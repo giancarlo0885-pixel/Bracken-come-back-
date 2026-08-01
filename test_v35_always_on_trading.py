@@ -9,11 +9,21 @@ from engine import OracleSignal
 from market_sessions import quote_is_fresh
 
 
-@pytest.fixture(autouse=True)
-def _enable_stock_autotrade_for_legacy_execution_tests(monkeypatch):
+@pytest.fixture
+def stock_execution_enabled(monkeypatch):
     import oracle_bot
 
+    monkeypatch.setattr(oracle_bot, "ENABLE_AUTOTRADE", True)
     monkeypatch.setattr(oracle_bot, "ENABLE_STOCK_AUTOTRADE", True)
+    monkeypatch.setattr(oracle_bot, "ENABLE_NEW_ENTRIES", True)
+    monkeypatch.setattr(oracle_bot, "_AUTOTRADE_DISABLED_LOGGED", False)
+
+
+@pytest.fixture
+def stock_rotation_execution_enabled(stock_execution_enabled, monkeypatch):
+    import oracle_bot
+
+    monkeypatch.setattr(oracle_bot, "ENABLE_PORTFOLIO_ROTATION", True)
 
 
 def _oracle_signal(symbol: str = "SOUN", price: float = 2.0) -> OracleSignal:
@@ -126,7 +136,7 @@ def test_dashboard_exposes_always_on_status():
     assert "Auto recovery" in source
 
 
-def test_rejected_replacement_buy_does_not_emit_rotation_sell(monkeypatch):
+def test_rejected_replacement_buy_does_not_emit_rotation_sell(monkeypatch, stock_rotation_execution_enabled):
     import oracle_bot
 
     rotation_candidate = {
@@ -183,7 +193,7 @@ def test_rejected_replacement_buy_does_not_emit_rotation_sell(monkeypatch):
     assert actions == []
 
 
-def test_buy_portfolio_row_missing_returns_three_value_tuple(monkeypatch):
+def test_buy_portfolio_row_missing_returns_three_value_tuple(monkeypatch, stock_execution_enabled):
     import oracle_bot
 
     class MissingPortfolioConnection:
@@ -532,7 +542,7 @@ def test_scanning_and_signal_persistence_continue_when_execution_disabled(monkey
     assert saved == {"signals": 1, "forecasts": 1}
 
 
-def test_mismatched_price_cannot_update_position_current_price(monkeypatch):
+def test_mismatched_price_cannot_update_position_current_price(monkeypatch, stock_execution_enabled):
     import oracle_bot
 
     calls = []
@@ -546,7 +556,7 @@ def test_mismatched_price_cannot_update_position_current_price(monkeypatch):
     assert calls == []
 
 
-def test_mismatched_price_cannot_trigger_risk_exits(monkeypatch):
+def test_mismatched_price_cannot_trigger_risk_exits(monkeypatch, stock_execution_enabled):
     import oracle_bot
 
     monkeypatch.setattr(oracle_bot, "ENABLE_AUTOTRADE", True)
@@ -587,7 +597,7 @@ def test_missing_quote_identity_is_rejected():
     assert "requested quote symbol is missing" in reason
 
 
-def test_anomaly_quarantine_runs_before_update_prices_and_risk_exits(monkeypatch):
+def test_anomaly_quarantine_runs_before_update_prices_and_risk_exits(monkeypatch, stock_execution_enabled):
     import oracle_bot
 
     quote_a = _verified_quote("AAPL", 100, ohlcv_fingerprint="same-sequence")
@@ -670,7 +680,7 @@ def test_enable_autotrade_false_snapshot_does_not_update_portfolios_table(monkey
     assert result["equity"] == 1000
 
 
-def test_process_signals_uses_verified_quote_price_not_signal_price(monkeypatch):
+def test_process_signals_uses_verified_quote_price_not_signal_price(monkeypatch, stock_execution_enabled):
     import oracle_bot
 
     captured = {}
@@ -699,7 +709,7 @@ def test_process_signals_uses_verified_quote_price_not_signal_price(monkeypatch)
     assert actions[0]["price"] == 100.0
 
 
-def test_signal_verified_quote_price_mismatch_is_rejected(monkeypatch):
+def test_signal_verified_quote_price_mismatch_is_rejected(monkeypatch, stock_execution_enabled):
     import oracle_bot
 
     quote = _verified_quote("AAPL", 100.0)
@@ -713,7 +723,7 @@ def test_signal_verified_quote_price_mismatch_is_rejected(monkeypatch):
     assert actions == []
 
 
-def test_verified_margin_reduction_uses_exact_fresh_symbol_quote(monkeypatch):
+def test_verified_margin_reduction_uses_exact_fresh_symbol_quote(monkeypatch, stock_execution_enabled):
     import oracle_bot
 
     closed = []
@@ -739,7 +749,7 @@ def test_verified_margin_reduction_uses_exact_fresh_symbol_quote(monkeypatch):
     assert closed == [("AAPL", 80.0, oracle_bot.PAPER_MARGIN_REDUCTION_REASON)]
 
 
-def test_margin_reduction_rejects_missing_stale_or_mismatched_quotes(monkeypatch):
+def test_margin_reduction_rejects_missing_stale_or_mismatched_quotes(monkeypatch, stock_execution_enabled):
     import oracle_bot
 
     stale = _verified_quote("AAPL", 80.0, quote_timestamp=(datetime.now(timezone.utc) - timedelta(days=7)).isoformat())
@@ -764,7 +774,7 @@ def test_margin_reduction_rejects_missing_stale_or_mismatched_quotes(monkeypatch
     assert oracle_bot.update_prices("cash", {"AAPL": mismatched}) == 0
 
 
-def test_margin_reduction_defers_when_one_position_quote_is_missing(monkeypatch):
+def test_margin_reduction_defers_when_one_position_quote_is_missing(monkeypatch, stock_execution_enabled):
     import oracle_bot
 
     closed = []
@@ -785,7 +795,7 @@ def test_margin_reduction_defers_when_one_position_quote_is_missing(monkeypatch)
     assert closed == []
 
 
-def test_margin_reduction_defers_when_any_position_quote_is_stale(monkeypatch):
+def test_margin_reduction_defers_when_any_position_quote_is_stale(monkeypatch, stock_execution_enabled):
     import oracle_bot
 
     stale = _verified_quote("MSFT", 180, quote_timestamp=(datetime.now(timezone.utc) - timedelta(days=7)).isoformat())
@@ -807,7 +817,7 @@ def test_margin_reduction_defers_when_any_position_quote_is_stale(monkeypatch):
     assert closed == []
 
 
-def test_margin_reduction_defers_when_any_position_quote_is_quarantined(monkeypatch):
+def test_margin_reduction_defers_when_any_position_quote_is_quarantined(monkeypatch, stock_execution_enabled):
     import oracle_bot
 
     closed = []
@@ -831,7 +841,7 @@ def test_margin_reduction_defers_when_any_position_quote_is_quarantined(monkeypa
     assert closed == []
 
 
-def test_margin_reduction_requires_every_position_fresh_exact_quote(monkeypatch):
+def test_margin_reduction_requires_every_position_fresh_exact_quote(monkeypatch, stock_execution_enabled):
     import oracle_bot
 
     closed = []
@@ -860,7 +870,7 @@ def test_margin_reduction_requires_every_position_fresh_exact_quote(monkeypatch)
     assert closed == [("AAPL", 80.0, oracle_bot.PAPER_MARGIN_REDUCTION_REASON)]
 
 
-def test_hold_never_executes_buy(monkeypatch):
+def test_hold_never_executes_buy(monkeypatch, stock_execution_enabled):
     import oracle_bot
 
     quote = _verified_quote("AAPL", 100)
@@ -874,7 +884,7 @@ def test_hold_never_executes_buy(monkeypatch):
     assert actions == []
 
 
-def test_explicit_accumulate_can_proceed_through_entry_gates(monkeypatch):
+def test_explicit_accumulate_can_proceed_through_entry_gates(monkeypatch, stock_execution_enabled):
     import oracle_bot
 
     quote = _verified_quote("AAPL", 100)
@@ -935,7 +945,7 @@ def test_rotation_uses_verified_outgoing_quote_not_position_price(monkeypatch):
     assert candidate["_rotation_action"]["price"] == 7
 
 
-def test_automated_close_position_rejects_missing_quote_metadata(monkeypatch):
+def test_automated_close_position_rejects_missing_quote_metadata(monkeypatch, stock_execution_enabled):
     import oracle_bot
 
     monkeypatch.setattr(oracle_bot, "ENABLE_AUTOTRADE", True)
@@ -943,7 +953,7 @@ def test_automated_close_position_rejects_missing_quote_metadata(monkeypatch):
     assert oracle_bot._close_position("cash", {"symbol": "AAPL", "quantity": 1, "entry_price": 100}, 90, "stop_loss") is False
 
 
-def test_margin_call_calculation_uses_verified_current_prices(monkeypatch):
+def test_margin_call_calculation_uses_verified_current_prices(monkeypatch, stock_execution_enabled):
     import oracle_bot
 
     captured = {}
