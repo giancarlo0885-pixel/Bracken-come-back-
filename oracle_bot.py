@@ -1033,7 +1033,13 @@ def _penny_stock_gate(market: str, symbol: str, price: float, signal: Any, score
     quote_timestamp = metadata.get("quote_timestamp")
     if _parse_utc(quote_timestamp) is None:
         return False, "penny-stock verified quote timestamp is missing"
-    if not quote_is_fresh(quote_timestamp, "1d", max_intraday_age_seconds=DECISION_STOCK_MAX_AGE_MINUTES * 60):
+    if not quote_is_fresh(
+        quote_timestamp,
+        "1d",
+        max_intraday_age_seconds=DECISION_STOCK_MAX_AGE_MINUTES * 60,
+        exchange=exchange,
+        symbol=symbol,
+    ):
         return False, "penny-stock verified market data is stale"
     primary_category = safe_text(metadata.get("primary_category")).lower()
     if primary_category and primary_category != "penny_stock":

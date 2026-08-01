@@ -37,13 +37,16 @@ from config import (
 from api_manager import get_api_settings
 from database import connect, utc_now
 from market_data import get_history, latest_valid_index
+from market_data import get_live_snapshot
 from market_sessions import (
+    completed_daily_bar_is_fresh,
     confirmed_us_listing,
     is_otc_exchange,
     normalize_exchange,
     parse_utc,
     quote_freshness_seconds,
     quote_is_fresh,
+    market_session_state,
 )
 
 log = logging.getLogger("global-market-scanner")
@@ -173,7 +176,11 @@ class GlobalCandidate:
     discovery_source: str
     discovery_timestamp: str
     quote_timestamp: str
+    historical_bar_timestamp: str
     fetched_at: str
+    quote_provider: str
+    history_provider: str
+    market_session: str
     data_freshness_seconds: float | None
     category: str
     risk_bucket: str
@@ -195,7 +202,9 @@ def _ensure_tables() -> None:
             mover_score DOUBLE PRECISION, category TEXT DEFAULT 'unknown',
             primary_category TEXT DEFAULT 'unknown', mover_tags JSONB DEFAULT '[]'::jsonb,
             discovery_source TEXT DEFAULT 'rotating_universe', discovery_timestamp TEXT,
-            quote_timestamp TEXT, fetched_at TEXT, data_freshness_seconds DOUBLE PRECISION,
+            quote_timestamp TEXT, historical_bar_timestamp TEXT, fetched_at TEXT,
+            quote_provider TEXT, history_provider TEXT, market_session TEXT,
+            data_freshness_seconds DOUBLE PRECISION,
             risk_bucket TEXT DEFAULT 'standard', tradeable BOOLEAN DEFAULT TRUE,
             payload JSONB, scanned_at TEXT NOT NULL)""")
         for statement in (
@@ -206,7 +215,11 @@ def _ensure_tables() -> None:
             "ALTER TABLE global_market_candidates ADD COLUMN IF NOT EXISTS discovery_source TEXT DEFAULT 'rotating_universe'",
             "ALTER TABLE global_market_candidates ADD COLUMN IF NOT EXISTS discovery_timestamp TEXT",
             "ALTER TABLE global_market_candidates ADD COLUMN IF NOT EXISTS quote_timestamp TEXT",
+            "ALTER TABLE global_market_candidates ADD COLUMN IF NOT EXISTS historical_bar_timestamp TEXT",
             "ALTER TABLE global_market_candidates ADD COLUMN IF NOT EXISTS fetched_at TEXT",
+            "ALTER TABLE global_market_candidates ADD COLUMN IF NOT EXISTS quote_provider TEXT",
+            "ALTER TABLE global_market_candidates ADD COLUMN IF NOT EXISTS history_provider TEXT",
+            "ALTER TABLE global_market_candidates ADD COLUMN IF NOT EXISTS market_session TEXT",
             "ALTER TABLE global_market_candidates ADD COLUMN IF NOT EXISTS data_freshness_seconds DOUBLE PRECISION",
             "ALTER TABLE global_market_candidates ADD COLUMN IF NOT EXISTS risk_bucket TEXT DEFAULT 'standard'",
             "ALTER TABLE global_market_candidates ADD COLUMN IF NOT EXISTS tradeable BOOLEAN DEFAULT TRUE",
@@ -296,6 +309,108 @@ def _series(frame: pd.DataFrame, column: str) -> pd.Series:
     if isinstance(value, pd.DataFrame):
         value = value.iloc[:, -1]
     return pd.to_numeric(value, errors="coerce").dropna()
+
+
+def _finite_number(value: Any) -> float | None:
+    try:
+        number = float(str(value).strip().replace("%", "").replace(",", ""))
+    except (TypeError, ValueError):
+        return None
+    if number != number or number in (float("inf"), float("-inf")):
+        return None
+    return number
+
+
+def _provider_timestamp(value: Any) -> str:
+    parsed = parse_utc(value)
+    return parsed.isoformat() if parsed else ""
+
+
+def _current_quote_from_meta(meta: dict[str, Any], now: datetime | None) -> dict[str, Any] | None:
+    price = _finite_number(meta.get("price") or meta.get("current_price") or meta.get("last_price"))
+    change = _finite_number(meta.get("change_1d_pct") or meta.get("change_pct") or meta.get("percent_change"))
+    volume = _finite_number(meta.get("daily_volume") or meta.get("volume") or meta.get("current_volume"))
+    quote_timestamp = _provider_timestamp(meta.get("quote_timestamp") or meta.get("last_updated") or meta.get("timestamp"))
+    if price is None or change is None or volume is None or not quote_timestamp:
+        return None
+    session = str(meta.get("market_session") or market_session_state(now, meta.get("exchange"), meta.get("region"), meta.get("symbol")))
+    interval = "1m" if session in {"premarket", "regular", "after-hours"} else "1d"
+    if not quote_is_fresh(
+        quote_timestamp,
+        interval,
+        now,
+        max_intraday_age_seconds=max(60, API_CACHE_TTL_SECONDS * 2),
+        exchange=meta.get("exchange"),
+        region=meta.get("region"),
+        symbol=meta.get("symbol"),
+    ):
+        return None
+    return {
+        "price": price,
+        "change_1d_pct": change,
+        "daily_volume": volume,
+        "relative_volume": _finite_number(meta.get("relative_volume")),
+        "quote_timestamp": quote_timestamp,
+        "quote_provider": str(meta.get("quote_provider") or meta.get("discovery_source") or "provider_snapshot"),
+        "market_session": session,
+    }
+
+
+def _current_quote_from_intraday(meta: dict[str, Any], now: datetime | None) -> dict[str, Any] | None:
+    try:
+        snapshot = get_live_snapshot(meta["symbol"])
+    except Exception:
+        return None
+    if snapshot is None:
+        return None
+    if not quote_is_fresh(
+        snapshot.timestamp,
+        snapshot.interval,
+        now,
+        max_intraday_age_seconds=max(60, API_CACHE_TTL_SECONDS * 2),
+        exchange=meta.get("exchange"),
+        region=meta.get("region"),
+        symbol=meta.get("symbol"),
+    ):
+        return None
+    return {
+        "price": snapshot.price,
+        "change_1d_pct": snapshot.change_pct,
+        "daily_volume": snapshot.volume,
+        "relative_volume": None,
+        "quote_timestamp": snapshot.timestamp,
+        "quote_provider": snapshot.provider,
+        "market_session": market_session_state(now, meta.get("exchange"), meta.get("region"), meta.get("symbol")),
+    }
+
+
+def _current_quote_from_history(meta: dict[str, Any], hist: pd.DataFrame, now: datetime | None) -> dict[str, Any] | None:
+    latest_quote = latest_valid_index(hist, "Close")
+    quote_time = latest_quote.isoformat() if latest_quote else ""
+    if not quote_is_fresh(
+        quote_time,
+        "1d",
+        now,
+        exchange=meta.get("exchange"),
+        region=meta.get("region"),
+        symbol=meta.get("symbol"),
+    ):
+        return None
+    close = _series(hist, "Close")
+    volume = _series(hist, "Volume") if "Volume" in hist.columns else pd.Series(index=hist.index, dtype=float)
+    if len(close) < 2:
+        return None
+    price = float(close.iloc[-1])
+    previous = float(close.iloc[-2])
+    return {
+        "price": price,
+        "change_1d_pct": ((price / previous) - 1.0) * 100.0 if previous else 0.0,
+        "daily_volume": float(volume.iloc[-1]) if len(volume) else 0.0,
+        "relative_volume": None,
+        "quote_timestamp": quote_time,
+        "quote_provider": "daily_history",
+        "market_session": market_session_state(now, meta.get("exchange"), meta.get("region"), meta.get("symbol")),
+    }
 
 
 def _classify_candidate(meta: dict[str, str], price: float, change_1d: float, relative_volume: float, avg_dollar_volume: float, daily_volume: float) -> tuple[str, list[str], str, bool]:
@@ -427,11 +542,18 @@ def _alpha_vantage_movers(key: str) -> list[dict[str, str]]:
         for item in payload.get(field, [])[:25]:
             symbol = item.get("ticker")
             if symbol:
+                change = _finite_number(item.get("change_percentage"))
                 out.append(_mover_meta(
                     symbol,
                     mover_type,
                     "alpha_vantage_top_gainers_losers",
                     exchange=item.get("exchange") or item.get("market") or item.get("exchangeCode"),
+                    price=_finite_number(item.get("price")),
+                    change_1d_pct=change,
+                    daily_volume=_finite_number(item.get("volume")),
+                    quote_timestamp=_now_iso(),
+                    quote_provider="alpha_vantage_top_gainers_losers",
+                    market_session="regular",
                 ))
     return out
 
@@ -452,6 +574,8 @@ def _polygon_snapshot_movers(key: str) -> list[dict[str, str]]:
         symbol = item.get("ticker")
         day = item.get("day") or {}
         prev = item.get("prevDay") or {}
+        last_trade = item.get("lastTrade") or {}
+        updated_ms = item.get("updated") or last_trade.get("t") or day.get("t")
         close = float(day.get("c") or 0)
         prev_close = float(prev.get("c") or 0)
         volume = float(day.get("v") or 0)
@@ -475,6 +599,13 @@ def _polygon_snapshot_movers(key: str) -> list[dict[str, str]]:
             mover_type,
             "polygon_snapshot",
             exchange=item.get("primaryExchange") or item.get("exchange") or item.get("market"),
+            price=_finite_number((item.get("lastTrade") or {}).get("p")) or _finite_number((item.get("day") or {}).get("c")),
+            change_1d_pct=((_finite_number((item.get("day") or {}).get("c")) / _finite_number((item.get("prevDay") or {}).get("c")) - 1.0) * 100.0) if _finite_number((item.get("day") or {}).get("c")) and _finite_number((item.get("prevDay") or {}).get("c")) else None,
+            daily_volume=_finite_number((item.get("day") or {}).get("v")),
+            relative_volume=(_finite_number((item.get("day") or {}).get("v")) / _finite_number((item.get("prevDay") or {}).get("v"))) if _finite_number((item.get("day") or {}).get("v")) and _finite_number((item.get("prevDay") or {}).get("v")) else None,
+            quote_timestamp=(datetime.fromtimestamp((item.get("updated") or (item.get("lastTrade") or {}).get("t") or (item.get("day") or {}).get("t")) / 1000_000_000, timezone.utc).isoformat() if (item.get("updated") or (item.get("lastTrade") or {}).get("t") or (item.get("day") or {}).get("t")) else _now_iso()),
+            quote_provider="polygon_snapshot",
+            market_session="regular",
             provider_metadata={"polygon_snapshot": item},
         )
         for _, item, mover_type in ranked[:75]
@@ -495,7 +626,20 @@ def _eodhd_screener_movers(key: str) -> list[dict[str, str]]:
             code = str(item.get("code") or item.get("symbol") or "").replace(".US", "")
             if code:
                 exchange = item.get("exchange") or item.get("Exchange") or str(item.get("code") or "").split(".")[-1]
-                out.append(_mover_meta(code, mover_type, "eodhd_screener", item.get("name"), exchange=exchange, provider_metadata={"eodhd": item}))
+                out.append(_mover_meta(
+                    code,
+                    mover_type,
+                    "eodhd_screener",
+                    item.get("name"),
+                    exchange=exchange,
+                    price=_finite_number(item.get("price") or item.get("close")),
+                    change_1d_pct=_finite_number(item.get("change_p") or item.get("change_pct") or item.get("change")),
+                    daily_volume=_finite_number(item.get("volume")),
+                    quote_timestamp=_now_iso(),
+                    quote_provider="eodhd_screener",
+                    market_session="regular",
+                    provider_metadata={"eodhd": item},
+                ))
     return out
 
 
@@ -542,7 +686,28 @@ def _candidate_metrics(meta: dict[str, str], now: datetime | None = None) -> Glo
     close = _series(hist, "Close")
     if len(close) < 6:
         return None
-    price = float(close.iloc[-1])
+    route = dict(hist.attrs.get("provider_route") or {})
+    history_provider = str(route.get("provider") or "unknown")
+    fetched_at = str(route.get("fetched_at") or utc_now())
+    latest_history_bar = latest_valid_index(hist, "Close")
+    historical_bar_timestamp = latest_history_bar.isoformat() if latest_history_bar else ""
+    current_quote = (
+        _current_quote_from_meta(meta, now)
+        or _current_quote_from_intraday(meta, now)
+        or _current_quote_from_history(meta, hist, now)
+    )
+    if current_quote is None:
+        return None
+    history_is_current = completed_daily_bar_is_fresh(
+        historical_bar_timestamp,
+        now,
+        exchange=meta.get("exchange"),
+        region=meta.get("region"),
+        symbol=meta.get("symbol"),
+    )
+    if not history_is_current and current_quote.get("quote_provider") == "daily_history":
+        return None
+    price = float(current_quote["price"])
     penny_candidate = price <= PENNY_STOCK_MAX_PRICE
     if price < (PENNY_STOCK_MIN_PRICE if penny_candidate else GLOBAL_MIN_PRICE):
         return None
@@ -553,10 +718,11 @@ def _candidate_metrics(meta: dict[str, str], now: datetime | None = None) -> Glo
     min_dollar_volume = PENNY_STOCK_MIN_AVG_DOLLAR_VOLUME if penny_candidate else GLOBAL_MIN_AVG_DOLLAR_VOLUME
     if avg_dollar_volume < min_dollar_volume:
         return None
-    change_1d = ((price / float(close.iloc[-2])) - 1.0) * 100.0 if close.iloc[-2] else 0.0
+    change_1d = float(current_quote["change_1d_pct"])
     change_5d = ((price / float(close.iloc[-6])) - 1.0) * 100.0 if close.iloc[-6] else 0.0
     recent_avg_volume = float(volume.iloc[-6:-1].mean()) if len(volume) >= 6 else avg_volume
-    relative_volume = float(volume.iloc[-1] / recent_avg_volume) if recent_avg_volume > 0 else 1.0
+    quote_volume = float(current_quote["daily_volume"])
+    relative_volume = float(current_quote["relative_volume"]) if current_quote.get("relative_volume") is not None else (quote_volume / recent_avg_volume if recent_avg_volume > 0 else 1.0)
     returns = close.pct_change().dropna().tail(20)
     volatility = float(returns.std() * 100.0) if not returns.empty else 0.0
     # Rewards decisive movement and participation without letting raw volatility dominate.
@@ -567,21 +733,19 @@ def _candidate_metrics(meta: dict[str, str], now: datetime | None = None) -> Glo
         + min(10.0, max(0.0, volatility - 0.5) * 4.0)
         + min(5.0, max(0.0, (avg_dollar_volume / 50_000_000.0)))
     )
-    daily_volume = float(volume.iloc[-1]) if len(volume) else 0.0
+    daily_volume = quote_volume
     category, mover_tags, risk_bucket, tradeable = _classify_candidate(meta, price, change_1d, relative_volume, avg_dollar_volume, daily_volume)
     if not tradeable:
         return None
-    route = dict(hist.attrs.get("provider_route") or {})
-    fetched_at = str(route.get("fetched_at") or utc_now())
-    latest_quote = latest_valid_index(hist, "Close")
-    quote_time = str(route.get("quote_timestamp") or (latest_quote.isoformat() if latest_quote else ""))
-    interval = str(route.get("interval") or "1d")
-    if not quote_is_fresh(quote_time, interval, now, max_intraday_age_seconds=max(60, API_CACHE_TTL_SECONDS * 2)):
-        return None
+    quote_time = str(current_quote["quote_timestamp"])
     freshness = quote_freshness_seconds(quote_time, now)
     for explicit_mover in _tag_list(meta.get("mover_tags")) + _tag_list(meta.get("mover_type")):
         if explicit_mover and explicit_mover not in mover_tags:
             mover_tags.append(explicit_mover)
+    market_session = str(current_quote.get("market_session") or market_session_state(now, meta.get("exchange"), meta.get("region"), meta.get("symbol")))
+    if market_session in {"premarket", "after-hours"} and "extended_hours" not in mover_tags:
+        mover_tags.append("extended_hours")
+        risk_bucket = "extended_hours_high_risk" if risk_bucket == "standard" else f"{risk_bucket}_extended_hours"
     return GlobalCandidate(
         symbol=meta["symbol"], name=meta.get("name", meta["symbol"]),
         exchange=normalize_exchange(meta.get("exchange")) or "Unknown", region=meta.get("region", "Unknown"),
@@ -591,7 +755,10 @@ def _candidate_metrics(meta: dict[str, str], now: datetime | None = None) -> Glo
         mover_score=round(mover_score, 3), primary_category=category,
         mover_tags=mover_tags, discovery_source=str(meta.get("discovery_source") or "rotating_universe"),
         discovery_timestamp=str(meta.get("discovery_timestamp") or utc_now()),
-        quote_timestamp=quote_time or fetched_at, fetched_at=fetched_at, data_freshness_seconds=freshness, category=category,
+        quote_timestamp=quote_time or fetched_at, historical_bar_timestamp=historical_bar_timestamp,
+        fetched_at=fetched_at, quote_provider=str(current_quote.get("quote_provider") or "unknown"),
+        history_provider=history_provider, market_session=market_session,
+        data_freshness_seconds=freshness, category=category,
         risk_bucket=risk_bucket, tradeable=tradeable, scanned_at=utc_now(),
     )
 
@@ -629,9 +796,10 @@ def scan_global_markets() -> list[dict[str, Any]]:
             conn.execute("""INSERT INTO global_market_candidates
                 (symbol,name,exchange,region,sector,price,change_1d_pct,change_5d_pct,
                  daily_volume,relative_volume,avg_dollar_volume,volatility_pct,mover_score,category,primary_category,
-                 mover_tags,discovery_source,discovery_timestamp,quote_timestamp,fetched_at,data_freshness_seconds,
+                 mover_tags,discovery_source,discovery_timestamp,quote_timestamp,historical_bar_timestamp,
+                 fetched_at,quote_provider,history_provider,market_session,data_freshness_seconds,
                  risk_bucket,tradeable,payload,scanned_at)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s)
                 ON CONFLICT (symbol) DO UPDATE SET name=EXCLUDED.name,exchange=EXCLUDED.exchange,
                 region=EXCLUDED.region,sector=EXCLUDED.sector,price=EXCLUDED.price,
                 change_1d_pct=EXCLUDED.change_1d_pct,change_5d_pct=EXCLUDED.change_5d_pct,
@@ -641,7 +809,9 @@ def scan_global_markets() -> list[dict[str, Any]]:
                 category=EXCLUDED.category,primary_category=EXCLUDED.primary_category,
                 mover_tags=EXCLUDED.mover_tags,discovery_source=EXCLUDED.discovery_source,
                 discovery_timestamp=EXCLUDED.discovery_timestamp,quote_timestamp=EXCLUDED.quote_timestamp,
-                fetched_at=EXCLUDED.fetched_at,
+                historical_bar_timestamp=EXCLUDED.historical_bar_timestamp,fetched_at=EXCLUDED.fetched_at,
+                quote_provider=EXCLUDED.quote_provider,history_provider=EXCLUDED.history_provider,
+                market_session=EXCLUDED.market_session,
                 data_freshness_seconds=EXCLUDED.data_freshness_seconds,
                 risk_bucket=EXCLUDED.risk_bucket,tradeable=EXCLUDED.tradeable,
                 payload=EXCLUDED.payload,scanned_at=EXCLUDED.scanned_at""",
@@ -650,7 +820,9 @@ def scan_global_markets() -> list[dict[str, Any]]:
                  candidate.avg_dollar_volume,candidate.volatility_pct,candidate.mover_score,
                  candidate.category,candidate.primary_category,json.dumps(candidate.mover_tags),
                  candidate.discovery_source,candidate.discovery_timestamp,candidate.quote_timestamp,
-                 candidate.fetched_at,candidate.data_freshness_seconds,candidate.risk_bucket,candidate.tradeable,
+                 candidate.historical_bar_timestamp,candidate.fetched_at,candidate.quote_provider,
+                 candidate.history_provider,candidate.market_session,candidate.data_freshness_seconds,
+                 candidate.risk_bucket,candidate.tradeable,
                  json.dumps(payload),candidate.scanned_at))
         next_cursor = (cursor + rotating_count) % len(universe)
         conn.execute("""INSERT INTO global_scanner_status
@@ -666,7 +838,8 @@ def scan_global_markets() -> list[dict[str, Any]]:
         rows = conn.execute("""SELECT symbol,name,exchange,region,sector,price,change_1d_pct,
             change_5d_pct,daily_volume,relative_volume,avg_dollar_volume,volatility_pct,mover_score,
             category,primary_category,mover_tags,discovery_source,discovery_timestamp,quote_timestamp,
-            fetched_at,data_freshness_seconds,risk_bucket,tradeable,scanned_at
+            historical_bar_timestamp,fetched_at,quote_provider,history_provider,market_session,
+            data_freshness_seconds,risk_bucket,tradeable,scanned_at
             FROM global_market_candidates WHERE scanned_at >= %s
             ORDER BY mover_score DESC, scanned_at DESC LIMIT %s""",
             (cutoff, GLOBAL_ACTIVE_CANDIDATES,)).fetchall()

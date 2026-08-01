@@ -286,7 +286,7 @@ def test_real_oracle_signal_penny_allows_valid_weekend_daily_metadata(monkeypatc
     monkeypatch.setattr(
         oracle_bot,
         "quote_is_fresh",
-        lambda value, interval, **kwargs: quote_is_fresh(value, interval, saturday),
+        lambda value, interval, **kwargs: quote_is_fresh(value, interval, saturday, exchange=kwargs.get("exchange")),
     )
 
     ok, reason = oracle_bot._penny_stock_gate("cash", "SOUN", 2.0, _oracle_signal(), 92, .86)

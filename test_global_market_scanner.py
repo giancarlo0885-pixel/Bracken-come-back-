@@ -20,6 +20,7 @@ if "yfinance" not in sys.modules:
 
 import pandas as pd
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import global_market_scanner as scanner
 
@@ -31,7 +32,12 @@ def sample_history() -> pd.DataFrame:
         "Low": [99,100,101,102,103,104],
         "Close": [101,102,103,104,106,110],
         "Volume": [1_000_000,1_050_000,1_100_000,1_000_000,1_200_000,2_500_000],
-    }, index=pd.date_range("2026-07-26", periods=6, tz="UTC"))
+    }, index=pd.bdate_range("2026-07-24 20:00", periods=6, tz="UTC", normalize=False))
+
+
+def previous_session_history() -> pd.DataFrame:
+    frame = sample_history().copy()
+    return frame
 
 
 def penny_history() -> pd.DataFrame:
@@ -136,7 +142,7 @@ def test_provider_mover_discovery_uses_configured_alpha_capability(monkeypatch):
 
 def test_provider_discovered_core_stock_keeps_mover_metadata(monkeypatch):
     merged = scanner.merge_candidate_metadata([
-        {"symbol": "AAPL", "name": "Apple", "exchange": "US", "sector": "mega_cap_core"},
+        {"symbol": "AAPL", "name": "Apple", "exchange": "NASDAQ", "region": "United States", "sector": "mega_cap_core"},
         {
             "symbol": "AAPL",
             "mover_type": "major_gainer",
@@ -159,25 +165,25 @@ def test_provider_discovered_core_stock_keeps_mover_metadata(monkeypatch):
 def test_quote_freshness_uses_bar_time_not_fetch_time():
     now = datetime(2026, 8, 3, 16, 0, tzinfo=timezone.utc)
     old_bar = datetime(2026, 7, 31, 20, 0, tzinfo=timezone.utc)
-    assert scanner.quote_is_fresh(old_bar.isoformat(), "1m", now) is False
+    assert scanner.quote_is_fresh(old_bar.isoformat(), "1m", now, exchange="NASDAQ") is False
 
 
 def test_fresh_intraday_bar_is_fresh():
     now = datetime(2026, 8, 3, 16, 0, tzinfo=timezone.utc)
     bar = now - timedelta(minutes=2)
-    assert scanner.quote_is_fresh(bar.isoformat(), "1m", now) is True
+    assert scanner.quote_is_fresh(bar.isoformat(), "1m", now, exchange="NASDAQ") is True
 
 
 def test_friday_daily_bar_is_fresh_during_weekend():
     now = datetime(2026, 8, 1, 18, 0, tzinfo=timezone.utc)
     friday_close = datetime(2026, 7, 31, 20, 0, tzinfo=timezone.utc)
-    assert scanner.quote_is_fresh(friday_close.isoformat(), "1d", now) is True
+    assert scanner.quote_is_fresh(friday_close.isoformat(), "1d", now, exchange="NASDAQ") is True
 
 
 def test_stale_daily_bar_is_not_fresh_during_open_session():
     now = datetime(2026, 8, 3, 16, 0, tzinfo=timezone.utc)
     friday_close = datetime(2026, 7, 31, 20, 0, tzinfo=timezone.utc)
-    assert scanner.quote_is_fresh(friday_close.isoformat(), "1d", now) is False
+    assert scanner.quote_is_fresh(friday_close.isoformat(), "1d", now, exchange="NASDAQ") is False
 
 
 def test_candidate_metrics_rejects_stale_candidate(monkeypatch):
@@ -203,6 +209,7 @@ def test_candidate_metrics_accepts_friday_daily_bar_during_saturday(monkeypatch)
 
 def test_candidate_metrics_rejects_previous_session_bar_after_monday_open(monkeypatch):
     monkeypatch.setattr(scanner, "get_history", lambda *args, **kwargs: sample_history())
+    monkeypatch.setattr(scanner, "get_live_snapshot", lambda symbol: None)
     candidate = scanner._candidate_metrics(
         {"symbol": "AAPL", "name": "Apple", "exchange": "NASDAQ", "region": "United States", "sector": "mega_cap_core"},
         now=datetime(2026, 8, 3, 14, 0, tzinfo=timezone.utc),
@@ -251,3 +258,202 @@ def test_one_ticker_retains_multiple_provider_mover_tags(monkeypatch):
     assert record["symbol"] == "MIX"
     assert set(record["mover_tags"]) >= {"major_gainer", "unusual_volume"}
     assert record["exchange"] == "NASDAQ"
+
+
+def test_provider_without_in_progress_daily_candle_uses_snapshot_during_regular_trading(monkeypatch):
+    monkeypatch.setattr(scanner, "get_history", lambda *args, **kwargs: previous_session_history())
+    candidate = scanner._candidate_metrics(
+        {
+            "symbol": "AAPL",
+            "name": "Apple",
+            "exchange": "NASDAQ",
+            "region": "United States",
+            "sector": "mega_cap_core",
+            "price": 120,
+            "change_1d_pct": 4.5,
+            "daily_volume": 3_000_000,
+            "quote_timestamp": "2026-08-03T14:01:00+00:00",
+            "quote_provider": "polygon_snapshot",
+            "market_session": "regular",
+        },
+        now=datetime(2026, 8, 3, 14, 2, tzinfo=timezone.utc),
+    )
+    assert candidate is not None
+    assert candidate.price == 120
+    assert candidate.historical_bar_timestamp.startswith("2026-07-31")
+    assert candidate.quote_provider == "polygon_snapshot"
+
+
+def test_fresh_intraday_quote_plus_previous_session_daily_history(monkeypatch):
+    monkeypatch.setattr(scanner, "get_history", lambda *args, **kwargs: previous_session_history())
+    monkeypatch.setattr(
+        scanner,
+        "get_live_snapshot",
+        lambda symbol: SimpleNamespace(
+            price=121,
+            change_pct=5.5,
+            volume=4_000_000,
+            timestamp="2026-08-03T14:03:00+00:00",
+            interval="1m",
+            provider="polygon_intraday",
+        ),
+    )
+    candidate = scanner._candidate_metrics(
+        {"symbol": "AAPL", "name": "Apple", "exchange": "NASDAQ", "region": "United States", "sector": "mega_cap_core"},
+        now=datetime(2026, 8, 3, 14, 4, tzinfo=timezone.utc),
+    )
+    assert candidate is not None
+    assert candidate.price == 121
+    assert candidate.quote_provider == "polygon_intraday"
+
+
+def test_premarket_mover_uses_current_premarket_quote(monkeypatch):
+    monkeypatch.setattr(scanner, "get_history", lambda *args, **kwargs: previous_session_history())
+    candidate = scanner._candidate_metrics(
+        {
+            "symbol": "AAPL",
+            "name": "Apple",
+            "exchange": "NASDAQ",
+            "region": "United States",
+            "sector": "mega_cap_core",
+            "price": 118,
+            "change_1d_pct": 3.5,
+            "daily_volume": 800_000,
+            "quote_timestamp": "2026-08-03T12:00:00+00:00",
+            "quote_provider": "polygon_premarket",
+            "market_session": "premarket",
+        },
+        now=datetime(2026, 8, 3, 12, 1, tzinfo=timezone.utc),
+    )
+    assert candidate is not None
+    assert candidate.market_session == "premarket"
+    assert "extended_hours" in candidate.mover_tags
+    assert "extended" in candidate.risk_bucket
+
+
+def test_after_hours_mover_uses_current_after_hours_quote(monkeypatch):
+    monkeypatch.setattr(scanner, "get_history", lambda *args, **kwargs: previous_session_history())
+    candidate = scanner._candidate_metrics(
+        {
+            "symbol": "AAPL",
+            "name": "Apple",
+            "exchange": "NASDAQ",
+            "region": "United States",
+            "sector": "mega_cap_core",
+            "price": 116,
+            "change_1d_pct": -3.2,
+            "daily_volume": 900_000,
+            "quote_timestamp": "2026-08-03T21:00:00+00:00",
+            "quote_provider": "polygon_afterhours",
+            "market_session": "after-hours",
+        },
+        now=datetime(2026, 8, 3, 21, 1, tzinfo=timezone.utc),
+    )
+    assert candidate is not None
+    assert candidate.market_session == "after-hours"
+    assert "extended_hours" in candidate.mover_tags
+
+
+def test_stale_intraday_quote_rejected(monkeypatch):
+    monkeypatch.setattr(scanner, "get_history", lambda *args, **kwargs: previous_session_history())
+    monkeypatch.setattr(
+        scanner,
+        "get_live_snapshot",
+        lambda symbol: SimpleNamespace(
+            price=121,
+            change_pct=5.5,
+            volume=4_000_000,
+            timestamp="2026-08-03T13:00:00+00:00",
+            interval="1m",
+            provider="stale_intraday",
+        ),
+    )
+    candidate = scanner._candidate_metrics(
+        {"symbol": "AAPL", "name": "Apple", "exchange": "NASDAQ", "region": "United States", "sector": "mega_cap_core"},
+        now=datetime(2026, 8, 3, 14, 4, tzinfo=timezone.utc),
+    )
+    assert candidate is None
+
+
+def test_provider_snapshot_values_enter_mover_ranking(monkeypatch):
+    monkeypatch.setattr(scanner, "get_history", lambda *args, **kwargs: previous_session_history())
+    candidate = scanner._candidate_metrics(
+        {
+            "symbol": "GAIN",
+            "name": "Gainer",
+            "exchange": "NASDAQ",
+            "region": "United States",
+            "sector": "major_gainer",
+            "price": 150,
+            "change_1d_pct": 10,
+            "daily_volume": 8_000_000,
+            "relative_volume": 4,
+            "quote_timestamp": "2026-08-03T14:05:00+00:00",
+            "quote_provider": "alpha",
+            "market_session": "regular",
+        },
+        now=datetime(2026, 8, 3, 14, 6, tzinfo=timezone.utc),
+    )
+    assert candidate is not None
+    assert candidate.price == 150
+    assert candidate.change_1d_pct == 10
+    assert candidate.relative_volume == 4
+    assert candidate.mover_score > 50
+
+
+def test_foreign_stock_freshness_uses_own_exchange_calendar(monkeypatch):
+    hist = previous_session_history()
+    hist.index = pd.bdate_range("2026-07-23 15:30", periods=6, tz="UTC", normalize=False)
+    monkeypatch.setattr(scanner, "get_history", lambda *args, **kwargs: hist)
+    candidate = scanner._candidate_metrics(
+        {
+            "symbol": "SAP.DE",
+            "name": "SAP",
+            "exchange": "XETRA",
+            "region": "Europe",
+            "sector": "Technology",
+            "price": 125,
+            "change_1d_pct": 4,
+            "daily_volume": 2_000_000,
+            "quote_timestamp": "2026-07-31T08:30:00+00:00",
+            "quote_provider": "eodhd",
+            "market_session": "regular",
+        },
+        now=datetime(2026, 7, 31, 8, 31, tzinfo=timezone.utc),
+    )
+    assert candidate is not None
+    assert candidate.exchange == "XETRA"
+
+
+def test_provider_fallback_when_current_quote_data_is_incomplete(monkeypatch):
+    monkeypatch.setattr(scanner, "get_history", lambda *args, **kwargs: previous_session_history())
+    monkeypatch.setattr(
+        scanner,
+        "get_live_snapshot",
+        lambda symbol: SimpleNamespace(
+            price=122,
+            change_pct=6,
+            volume=5_000_000,
+            timestamp="2026-08-03T14:03:00+00:00",
+            interval="1m",
+            provider="fallback_intraday",
+        ),
+    )
+    candidate = scanner._candidate_metrics(
+        {
+            "symbol": "AAPL",
+            "name": "Apple",
+            "exchange": "NASDAQ",
+            "region": "United States",
+            "sector": "mega_cap_core",
+            "price": 122,
+            "change_1d_pct": None,
+            "daily_volume": 5_000_000,
+            "quote_timestamp": "2026-08-03T14:03:00+00:00",
+            "quote_provider": "incomplete_provider",
+            "market_session": "regular",
+        },
+        now=datetime(2026, 8, 3, 14, 4, tzinfo=timezone.utc),
+    )
+    assert candidate is not None
+    assert candidate.quote_provider == "fallback_intraday"
