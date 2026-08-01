@@ -10,6 +10,7 @@ from config import (
     CRYPTO_FAST_SCAN_SECONDS,
     CRYPTO_PULSE_SECONDS,
     STOCK_CLOSED_SCAN_SECONDS,
+    STOCK_CLOSED_FAST_SCAN_SECONDS,
     STOCK_DEEP_SCAN_SECONDS,
     STOCK_FAST_SCAN_SECONDS,
     STOCK_PULSE_SECONDS,
@@ -63,10 +64,12 @@ def cadence_for(market: str, now: datetime | None = None) -> RuntimeCadence:
             CRYPTO_DEEP_SCAN_SECONDS,
             session,
         )
-    deep = STOCK_DEEP_SCAN_SECONDS if session in {"pre-market", "regular", "after-hours"} else STOCK_CLOSED_SCAN_SECONDS
+    is_entry_session = session in {"pre-market", "regular", "after-hours"}
+    deep = STOCK_DEEP_SCAN_SECONDS if is_entry_session else STOCK_CLOSED_SCAN_SECONDS
+    fast = STOCK_FAST_SCAN_SECONDS if is_entry_session else STOCK_CLOSED_FAST_SCAN_SECONDS
     return RuntimeCadence(
         STOCK_PULSE_SECONDS,
-        STOCK_FAST_SCAN_SECONDS,
+        fast,
         deep,
         session,
     )

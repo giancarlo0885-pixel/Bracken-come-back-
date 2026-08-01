@@ -47,3 +47,46 @@ def test_dashboard_exposes_always_on_status():
     assert "Always-On Institutional Paper Broker" in source
     assert "fast_scan_seconds" in source
     assert "Auto recovery" in source
+
+
+def test_rejected_replacement_buy_does_not_emit_rotation_sell(monkeypatch):
+    import oracle_bot
+
+    rotation_candidate = {
+        "market": "cash",
+        "symbol": "OLD",
+        "quantity": 1,
+        "current_price": 10,
+        "average_price": 9,
+        "_rotation_action": {
+            "market": "cash",
+            "symbol": "OLD",
+            "action": "SELL",
+            "price": 10,
+            "reason": "continuous_rotation_to_NEW",
+            "rotation_target": "NEW",
+        },
+    }
+    captured = {}
+
+    monkeypatch.setattr(oracle_bot, "ENABLE_QUANT_TRADE_STANDARD", False)
+    monkeypatch.setattr(oracle_bot, "DEFAULT_MAX_OPEN_POSITIONS", 1)
+    monkeypatch.setattr(oracle_bot, "EXTRA_OPEN_POSITIONS", 0)
+    monkeypatch.setattr(oracle_bot, "_entry_forecast_gate", lambda *args, **kwargs: (True, "fresh"))
+    monkeypatch.setattr(oracle_bot, "row", lambda *args, **kwargs: None)
+    monkeypatch.setattr(oracle_bot, "_open_position_count", lambda market: 1)
+    monkeypatch.setattr(oracle_bot, "recent_trade", lambda market, symbol: None)
+    monkeypatch.setattr(oracle_bot, "_rotate_for_stronger_candidate", lambda *args, **kwargs: rotation_candidate)
+
+    def reject_buy(*args, **kwargs):
+        captured["rotation_candidate"] = kwargs.get("rotation_candidate")
+        return False, "risk rejected", None
+
+    monkeypatch.setattr(oracle_bot, "_buy", reject_buy)
+    actions = oracle_bot.process_signals(
+        "cash",
+        [{"symbol": "NEW", "action": "BUY", "score": 95, "confidence": .95, "price": 20}],
+        {"NEW": 20},
+    )
+    assert captured["rotation_candidate"] is rotation_candidate
+    assert actions == []

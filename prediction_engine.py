@@ -84,36 +84,44 @@ def _data_gate(
     price: float,
     target: float,
     expected_return: float,
-    data_time: Any,
-) -> tuple[str, bool, str, float | None]:
+    signal_time: Any,
+    forecast_time: Any,
+) -> tuple[str, bool, str, float | None, float | None]:
     """Return final action, execution-readiness, plain status, and age.
 
     This gate prevents stale opportunity-ranking records from appearing as
     current BUY recommendations. It does not fabricate missing prices or targets.
     """
-    age = _age_minutes(data_time)
+    signal_age = _age_minutes(signal_time)
+    forecast_age = _age_minutes(forecast_time)
     max_age = DECISION_CRYPTO_MAX_AGE_MINUTES if market == "crypto" else DECISION_STOCK_MAX_AGE_MINUTES
     min_move = MIN_ACTIONABLE_MOVE_CRYPTO_PCT if market == "crypto" else MIN_ACTIONABLE_MOVE_STOCK_PCT
 
     if not _positive(price):
-        return "WAIT", False, "Waiting for a live market price", age
-    if age is not None and age > max_age:
-        return "WAIT", False, f"Market data is stale ({age:.0f} minutes old)", age
+        return "WAIT", False, "Waiting for a live market price", signal_age, forecast_age
+    if signal_age is None:
+        return "WAIT", False, "Waiting for a valid live signal timestamp", signal_age, forecast_age
+    if signal_age > max_age:
+        return "WAIT", False, f"Market signal is stale ({signal_age:.0f} minutes old)", signal_age, forecast_age
 
     if requested_action == "BUY":
         if REQUIRE_TARGET_FOR_BUY and not _positive(target):
-            return "WAIT", False, "Waiting for a current forecast target", age
+            return "WAIT", False, "Waiting for a current forecast target", signal_age, forecast_age
+        if forecast_age is None:
+            return "WAIT", False, "Waiting for a valid forecast timestamp", signal_age, forecast_age
+        if forecast_age > max_age:
+            return "WAIT", False, f"Forecast is stale ({forecast_age:.0f} minutes old)", signal_age, forecast_age
         if _positive(target) and target <= price:
-            return "WAIT", False, "Forecast does not currently offer upside", age
+            return "WAIT", False, "Forecast does not currently offer upside", signal_age, forecast_age
         if expected_return < min_move:
-            return "WAIT", False, f"Expected move is below the {min_move:.2f}% trade threshold", age
-        return "BUY", True, "Live quote and forecast passed the trade-readiness checks", age
+            return "WAIT", False, f"Expected move is below the {min_move:.2f}% trade threshold", signal_age, forecast_age
+        return "BUY", True, "Live quote and forecast passed the trade-readiness checks", signal_age, forecast_age
 
     if requested_action == "SELL":
-        return "SELL", True, "Live price is available for risk review", age
+        return "SELL", True, "Live price is available for risk review", signal_age, forecast_age
     if requested_action == "HOLD":
-        return "HOLD", True, "Live price is available; no new entry is approved", age
-    return "WAIT", True, "Live price is available; stronger confirmation is required", age
+        return "HOLD", True, "Live price is available; no new entry is approved", signal_age, forecast_age
+    return "WAIT", True, "Live price is available; stronger confirmation is required", signal_age, forecast_age
 
 
 def build_decisions(
@@ -151,14 +159,16 @@ def build_decisions(
             prob_up *= 100
         expected = ((target / price) - 1) * 100 if _positive(price) and _positive(target) else _f(payload.get("expected_return"))
         requested_action = normalize_action(sig.get("action") or payload.get("action"), score)
-        data_time = sig.get("created_at") or op.get("created_at") or fc.get("created_at")
-        action, trade_eligible, data_status, age_minutes = _data_gate(
+        signal_time = sig.get("created_at")
+        forecast_time = fc.get("created_at")
+        action, trade_eligible, data_status, signal_age_minutes, forecast_age_minutes = _data_gate(
             market=market,
             requested_action=requested_action,
             price=price,
             target=target,
             expected_return=expected,
-            data_time=data_time,
+            signal_time=signal_time,
+            forecast_time=forecast_time,
         )
         details = _payload(sig.get("details"))
         reason = str(payload.get("reason") or details.get("reason") or sig.get("details") or "Ranked by the Oracle's combined market evidence.")
@@ -171,7 +181,9 @@ def build_decisions(
             "requested_action": requested_action,
             "trade_eligible": trade_eligible,
             "data_status": data_status,
-            "data_age_minutes": round(age_minutes, 1) if age_minutes is not None else None,
+            "data_age_minutes": round(signal_age_minutes, 1) if signal_age_minutes is not None else None,
+            "signal_age_minutes": round(signal_age_minutes, 1) if signal_age_minutes is not None else None,
+            "forecast_age_minutes": round(forecast_age_minutes, 1) if forecast_age_minutes is not None else None,
             "score": round(score, 1),
             "confidence": round(max(0.0, min(100.0, confidence)), 1),
             "price": price,
@@ -182,7 +194,7 @@ def build_decisions(
             "expected_return": round(expected, 1),
             "risk": risk,
             "reason": reason,
-            "created_at": data_time,
+            "created_at": signal_time,
         })
 
     # Trade-ready BUYs first, then other current decisions, with incomplete/stale

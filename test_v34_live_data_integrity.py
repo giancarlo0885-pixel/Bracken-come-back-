@@ -48,10 +48,41 @@ def test_fresh_price_and_target_can_remain_buy() -> None:
     assert decisions[0]["trade_eligible"] is True
 
 
+def test_missing_signal_timestamp_is_never_trade_ready() -> None:
+    now = datetime.now(timezone.utc).isoformat()
+    signals = [{"market": "cash", "symbol": "AAPL", "price": 200, "action": "BUY", "confidence": .9}]
+    forecasts = [{"market": "cash", "symbol": "AAPL", "target_price": 205, "created_at": now}]
+    decisions = build_decisions([_op("AAPL")], signals, forecasts, 10)
+    assert decisions[0]["action"] == "WAIT"
+    assert decisions[0]["trade_eligible"] is False
+    assert "signal timestamp" in decisions[0]["data_status"]
+
+
+def test_missing_forecast_timestamp_is_never_trade_ready() -> None:
+    now = datetime.now(timezone.utc).isoformat()
+    signals = [{"market": "cash", "symbol": "AAPL", "price": 200, "action": "BUY", "confidence": .9, "created_at": now}]
+    forecasts = [{"market": "cash", "symbol": "AAPL", "target_price": 205}]
+    decisions = build_decisions([_op("AAPL")], signals, forecasts, 10)
+    assert decisions[0]["action"] == "WAIT"
+    assert decisions[0]["trade_eligible"] is False
+    assert "forecast timestamp" in decisions[0]["data_status"]
+
+
+def test_fresh_signal_does_not_make_stale_forecast_trade_ready() -> None:
+    now = datetime.now(timezone.utc)
+    signals = [{"market": "cash", "symbol": "AAPL", "price": 200, "action": "BUY", "confidence": .9, "created_at": now.isoformat()}]
+    forecasts = [{"market": "cash", "symbol": "AAPL", "target_price": 205, "created_at": (now - timedelta(hours=8)).isoformat()}]
+    decisions = build_decisions([_op("AAPL")], signals, forecasts, 10)
+    assert decisions[0]["action"] == "WAIT"
+    assert decisions[0]["trade_eligible"] is False
+    assert "forecast is stale" in decisions[0]["data_status"].lower()
+
+
 def test_stale_signal_is_downgraded() -> None:
     old = (datetime.now(timezone.utc) - timedelta(hours=8)).isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     signals = [{"market": "cash", "symbol": "AAPL", "price": 200, "action": "BUY", "confidence": .9, "created_at": old}]
-    forecasts = [{"market": "cash", "symbol": "AAPL", "target_price": 205, "created_at": old}]
+    forecasts = [{"market": "cash", "symbol": "AAPL", "target_price": 205, "created_at": now}]
     decisions = build_decisions([_op("AAPL")], signals, forecasts, 10)
     assert decisions[0]["action"] == "WAIT"
     assert "stale" in decisions[0]["data_status"].lower()
