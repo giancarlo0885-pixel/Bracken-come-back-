@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import html
 import json
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 import pandas as pd
@@ -16,6 +16,7 @@ from config import (
 )
 from dashboard_helpers import as_float, format_asset_price, worker_is_online
 from database import initialize_database, row, rows
+from earnings_calendar import mobile_card_lines, prepare_events, table_rows
 from market_data import get_history
 from migrations import run_migrations
 from portfolio_advisor import analyze_portfolio, simulate_trade
@@ -623,9 +624,84 @@ elif page == "🤖 Oracle":
 elif page == "🌍 Intelligence":
     st.subheader("Financial Intelligence")
     st.caption("Only market-moving information: macroeconomics, policy, earnings, capital flow, insiders, options, and global events.")
-    categories = sorted({str(e.get("category") or "Other") for e in events})
+    earnings_events = [e for e in events if str(e.get("category") or "") == "Earnings Calendar"]
+    if earnings_events:
+        st.markdown("### Earnings Calendar")
+        position_symbols = {str(p.get("symbol") or "").upper() for p in stock_positions if p.get("symbol")}
+        opportunity_symbols = {str(item.get("symbol") or "").upper() for item in opportunities if item.get("symbol")}
+        mover_symbols = {str(item.get("symbol") or "").upper() for item in decisions[:20] if item.get("symbol")}
+        cap_choices = ["All"] + sorted({
+            str(parse_payload(e.get("details")).get("market_cap_category") or parse_payload(e.get("details")).get("marketCapCategory") or "Unknown")
+            for e in earnings_events
+        })
+        f1, f2, f3 = st.columns([1.35, 1, 1])
+        with f1:
+            selected_range = st.date_input(
+                "Date range",
+                value=(date.today(), date.today() + timedelta(days=14)),
+                key="earnings-date-range",
+            )
+        with f2:
+            ticker_filter = st.text_input("Ticker", key="earnings-ticker-filter")
+        with f3:
+            cap_filter = st.selectbox("Market cap", cap_choices, key="earnings-market-cap")
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            reporting_today = st.checkbox("Reporting today", key="earnings-reporting-today")
+        with c2:
+            held_only = st.checkbox("Held positions", key="earnings-held-only")
+        with c3:
+            radar_only = st.checkbox("Opportunity radar", key="earnings-radar-only")
+
+        start_filter = None
+        end_filter = None
+        if isinstance(selected_range, tuple) and len(selected_range) == 2:
+            start_filter, end_filter = selected_range
+        elif selected_range:
+            start_filter = end_filter = selected_range
+
+        prepared_earnings = prepare_events(
+            earnings_events,
+            held_symbols=position_symbols,
+            opportunity_symbols=opportunity_symbols,
+            major_movers=mover_symbols,
+            start_date=start_filter,
+            end_date=end_filter,
+            ticker_filter=ticker_filter,
+            market_cap_category=cap_filter,
+            reporting_today=reporting_today,
+            held_only=held_only,
+            opportunity_only=radar_only,
+            limit=20,
+        )
+        main_rows = table_rows(prepared_earnings["main"])
+        if main_rows:
+            st.dataframe(pd.DataFrame(main_rows), use_container_width=True, hide_index=True)
+            with st.expander("Show more earnings"):
+                more_rows = table_rows(prepared_earnings["more"])
+                if more_rows:
+                    st.dataframe(pd.DataFrame(more_rows), use_container_width=True, hide_index=True)
+                else:
+                    st.caption("No additional matching events.")
+            with st.expander("Mobile card view"):
+                for event in prepared_earnings["main"]:
+                    st.markdown(
+                        "<div class='card'>" + "<br>".join(html.escape(line) for line in mobile_card_lines(event)) + "</div>",
+                        unsafe_allow_html=True,
+                    )
+        else:
+            st.info("No complete earnings events match the selected filters.")
+
+        if prepared_earnings["incomplete"]:
+            with st.expander("Incomplete Provider Data"):
+                st.dataframe(pd.DataFrame(table_rows(prepared_earnings["incomplete"])), use_container_width=True, hide_index=True)
+        with st.expander("Developer diagnostics: raw provider payload"):
+            st.json([event.get("raw_payload") for event in prepared_earnings["main"] + prepared_earnings["more"] + prepared_earnings["incomplete"]])
+
+    non_earnings_events = [e for e in events if str(e.get("category") or "") != "Earnings Calendar"]
+    categories = sorted({str(e.get("category") or "Other") for e in non_earnings_events})
     selected_categories = st.multiselect("Filter intelligence", categories, default=categories)
-    filtered_events = [e for e in events if str(e.get("category") or "Other") in selected_categories]
+    filtered_events = [e for e in non_earnings_events if str(e.get("category") or "Other") in selected_categories]
     if not filtered_events:
         st.info("No intelligence events match the selected filters.")
     else:
