@@ -12,10 +12,13 @@ from typing import Any
 from config import (
     ALWAYS_ON_TRADING,
     DEEP_ANALYSIS_CANDIDATES,
+    ENABLE_AUTOTRADE,
     EXECUTION_MODE,
     FAST_SCAN_BATCH_SIZE,
     FAST_SCAN_TOP_RANKED,
     FAST_SIGNAL_SCAN_ENABLED,
+    HIGH_CONFIDENCE_THRESHOLD,
+    HIGH_SCORE_THRESHOLD,
     INTELLIGENCE_REFRESH_SECONDS,
     LIVE_SCAN_WORKERS,
     NEWS_PRIORITY_CANDIDATES,
@@ -49,11 +52,61 @@ log = logging.getLogger("market-worker")
 stop_event = Event()
 trade_cycle_lock = Lock()
 _rolling_offsets: dict[str, int] = {"cash": 0, "crypto": 0}
+_EXECUTION_DISABLED_LOGGED = False
 
 
 def _request_stop(*_: object) -> None:
     log.info("Worker shutdown requested.")
     stop_event.set()
+
+
+def _execution_enabled() -> bool:
+    global _EXECUTION_DISABLED_LOGGED
+    if ENABLE_AUTOTRADE:
+        return True
+    if not _EXECUTION_DISABLED_LOGGED:
+        log.warning("Execution disabled because ENABLE_AUTOTRADE=false; scanning and persistence continue.")
+        _EXECUTION_DISABLED_LOGGED = True
+    return False
+
+
+def _quote_payload_from_history(symbol: str, history: Any, price: float) -> dict[str, Any]:
+    route = dict(getattr(history, "attrs", {}).get("provider_route", {}) or {})
+    return {
+        "symbol": str(symbol).upper(),
+        "requested_symbol": route.get("requested_symbol"),
+        "provider_symbol": route.get("provider_symbol"),
+        "provider": route.get("provider"),
+        "price": float(price),
+        "quote_timestamp": route.get("quote_timestamp"),
+        "interval": route.get("interval", "1d"),
+        "quote_verified": route.get("quote_verified") is True,
+        "source_identity": route.get("source_identity"),
+        "cache_identity": route.get("cache_identity"),
+        "ohlcv_fingerprint": route.get("ohlcv_fingerprint"),
+    }
+
+
+def _normalize_starter_action(signal: Any) -> Any:
+    action = str(getattr(signal, "action", "HOLD") or "HOLD").upper()
+    if action != "HOLD":
+        return signal
+    score = float(getattr(signal, "score", 0.0) or 0.0)
+    confidence = float(getattr(signal, "confidence", 0.0) or 0.0)
+    if score <= 1.0:
+        score *= 100.0
+    if confidence > 1.0:
+        confidence /= 100.0
+    starter_ready = (
+        score >= max(50.0, HIGH_SCORE_THRESHOLD - 2.0)
+        and confidence >= max(0.44, HIGH_CONFIDENCE_THRESHOLD - 0.04)
+    ) or (
+        confidence >= 0.82
+        and score >= max(45.0, HIGH_SCORE_THRESHOLD - 8.0)
+    )
+    if starter_ready:
+        signal.action = "ACCUMULATE"
+    return signal
 
 
 signal.signal(signal.SIGTERM, _request_stop)
@@ -292,6 +345,8 @@ def _fast_discover_symbol(market: str, symbol: str, name: str) -> tuple[Any, Any
             signal = analyze_market(symbol, history, 0.0)
             if signal is None:
                 continue
+            setattr(signal, "market_data_route", dict(getattr(history, "attrs", {}).get("provider_route", {}) or {}))
+            signal = _normalize_starter_action(signal)
             signal.reason = (
                 f"Always-on {interval} market pulse. " + str(getattr(signal, "reason", ""))
             ).strip()
@@ -313,7 +368,7 @@ def fast_scan_market(market: str) -> list[Any]:
         return []
 
     signals: list[Any] = []
-    prices: dict[str, float] = {}
+    prices: dict[str, Any] = {}
     workers = min(LIVE_SCAN_WORKERS, max(1, len(batch)))
     with ThreadPoolExecutor(max_workers=workers, thread_name_prefix=f"{market}-fast-symbol") as executor:
         futures = {
@@ -333,7 +388,7 @@ def fast_scan_market(market: str) -> list[Any]:
                 continue
             signal, history = result
             signals.append(signal)
-            prices[symbol] = float(getattr(signal, "price", 0.0) or 0.0)
+            prices[symbol] = _quote_payload_from_history(symbol, history, float(getattr(signal, "price", 0.0) or 0.0))
             try:
                 save_json_signal(
                     market,
@@ -374,18 +429,19 @@ def fast_scan_market(market: str) -> list[Any]:
 
     actions: list[Any] = []
     with trade_cycle_lock:
-        try:
-            update_prices(market, prices)
-        except Exception as exc:
-            log.debug("%s fast price update failed: %s", market, exc)
-        try:
-            actions.extend(risk_exits(market, prices) or [])
-        except Exception as exc:
-            log.exception("%s fast risk exits failed: %s", market, exc)
-        try:
-            actions.extend(process_signals(market, signals, prices=prices) or [])
-        except Exception as exc:
-            log.exception("%s fast execution failed: %s", market, exc)
+        if _execution_enabled():
+            try:
+                update_prices(market, prices)
+            except Exception as exc:
+                log.debug("%s fast price update failed: %s", market, exc)
+            try:
+                actions.extend(risk_exits(market, prices) or [])
+            except Exception as exc:
+                log.exception("%s fast risk exits failed: %s", market, exc)
+            try:
+                actions.extend(process_signals(market, signals, prices=prices) or [])
+            except Exception as exc:
+                log.exception("%s fast execution failed: %s", market, exc)
         try:
             snapshot(market)
         except Exception as exc:
@@ -452,7 +508,7 @@ def scan_market(market: str) -> list[Any]:
     )
 
     signals: list[Any] = []
-    prices: dict[str, float] = {}
+    prices: dict[str, Any] = {}
     for preliminary_signal, name in deep_candidates:
         if stop_event.is_set():
             break
@@ -466,13 +522,15 @@ def scan_market(market: str) -> list[Any]:
             signal = analyze_market(symbol, history, news.sentiment)
             if signal is None:
                 continue
+            setattr(signal, "market_data_route", dict(getattr(history, "attrs", {}).get("provider_route", {}) or {}))
             council = deliberate(signal, news.headlines[:8])
             signal.score = council["score"]
             signal.action = council["action"]
             signal.confidence = council["confidence"]
+            signal = _normalize_starter_action(signal)
             signal.reason = (str(signal.reason) + " " + str(council["explanation"])).strip()
             signals.append(signal)
-            prices[symbol] = float(signal.price)
+            prices[symbol] = _quote_payload_from_history(symbol, history, float(signal.price))
             save_json_signal(
                 market,
                 symbol,
@@ -590,18 +648,19 @@ def scan_market(market: str) -> list[Any]:
 
     actions: list[Any] = []
     with trade_cycle_lock:
-        try:
-            update_prices(market, prices)
-        except Exception as exc:
-            log.exception("%s price update failed: %s", market, exc)
-        try:
-            actions.extend(risk_exits(market, prices) or [])
-        except Exception as exc:
-            log.exception("%s deep-scan risk exits failed: %s", market, exc)
-        try:
-            actions.extend(process_signals(market, signals, prices=prices) or [])
-        except Exception as exc:
-            log.exception("%s signal execution failed: %s", market, exc)
+        if _execution_enabled():
+            try:
+                update_prices(market, prices)
+            except Exception as exc:
+                log.exception("%s price update failed: %s", market, exc)
+            try:
+                actions.extend(risk_exits(market, prices) or [])
+            except Exception as exc:
+                log.exception("%s deep-scan risk exits failed: %s", market, exc)
+            try:
+                actions.extend(process_signals(market, signals, prices=prices) or [])
+            except Exception as exc:
+                log.exception("%s signal execution failed: %s", market, exc)
         try:
             snapshot(market)
         except Exception as exc:
@@ -621,21 +680,22 @@ def live_position_pulse(market: str) -> tuple[list[Any], int, str]:
     if not symbols:
         return [], 0, "none"
     snapshots = get_many_snapshots(symbols, live=True)
-    prices = {symbol: item.price for symbol, item in snapshots.items() if item.price > 0}
+    prices = {symbol: item.to_quote_payload() for symbol, item in snapshots.items() if item.price > 0}
     provider_names = sorted({item.provider for item in snapshots.values() if item.provider})
     provider_text = ", ".join(provider_names[:2]) if provider_names else "unavailable"
     if not prices:
         return [], 0, provider_text
     actions: list[Any] = []
     with trade_cycle_lock:
-        try:
-            update_prices(market, prices)
-        except Exception as exc:
-            log.warning("%s pulse price update failed: %s", market, exc)
-        try:
-            actions.extend(risk_exits(market, prices) or [])
-        except Exception as exc:
-            log.exception("%s pulse risk exits failed: %s", market, exc)
+        if _execution_enabled():
+            try:
+                update_prices(market, prices)
+            except Exception as exc:
+                log.warning("%s pulse price update failed: %s", market, exc)
+            try:
+                actions.extend(risk_exits(market, prices) or [])
+            except Exception as exc:
+                log.exception("%s pulse risk exits failed: %s", market, exc)
         try:
             snapshot(market)
         except Exception as exc:

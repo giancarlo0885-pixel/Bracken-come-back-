@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import logging
+import re
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from collections import defaultdict
 import time
 from typing import Callable
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import pandas as pd
 import requests
@@ -49,15 +52,109 @@ class RoutedHistory:
             "attempts": [asdict(x) for x in self.attempts],
             "fetched_at": self.fetched_at,
             "records": int(len(self.frame)),
+            "requested_symbol": self.frame.attrs.get("requested_symbol"),
+            "provider_symbol": self.frame.attrs.get("provider_symbol"),
+            "period": self.frame.attrs.get("period"),
+            "interval": self.frame.attrs.get("interval"),
+            "source_identity": self.frame.attrs.get("source_identity"),
+            "cache_identity": self.frame.attrs.get("cache_identity"),
+            "quote_verified": self.frame.attrs.get("quote_verified") is True,
         }
 
 
-def _normalise(frame: pd.DataFrame) -> pd.DataFrame:
+SECRET_QUERY_KEYS = {"api_token", "apikey", "token", "key", "authorization"}
+
+
+def normalize_symbol(value: object) -> str:
+    return str(value or "").upper().strip()
+
+
+def _symbol_matches(requested: str, provider_symbol: object) -> bool:
+    return normalize_symbol(requested) == normalize_symbol(provider_symbol)
+
+
+def _redact_url(text: str) -> str:
+    def replace(match: re.Match[str]) -> str:
+        raw = match.group(0)
+        try:
+            parts = urlsplit(raw)
+            query = urlencode(
+                [
+                    (key, "REDACTED" if key.lower() in SECRET_QUERY_KEYS else value)
+                    for key, value in parse_qsl(parts.query, keep_blank_values=True)
+                ]
+            )
+            return urlunsplit((parts.scheme, parts.netloc, parts.path, query, parts.fragment))
+        except Exception:
+            return raw
+
+    redacted = re.sub(r"https?://[^\s)]+", replace, str(text))
+    for key in SECRET_QUERY_KEYS:
+        redacted = re.sub(
+            rf"(?i)([?&\s]{re.escape(key)}=)[^&\s)]+",
+            rf"\1REDACTED",
+            redacted,
+        )
+    return redacted
+
+
+def _select_symbol_columns(frame: pd.DataFrame, symbol: str) -> pd.DataFrame:
+    if frame is None or frame.empty or not isinstance(frame.columns, pd.MultiIndex):
+        return frame
+    requested = normalize_symbol(symbol)
+    for level in range(frame.columns.nlevels):
+        values = [normalize_symbol(value) for value in frame.columns.get_level_values(level)]
+        if requested not in values:
+            continue
+        selected = frame.loc[:, [value == requested for value in values]].copy()
+        selected.columns = selected.columns.droplevel(level)
+        if isinstance(selected.columns, pd.MultiIndex) and selected.columns.nlevels == 1:
+            selected.columns = selected.columns.get_level_values(0)
+        return selected
+    return pd.DataFrame()
+
+
+def _stamp_frame(
+    frame: pd.DataFrame,
+    provider: str,
+    requested_symbol: str,
+    provider_symbol: str,
+    period: str,
+    interval: str,
+    adjusted: bool,
+    extended_hours: bool,
+) -> pd.DataFrame:
+    out = frame.copy(deep=True)
+    out.attrs.clear()
+    out.attrs.update(
+        {
+            "requested_symbol": normalize_symbol(requested_symbol),
+            "provider_symbol": normalize_symbol(provider_symbol),
+            "provider": provider,
+            "period": str(period),
+            "interval": str(interval),
+            "adjusted": bool(adjusted),
+            "extended_hours": bool(extended_hours),
+            "quote_verified": True,
+        }
+    )
+    return out
+
+
+def _daily_like(interval: str) -> bool:
+    text = str(interval or "1d").lower().strip()
+    return text.endswith("d") or text in {"1wk", "1mo", "3mo", "1y"}
+
+
+def _normalise(frame: pd.DataFrame, symbol: str = "", interval: str = "1d") -> pd.DataFrame:
     if frame is None or frame.empty:
         return pd.DataFrame()
-    out = frame.copy()
+    original_attrs = dict(getattr(frame, "attrs", {}) or {})
+    out = frame.copy(deep=True)
     if isinstance(out.columns, pd.MultiIndex):
-        out.columns = out.columns.get_level_values(0)
+        out = _select_symbol_columns(out, symbol)
+        if out.empty:
+            return pd.DataFrame()
     lower_to_original = {str(c).lower(): c for c in out.columns}
     mapping = {}
     for wanted in ("Open", "High", "Low", "Close", "Volume"):
@@ -70,9 +167,54 @@ def _normalise(frame: pd.DataFrame) -> pd.DataFrame:
     if "Close" not in keep:
         return pd.DataFrame()
     out = out[keep].apply(pd.to_numeric, errors="coerce").dropna(subset=["Close"])
-    out.index = pd.to_datetime(out.index, errors="coerce", utc=True)
+    index = pd.to_datetime(out.index, errors="coerce")
+    if getattr(index, "tz", None) is None and not _daily_like(interval):
+        return pd.DataFrame()
+    if getattr(index, "tz", None) is not None:
+        index = index.tz_convert(timezone.utc)
+    out.index = index
     out = out[~out.index.isna()].sort_index()
-    return out[~out.index.duplicated(keep="last")]
+    out = out[~out.index.duplicated(keep="last")]
+    out.attrs.update(original_attrs)
+    return out
+
+
+def _verified_history(
+    frame: pd.DataFrame,
+    provider: str,
+    requested_symbol: str,
+    provider_symbol: str,
+    period: str,
+    interval: str,
+    adjusted: bool = True,
+    extended_hours: bool = True,
+) -> pd.DataFrame:
+    if not requested_symbol or not _symbol_matches(requested_symbol, provider_symbol):
+        return pd.DataFrame()
+    normalized = _normalise(frame, requested_symbol, interval)
+    if normalized.empty:
+        return pd.DataFrame()
+    return _stamp_frame(
+        normalized,
+        provider,
+        requested_symbol,
+        provider_symbol,
+        period,
+        interval,
+        adjusted,
+        extended_hours,
+    )
+
+
+def verify_frame_symbol(frame: pd.DataFrame, requested_symbol: str) -> bool:
+    if frame is None or frame.empty:
+        return False
+    requested = normalize_symbol(requested_symbol)
+    if not requested:
+        return False
+    frame_requested = normalize_symbol(frame.attrs.get("requested_symbol"))
+    provider_symbol = normalize_symbol(frame.attrs.get("provider_symbol"))
+    return frame_requested == requested and provider_symbol == requested
 
 
 def _is_intraday(interval: str) -> bool:
@@ -179,7 +321,14 @@ def _polygon(symbol: str, period: str, interval: str, key: str) -> pd.DataFrame:
         return pd.DataFrame()
     frame = pd.DataFrame(records)
     frame.index = pd.to_datetime(frame["t"], unit="ms", utc=True)
-    return _normalise(frame.rename(columns={"o": "Open", "h": "High", "l": "Low", "c": "Close", "v": "Volume"}))
+    return _verified_history(
+        frame.rename(columns={"o": "Open", "h": "High", "l": "Low", "c": "Close", "v": "Volume"}),
+        "Polygon",
+        symbol,
+        symbol,
+        period,
+        interval,
+    )
 
 
 def _eodhd(symbol: str, period: str, interval: str, key: str) -> pd.DataFrame:
@@ -197,8 +346,15 @@ def _eodhd(symbol: str, period: str, interval: str, key: str) -> pd.DataFrame:
     if not isinstance(records, list) or not records:
         return pd.DataFrame()
     frame = pd.DataFrame(records)
-    frame.index = pd.to_datetime(frame["date"], utc=True)
-    return _normalise(frame.rename(columns={"open": "Open", "high": "High", "low": "Low", "close": "Close", "volume": "Volume"}))
+    frame.index = pd.to_datetime(frame["date"], errors="coerce")
+    return _verified_history(
+        frame.rename(columns={"open": "Open", "high": "High", "low": "Low", "close": "Close", "volume": "Volume"}),
+        "EODHD",
+        symbol,
+        symbol,
+        period,
+        interval,
+    )
 
 
 def _alpha_interval(interval: str) -> str:
@@ -235,9 +391,28 @@ def _alpha(symbol: str, period: str, interval: str, key: str) -> pd.DataFrame:
         series = data.get(f"Time Series ({alpha_interval})", {})
         if not series:
             return pd.DataFrame()
+        metadata = data.get("Meta Data", {}) if isinstance(data, dict) else {}
+        provider_timezone = (
+            metadata.get("6. Time Zone")
+            or metadata.get("Time Zone")
+            or metadata.get("timezone")
+        )
+        if not provider_timezone:
+            return pd.DataFrame()
+        try:
+            zone = ZoneInfo(str(provider_timezone))
+        except ZoneInfoNotFoundError:
+            return pd.DataFrame()
         frame = pd.DataFrame.from_dict(series, orient="index")
-        frame.index = pd.to_datetime(frame.index, utc=True)
-        return _normalise(frame.rename(columns={"1. open": "Open", "2. high": "High", "3. low": "Low", "4. close": "Close", "5. volume": "Volume"}))
+        frame.index = pd.to_datetime(frame.index, errors="coerce").tz_localize(zone).tz_convert(timezone.utc)
+        return _verified_history(
+            frame.rename(columns={"1. open": "Open", "2. high": "High", "3. low": "Low", "4. close": "Close", "5. volume": "Volume"}),
+            "Alpha Vantage",
+            symbol,
+            symbol,
+            period,
+            interval,
+        )
 
     response = requests.get(
         "https://www.alphavantage.co/query",
@@ -250,8 +425,15 @@ def _alpha(symbol: str, period: str, interval: str, key: str) -> pd.DataFrame:
     if not series:
         return pd.DataFrame()
     frame = pd.DataFrame.from_dict(series, orient="index")
-    frame.index = pd.to_datetime(frame.index, utc=True)
-    return _normalise(frame.rename(columns={"1. open": "Open", "2. high": "High", "3. low": "Low", "5. adjusted close": "Close", "6. volume": "Volume"}))
+    frame.index = pd.to_datetime(frame.index, errors="coerce")
+    return _verified_history(
+        frame.rename(columns={"1. open": "Open", "2. high": "High", "3. low": "Low", "5. adjusted close": "Close", "6. volume": "Volume"}),
+        "Alpha Vantage",
+        symbol,
+        symbol,
+        period,
+        interval,
+    )
 
 
 def _finnhub_resolution(interval: str) -> str:
@@ -291,7 +473,7 @@ def _finnhub(symbol: str, period: str, interval: str, key: str) -> pd.DataFrame:
         },
         index=pd.to_datetime(data.get("t", []), unit="s", utc=True),
     )
-    return _normalise(frame)
+    return _verified_history(frame, "Finnhub", symbol, symbol, period, interval)
 
 
 def route_history(
@@ -336,15 +518,25 @@ def route_history(
             attempts.append(ProviderAttempt(provider, False, status="not_configured"))
             continue
         try:
-            namespace = f"history_{provider.lower().replace(' ', '_')}_{interval}"
+            namespace = (
+                f"history_{provider.lower().replace(' ', '_')}_{symbol}_{period}_{interval}"
+                f"_adjusted_true_extended_{str(intraday).lower()}"
+            )
             frame = cached_call(namespace, ttl, function, symbol, period, interval, key)
-            frame = _normalise(frame)
+            frame = _normalise(frame, symbol, interval)
             if not frame.empty:
+                frame.attrs["cache_identity"] = namespace
+                frame.attrs.setdefault("source_identity", f"{provider}:{symbol}:{period}:{interval}")
+                frame.attrs["period"] = period
+                frame.attrs["interval"] = interval
+                frame.attrs["quote_verified"] = True
+            if not frame.empty and verify_frame_symbol(frame, symbol):
+                frame = frame.copy(deep=True)
                 attempts.append(ProviderAttempt(provider, True, len(frame), "healthy"))
                 return RoutedHistory(frame, provider, attempts, datetime.now(timezone.utc).isoformat())
-            attempts.append(ProviderAttempt(provider, False, 0, "no_data"))
+            attempts.append(ProviderAttempt(provider, False, 0, "symbol_mismatch_or_no_data"))
         except Exception as exc:
-            text = str(exc)[:220]
+            text = _redact_url(str(exc))[:220]
             status = "rate_limited" if "429" in text or "limit" in text.lower() else "degraded"
             if status == "rate_limited":
                 _mark_provider_limited(provider)
@@ -352,12 +544,16 @@ def route_history(
             _record_failure(provider, status, symbol)
 
     try:
-        frame = _normalise(yahoo_loader(symbol, period, interval))
-        if not frame.empty:
+        frame = _verified_history(yahoo_loader(symbol, period, interval), "Yahoo Finance", symbol, symbol, period, interval)
+        if not frame.empty and verify_frame_symbol(frame, symbol):
+            frame.attrs["source_identity"] = f"Yahoo Finance:{symbol}:{period}:{interval}"
+            frame.attrs["period"] = period
+            frame.attrs["interval"] = interval
+            frame.attrs["quote_verified"] = True
             attempts.append(ProviderAttempt("Yahoo Finance", True, len(frame), "fallback"))
             return RoutedHistory(frame, "Yahoo Finance", attempts, datetime.now(timezone.utc).isoformat())
     except Exception as exc:
-        attempts.append(ProviderAttempt("Yahoo Finance", False, 0, "degraded", str(exc)[:220]))
+        attempts.append(ProviderAttempt("Yahoo Finance", False, 0, "degraded", _redact_url(str(exc))[:220]))
         _record_failure("Yahoo Finance", "degraded", symbol)
 
     mark_symbol_unavailable(symbol)
