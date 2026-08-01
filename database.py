@@ -148,7 +148,7 @@ def initialize_database() -> None:
             signal_created_at TEXT,
             data_quality_score DOUBLE PRECISION,
             forecast_id TEXT,
-            horizon_days INTEGER NOT NULL,
+            horizon_days DOUBLE PRECISION NOT NULL,
             horizon_bars INTEGER,
             horizon_minutes DOUBLE PRECISION,
             target_price DOUBLE PRECISION NOT NULL,
@@ -383,6 +383,7 @@ def initialize_database() -> None:
         "ALTER TABLE forecasts ADD COLUMN IF NOT EXISTS forecast_id TEXT",
         "ALTER TABLE forecasts ADD COLUMN IF NOT EXISTS horizon_bars INTEGER",
         "ALTER TABLE forecasts ADD COLUMN IF NOT EXISTS horizon_minutes DOUBLE PRECISION",
+        "ALTER TABLE forecasts ALTER COLUMN horizon_days TYPE DOUBLE PRECISION USING horizon_days::DOUBLE PRECISION",
         """
         CREATE TABLE IF NOT EXISTS forecast_validation (
             id BIGSERIAL PRIMARY KEY,
@@ -410,7 +411,8 @@ def initialize_database() -> None:
             reason TEXT,
             payload JSONB,
             reviewed_at TEXT,
-            created_at TEXT NOT NULL
+            created_at TEXT NOT NULL,
+            UNIQUE(record_type, record_id)
         )
         """,
         """
@@ -511,7 +513,8 @@ def initialize_database() -> None:
             status TEXT NOT NULL DEFAULT 'experimental',
             reason TEXT,
             created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL
+            updated_at TEXT NOT NULL,
+            UNIQUE(model, model_version)
         )
         """,
         """
@@ -672,6 +675,8 @@ def initialize_database() -> None:
         )
         """,
         "CREATE INDEX IF NOT EXISTS idx_recommendations_market_created ON recommendations (market, created_at DESC)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_paper_data_audit_record ON paper_data_audit (record_type, record_id)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_model_registry_model_version ON model_registry (model, model_version)",
         "CREATE INDEX IF NOT EXISTS idx_recommendations_symbol_created ON recommendations (symbol, created_at DESC)",
         "CREATE INDEX IF NOT EXISTS idx_order_proposals_status ON order_proposals (approval_status, created_at DESC)",
         "CREATE INDEX IF NOT EXISTS idx_strategy_signals_symbol_strategy ON strategy_signals (symbol, strategy, created_at DESC)",
@@ -912,7 +917,9 @@ def save_json_signal(
     action: str,
     confidence: float,
     details: Any,
+    created_at: str | None = None,
 ) -> None:
+    created_at = created_at or utc_now()
     with connect() as conn:
         with conn.cursor() as cursor:
             cursor.execute(
@@ -937,7 +944,7 @@ def save_json_signal(
                     action,
                     float(confidence),
                     json.dumps(details, default=str),
-                    utc_now(),
+                    created_at,
                 ),
             )
 
@@ -999,7 +1006,7 @@ def save_forecast(
                     signal_created_at,
                     float(getattr(forecast, "data_quality_score", 0.0) or 0.0),
                     str(getattr(forecast, "forecast_id", "") or ""),
-                    int(float(forecast.horizon_days)),
+                    float(getattr(forecast, "horizon_days", 0.0) or 0.0),
                     int(getattr(forecast, "horizon_bars", 0) or 0),
                     float(getattr(forecast, "horizon_minutes", 0.0) or 0.0),
                     float(forecast.target_price),

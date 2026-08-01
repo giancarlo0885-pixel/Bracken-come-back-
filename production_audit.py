@@ -88,6 +88,7 @@ def audit_legacy_paper_records(cutoff: datetime, *, mark: bool = True) -> AuditR
                     """
                     INSERT INTO paper_data_audit(record_type, record_id, market, symbol, status, reason, payload, created_at)
                     VALUES ('trade', %s, %s, %s, 'suspected_price_corruption', %s, %s::jsonb, %s)
+                    ON CONFLICT (record_type, record_id) DO NOTHING
                     """,
                     (item.get("id"), item.get("market"), item.get("symbol"), f"created before merge commit {MERGE_COMMIT_SHA}", "{}", now),
                 )
@@ -98,6 +99,7 @@ def audit_legacy_paper_records(cutoff: datetime, *, mark: bool = True) -> AuditR
                     """
                     INSERT INTO paper_data_audit(record_type, record_id, market, symbol, status, reason, payload, created_at)
                     VALUES ('position', %s, %s, %s, 'suspected_price_corruption', %s, %s::jsonb, %s)
+                    ON CONFLICT (record_type, record_id) DO NOTHING
                     """,
                     (item.get("id"), item.get("market"), item.get("symbol"), f"opened before merge commit {MERGE_COMMIT_SHA}", "{}", now),
                 )

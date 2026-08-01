@@ -16,6 +16,7 @@ def stock_execution_enabled(monkeypatch):
     monkeypatch.setattr(oracle_bot, "ENABLE_AUTOTRADE", True)
     monkeypatch.setattr(oracle_bot, "ENABLE_STOCK_AUTOTRADE", True)
     monkeypatch.setattr(oracle_bot, "ENABLE_NEW_ENTRIES", True)
+    monkeypatch.setattr(oracle_bot, "ENABLE_AUTOMATED_EXITS", True)
     monkeypatch.setattr(oracle_bot, "_AUTOTRADE_DISABLED_LOGGED", False)
 
 
@@ -909,7 +910,7 @@ def test_displayed_saved_action_matches_executed_action():
 
     signal = SimpleNamespace(action="HOLD", score=.95, confidence=.95)
     normalized = market_worker._normalize_starter_action(signal)
-    assert normalized.action == "ACCUMULATE"
+    assert normalized.action == "HOLD"
 
 
 def test_rotation_rejects_stale_outgoing_quote(monkeypatch):
@@ -936,6 +937,11 @@ def test_rotation_rejects_mismatched_outgoing_quote(monkeypatch):
 def test_rotation_uses_verified_outgoing_quote_not_position_price(monkeypatch):
     import oracle_bot
 
+    monkeypatch.setattr(oracle_bot, "ENABLE_AUTOTRADE", True)
+    monkeypatch.setattr(oracle_bot, "ENABLE_STOCK_AUTOTRADE", True)
+    monkeypatch.setattr(oracle_bot, "ENABLE_NEW_ENTRIES", True)
+    monkeypatch.setattr(oracle_bot, "ENABLE_PORTFOLIO_ROTATION", True)
+    monkeypatch.setattr(oracle_bot, "_AUTOTRADE_DISABLED_LOGGED", False)
     monkeypatch.setattr(oracle_bot, "ROTATION_ENABLED", True)
     monkeypatch.setattr(oracle_bot, "ROTATION_MIN_SCORE_GAP", 1)
     monkeypatch.setattr(oracle_bot, "rows", lambda *args, **kwargs: [{"symbol": "OLD", "quantity": 1, "current_price": 999, "entry_price": 10}])

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+from datetime import datetime, timezone
 
 
 class ModelStatus(str, Enum):
@@ -26,10 +27,44 @@ _REGISTRY: dict[tuple[str, str], ModelRecord] = {}
 def register_model(model: str, model_version: str, status: str = "experimental", reason: str = "") -> ModelRecord:
     record = ModelRecord(model, model_version, ModelStatus(status), reason)
     _REGISTRY[(model, model_version)] = record
+    try:
+        from database import connect, utc_now
+
+        with connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO model_registry (model, model_version, status, reason, created_at, updated_at)
+                VALUES (%s,%s,%s,%s,%s,%s)
+                ON CONFLICT (model, model_version) DO UPDATE SET
+                    status=EXCLUDED.status,
+                    reason=EXCLUDED.reason,
+                    updated_at=EXCLUDED.updated_at
+                """,
+                (model, model_version, record.status.value, reason, utc_now(), utc_now()),
+            )
+    except Exception:
+        pass
     return record
 
 
 def model_status(model: str, model_version: str) -> ModelStatus:
+    try:
+        from database import row
+
+        record = row(
+            """
+            SELECT status
+            FROM model_registry
+            WHERE model=%s AND model_version=%s
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (model, model_version),
+        )
+        if record and record.get("status"):
+            return ModelStatus(str(record.get("status")))
+    except Exception:
+        pass
     record = _REGISTRY.get((model, model_version))
     return record.status if record else ModelStatus.SHADOW
 

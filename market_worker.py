@@ -13,8 +13,13 @@ from config import (
     ALWAYS_ON_TRADING,
     DEEP_ANALYSIS_CANDIDATES,
     ENABLE_AUTOTRADE,
+    ENABLE_AUTOMATED_EXITS,
+    ENABLE_BROKER_SUBMISSION,
     ENABLE_CRYPTO_AUTOTRADE,
+    ENABLE_NEW_ENTRIES,
+    ENABLE_PORTFOLIO_ROTATION,
     ENABLE_STOCK_AUTOTRADE,
+    GLOBAL_KILL_SWITCH,
     EXECUTION_MODE,
     FAST_SCAN_BATCH_SIZE,
     FAST_SCAN_TOP_RANKED,
@@ -38,6 +43,7 @@ from database import (
     trim_old_records,
     utc_now,
 )
+from execution_policy import execution_policy
 from engine import analyze_market
 from forecasting import forecast_price
 from global_market_scanner import active_global_watchlist
@@ -55,7 +61,6 @@ stop_event = Event()
 trade_cycle_lock = Lock()
 _rolling_offsets: dict[str, int] = {"cash": 0, "crypto": 0}
 _EXECUTION_DISABLED_LOGGED = False
-_INITIAL_ENABLE_AUTOTRADE = ENABLE_AUTOTRADE
 
 
 def _request_stop(*_: object) -> None:
@@ -63,21 +68,29 @@ def _request_stop(*_: object) -> None:
     stop_event.set()
 
 
-def _market_execution_switch(market: str) -> bool:
-    specific = ENABLE_CRYPTO_AUTOTRADE if str(market or "").lower() == "crypto" else ENABLE_STOCK_AUTOTRADE
-    if ENABLE_AUTOTRADE != _INITIAL_ENABLE_AUTOTRADE:
-        return bool(ENABLE_AUTOTRADE)
-    return bool(ENABLE_AUTOTRADE and specific)
+def _execution_overrides() -> dict[str, Any]:
+    return {
+        "ENABLE_AUTOTRADE": ENABLE_AUTOTRADE,
+        "ENABLE_STOCK_AUTOTRADE": ENABLE_STOCK_AUTOTRADE,
+        "ENABLE_CRYPTO_AUTOTRADE": ENABLE_CRYPTO_AUTOTRADE,
+        "ENABLE_NEW_ENTRIES": ENABLE_NEW_ENTRIES,
+        "ENABLE_AUTOMATED_EXITS": ENABLE_AUTOMATED_EXITS,
+        "ENABLE_PORTFOLIO_ROTATION": ENABLE_PORTFOLIO_ROTATION,
+        "ENABLE_BROKER_SUBMISSION": ENABLE_BROKER_SUBMISSION,
+        "GLOBAL_KILL_SWITCH": GLOBAL_KILL_SWITCH,
+    }
 
 
-def _execution_enabled(market: str = "cash") -> bool:
+def _execution_enabled(market: str = "cash", intent: str = "entry") -> bool:
     global _EXECUTION_DISABLED_LOGGED
-    if _market_execution_switch(market):
+    policy = execution_policy(market=market, intent=intent, overrides=_execution_overrides())
+    if policy.allowed:
         return True
     if not _EXECUTION_DISABLED_LOGGED:
         log.warning(
-            "Execution disabled for %s because ENABLE_AUTOTRADE/market autotrade switch is false; scanning and persistence continue.",
+            "Execution disabled for %s by central policy (%s); scanning and persistence continue.",
             market,
+            policy.reason,
         )
         _EXECUTION_DISABLED_LOGGED = True
     return False
@@ -101,24 +114,6 @@ def _quote_payload_from_history(symbol: str, history: Any, price: float) -> dict
 
 
 def _normalize_starter_action(signal: Any) -> Any:
-    action = str(getattr(signal, "action", "HOLD") or "HOLD").upper()
-    if action != "HOLD":
-        return signal
-    score = float(getattr(signal, "score", 0.0) or 0.0)
-    confidence = float(getattr(signal, "confidence", 0.0) or 0.0)
-    if score <= 1.0:
-        score *= 100.0
-    if confidence > 1.0:
-        confidence /= 100.0
-    starter_ready = (
-        score >= max(50.0, HIGH_SCORE_THRESHOLD - 2.0)
-        and confidence >= max(0.44, HIGH_CONFIDENCE_THRESHOLD - 0.04)
-    ) or (
-        confidence >= 0.82
-        and score >= max(45.0, HIGH_SCORE_THRESHOLD - 8.0)
-    )
-    if starter_ready:
-        signal.action = "ACCUMULATE"
     return signal
 
 
@@ -403,6 +398,8 @@ def fast_scan_market(market: str) -> list[Any]:
             signals.append(signal)
             prices[symbol] = _quote_payload_from_history(symbol, history, float(getattr(signal, "price", 0.0) or 0.0))
             try:
+                signal_created_at = utc_now()
+                setattr(signal, "created_at", signal_created_at)
                 save_json_signal(
                     market,
                     symbol,
@@ -423,6 +420,7 @@ def fast_scan_market(market: str) -> list[Any]:
                             "entry_price": float(signal.price),
                         },
                     },
+                    created_at=signal_created_at,
                 )
                 forecast = forecast_price(
                     history,
@@ -431,7 +429,7 @@ def fast_scan_market(market: str) -> list[Any]:
                     source_interval=dict(getattr(history, "attrs", {}).get("provider_route", {}) or {}).get("interval", "1d"),
                 )
                 if forecast:
-                    save_forecast(market, symbol, forecast, scan_type="fast", signal_created_at=utc_now())
+                    save_forecast(market, symbol, forecast, scan_type="fast", signal_created_at=signal_created_at)
             except Exception as exc:
                 log.debug("Fast persistence failed | market=%s | symbol=%s | error=%s", market, symbol, exc)
 
@@ -447,7 +445,9 @@ def fast_scan_market(market: str) -> list[Any]:
 
     actions: list[Any] = []
     with trade_cycle_lock:
-        if _execution_enabled(market):
+        exits_enabled = _execution_enabled(market, "exit")
+        entries_enabled = _execution_enabled(market, "entry")
+        if exits_enabled:
             try:
                 update_prices(market, prices)
             except Exception as exc:
@@ -456,6 +456,7 @@ def fast_scan_market(market: str) -> list[Any]:
                 actions.extend(risk_exits(market, prices) or [])
             except Exception as exc:
                 log.exception("%s fast risk exits failed: %s", market, exc)
+        if entries_enabled or exits_enabled:
             try:
                 actions.extend(process_signals(market, signals, prices=prices) or [])
             except Exception as exc:
@@ -549,6 +550,8 @@ def scan_market(market: str) -> list[Any]:
             signal.reason = (str(signal.reason) + " " + str(council["explanation"])).strip()
             signals.append(signal)
             prices[symbol] = _quote_payload_from_history(symbol, history, float(signal.price))
+            signal_created_at = utc_now()
+            setattr(signal, "created_at", signal_created_at)
             save_json_signal(
                 market,
                 symbol,
@@ -571,6 +574,7 @@ def scan_market(market: str) -> list[Any]:
                     },
                     "oracle_council": council,
                 },
+                created_at=signal_created_at,
             )
             forecast = forecast_price(
                 history,
@@ -579,7 +583,7 @@ def scan_market(market: str) -> list[Any]:
                 source_interval=dict(getattr(history, "attrs", {}).get("provider_route", {}) or {}).get("interval", "1d"),
             )
             if forecast:
-                save_forecast(market, symbol, forecast, scan_type="deep", signal_created_at=utc_now())
+                save_forecast(market, symbol, forecast, scan_type="deep", signal_created_at=signal_created_at)
         except Exception as exc:
             log.warning("Oracle pass failed | market=%s | symbol=%s | error=%s", market, symbol, exc)
 
@@ -671,7 +675,9 @@ def scan_market(market: str) -> list[Any]:
 
     actions: list[Any] = []
     with trade_cycle_lock:
-        if _execution_enabled(market):
+        exits_enabled = _execution_enabled(market, "exit")
+        entries_enabled = _execution_enabled(market, "entry")
+        if exits_enabled:
             try:
                 update_prices(market, prices)
             except Exception as exc:
@@ -680,6 +686,7 @@ def scan_market(market: str) -> list[Any]:
                 actions.extend(risk_exits(market, prices) or [])
             except Exception as exc:
                 log.exception("%s deep-scan risk exits failed: %s", market, exc)
+        if entries_enabled or exits_enabled:
             try:
                 actions.extend(process_signals(market, signals, prices=prices) or [])
             except Exception as exc:
@@ -710,7 +717,7 @@ def live_position_pulse(market: str) -> tuple[list[Any], int, str]:
         return [], 0, provider_text
     actions: list[Any] = []
     with trade_cycle_lock:
-        if _execution_enabled(market):
+        if _execution_enabled(market, "exit"):
             try:
                 update_prices(market, prices)
             except Exception as exc:

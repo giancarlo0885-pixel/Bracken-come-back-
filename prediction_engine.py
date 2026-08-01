@@ -160,12 +160,20 @@ def build_decisions(
                 right = _timestamp(signal_quote_time)
                 if left is None or right is None or abs((left - right).total_seconds()) > 1:
                     continue
-            if str(candidate.get("requested_symbol") or requested).upper() != requested:
+            if str(candidate.get("market") or key[0]).lower() != key[0]:
                 continue
-            if str(candidate.get("provider_symbol") or requested).upper() != requested:
+            if str(candidate.get("requested_symbol") or "").upper() != requested:
+                continue
+            if str(candidate.get("provider_symbol") or "").upper() != requested:
+                continue
+            if str(candidate.get("currency") or signal.get("currency") or "").upper() != str(signal.get("currency") or candidate.get("currency") or "").upper():
+                continue
+            if str(candidate.get("exchange") or signal.get("exchange") or "").upper() != str(signal.get("exchange") or candidate.get("exchange") or "").upper():
+                continue
+            if signal.get("strategy_horizon") and candidate.get("strategy_horizon") and str(signal.get("strategy_horizon")) != str(candidate.get("strategy_horizon")):
                 continue
             return candidate
-        return candidates[0]
+        return {}
 
     results: list[dict[str, Any]] = []
     for op in opportunities:

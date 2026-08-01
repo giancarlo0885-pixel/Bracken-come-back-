@@ -64,7 +64,7 @@ CRYPTO_FAST_SCAN_SECONDS = max(5, int(os.getenv("CRYPTO_FAST_SCAN_SECONDS", "10"
 FAST_SCAN_BATCH_SIZE = max(3, min(30, int(os.getenv("FAST_SCAN_BATCH_SIZE", "10"))))
 FAST_SCAN_TOP_RANKED = max(3, min(50, int(os.getenv("FAST_SCAN_TOP_RANKED", "20"))))
 WORKER_CYCLE_ERROR_BACKOFF_SECONDS = max(1, int(os.getenv("WORKER_CYCLE_ERROR_BACKOFF_SECONDS", "5")))
-ENABLE_AUTOTRADE = os.getenv("ENABLE_AUTOTRADE", "true").lower() == "true"
+ENABLE_AUTOTRADE = os.getenv("ENABLE_AUTOTRADE", "false").lower() == "true"
 # V36 separates stock and crypto execution switches. Missing environment
 # variables default to false so Railway can continue scanning/advising without
 # accidentally enabling broker mutations. ENABLE_AUTOTRADE remains a legacy
@@ -284,7 +284,7 @@ DECISION_CRYPTO_MAX_AGE_MINUTES = max(5, int(os.getenv("DECISION_CRYPTO_MAX_AGE_
 MIN_ACTIONABLE_MOVE_STOCK_PCT = max(0.0, float(os.getenv("MIN_ACTIONABLE_MOVE_STOCK_PCT", "0.75")))
 MIN_ACTIONABLE_MOVE_CRYPTO_PCT = max(0.0, float(os.getenv("MIN_ACTIONABLE_MOVE_CRYPTO_PCT", "1.25")))
 REQUIRE_TARGET_FOR_BUY = os.getenv("REQUIRE_TARGET_FOR_BUY", "true").lower() == "true"
-FORECAST_MIN_VALIDATION_SAMPLES = max(0, int(os.getenv("FORECAST_MIN_VALIDATION_SAMPLES", "0")))
+FORECAST_MIN_VALIDATION_SAMPLES = max(0, int(os.getenv("FORECAST_MIN_VALIDATION_SAMPLES", "30")))
 FORECAST_MIN_DIRECTIONAL_ACCURACY = max(0.0, min(1.0, float(os.getenv("FORECAST_MIN_DIRECTIONAL_ACCURACY", "0.52"))))
 FORECAST_MAX_CALIBRATION_ERROR = max(0.0, min(1.0, float(os.getenv("FORECAST_MAX_CALIBRATION_ERROR", "0.18"))))
 FORECAST_MIN_DATA_QUALITY_SCORE = max(0.0, min(100.0, float(os.getenv("FORECAST_MIN_DATA_QUALITY_SCORE", "55"))))

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 import io
+import json
 import logging
 
 import pandas as pd
@@ -40,7 +41,7 @@ def test_five_minute_returns_are_not_treated_as_daily_returns():
     forecast = forecast_price(_history(interval="5m"), days=1, source_interval="5m", market="cash")
     assert forecast is not None
     assert forecast.source_interval == "5m"
-    assert forecast.horizon_bars == 288
+    assert forecast.horizon_bars == 78
     assert forecast.horizon_days == pytest.approx(1.0)
     assert forecast.bars_per_year == pytest.approx(252 * 390 / 5)
 
@@ -67,7 +68,7 @@ def test_fast_forecast_cannot_replace_deep_forecast():
     signals = [{"market": "cash", "symbol": "AAPL", "price": 100, "action": "BUY", "confidence": .9, "created_at": now, "scan_type": "deep", "source_interval": "1d"}]
     forecasts = [
         {"market": "cash", "symbol": "AAPL", "target_price": 130, "created_at": now, "scan_type": "fast", "source_interval": "5m"},
-        {"market": "cash", "symbol": "AAPL", "target_price": 103, "created_at": now, "scan_type": "deep", "source_interval": "1d"},
+        {"market": "cash", "symbol": "AAPL", "requested_symbol": "AAPL", "provider_symbol": "AAPL", "target_price": 103, "created_at": now, "scan_type": "deep", "source_interval": "1d"},
     ]
     decision = build_decisions([{"market": "cash", "symbol": "AAPL", "opportunity_score": 90, "payload": {"action": "BUY"}}], signals, forecasts, 1)[0]
     assert decision["target"] == 103
@@ -181,3 +182,24 @@ def test_normal_info_logs_are_not_emitted_as_error():
     payload = stream.getvalue()
     assert '"severity": "INFO"' in payload
     assert '"severity": "ERROR"' not in payload
+
+
+def test_structured_formatter_redacts_exception_and_extra_fields():
+    stream = io.StringIO()
+    handler = logging.StreamHandler(stream)
+    handler.setFormatter(StructuredFormatter())
+    logger = logging.getLogger("v36-redaction-test")
+    logger.handlers = [handler]
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+    try:
+        raise RuntimeError("api_token=SECRET apikey=SECRET Authorization: Bearer SECRET")
+    except RuntimeError:
+        logger.exception(
+            "failed https://example.com?api_token=SECRET",
+            extra={"event": "apikey=SECRET", "headers": {"Authorization": "Bearer SECRET"}},
+        )
+    payload = stream.getvalue()
+    assert "SECRET" not in payload
+    parsed = json.loads(payload)
+    assert parsed["severity"] == "ERROR"

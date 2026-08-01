@@ -32,8 +32,8 @@ def test_missing_target_is_never_a_buy() -> None:
 
 def test_small_expected_move_is_downgraded() -> None:
     now = datetime.now(timezone.utc).isoformat()
-    signals = [{"market": "cash", "symbol": "7203.T", "price": 3224, "action": "BUY", "confidence": .9, "created_at": now}]
-    forecasts = [{"market": "cash", "symbol": "7203.T", "target_price": 3238.24, "created_at": now}]
+    signals = [{"market": "cash", "symbol": "7203.T", "price": 3224, "action": "BUY", "confidence": .9, "created_at": now, "source_interval": "1d", "scan_type": "deep", "source_quote_timestamp": now}]
+    forecasts = [{"market": "cash", "symbol": "7203.T", "requested_symbol": "7203.T", "provider_symbol": "7203.T", "source_interval": "1d", "scan_type": "deep", "source_quote_timestamp": now, "target_price": 3238.24, "created_at": now}]
     decisions = build_decisions([_op("7203.T")], signals, forecasts, 10)
     assert decisions[0]["action"] == "WAIT"
     assert "trade threshold" in decisions[0]["data_status"]
@@ -41,8 +41,8 @@ def test_small_expected_move_is_downgraded() -> None:
 
 def test_fresh_price_and_target_can_remain_buy() -> None:
     now = datetime.now(timezone.utc).isoformat()
-    signals = [{"market": "cash", "symbol": "AAPL", "price": 200, "action": "BUY", "confidence": .9, "created_at": now}]
-    forecasts = [{"market": "cash", "symbol": "AAPL", "target_price": 205, "created_at": now}]
+    signals = [{"market": "cash", "symbol": "AAPL", "price": 200, "action": "BUY", "confidence": .9, "created_at": now, "source_interval": "1d", "scan_type": "deep", "source_quote_timestamp": now}]
+    forecasts = [{"market": "cash", "symbol": "AAPL", "requested_symbol": "AAPL", "provider_symbol": "AAPL", "source_interval": "1d", "scan_type": "deep", "source_quote_timestamp": now, "target_price": 205, "created_at": now}]
     decisions = build_decisions([_op("AAPL")], signals, forecasts, 10)
     assert decisions[0]["action"] == "BUY"
     assert decisions[0]["trade_eligible"] is True
@@ -60,8 +60,8 @@ def test_missing_signal_timestamp_is_never_trade_ready() -> None:
 
 def test_missing_forecast_timestamp_is_never_trade_ready() -> None:
     now = datetime.now(timezone.utc).isoformat()
-    signals = [{"market": "cash", "symbol": "AAPL", "price": 200, "action": "BUY", "confidence": .9, "created_at": now}]
-    forecasts = [{"market": "cash", "symbol": "AAPL", "target_price": 205}]
+    signals = [{"market": "cash", "symbol": "AAPL", "price": 200, "action": "BUY", "confidence": .9, "created_at": now, "source_interval": "1d", "scan_type": "deep", "source_quote_timestamp": now}]
+    forecasts = [{"market": "cash", "symbol": "AAPL", "requested_symbol": "AAPL", "provider_symbol": "AAPL", "source_interval": "1d", "scan_type": "deep", "source_quote_timestamp": now, "target_price": 205}]
     decisions = build_decisions([_op("AAPL")], signals, forecasts, 10)
     assert decisions[0]["action"] == "WAIT"
     assert decisions[0]["trade_eligible"] is False
@@ -70,8 +70,9 @@ def test_missing_forecast_timestamp_is_never_trade_ready() -> None:
 
 def test_fresh_signal_does_not_make_stale_forecast_trade_ready() -> None:
     now = datetime.now(timezone.utc)
-    signals = [{"market": "cash", "symbol": "AAPL", "price": 200, "action": "BUY", "confidence": .9, "created_at": now.isoformat()}]
-    forecasts = [{"market": "cash", "symbol": "AAPL", "target_price": 205, "created_at": (now - timedelta(hours=8)).isoformat()}]
+    quote_time = now.isoformat()
+    signals = [{"market": "cash", "symbol": "AAPL", "price": 200, "action": "BUY", "confidence": .9, "created_at": quote_time, "source_interval": "1d", "scan_type": "deep", "source_quote_timestamp": quote_time}]
+    forecasts = [{"market": "cash", "symbol": "AAPL", "requested_symbol": "AAPL", "provider_symbol": "AAPL", "source_interval": "1d", "scan_type": "deep", "source_quote_timestamp": quote_time, "target_price": 205, "created_at": (now - timedelta(hours=8)).isoformat()}]
     decisions = build_decisions([_op("AAPL")], signals, forecasts, 10)
     assert decisions[0]["action"] == "WAIT"
     assert decisions[0]["trade_eligible"] is False
@@ -112,8 +113,14 @@ def test_execution_forecast_gate_accepts_fresh_edge(monkeypatch) -> None:
         lambda *args, **kwargs: {
             "target_price": 205.0,
             "created_at": datetime.now(timezone.utc).isoformat(),
+            "requested_symbol": "AAPL",
+            "provider_symbol": "AAPL",
+            "model": "log-return diffusion",
+            "model_version": "unit",
+            "data_quality_score": 90,
         },
     )
+    monkeypatch.setattr(oracle_bot, "model_execution_approved", lambda *args, **kwargs: (True, "approved"))
     approved, reason = oracle_bot._entry_forecast_gate("cash", "AAPL", 200.0)
     assert approved is True
     assert "forecast approved" in reason

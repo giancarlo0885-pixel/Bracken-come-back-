@@ -38,7 +38,7 @@ class Forecast:
     low_price: float = 0.0
     high_price: float = 0.0
     probability_up: float = 0.0
-    model: str = "regime-aware ensemble"
+    model: str = "log-return diffusion"
     requested_symbol: str = ""
     provider_symbol: str = ""
     source_interval: str = "1d"
@@ -103,15 +103,18 @@ def _horizon(
     horizon_days: float | None,
 ) -> tuple[int, float, float]:
     minutes_per_bar = interval_minutes(source_interval)
+    is_crypto = str(asset_class or "").lower() == "crypto"
+    is_intraday = minutes_per_bar < 1440.0
+    stock_session_minutes = 390.0
     requested_minutes = None
     if horizon_minutes is not None:
         requested_minutes = float(horizon_minutes)
     elif horizon_hours is not None:
         requested_minutes = float(horizon_hours) * 60.0
     elif horizon_days is not None:
-        requested_minutes = float(horizon_days) * 1440.0
+        requested_minutes = float(horizon_days) * (1440.0 if is_crypto or not is_intraday else stock_session_minutes)
     elif days is not None:
-        requested_minutes = float(days) * 1440.0
+        requested_minutes = float(days) * (1440.0 if is_crypto or not is_intraday else stock_session_minutes)
 
     if horizon_bars is None:
         if requested_minutes is None:
@@ -124,7 +127,8 @@ def _horizon(
     if requested_minutes is not None and horizon_minutes is not None:
         total_minutes = max(minutes_per_bar, float(horizon_minutes))
         horizon_bars = max(1, int(round(total_minutes / minutes_per_bar)))
-    return horizon_bars, total_minutes, total_minutes / 1440.0
+    minutes_per_horizon_day = 1440.0 if is_crypto or not is_intraday else stock_session_minutes
+    return horizon_bars, total_minutes, total_minutes / minutes_per_horizon_day
 
 
 def _quote_timestamp(history: pd.DataFrame) -> str:
@@ -158,7 +162,7 @@ def forecast_price(
     horizon_days: float | None = None,
     asset_class: str | None = None,
     market: str = "",
-    model: str = "regime-aware ensemble",
+    model: str = "log-return diffusion",
     model_version: str = FORECAST_MODEL_VERSION,
 ) -> Forecast | None:
     if history is None or history.empty or len(history) < 40 or "Close" not in history.columns:

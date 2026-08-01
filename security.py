@@ -27,8 +27,11 @@ def redact_url(value: Any) -> str:
 
     redacted = re.sub(r"https?://[^\s)]+", replace, text)
     for key in SECRET_KEYS:
-        redacted = re.sub(rf"(?i)(^|[?&\s])({re.escape(key)}=)[^&\s)]+", rf"\1\2REDACTED", redacted)
+        redacted = re.sub(rf"(?i)(^|[?&\s\"'])({re.escape(key)}=)[^&\s)\"']+", rf"\1\2REDACTED", redacted)
         redacted = re.sub(rf"(?i)({re.escape(key)}:\s*)[^\s,;]+", rf"\1REDACTED", redacted)
+    redacted = re.sub(r"(?i)(authorization:\s*bearer\s+)[^\s,;]+", r"\1REDACTED", redacted)
+    redacted = re.sub(r"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]{4,}", r"\1REDACTED", redacted)
+    redacted = re.sub(r"(?i)(authorization:\s*REDACTED)\s+[^\s,;]+", r"\1", redacted)
     return redacted
 
 

@@ -10,6 +10,7 @@ from typing import Any
 
 from config import *
 from database import connect, row, rows, utc_now
+from execution_policy import execution_policy
 from forecast_quality import model_execution_approved
 from quant_trade_standard import assess_trade
 from oracle_intelligence import evaluate_opportunity
@@ -35,7 +36,6 @@ from paper_broker import (
 
 log = logging.getLogger("oracle-bot")
 _AUTOTRADE_DISABLED_LOGGED = False
-_INITIAL_ENABLE_AUTOTRADE = ENABLE_AUTOTRADE
 PAPER_MARGIN_REDUCTION_REASON = "paper_margin_reduction"
 QUOTE_PRICE_TOLERANCE_PCT = 0.001
 
@@ -275,21 +275,34 @@ def _normalized_symbol(value: Any) -> str:
     return normalize_symbol(value)
 
 
-def _autotrade_enabled(market: str = "cash") -> bool:
-    legacy = bool(globals().get("ENABLE_AUTOTRADE", False))
-    if globals().get("ENABLE_AUTOTRADE", False) != _INITIAL_ENABLE_AUTOTRADE:
-        return legacy
-    market = safe_text(market).lower()
-    specific = bool(globals().get("ENABLE_CRYPTO_AUTOTRADE" if market == "crypto" else "ENABLE_STOCK_AUTOTRADE", False))
-    return bool(legacy and specific)
+def _execution_overrides() -> dict[str, Any]:
+    return {
+        "ENABLE_AUTOTRADE": globals().get("ENABLE_AUTOTRADE", False),
+        "ENABLE_STOCK_AUTOTRADE": globals().get("ENABLE_STOCK_AUTOTRADE", False),
+        "ENABLE_CRYPTO_AUTOTRADE": globals().get("ENABLE_CRYPTO_AUTOTRADE", False),
+        "ENABLE_NEW_ENTRIES": globals().get("ENABLE_NEW_ENTRIES", False),
+        "ENABLE_AUTOMATED_EXITS": globals().get("ENABLE_AUTOMATED_EXITS", False),
+        "ENABLE_PORTFOLIO_ROTATION": globals().get("ENABLE_PORTFOLIO_ROTATION", False),
+        "ENABLE_BROKER_SUBMISSION": globals().get("ENABLE_BROKER_SUBMISSION", False),
+        "GLOBAL_KILL_SWITCH": globals().get("GLOBAL_KILL_SWITCH", False),
+    }
 
 
-def _execution_disabled(reason: str, market: str = "cash") -> bool:
+def _execution_policy(market: str = "cash", intent: str = "entry"):
+    return execution_policy(market=market, intent=intent, overrides=_execution_overrides())
+
+
+def _autotrade_enabled(market: str = "cash", intent: str = "entry") -> bool:
+    return _execution_policy(market, intent).allowed
+
+
+def _execution_disabled(reason: str, market: str = "cash", intent: str = "entry") -> bool:
     global _AUTOTRADE_DISABLED_LOGGED
-    if _autotrade_enabled(market):
+    policy = _execution_policy(market, intent)
+    if policy.allowed:
         return False
     if not _AUTOTRADE_DISABLED_LOGGED:
-        log.warning("Execution disabled because ENABLE_AUTOTRADE/market autotrade switch is false; %s blocked.", reason)
+        log.warning("Execution disabled by central policy (%s); %s blocked.", policy.reason, reason)
         _AUTOTRADE_DISABLED_LOGGED = True
     return True
 
@@ -830,7 +843,7 @@ def update_prices(
 ) -> int:
     market = safe_text(market).lower()
     prices = prices or {}
-    if _execution_disabled("price updates", market):
+    if _execution_disabled("price updates", market, "exit"):
         return 0
     anomalous_symbols = _duplicate_price_anomaly_symbols(prices)
 
@@ -954,7 +967,7 @@ def _close_position(
     quote_metadata: dict[str, Any] | None = None,
 ) -> bool:
     market = safe_text(market).lower()
-    if _execution_disabled("position close", market):
+    if _execution_disabled("position close", market, "exit"):
         return False
     symbol = safe_text(position.get("symbol")).upper()
     quantity = safe_float(position.get("quantity"))
@@ -1124,7 +1137,7 @@ def risk_exits(
 ) -> list[dict[str, Any]]:
     market = safe_text(market).lower()
     prices = prices or {}
-    if _execution_disabled("risk exits", market):
+    if _execution_disabled("risk exits", market, "exit"):
         return []
     anomalous_symbols = _duplicate_price_anomaly_symbols(prices)
 
@@ -1439,6 +1452,8 @@ def _rotate_for_stronger_candidate(
     """
     if not ROTATION_ENABLED:
         return None
+    if _execution_disabled("portfolio rotation", market, "rotation"):
+        return None
     quotes = quotes or {}
     anomalous_symbols = anomalous_symbols or set()
     positions = rows(
@@ -1511,8 +1526,10 @@ def _buy(
 ) -> tuple[bool, str, dict[str, Any] | None]:
     """Execute an institutional paper-broker buy with controlled leverage."""
     market = safe_text(market).lower()
-    if _execution_disabled("buy", market):
+    if _execution_disabled("buy", market, "entry"):
         return False, "autotrade disabled", None
+    if rotation_candidate and _execution_disabled("portfolio rotation", market, "rotation"):
+        return False, "portfolio rotation disabled", None
     symbol = safe_text(symbol).upper()
     price = safe_float(price)
     rotation_action = (
@@ -1866,8 +1883,6 @@ def process_signals(
     market = safe_text(market).lower()
     signals = list(signals or [])
     prices = prices or {}
-    if _execution_disabled("signal execution", market):
-        return []
     actions: list[dict[str, Any]] = []
     anomalous_symbols = _duplicate_price_anomaly_symbols(prices)
 
@@ -1938,6 +1953,8 @@ def process_signals(
             continue
 
         if action in {"SELL", "EXIT", "CLOSE"}:
+            if _execution_disabled("sell signal", market, "exit"):
+                continue
             position = row(
                 """
                 SELECT *
@@ -1991,6 +2008,8 @@ def process_signals(
                 symbol,
                 action,
             )
+            continue
+        if _execution_disabled("buy signal", market, "entry"):
             continue
         quote_ok, quote_reason = _execution_quote_guard(market, symbol, price, signal, quote_metadata=quote)
         if not quote_ok:

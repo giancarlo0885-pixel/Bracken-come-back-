@@ -3,15 +3,18 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 import hashlib
+import math
 from typing import Any
 
 from config import ADVISOR_MODEL_VERSION, ADVISOR_RECOMMENDATION_TTL_MINUTES
+from market_sessions import quote_is_fresh
 from portfolio_optimizer import PortfolioConstraints, portfolio_fit_score
 from provider_router import normalize_symbol
 from strategy_engine import StrategySignal, ensemble_score, evaluate_strategies
 
 
 ADVISOR_ACTIONS = {"STRONG BUY", "BUY", "ACCUMULATE", "HOLD", "REDUCE", "SELL", "AVOID", "WATCH"}
+ENTRY_ACTIONS = {"STRONG BUY", "BUY", "ACCUMULATE"}
 
 
 @dataclass
@@ -80,6 +83,45 @@ def _action(score: float, confidence: float, risk_notes: list[str], restricted: 
     return "HOLD"
 
 
+def _finite_positive(value: Any) -> bool:
+    try:
+        number = float(value)
+        return math.isfinite(number) and number > 0.0
+    except (TypeError, ValueError):
+        return False
+
+
+def _verified_quote(candidate: dict[str, Any], symbol: str) -> tuple[dict[str, Any], list[str]]:
+    quote = dict(candidate.get("verified_quote") or candidate.get("quote") or {})
+    for key in (
+        "symbol",
+        "requested_symbol",
+        "provider_symbol",
+        "provider",
+        "price",
+        "quote_timestamp",
+        "interval",
+        "quote_verified",
+        "currency",
+        "exchange",
+    ):
+        if key not in quote and key in candidate:
+            quote[key] = candidate[key]
+    missing: list[str] = []
+    requested = normalize_symbol(quote.get("requested_symbol"))
+    provider_symbol = normalize_symbol(quote.get("provider_symbol"))
+    quote_symbol = normalize_symbol(quote.get("symbol") or symbol)
+    if quote_symbol != symbol or requested != symbol or provider_symbol != symbol:
+        missing.append("verified quote identity is missing or mismatched")
+    if quote.get("quote_verified") is not True:
+        missing.append("verified quote flag is missing")
+    if not _finite_positive(quote.get("price")):
+        missing.append("verified price is missing")
+    if not quote_is_fresh(quote.get("quote_timestamp"), str(quote.get("interval") or "1d"), symbol=symbol):
+        missing.append("verified quote is stale")
+    return quote, missing
+
+
 def generate_recommendation(
     candidate: dict[str, Any],
     profile: AdvisorProfile | None = None,
@@ -90,7 +132,8 @@ def generate_recommendation(
     profile = profile or AdvisorProfile()
     holdings = list(holdings or [])
     symbol = normalize_symbol(candidate.get("symbol"))
-    price = float(candidate.get("current_verified_price") or candidate.get("price") or 0.0)
+    quote, quote_missing = _verified_quote(candidate, symbol)
+    price = float(quote.get("price") or 0.0) if not quote_missing else 0.0
     data_quality = float(candidate.get("data_quality_score") or 0.0)
     strategies = strategy_signals or evaluate_strategies(candidate)
     fit, fit_reasons = portfolio_fit_score(
@@ -110,14 +153,18 @@ def generate_recommendation(
     downside = abs(float(candidate.get("expected_downside") or candidate.get("volatility") or 0.0))
     risk_reward = expected_return / downside if downside > 0 else 0.0
     restricted = symbol in {normalize_symbol(item) for item in profile.restricted_assets}
-    missing = []
-    if price <= 0:
-        missing.append("verified price is missing")
+    missing = list(quote_missing)
     if data_quality < 50:
         missing.append("data quality is low")
+    if not candidate.get("liquidity_value") and not candidate.get("avg_dollar_volume") and not candidate.get("volume"):
+        missing.append("liquidity evidence is unavailable")
+    validation_status = str(candidate.get("validation_status") or candidate.get("forecast_validation_status") or "shadow").lower()
+    approved_forecast = validation_status == "approved" or bool(candidate.get("forecast_approved"))
+    if not approved_forecast:
+        missing.append("forecast is experimental or shadow-only")
     action = _action(opportunity, confidence, missing + ([] if fit >= 50 else fit_reasons), restricted)
-    if price <= 0:
-        action = "WATCH" if not restricted else "AVOID"
+    if action in ENTRY_ACTIONS and missing:
+        action = "WATCH" if quote_missing or data_quality < 50 else "HOLD"
     entry_low = price * 0.995 if price > 0 else 0.0
     entry_high = price * 1.005 if price > 0 else 0.0
     now = datetime.now(timezone.utc)
@@ -163,7 +210,7 @@ def generate_recommendation(
             "opportunity": f"{opportunity:.0f}/100",
             "risk": "high" if downside > expected_return else "moderate",
             "data_quality": f"{data_quality:.0f}/100",
-            "forecast_quality": str(candidate.get("validation_status") or "unvalidated"),
+            "forecast_quality": "approved" if approved_forecast else "shadow-only",
             "portfolio_fit": f"{fit:.0f}/100",
         },
     )

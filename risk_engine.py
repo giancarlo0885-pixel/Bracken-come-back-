@@ -7,6 +7,7 @@ from typing import Any
 
 from config import (
     ENABLE_AUTOMATED_EXITS,
+    ENABLE_AUTOTRADE,
     ENABLE_BROKER_SUBMISSION,
     ENABLE_CRYPTO_AUTOTRADE,
     ENABLE_NEW_ENTRIES,
@@ -23,6 +24,7 @@ from config import (
     QUANT_MAX_SLIPPAGE_PCT,
     QUANT_MAX_SPREAD_PCT,
 )
+from execution_policy import execution_policy
 from market_sessions import quote_is_fresh
 from provider_router import normalize_symbol
 
@@ -37,6 +39,7 @@ class RiskState(str, Enum):
 
 @dataclass
 class ExecutionSwitches:
+    autotrade: bool = ENABLE_AUTOTRADE
     stock_autotrade: bool = ENABLE_STOCK_AUTOTRADE
     crypto_autotrade: bool = ENABLE_CRYPTO_AUTOTRADE
     new_entries: bool = ENABLE_NEW_ENTRIES
@@ -46,20 +49,20 @@ class ExecutionSwitches:
     global_kill_switch: bool = GLOBAL_KILL_SWITCH
 
     def execution_allowed(self, market: str, intent: str) -> bool:
-        if self.global_kill_switch:
-            return False
-        market_ok = self.crypto_autotrade if market == "crypto" else self.stock_autotrade
-        if not market_ok:
-            return False
-        if intent == "entry":
-            return self.new_entries
-        if intent == "exit":
-            return self.automated_exits
-        if intent == "rotation":
-            return self.portfolio_rotation
-        if intent == "broker":
-            return self.broker_submission
-        return False
+        return execution_policy(
+            market=market,
+            intent=intent,
+            overrides={
+                "ENABLE_AUTOTRADE": self.autotrade,
+                "ENABLE_STOCK_AUTOTRADE": self.stock_autotrade,
+                "ENABLE_CRYPTO_AUTOTRADE": self.crypto_autotrade,
+                "ENABLE_NEW_ENTRIES": self.new_entries,
+                "ENABLE_AUTOMATED_EXITS": self.automated_exits,
+                "ENABLE_PORTFOLIO_ROTATION": self.portfolio_rotation,
+                "ENABLE_BROKER_SUBMISSION": self.broker_submission,
+                "GLOBAL_KILL_SWITCH": self.global_kill_switch,
+            },
+        ).allowed
 
 
 @dataclass

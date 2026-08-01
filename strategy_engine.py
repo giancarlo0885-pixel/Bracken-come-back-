@@ -36,6 +36,30 @@ PREMIUM_STRATEGIES = {
     "whale_activity",
 }
 
+REQUIRED_EVIDENCE: dict[str, tuple[str, ...]] = {
+    "momentum": ("momentum_5d", "momentum_20d"),
+    "trend_following": ("trend_strength",),
+    "breakout": ("breakout_level", "price"),
+    "mean_reversion": ("mean_reversion_zscore",),
+    "oversold_recovery": ("rsi",),
+    "quality": ("quality_score",),
+    "value": ("valuation_score",),
+    "growth": ("growth_score",),
+    "earnings_momentum": ("earnings_surprise_pct",),
+    "unusual_volume": ("volume_ratio",),
+    "volatility_expansion": ("volatility", "average_volatility"),
+    "sector_rotation": ("sector_strength",),
+    "macro_sensitivity": ("macro_score",),
+    "news_catalyst": ("news_score", "verified_news_count"),
+    "insider_activity": ("insider_activity",),
+    "congressional_activity": ("congressional_activity",),
+    "etf_flow": ("etf_flow",),
+    "options_flow": ("options_flow",),
+    "whale_activity": ("whale_activity",),
+    "relative_strength": ("relative_strength",),
+    "global_market_dislocation": ("global_dislocation_score",),
+}
+
 
 @dataclass
 class StrategySignal:
@@ -56,8 +80,17 @@ def _metric(data: dict[str, Any], key: str, default: float = 0.0) -> float:
 
 
 def _generic_strategy(name: str, data: dict[str, Any]) -> StrategySignal:
-    if name in PREMIUM_STRATEGIES and not bool(data.get(name)):
-        return StrategySignal(name, 0.0, 0.0, False, "Provider not configured", {})
+    required = REQUIRED_EVIDENCE.get(name, ())
+    missing = [key for key in required if data.get(key) in (None, "", [], {})]
+    if missing:
+        return StrategySignal(
+            name,
+            0.0,
+            0.0,
+            False,
+            "Required provider evidence unavailable",
+            {"missing": missing},
+        )
     momentum = _metric(data, "momentum_5d") + _metric(data, "momentum_20d")
     trend = _metric(data, "trend_strength")
     volume = min(3.0, _metric(data, "volume_ratio", 1.0)) / 3.0
@@ -66,7 +99,14 @@ def _generic_strategy(name: str, data: dict[str, Any]) -> StrategySignal:
     base = 50.0 + 20.0 * momentum + 18.0 * trend + 12.0 * volume + 10.0 * valuation + 10.0 * catalyst
     score = max(0.0, min(100.0, base))
     confidence = max(0.0, min(1.0, _metric(data, "data_quality_score", 70.0) / 100.0))
-    return StrategySignal(name, score, confidence, True, "real configured evidence evaluated", {"momentum": momentum, "trend": trend, "volume": volume})
+    return StrategySignal(
+        name,
+        score,
+        confidence,
+        True,
+        "Configured provider evidence evaluated",
+        {key: data.get(key) for key in required} | {"momentum": momentum, "trend": trend, "volume": volume},
+    )
 
 
 STRATEGY_REGISTRY: dict[str, Callable[[dict[str, Any]], StrategySignal]] = {

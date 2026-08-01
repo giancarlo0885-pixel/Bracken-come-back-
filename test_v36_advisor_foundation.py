@@ -7,6 +7,7 @@ import pytest
 from advisor_engine import AdvisorProfile, generate_recommendation
 from asset_routing import infer_asset_class
 from broker_interface import DisabledBrokerAdapter
+from execution_policy import execution_policy
 from order_proposals import approve_proposal, create_order_proposal
 from portfolio_optimizer import portfolio_fit_score
 from price_consensus import verify_price_consensus
@@ -42,11 +43,14 @@ def test_advisor_recommendation_has_required_structure_and_warnings():
             "exchange": "NASDAQ",
             "currency": "USD",
             "price": 200,
+            "verified_quote": _quote("AAPL", 200),
             "confidence": 85,
             "opportunity_score": 82,
             "expected_return": 6,
             "expected_downside": 3,
             "data_quality_score": 90,
+            "liquidity_value": 1_000_000,
+            "validation_status": "approved",
             "catalyst": "confirmed earnings momentum",
         },
         AdvisorProfile(available_capital=10_000),
@@ -61,7 +65,7 @@ def test_advisor_recommendation_has_required_structure_and_warnings():
 def test_premium_strategy_data_is_not_fabricated():
     signals = evaluate_strategies({"symbol": "AAPL", "data_quality_score": 80}, ["insider_activity", "options_flow"])
     assert all(signal.available is False for signal in signals)
-    assert all(signal.message == "Provider not configured" for signal in signals)
+    assert all(signal.message == "Required provider evidence unavailable" for signal in signals)
     score = ensemble_score(signals)
     assert score["overall_confidence"] == 0.0
 
@@ -107,7 +111,7 @@ def test_all_new_execution_switches_default_false_and_block_entries():
 
 
 def test_enabled_switches_still_require_risk_checks():
-    switches = ExecutionSwitches(stock_autotrade=True, new_entries=True)
+    switches = ExecutionSwitches(autotrade=True, stock_autotrade=True, new_entries=True)
     result = pre_trade_risk_checks(
         market="cash",
         symbol="AAPL",
@@ -120,6 +124,48 @@ def test_enabled_switches_still_require_risk_checks():
     )
     assert result.approved is False
     assert "position size" in result.reason
+
+
+def test_central_policy_requires_all_entry_switches():
+    allowed = execution_policy(
+        market="cash",
+        intent="entry",
+        overrides={
+            "GLOBAL_KILL_SWITCH": False,
+            "ENABLE_AUTOTRADE": True,
+            "ENABLE_STOCK_AUTOTRADE": True,
+            "ENABLE_NEW_ENTRIES": True,
+        },
+    )
+    blocked = execution_policy(
+        market="cash",
+        intent="entry",
+        overrides={
+            "GLOBAL_KILL_SWITCH": False,
+            "ENABLE_AUTOTRADE": True,
+            "ENABLE_STOCK_AUTOTRADE": True,
+            "ENABLE_NEW_ENTRIES": False,
+        },
+    )
+    assert allowed.allowed is True
+    assert blocked.allowed is False
+
+
+def test_hold_recommendation_does_not_become_entry_action():
+    rec = generate_recommendation(
+        {
+            "symbol": "AAPL",
+            "market": "cash",
+            "verified_quote": _quote("AAPL", 200),
+            "confidence": 95,
+            "opportunity_score": 95,
+            "expected_return": 8,
+            "expected_downside": 2,
+            "data_quality_score": 90,
+        },
+        AdvisorProfile(available_capital=10_000),
+    )
+    assert rec.action in {"HOLD", "WATCH"}
 
 
 def test_disabled_broker_adapter_never_submits_real_order():
@@ -151,6 +197,34 @@ def test_order_proposals_are_idempotent_and_manual_approval_only():
     assert proposal.idempotency_key == same.idempotency_key
     approve_proposal(proposal)
     assert proposal.approval_status == "approved"
+
+
+def test_proposal_creation_rejects_failed_risk_checks():
+    with pytest.raises(ValueError, match="risk checks"):
+        create_order_proposal(
+            symbol="AAPL",
+            side="BUY",
+            quantity=1,
+            verified_quote=_quote(),
+            strategy="momentum",
+            recommendation_id="rec-risk",
+            risk_checks=[{"name": "risk", "passed": False}],
+        )
+
+
+def test_approve_proposal_rejects_stale_quote():
+    proposal = create_order_proposal(
+        symbol="AAPL",
+        side="BUY",
+        quantity=1,
+        verified_quote=_quote(),
+        strategy="momentum",
+        recommendation_id="rec-stale",
+        risk_checks=[{"name": "risk", "passed": True}],
+    )
+    proposal.verified_quote["quote_timestamp"] = "2020-01-01T00:00:00+00:00"
+    with pytest.raises(ValueError, match="quote"):
+        approve_proposal(proposal)
 
 
 def test_shadow_mode_does_not_mutate_paper_portfolio():
