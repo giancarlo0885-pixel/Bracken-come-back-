@@ -131,9 +131,22 @@ def test_rejected_replacement_buy_does_not_emit_rotation_sell(monkeypatch):
         return False, "risk rejected", None
 
     monkeypatch.setattr(oracle_bot, "_buy", reject_buy)
+    now = datetime.now(timezone.utc).isoformat()
     actions = oracle_bot.process_signals(
         "cash",
-        [{"symbol": "NEW", "action": "BUY", "score": 95, "confidence": .95, "price": 20}],
+        [{
+            "symbol": "NEW",
+            "action": "BUY",
+            "score": 95,
+            "confidence": .95,
+            "price": 20,
+            "market_data_route": {
+                "requested_symbol": "NEW",
+                "provider_symbol": "NEW",
+                "quote_timestamp": now,
+                "interval": "1d",
+            },
+        }],
         {"NEW": 20},
     )
     assert captured["rotation_candidate"] is rotation_candidate
@@ -173,7 +186,18 @@ def test_buy_portfolio_row_missing_returns_three_value_tuple(monkeypatch):
         "cash",
         "NEW",
         100,
-        {"symbol": "NEW", "score": 90, "confidence": .9, "price": 100},
+        {
+            "symbol": "NEW",
+            "score": 90,
+            "confidence": .9,
+            "price": 100,
+            "market_data_route": {
+                "requested_symbol": "NEW",
+                "provider_symbol": "NEW",
+                "quote_timestamp": datetime.now(timezone.utc).isoformat(),
+                "interval": "1d",
+            },
+        },
     )
     assert result == (False, "portfolio row missing", None)
 
@@ -335,3 +359,56 @@ def test_penny_portfolio_limit_rejects_above_limit():
     total, pct = oracle_bot._penny_portfolio_exposure_after(positions, 10_000, 100)
     assert total == 240
     assert pct > oracle_bot.PENNY_STOCK_MAX_PORTFOLIO_PCT
+
+
+def test_execution_rejects_signal_quote_symbol_mismatch():
+    import oracle_bot
+
+    now = datetime.now(timezone.utc).isoformat()
+    ok, reason = oracle_bot._execution_quote_guard(
+        "cash",
+        "F",
+        12.34,
+        {
+            "symbol": "F",
+            "market_data_route": {
+                "requested_symbol": "GM",
+                "provider_symbol": "GM",
+                "quote_timestamp": now,
+                "interval": "1d",
+            },
+        },
+    )
+    assert ok is False
+    assert "identity mismatch" in reason
+
+
+def test_duplicate_price_anomaly_blocks_execution(monkeypatch):
+    import oracle_bot
+
+    monkeypatch.setattr(oracle_bot, "_entry_forecast_gate", lambda *args, **kwargs: (True, "fresh"))
+    monkeypatch.setattr(oracle_bot, "_penny_stock_gate", lambda *args, **kwargs: (True, "not penny"))
+    monkeypatch.setattr(oracle_bot, "ENABLE_QUANT_TRADE_STANDARD", False)
+
+    def buy_should_not_run(*args, **kwargs):
+        raise AssertionError("duplicate-price quarantined signals must not execute")
+
+    monkeypatch.setattr(oracle_bot, "_buy", buy_should_not_run)
+    now = datetime.now(timezone.utc).isoformat()
+    signals = [
+        {
+            "symbol": symbol,
+            "action": "BUY",
+            "score": 95,
+            "confidence": .95,
+            "market_data_route": {
+                "requested_symbol": symbol,
+                "provider_symbol": symbol,
+                "quote_timestamp": now,
+                "interval": "1d",
+            },
+        }
+        for symbol in ("GM", "F", "AAPL")
+    ]
+    actions = oracle_bot.process_signals("cash", signals, {"GM": 88.59, "F": 88.59, "AAPL": 88.59})
+    assert actions == []

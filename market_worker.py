@@ -292,6 +292,7 @@ def _fast_discover_symbol(market: str, symbol: str, name: str) -> tuple[Any, Any
             signal = analyze_market(symbol, history, 0.0)
             if signal is None:
                 continue
+            setattr(signal, "market_data_route", dict(getattr(history, "attrs", {}).get("provider_route", {}) or {}))
             signal.reason = (
                 f"Always-on {interval} market pulse. " + str(getattr(signal, "reason", ""))
             ).strip()
@@ -466,6 +467,7 @@ def scan_market(market: str) -> list[Any]:
             signal = analyze_market(symbol, history, news.sentiment)
             if signal is None:
                 continue
+            setattr(signal, "market_data_route", dict(getattr(history, "attrs", {}).get("provider_route", {}) or {}))
             council = deliberate(signal, news.headlines[:8])
             signal.score = council["score"]
             signal.action = council["action"]

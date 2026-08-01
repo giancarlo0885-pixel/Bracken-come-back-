@@ -4,6 +4,7 @@ from dataclasses import replace
 
 import json
 import logging
+import math
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -99,7 +100,7 @@ def safe_float(
 ) -> float:
     try:
         result = float(value)
-        if result != result:
+        if result != result or not math.isfinite(result):
             return default
         return result
     except (TypeError, ValueError):
@@ -217,6 +218,96 @@ def signal_price(
             return value
 
     return fallback
+
+
+def _normalized_symbol(value: Any) -> str:
+    return safe_text(value).upper()
+
+
+def _signal_route(signal: Any) -> dict[str, Any]:
+    route = signal_value(signal, "market_data_route", None)
+    if isinstance(route, dict):
+        return dict(route)
+    payload = signal_value(signal, "payload", None)
+    if isinstance(payload, dict) and isinstance(payload.get("market_data_route"), dict):
+        return dict(payload["market_data_route"])
+    return {}
+
+
+def _quote_identity_metadata(signal: Any) -> dict[str, Any]:
+    metadata = _signal_route(signal)
+    for key in (
+        "requested_symbol",
+        "provider_symbol",
+        "quote_symbol",
+        "provider",
+        "quote_timestamp",
+        "timestamp",
+        "interval",
+        "quote_verified",
+    ):
+        value = signal_value(signal, key, None)
+        if value not in (None, "", []):
+            metadata[key] = value
+    return metadata
+
+
+def _execution_quote_guard(
+    market: str,
+    symbol: str,
+    price: float,
+    signal: Any,
+    position: dict[str, Any] | None = None,
+) -> tuple[bool, str]:
+    symbol = _normalized_symbol(symbol)
+    signal_symbol = _normalized_symbol(signal_value(signal, "symbol", symbol))
+    if signal_symbol != symbol:
+        return False, f"signal/quote symbol mismatch ({signal_symbol}/{symbol})"
+    if position is not None:
+        position_symbol = _normalized_symbol(position.get("symbol"))
+        if position_symbol != symbol:
+            return False, f"position/quote symbol mismatch ({position_symbol}/{symbol})"
+    if price <= 0 or not math.isfinite(price):
+        return False, "quote price is invalid"
+    metadata = _quote_identity_metadata(signal)
+    if not metadata:
+        return False, "verified quote identity metadata is missing"
+    requested = _normalized_symbol(metadata.get("requested_symbol") or metadata.get("quote_symbol") or metadata.get("symbol"))
+    provider_symbol = _normalized_symbol(metadata.get("provider_symbol") or metadata.get("quote_symbol") or metadata.get("symbol"))
+    if requested != symbol or provider_symbol != symbol:
+        return False, f"provider quote identity mismatch ({requested}/{provider_symbol}/{symbol})"
+    quote_timestamp = metadata.get("quote_timestamp") or metadata.get("timestamp")
+    if _parse_utc(quote_timestamp) is None:
+        return False, "verified quote timestamp is missing"
+    if not quote_is_fresh(
+        quote_timestamp,
+        safe_text(metadata.get("interval"), "1d"),
+        max_intraday_age_seconds=DECISION_STOCK_MAX_AGE_MINUTES * 60,
+        symbol=symbol,
+    ):
+        return False, "verified quote timestamp is stale"
+    return True, "quote identity verified"
+
+
+def _duplicate_price_anomaly_symbols(prices: dict[str, float]) -> set[str]:
+    grouped: dict[float, list[str]] = {}
+    for raw_symbol, raw_price in (prices or {}).items():
+        symbol = _normalized_symbol(raw_symbol)
+        price = safe_float(raw_price)
+        if symbol and price > 0:
+            grouped.setdefault(price, []).append(symbol)
+    blocked: set[str] = set()
+    for price, symbols in grouped.items():
+        unique = sorted(set(symbols))
+        if len(unique) >= 3:
+            blocked.update(unique)
+            log.warning(
+                "Duplicate-price execution anomaly blocked | price=%.6f affected_symbols=%d sample=%s",
+                price,
+                len(unique),
+                ",".join(unique[:8]),
+            )
+    return blocked
 
 
 def execute(
@@ -617,6 +708,8 @@ def _close_position(
     price = safe_float(price)
 
     if not symbol or quantity <= 0 or price <= 0:
+        return False
+    if _normalized_symbol(position.get("symbol")) != symbol or not math.isfinite(price):
         return False
 
     value = quantity * price
@@ -1141,6 +1234,9 @@ def _buy(
         return False, "missing symbol", None
     if price <= 0:
         return False, f"invalid price={price}", None
+    quote_ok, quote_reason = _execution_quote_guard(market, symbol, price, signal)
+    if not quote_ok:
+        return False, quote_reason, None
 
     equity_data = portfolio_equity(market)
     equity = max(safe_float(equity_data.get("equity"), market_starting_capital(market)), 0.01)
@@ -1455,6 +1551,7 @@ def process_signals(
     signals = list(signals or [])
     prices = prices or {}
     actions: list[dict[str, Any]] = []
+    anomalous_symbols = _duplicate_price_anomaly_symbols(prices)
 
     maximum_positions = (
         DEFAULT_MAX_OPEN_POSITIONS
@@ -1503,6 +1600,13 @@ def process_signals(
                 symbol,
             )
             continue
+        if symbol in anomalous_symbols:
+            log.info(
+                "%s | REJECT | %s | duplicate-price anomaly quarantine",
+                market.upper(),
+                symbol,
+            )
+            continue
 
         if action in {"SELL", "EXIT", "CLOSE"}:
             position = row(
@@ -1520,6 +1624,15 @@ def process_signals(
                     "%s | REJECT SELL | %s | no open position",
                     market.upper(),
                     symbol,
+                )
+                continue
+            quote_ok, quote_reason = _execution_quote_guard(market, symbol, price, signal, position)
+            if not quote_ok:
+                log.info(
+                    "%s | REJECT SELL | %s | %s",
+                    market.upper(),
+                    symbol,
+                    quote_reason,
                 )
                 continue
 
@@ -1565,6 +1678,15 @@ def process_signals(
                 market.upper(),
                 symbol,
                 action,
+            )
+            continue
+        quote_ok, quote_reason = _execution_quote_guard(market, symbol, price, signal)
+        if not quote_ok:
+            log.info(
+                "%s | REJECT BUY | %s | %s",
+                market.upper(),
+                symbol,
+                quote_reason,
             )
             continue
 

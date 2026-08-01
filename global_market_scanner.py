@@ -37,6 +37,7 @@ from config import (
 from api_manager import get_api_settings
 from database import connect, utc_now
 from market_data import get_history, get_live_snapshot
+from provider_router import _redact_url, normalize_symbol
 from market_sessions import (
     completed_daily_bar_is_fresh,
     confirmed_us_listing,
@@ -252,7 +253,7 @@ def _eodhd_exchange_symbols(exchange: str) -> list[dict[str, Any]]:
         payload = response.json()
         return payload if isinstance(payload, list) else []
     except Exception as exc:
-        log.warning("EODHD universe request failed for %s: %s", exchange, exc)
+        log.warning("EODHD universe request failed for %s: %s", exchange, _redact_url(str(exc)))
         return []
 
 
@@ -396,6 +397,16 @@ def _current_quote_from_intraday(meta: dict[str, Any], now: datetime | None) -> 
     except Exception:
         return None
     if snapshot is None:
+        return None
+    requested = normalize_symbol(meta.get("symbol"))
+    snapshot_symbol = normalize_symbol(getattr(snapshot, "symbol", requested))
+    snapshot_requested = normalize_symbol(getattr(snapshot, "requested_symbol", requested))
+    snapshot_provider_symbol = normalize_symbol(getattr(snapshot, "provider_symbol", requested))
+    if (
+        snapshot_symbol != requested
+        or snapshot_requested != requested
+        or snapshot_provider_symbol != requested
+    ):
         return None
     if not quote_is_fresh(
         snapshot.timestamp,
@@ -703,7 +714,7 @@ def provider_mover_universe() -> list[dict[str, str]]:
                 if meta.get("symbol"):
                     discovered.append(meta)
         except Exception as exc:
-            log.debug("Mover discovery unavailable via %s: %s", key_name, exc)
+            log.debug("Mover discovery unavailable via %s: %s", key_name, _redact_url(str(exc)))
     return merge_candidate_metadata(discovered)
 
 
@@ -843,7 +854,7 @@ def scan_global_markets() -> list[dict[str, Any]]:
             if candidate:
                 found.append(candidate)
         except Exception as exc:
-            log.debug("Global candidate failed for %s: %s", meta.get("symbol"), exc)
+            log.debug("Global candidate failed for %s: %s", meta.get("symbol"), _redact_url(str(exc)))
     with connect() as conn:
         for candidate in found:
             payload = candidate.to_dict()
