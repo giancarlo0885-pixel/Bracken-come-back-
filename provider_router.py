@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from collections import defaultdict
 import time
 from typing import Callable
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import pandas as pd
 import requests
@@ -390,8 +391,20 @@ def _alpha(symbol: str, period: str, interval: str, key: str) -> pd.DataFrame:
         series = data.get(f"Time Series ({alpha_interval})", {})
         if not series:
             return pd.DataFrame()
+        metadata = data.get("Meta Data", {}) if isinstance(data, dict) else {}
+        provider_timezone = (
+            metadata.get("6. Time Zone")
+            or metadata.get("Time Zone")
+            or metadata.get("timezone")
+        )
+        if not provider_timezone:
+            return pd.DataFrame()
+        try:
+            zone = ZoneInfo(str(provider_timezone))
+        except ZoneInfoNotFoundError:
+            return pd.DataFrame()
         frame = pd.DataFrame.from_dict(series, orient="index")
-        frame.index = pd.to_datetime(frame.index, errors="coerce").tz_localize("America/New_York").tz_convert(timezone.utc)
+        frame.index = pd.to_datetime(frame.index, errors="coerce").tz_localize(zone).tz_convert(timezone.utc)
         return _verified_history(
             frame.rename(columns={"1. open": "Open", "2. high": "High", "3. low": "Low", "4. close": "Close", "5. volume": "Volume"}),
             "Alpha Vantage",

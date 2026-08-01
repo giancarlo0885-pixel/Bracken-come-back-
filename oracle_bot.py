@@ -307,10 +307,15 @@ def _verified_quote_for(
     quote_timestamp = payload.get("quote_timestamp") or payload.get("timestamp")
     if _parse_utc(quote_timestamp) is None:
         return None
+    max_age_seconds = (
+        DECISION_CRYPTO_MAX_AGE_MINUTES
+        if safe_text(market).lower() == "crypto"
+        else DECISION_STOCK_MAX_AGE_MINUTES
+    ) * 60
     if not quote_is_fresh(
         quote_timestamp,
         safe_text(payload.get("interval"), "1d"),
-        max_intraday_age_seconds=DECISION_STOCK_MAX_AGE_MINUTES * 60,
+        max_intraday_age_seconds=max_age_seconds,
         symbol=symbol,
     ):
         return None
@@ -373,10 +378,15 @@ def _execution_quote_guard(
     quote_timestamp = metadata.get("quote_timestamp") or metadata.get("timestamp")
     if _parse_utc(quote_timestamp) is None:
         return False, "verified quote timestamp is missing"
+    max_age_seconds = (
+        DECISION_CRYPTO_MAX_AGE_MINUTES
+        if safe_text(market).lower() == "crypto"
+        else DECISION_STOCK_MAX_AGE_MINUTES
+    ) * 60
     if not quote_is_fresh(
         quote_timestamp,
         safe_text(metadata.get("interval"), "1d"),
-        max_intraday_age_seconds=DECISION_STOCK_MAX_AGE_MINUTES * 60,
+        max_intraday_age_seconds=max_age_seconds,
         symbol=symbol,
     ):
         return False, "verified quote timestamp is stale"
@@ -406,6 +416,38 @@ def _duplicate_price_anomaly_symbols(prices: dict[str, Any]) -> set[str]:
                 ",".join(unique[:8]),
             )
     return blocked
+
+
+def _repriced_positions(
+    positions: list[dict[str, Any]],
+    quotes: dict[str, Any],
+    market: str,
+    anomalous_symbols: set[str] | None = None,
+) -> list[dict[str, Any]]:
+    anomalous_symbols = anomalous_symbols or set()
+    repriced: list[dict[str, Any]] = []
+    for position in positions:
+        item = dict(position)
+        symbol = _normalized_symbol(item.get("symbol"))
+        if symbol and symbol not in anomalous_symbols:
+            price = _verified_price_for(symbol, quotes, market)
+            if price > 0:
+                item["current_price"] = price
+        repriced.append(item)
+    return repriced
+
+
+def _current_account_from_quotes(
+    market: str,
+    positions: list[dict[str, Any]],
+    quotes: dict[str, Any],
+    anomalous_symbols: set[str],
+) -> Any:
+    return build_account(
+        market,
+        ensure_portfolio(market),
+        _repriced_positions(positions, quotes, market, anomalous_symbols),
+    )
 
 
 def execute(
@@ -743,13 +785,13 @@ def update_prices(
     )
 
     closed_for_margin: set[str] = set()
-    account_state = portfolio_equity(market)
+    account = _current_account_from_quotes(market, list(positions), prices, anomalous_symbols)
     if (
         PAPER_BROKER_MODE
         and positions
         and (
-            bool(account_state.get("margin_call"))
-            or safe_float(account_state.get("margin_utilization_pct"))
+            bool(account.margin_call)
+            or safe_float(account.margin_utilization_pct)
             > PAPER_MAX_MARGIN_UTILIZATION_PCT * 100.0
         )
     ):
@@ -763,15 +805,17 @@ def update_prices(
             symbol = safe_text(position.get("symbol")).upper()
             if symbol in anomalous_symbols:
                 continue
-            current_price = _verified_price_for(symbol, prices, market)
+            quote = _verified_quote_for(symbol, prices, market)
+            current_price = safe_float(quote.get("price")) if quote else 0.0
             if current_price <= 0:
                 continue
-            if _close_position(market, position, current_price, PAPER_MARGIN_REDUCTION_REASON):
+            if _close_position(market, position, current_price, PAPER_MARGIN_REDUCTION_REASON, quote_metadata=quote):
                 closed_for_margin.add(symbol)
-            account_state = portfolio_equity(market)
+            remaining = [p for p in positions if safe_text(p.get("symbol")).upper() not in closed_for_margin]
+            account = _current_account_from_quotes(market, list(remaining), prices, anomalous_symbols)
             if (
-                not bool(account_state.get("margin_call"))
-                and safe_float(account_state.get("margin_utilization_pct"))
+                not bool(account.margin_call)
+                and safe_float(account.margin_utilization_pct)
                 < PAPER_MARGIN_WARNING_PCT * 100.0
             ):
                 break
@@ -830,6 +874,7 @@ def _close_position(
     position: dict[str, Any],
     price: float,
     reason: str,
+    quote_metadata: dict[str, Any] | None = None,
 ) -> bool:
     market = safe_text(market).lower()
     if _execution_disabled("position close"):
@@ -842,6 +887,31 @@ def _close_position(
         return False
     if _normalized_symbol(position.get("symbol")) != symbol or not math.isfinite(price):
         return False
+    quote_ok, quote_reason = _execution_quote_guard(
+        market,
+        symbol,
+        price,
+        {"symbol": symbol},
+        position,
+        quote_metadata=quote_metadata,
+    )
+    if not quote_ok:
+        log.info("%s | REJECT CLOSE | %s | %s", market.upper(), symbol, quote_reason)
+        return False
+
+    return _execute_close_position(market, position, price, reason)
+
+
+def _execute_close_position(
+    market: str,
+    position: dict[str, Any],
+    price: float,
+    reason: str,
+) -> bool:
+    market = safe_text(market).lower()
+    symbol = safe_text(position.get("symbol")).upper()
+    quantity = safe_float(position.get("quantity"))
+    price = safe_float(price)
 
     value = quantity * price
 
@@ -1042,7 +1112,7 @@ def risk_exits(
         if not reason:
             continue
 
-        if _close_position(market, position, current_price, reason):
+        if _close_position(market, position, current_price, reason, quote_metadata=quote):
             actions.append(
                 {
                     "market": market,
@@ -1281,6 +1351,8 @@ def _rotate_for_stronger_candidate(
     market: str,
     incoming_symbol: str,
     incoming_score: float,
+    quotes: dict[str, Any] | None = None,
+    anomalous_symbols: set[str] | None = None,
 ) -> dict[str, Any] | None:
     """Select a rotation candidate without closing it.
 
@@ -1290,6 +1362,8 @@ def _rotate_for_stronger_candidate(
     """
     if not ROTATION_ENABLED:
         return None
+    quotes = quotes or {}
+    anomalous_symbols = anomalous_symbols or set()
     positions = rows(
         """
         SELECT * FROM positions
@@ -1303,11 +1377,20 @@ def _rotate_for_stronger_candidate(
     ranked: list[tuple[float, float, dict[str, Any]]] = []
     for position in positions:
         symbol = safe_text(position.get("symbol")).upper()
-        current = safe_float(position.get("current_price"))
+        if symbol in anomalous_symbols:
+            continue
+        quote = _verified_quote_for(symbol, quotes, market)
+        current = safe_float(quote.get("price")) if quote else 0.0
+        if current <= 0:
+            continue
         entry = safe_float(position.get("average_price"), safe_float(position.get("entry_price")))
         return_pct = ((current / entry) - 1.0) * 100.0 if entry > 0 and current > 0 else -999.0
         held_score = _latest_opportunity_score(market, symbol)
-        ranked.append((held_score, return_pct, position))
+        candidate_position = dict(position)
+        candidate_position["_verified_rotation_quote"] = quote
+        ranked.append((held_score, return_pct, candidate_position))
+    if not ranked:
+        return None
 
     held_score, return_pct, weakest = min(ranked, key=lambda item: (item[0], item[1]))
     score_gap = incoming_score - held_score
@@ -1315,10 +1398,12 @@ def _rotate_for_stronger_candidate(
         return None
 
     weakest_symbol = safe_text(weakest.get("symbol")).upper()
-    exit_price = safe_float(weakest.get("current_price"))
+    outgoing_quote = _quote_payload(weakest.get("_verified_rotation_quote"), weakest_symbol)
+    exit_price = safe_float(outgoing_quote.get("price"))
     if exit_price <= 0:
         return None
     candidate = dict(weakest)
+    candidate["_verified_rotation_quote"] = outgoing_quote
     candidate["_rotation_action"] = {
         "market": market,
         "symbol": weakest_symbol,
@@ -1345,6 +1430,7 @@ def _buy(
     target_trade_value: float | None = None,
     rotation_candidate: dict[str, Any] | None = None,
     verified_quote: dict[str, Any] | None = None,
+    rotation_verified_quote: dict[str, Any] | None = None,
 ) -> tuple[bool, str, dict[str, Any] | None]:
     """Execute an institutional paper-broker buy with controlled leverage."""
     market = safe_text(market).lower()
@@ -1460,13 +1546,36 @@ def _buy(
             margin_repayment = 0.0
             if rotation_candidate:
                 rotation_symbol = safe_text(rotation_candidate.get("symbol")).upper()
+                outgoing_quote = _quote_payload(
+                    rotation_verified_quote or rotation_candidate.get("_verified_rotation_quote"),
+                    rotation_symbol,
+                )
                 locked_rotation = next(
                     (p for p in active_positions if safe_text(p.get("symbol")).upper() == rotation_symbol),
                     None,
                 )
                 if locked_rotation is None:
                     return False, "rotation candidate is no longer open", None
-                exit_price = safe_float(rotation_action.get("price") if rotation_action else 0.0)
+                outgoing_ok, outgoing_reason = _execution_quote_guard(
+                    market,
+                    rotation_symbol,
+                    safe_float(outgoing_quote.get("price")),
+                    {"symbol": rotation_symbol},
+                    locked_rotation,
+                    quote_metadata=outgoing_quote,
+                )
+                if not outgoing_ok:
+                    return False, f"rotation outgoing quote rejected: {outgoing_reason}", None
+                incoming_ok, incoming_reason = _execution_quote_guard(
+                    market,
+                    symbol,
+                    price,
+                    signal,
+                    quote_metadata=verified_quote,
+                )
+                if not incoming_ok:
+                    return False, f"rotation incoming quote rejected: {incoming_reason}", None
+                exit_price = safe_float(outgoing_quote.get("price"))
                 quantity_to_sell = safe_float(locked_rotation.get("quantity"))
                 if exit_price <= 0 or quantity_to_sell <= 0:
                     return False, "rotation candidate has invalid exit data", None
@@ -1779,7 +1888,7 @@ def process_signals(
                 )
                 continue
 
-            if _close_position(market, position, price, "sell_signal"):
+            if _close_position(market, position, price, "sell_signal", quote_metadata=quote):
                 actions.append(
                     {
                         "market": market,
@@ -1798,24 +1907,7 @@ def process_signals(
             "LONG",
         }
 
-        # Strong HOLD signals can become accumulation entries.
-        aggressive_hold = (
-            action == "HOLD"
-            and (
-                (
-                    score >= max(50.0, HIGH_SCORE_THRESHOLD - 2.0)
-                    and confidence >= max(0.44, HIGH_CONFIDENCE_THRESHOLD - 0.04)
-                )
-                or (
-                    # V27: very high confidence can qualify a borderline-score
-                    # HOLD for the controlled starter-entry evaluation path.
-                    confidence >= 0.82
-                    and score >= max(45.0, HIGH_SCORE_THRESHOLD - 8.0)
-                )
-            )
-        )
-
-        if not buy_signal and not aggressive_hold:
+        if not buy_signal:
             log.info(
                 "%s | REJECT | %s | action=%s is not an entry",
                 market.upper(),
@@ -1948,7 +2040,7 @@ def process_signals(
         open_count = _open_position_count(market)
         rotation_candidate = None
         if not existing_position and open_count >= maximum_positions:
-            rotation_candidate = _rotate_for_stronger_candidate(market, symbol, score)
+            rotation_candidate = _rotate_for_stronger_candidate(market, symbol, score, prices, anomalous_symbols)
             if rotation_candidate is None:
                 log.info(
                     "%s | REJECT | %s | position limit reached %d/%d and no superior rotation",
@@ -1964,6 +2056,11 @@ def process_signals(
             target_trade_value=target_trade_value,
             rotation_candidate=rotation_candidate,
             verified_quote=quote,
+            rotation_verified_quote=(
+                rotation_candidate.get("_verified_rotation_quote")
+                if isinstance(rotation_candidate, dict)
+                else None
+            ),
         )
         if not success:
             log.info(
@@ -1980,7 +2077,7 @@ def process_signals(
             {
                 "market": market,
                 "symbol": symbol,
-                "action": "BUY",
+                "action": action,
                 "price": price,
                 "score": score,
                 "confidence": confidence,

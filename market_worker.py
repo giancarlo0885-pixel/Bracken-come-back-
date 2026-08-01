@@ -17,6 +17,8 @@ from config import (
     FAST_SCAN_BATCH_SIZE,
     FAST_SCAN_TOP_RANKED,
     FAST_SIGNAL_SCAN_ENABLED,
+    HIGH_CONFIDENCE_THRESHOLD,
+    HIGH_SCORE_THRESHOLD,
     INTELLIGENCE_REFRESH_SECONDS,
     LIVE_SCAN_WORKERS,
     NEWS_PRIORITY_CANDIDATES,
@@ -83,6 +85,28 @@ def _quote_payload_from_history(symbol: str, history: Any, price: float) -> dict
         "cache_identity": route.get("cache_identity"),
         "ohlcv_fingerprint": route.get("ohlcv_fingerprint"),
     }
+
+
+def _normalize_starter_action(signal: Any) -> Any:
+    action = str(getattr(signal, "action", "HOLD") or "HOLD").upper()
+    if action != "HOLD":
+        return signal
+    score = float(getattr(signal, "score", 0.0) or 0.0)
+    confidence = float(getattr(signal, "confidence", 0.0) or 0.0)
+    if score <= 1.0:
+        score *= 100.0
+    if confidence > 1.0:
+        confidence /= 100.0
+    starter_ready = (
+        score >= max(50.0, HIGH_SCORE_THRESHOLD - 2.0)
+        and confidence >= max(0.44, HIGH_CONFIDENCE_THRESHOLD - 0.04)
+    ) or (
+        confidence >= 0.82
+        and score >= max(45.0, HIGH_SCORE_THRESHOLD - 8.0)
+    )
+    if starter_ready:
+        signal.action = "ACCUMULATE"
+    return signal
 
 
 signal.signal(signal.SIGTERM, _request_stop)
@@ -322,6 +346,7 @@ def _fast_discover_symbol(market: str, symbol: str, name: str) -> tuple[Any, Any
             if signal is None:
                 continue
             setattr(signal, "market_data_route", dict(getattr(history, "attrs", {}).get("provider_route", {}) or {}))
+            signal = _normalize_starter_action(signal)
             signal.reason = (
                 f"Always-on {interval} market pulse. " + str(getattr(signal, "reason", ""))
             ).strip()
@@ -502,6 +527,7 @@ def scan_market(market: str) -> list[Any]:
             signal.score = council["score"]
             signal.action = council["action"]
             signal.confidence = council["confidence"]
+            signal = _normalize_starter_action(signal)
             signal.reason = (str(signal.reason) + " " + str(council["explanation"])).strip()
             signals.append(signal)
             prices[symbol] = _quote_payload_from_history(symbol, history, float(signal.price))

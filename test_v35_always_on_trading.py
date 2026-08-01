@@ -529,6 +529,7 @@ def test_mismatched_price_cannot_update_position_current_price(monkeypatch):
     calls = []
     monkeypatch.setattr(oracle_bot, "ENABLE_AUTOTRADE", True)
     monkeypatch.setattr(oracle_bot, "rows", lambda *args, **kwargs: [{"symbol": "F", "quantity": 1}])
+    monkeypatch.setattr(oracle_bot, "ensure_portfolio", lambda market: {"cash": 1000, "starting_balance": 1000, "margin_debt": 0, "leverage_limit": 4})
     monkeypatch.setattr(oracle_bot, "portfolio_equity", lambda market: {"margin_call": 0.0, "margin_utilization_pct": 0})
     monkeypatch.setattr(oracle_bot, "execute", lambda *args, **kwargs: calls.append(args))
     updated = oracle_bot.update_prices("cash", {"F": _verified_quote("GM", 88.59)})
@@ -589,8 +590,9 @@ def test_anomaly_quarantine_runs_before_update_prices_and_risk_exits(monkeypatch
         lambda *args, **kwargs: [
             {"symbol": "AAPL", "quantity": 1, "entry_price": 110, "highest_price": 120},
             {"symbol": "MSFT", "quantity": 1, "entry_price": 210, "highest_price": 220},
-        ],
+            ],
     )
+    monkeypatch.setattr(oracle_bot, "ensure_portfolio", lambda market: {"cash": 1000, "starting_balance": 1000, "margin_debt": 0, "leverage_limit": 4})
     monkeypatch.setattr(oracle_bot, "execute", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("price updated")))
     monkeypatch.setattr(oracle_bot, "portfolio_equity", lambda market: {"margin_call": 0.0, "margin_utilization_pct": 0})
     monkeypatch.setattr(oracle_bot, "_close_position", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("exit executed")))
@@ -713,12 +715,16 @@ def test_verified_margin_reduction_uses_exact_fresh_symbol_quote(monkeypatch):
         "rows",
         lambda *args, **kwargs: [{"symbol": "AAPL", "quantity": 1, "entry_price": 100, "current_price": 120}],
     )
-    states = iter([
-        {"margin_call": 1.0, "margin_utilization_pct": 101},
-        {"margin_call": 0.0, "margin_utilization_pct": 1},
-    ])
-    monkeypatch.setattr(oracle_bot, "portfolio_equity", lambda market: next(states))
-    monkeypatch.setattr(oracle_bot, "_close_position", lambda market, position, price, reason: closed.append((position["symbol"], price, reason)) or True)
+    monkeypatch.setattr(oracle_bot, "ensure_portfolio", lambda market: {"cash": 0, "starting_balance": 1000, "margin_debt": 500, "leverage_limit": 4})
+
+    class Account:
+        def __init__(self, call, utilization):
+            self.margin_call = call
+            self.margin_utilization_pct = utilization
+
+    states = iter([Account(True, 101), Account(False, 1)])
+    monkeypatch.setattr(oracle_bot, "build_account", lambda *args, **kwargs: next(states))
+    monkeypatch.setattr(oracle_bot, "_close_position", lambda market, position, price, reason, **kwargs: closed.append((position["symbol"], price, reason)) or True)
     monkeypatch.setattr(oracle_bot, "execute", lambda *args, **kwargs: None)
     oracle_bot.update_prices("cash", {"AAPL": quote})
     assert closed == [("AAPL", 80.0, oracle_bot.PAPER_MARGIN_REDUCTION_REASON)]
@@ -735,9 +741,137 @@ def test_margin_reduction_rejects_missing_stale_or_mismatched_quotes(monkeypatch
         "rows",
         lambda *args, **kwargs: [{"symbol": "AAPL", "quantity": 1, "entry_price": 100, "current_price": 120}],
     )
-    monkeypatch.setattr(oracle_bot, "portfolio_equity", lambda market: {"margin_call": 1.0, "margin_utilization_pct": 101})
+    monkeypatch.setattr(oracle_bot, "ensure_portfolio", lambda market: {"cash": 0, "starting_balance": 1000, "margin_debt": 500, "leverage_limit": 4})
+
+    class Account:
+        margin_call = True
+        margin_utilization_pct = 101
+
+    monkeypatch.setattr(oracle_bot, "build_account", lambda *args, **kwargs: Account())
     monkeypatch.setattr(oracle_bot, "_close_position", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("margin close executed")))
     monkeypatch.setattr(oracle_bot, "execute", lambda *args, **kwargs: None)
     assert oracle_bot.update_prices("cash", {}) == 0
     assert oracle_bot.update_prices("cash", {"AAPL": stale}) == 0
     assert oracle_bot.update_prices("cash", {"AAPL": mismatched}) == 0
+
+
+def test_hold_never_executes_buy(monkeypatch):
+    import oracle_bot
+
+    quote = _verified_quote("AAPL", 100)
+    monkeypatch.setattr(oracle_bot, "ENABLE_AUTOTRADE", True)
+    monkeypatch.setattr(oracle_bot, "_buy", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("HOLD bought")))
+    actions = oracle_bot.process_signals(
+        "cash",
+        [{"symbol": "AAPL", "action": "HOLD", "score": 99, "confidence": .99, "price": 100, "market_data_route": quote}],
+        {"AAPL": quote},
+    )
+    assert actions == []
+
+
+def test_explicit_accumulate_can_proceed_through_entry_gates(monkeypatch):
+    import oracle_bot
+
+    quote = _verified_quote("AAPL", 100)
+    monkeypatch.setattr(oracle_bot, "ENABLE_AUTOTRADE", True)
+    monkeypatch.setattr(oracle_bot, "ENABLE_QUANT_TRADE_STANDARD", False)
+    monkeypatch.setattr(oracle_bot, "_entry_forecast_gate", lambda *args, **kwargs: (True, "fresh"))
+    monkeypatch.setattr(oracle_bot, "_penny_stock_gate", lambda *args, **kwargs: (True, "not penny"))
+    monkeypatch.setattr(oracle_bot, "row", lambda *args, **kwargs: None)
+    monkeypatch.setattr(oracle_bot, "recent_trade", lambda *args, **kwargs: None)
+    monkeypatch.setattr(oracle_bot, "_open_position_count", lambda market: 0)
+    monkeypatch.setattr(oracle_bot, "_buy", lambda *args, **kwargs: (True, "ok", None))
+    actions = oracle_bot.process_signals(
+        "cash",
+        [{"symbol": "AAPL", "action": "ACCUMULATE", "score": 95, "confidence": .95, "price": 100, "market_data_route": quote}],
+        {"AAPL": quote},
+    )
+    assert actions and actions[0]["action"] == "ACCUMULATE"
+
+
+def test_displayed_saved_action_matches_executed_action():
+    import market_worker
+
+    signal = SimpleNamespace(action="HOLD", score=.95, confidence=.95)
+    normalized = market_worker._normalize_starter_action(signal)
+    assert normalized.action == "ACCUMULATE"
+
+
+def test_rotation_rejects_stale_outgoing_quote(monkeypatch):
+    import oracle_bot
+
+    stale = _verified_quote("OLD", 7, quote_timestamp=(datetime.now(timezone.utc) - timedelta(days=7)).isoformat())
+    monkeypatch.setattr(oracle_bot, "ROTATION_ENABLED", True)
+    monkeypatch.setattr(oracle_bot, "ROTATION_MIN_SCORE_GAP", 1)
+    monkeypatch.setattr(oracle_bot, "rows", lambda *args, **kwargs: [{"symbol": "OLD", "quantity": 1, "current_price": 999, "entry_price": 10}])
+    monkeypatch.setattr(oracle_bot, "_latest_opportunity_score", lambda *args, **kwargs: 10)
+    assert oracle_bot._rotate_for_stronger_candidate("cash", "NEW", 90, {"OLD": stale}) is None
+
+
+def test_rotation_rejects_mismatched_outgoing_quote(monkeypatch):
+    import oracle_bot
+
+    monkeypatch.setattr(oracle_bot, "ROTATION_ENABLED", True)
+    monkeypatch.setattr(oracle_bot, "ROTATION_MIN_SCORE_GAP", 1)
+    monkeypatch.setattr(oracle_bot, "rows", lambda *args, **kwargs: [{"symbol": "OLD", "quantity": 1, "current_price": 999, "entry_price": 10}])
+    monkeypatch.setattr(oracle_bot, "_latest_opportunity_score", lambda *args, **kwargs: 10)
+    assert oracle_bot._rotate_for_stronger_candidate("cash", "NEW", 90, {"OLD": _verified_quote("OTHER", 7)}) is None
+
+
+def test_rotation_uses_verified_outgoing_quote_not_position_price(monkeypatch):
+    import oracle_bot
+
+    monkeypatch.setattr(oracle_bot, "ROTATION_ENABLED", True)
+    monkeypatch.setattr(oracle_bot, "ROTATION_MIN_SCORE_GAP", 1)
+    monkeypatch.setattr(oracle_bot, "rows", lambda *args, **kwargs: [{"symbol": "OLD", "quantity": 1, "current_price": 999, "entry_price": 10}])
+    monkeypatch.setattr(oracle_bot, "_latest_opportunity_score", lambda *args, **kwargs: 10)
+    candidate = oracle_bot._rotate_for_stronger_candidate("cash", "NEW", 90, {"OLD": _verified_quote("OLD", 7)})
+    assert candidate is not None
+    assert candidate["_rotation_action"]["price"] == 7
+
+
+def test_automated_close_position_rejects_missing_quote_metadata(monkeypatch):
+    import oracle_bot
+
+    monkeypatch.setattr(oracle_bot, "ENABLE_AUTOTRADE", True)
+    monkeypatch.setattr(oracle_bot, "connect", lambda: (_ for _ in ()).throw(AssertionError("database mutated")))
+    assert oracle_bot._close_position("cash", {"symbol": "AAPL", "quantity": 1, "entry_price": 100}, 90, "stop_loss") is False
+
+
+def test_margin_call_calculation_uses_verified_current_prices(monkeypatch):
+    import oracle_bot
+
+    captured = {}
+    quote = _verified_quote("AAPL", 80)
+    monkeypatch.setattr(oracle_bot, "ENABLE_AUTOTRADE", True)
+    monkeypatch.setattr(oracle_bot, "PAPER_BROKER_MODE", True)
+    monkeypatch.setattr(oracle_bot, "ensure_portfolio", lambda market: {"cash": 0, "starting_balance": 1000, "margin_debt": 500, "leverage_limit": 4})
+    monkeypatch.setattr(oracle_bot, "rows", lambda *args, **kwargs: [{"symbol": "AAPL", "quantity": 1, "entry_price": 100, "current_price": 999}])
+
+    class Account:
+        margin_call = False
+        margin_utilization_pct = 0
+
+    def fake_build_account(market, portfolio, positions):
+        captured["current_price"] = positions[0]["current_price"]
+        return Account()
+
+    monkeypatch.setattr(oracle_bot, "build_account", fake_build_account)
+    monkeypatch.setattr(oracle_bot, "execute", lambda *args, **kwargs: None)
+    oracle_bot.update_prices("cash", {"AAPL": quote})
+    assert captured["current_price"] == 80
+
+
+def test_crypto_freshness_uses_crypto_setting(monkeypatch):
+    import oracle_bot
+
+    captured = {}
+    quote = _verified_quote("BTC-USD", 100, interval="1m")
+
+    def fake_fresh(timestamp, interval, **kwargs):
+        captured["max_age"] = kwargs.get("max_intraday_age_seconds")
+        return True
+
+    monkeypatch.setattr(oracle_bot, "quote_is_fresh", fake_fresh)
+    assert oracle_bot._verified_quote_for("BTC-USD", {"BTC-USD": quote}, "crypto") is not None
+    assert captured["max_age"] == oracle_bot.DECISION_CRYPTO_MAX_AGE_MINUTES * 60

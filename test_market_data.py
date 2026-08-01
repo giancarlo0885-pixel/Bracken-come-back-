@@ -303,3 +303,50 @@ def test_alpha_vantage_daily_dates_retain_original_session_date(monkeypatch):
     frame = _alpha("AAPL", "5d", "1d", "key")
     assert str(frame.index[-1].date()) == "2026-07-31"
     assert frame.index.tz is None
+
+
+def test_foreign_alpha_vantage_intraday_uses_provider_timezone(monkeypatch):
+    class Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "Meta Data": {"6. Time Zone": "Europe/London"},
+                "Time Series (5min)": {
+                    "2026-07-31 08:00:00": {
+                        "1. open": "1",
+                        "2. high": "2",
+                        "3. low": "1",
+                        "4. close": "2",
+                        "5. volume": "100",
+                    }
+                },
+            }
+
+    monkeypatch.setattr(provider_router.requests, "get", lambda *args, **kwargs: Response())
+    frame = _alpha("VOD.L", "1d", "5m", "key")
+    assert frame.index[-1].isoformat() == "2026-07-31T07:00:00+00:00"
+
+
+def test_missing_alpha_vantage_intraday_timezone_is_rejected(monkeypatch):
+    class Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "Meta Data": {},
+                "Time Series (5min)": {
+                    "2026-07-31 08:00:00": {
+                        "1. open": "1",
+                        "2. high": "2",
+                        "3. low": "1",
+                        "4. close": "2",
+                        "5. volume": "100",
+                    }
+                },
+            }
+
+    monkeypatch.setattr(provider_router.requests, "get", lambda *args, **kwargs: Response())
+    assert _alpha("VOD.L", "1d", "5m", "key").empty
