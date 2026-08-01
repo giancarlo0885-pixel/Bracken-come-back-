@@ -107,6 +107,60 @@ def safe_text(
     return str(value).strip()
 
 
+def _parse_utc(value: Any) -> datetime | None:
+    text = safe_text(value)
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _entry_forecast_gate(market: str, symbol: str, price: float) -> tuple[bool, str]:
+    """Require a fresh, actionable forecast before a new paper entry.
+
+    The deep worker saves the forecast before calling ``process_signals``. This
+    final execution gate keeps stale ranking records and quote-only signals from
+    reaching the institutional paper broker as new purchases.
+    """
+    if not REQUIRE_TARGET_FOR_BUY:
+        return True, "forecast gate disabled"
+
+    forecast = row(
+        """
+        SELECT target_price, low_price, high_price, probability_up, created_at
+        FROM forecasts
+        WHERE market = %s AND symbol = %s
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (market, symbol),
+    ) or {}
+    target = safe_float(forecast.get("target_price"))
+    if price <= 0:
+        return False, "missing live entry price"
+    if target <= 0:
+        return False, "missing current forecast target"
+
+    created = _parse_utc(forecast.get("created_at"))
+    max_age = DECISION_CRYPTO_MAX_AGE_MINUTES if market == "crypto" else DECISION_STOCK_MAX_AGE_MINUTES
+    if created is None:
+        return False, "forecast timestamp is missing"
+    age_minutes = max(0.0, (datetime.now(timezone.utc) - created).total_seconds() / 60.0)
+    if age_minutes > max_age:
+        return False, f"forecast is stale ({age_minutes:.0f} minutes old)"
+
+    expected_move_pct = ((target / price) - 1.0) * 100.0
+    minimum_move = MIN_ACTIONABLE_MOVE_CRYPTO_PCT if market == "crypto" else MIN_ACTIONABLE_MOVE_STOCK_PCT
+    if expected_move_pct < minimum_move:
+        return False, f"expected move {expected_move_pct:.2f}% is below {minimum_move:.2f}%"
+    return True, f"forecast approved with {expected_move_pct:.2f}% expected move"
+
+
 def signal_value(
     signal: Any,
     name: str,
@@ -807,6 +861,81 @@ def _open_position_count(
         return 0
 
 
+def _latest_opportunity_score(market: str, symbol: str) -> float:
+    try:
+        record = row(
+            """
+            SELECT opportunity_score
+            FROM opportunity_rankings
+            WHERE market=%s AND symbol=%s
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            (market, symbol),
+        ) or {}
+        return safe_float(record.get("opportunity_score"), 50.0)
+    except Exception:
+        return 50.0
+
+
+def _rotate_for_stronger_candidate(
+    market: str,
+    incoming_symbol: str,
+    incoming_score: float,
+) -> dict[str, Any] | None:
+    """Free one slot only when a materially stronger paper opportunity appears."""
+    if not ROTATION_ENABLED:
+        return None
+    positions = rows(
+        """
+        SELECT * FROM positions
+        WHERE market=%s AND symbol<>%s
+        """,
+        (market, incoming_symbol),
+    )
+    if not positions:
+        return None
+
+    ranked: list[tuple[float, float, dict[str, Any]]] = []
+    for position in positions:
+        symbol = safe_text(position.get("symbol")).upper()
+        current = safe_float(position.get("current_price"))
+        entry = safe_float(position.get("average_price"), safe_float(position.get("entry_price")))
+        return_pct = ((current / entry) - 1.0) * 100.0 if entry > 0 and current > 0 else -999.0
+        held_score = _latest_opportunity_score(market, symbol)
+        ranked.append((held_score, return_pct, position))
+
+    held_score, return_pct, weakest = min(ranked, key=lambda item: (item[0], item[1]))
+    score_gap = incoming_score - held_score
+    if score_gap < ROTATION_MIN_SCORE_GAP:
+        return None
+
+    weakest_symbol = safe_text(weakest.get("symbol")).upper()
+    exit_price = safe_float(weakest.get("current_price"))
+    if exit_price <= 0:
+        return None
+    reason = f"continuous_rotation_to_{incoming_symbol}"
+    if not _close_position(market, weakest, exit_price, reason):
+        return None
+    log.info(
+        "%s | CONTINUOUS ROTATION | sold=%s incoming=%s gap=%.2f",
+        market.upper(),
+        weakest_symbol,
+        incoming_symbol,
+        score_gap,
+    )
+    return {
+        "market": market,
+        "symbol": weakest_symbol,
+        "action": "SELL",
+        "price": exit_price,
+        "reason": reason,
+        "rotation_target": incoming_symbol,
+        "score_gap": score_gap,
+        "return_pct": return_pct,
+    }
+
+
 # =========================================================
 # BUY EXECUTION
 # =========================================================
@@ -1136,6 +1265,16 @@ def process_signals(
             )
             continue
 
+        forecast_ready, forecast_reason = _entry_forecast_gate(market, symbol, price)
+        if not forecast_ready:
+            log.info(
+                "%s | REJECT | %s | forecast gate: %s",
+                market.upper(),
+                symbol,
+                forecast_reason,
+            )
+            continue
+
         # A BUY qualifies through either score or confidence. Only signals
         # that are weak on both measurements are rejected.
         minimum_score = max(45.0, HIGH_SCORE_THRESHOLD - 7.0)
@@ -1221,14 +1360,17 @@ def process_signals(
 
         open_count = _open_position_count(market)
         if not existing_position and open_count >= maximum_positions:
-            log.info(
-                "%s | REJECT | %s | position limit reached %d/%d",
-                market.upper(),
-                symbol,
-                open_count,
-                maximum_positions,
-            )
-            continue
+            rotation_action = _rotate_for_stronger_candidate(market, symbol, score)
+            if rotation_action is None:
+                log.info(
+                    "%s | REJECT | %s | position limit reached %d/%d and no superior rotation",
+                    market.upper(),
+                    symbol,
+                    open_count,
+                    maximum_positions,
+                )
+                continue
+            actions.append(rotation_action)
 
         recent = recent_trade(market, symbol)
         if recent:

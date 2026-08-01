@@ -94,3 +94,36 @@ def worker_is_online(status: Any) -> bool:
     hide dead Railway workers from Mission Control.
     """
     return str(status or "").strip().lower() in {"starting", "running", "idle", "healthy", "online"}
+
+
+def symbol_currency(symbol: Any, market: Any = "cash") -> str:
+    """Return the quote currency used for human-readable asset prices.
+
+    Portfolio totals remain USD. Individual global opportunity prices retain
+    their market currency so a Japanese or Indian quote is never shown as USD.
+    """
+    text = str(symbol or "").upper().strip()
+    market_text = str(market or "").lower().strip()
+    if market_text == "crypto" or text.endswith("-USD"):
+        return "USD"
+    suffixes = (
+        (".T", "JPY"), (".NS", "INR"), (".BO", "INR"),
+        (".DE", "EUR"), (".PA", "EUR"), (".AS", "EUR"),
+        (".MI", "EUR"), (".MC", "EUR"), (".L", "GBP"),
+        (".SW", "CHF"), (".HK", "HKD"), (".KS", "KRW"),
+        (".KQ", "KRW"), (".AX", "AUD"), (".TO", "CAD"),
+        (".SA", "BRL"), (".JO", "ZAR"), (".TA", "ILS"),
+    )
+    for suffix, currency in suffixes:
+        if text.endswith(suffix):
+            return currency
+    return "USD"
+
+
+def format_asset_price(value: Any, symbol: Any, market: Any = "cash") -> str:
+    number = as_float(value, 0.0)
+    if number <= 0:
+        return "Waiting for price"
+    currency = symbol_currency(symbol, market)
+    decimals = 4 if market == "crypto" and number < 10 else 2
+    return f"{number:,.{decimals}f} {currency}"

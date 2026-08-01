@@ -10,7 +10,7 @@ STARTING_BALANCE = float(os.getenv("STARTING_BALANCE", "10000000"))
 STOCK_STARTING_BALANCE = float(os.getenv("STOCK_STARTING_BALANCE", "10000000"))
 CRYPTO_STARTING_BALANCE = float(os.getenv("CRYPTO_STARTING_BALANCE", "5000000"))
 PAPER_BROKER_MODE = os.getenv("PAPER_BROKER_MODE", "true").lower() == "true"
-PAPER_CAPITAL_UPGRADE = os.getenv("PAPER_CAPITAL_UPGRADE", "true").lower() == "true"
+PAPER_CAPITAL_UPGRADE = os.getenv("PAPER_CAPITAL_UPGRADE", "false").lower() == "true"
 PAPER_BROKER_PROFILE = os.getenv("PAPER_BROKER_PROFILE", "institutional-paper")
 STOCK_PAPER_LEVERAGE = max(1.0, min(6.0, float(os.getenv("STOCK_PAPER_LEVERAGE", "4.0"))))
 CRYPTO_PAPER_LEVERAGE = max(1.0, min(3.0, float(os.getenv("CRYPTO_PAPER_LEVERAGE", "2.0"))))
@@ -35,10 +35,10 @@ REALTIME_MODE = os.getenv("REALTIME_MODE", "true").lower() == "true"
 EXECUTION_MODE = os.getenv("EXECUTION_MODE", "paper").strip().lower()
 UI_AUTO_REFRESH = os.getenv("UI_AUTO_REFRESH", "true").lower() == "true"
 UI_REFRESH_SECONDS = max(5, int(os.getenv("UI_REFRESH_SECONDS", "15")))
-STOCK_PULSE_SECONDS = max(5, int(os.getenv("STOCK_PULSE_SECONDS", "15")))
-CRYPTO_PULSE_SECONDS = max(5, int(os.getenv("CRYPTO_PULSE_SECONDS", "10")))
+STOCK_PULSE_SECONDS = max(5, int(os.getenv("STOCK_PULSE_SECONDS", "10")))
+CRYPTO_PULSE_SECONDS = max(5, int(os.getenv("CRYPTO_PULSE_SECONDS", "5")))
 STOCK_DEEP_SCAN_SECONDS = max(30, int(os.getenv("STOCK_DEEP_SCAN_SECONDS", "60")))
-STOCK_CLOSED_SCAN_SECONDS = max(60, int(os.getenv("STOCK_CLOSED_SCAN_SECONDS", "300")))
+STOCK_CLOSED_SCAN_SECONDS = max(60, int(os.getenv("STOCK_CLOSED_SCAN_SECONDS", "120")))
 CRYPTO_DEEP_SCAN_SECONDS = max(15, int(os.getenv("CRYPTO_DEEP_SCAN_SECONDS", "30")))
 INTELLIGENCE_REFRESH_SECONDS = max(300, int(os.getenv("INTELLIGENCE_REFRESH_SECONDS", "900")))
 REALTIME_CACHE_TTL_SECONDS = max(5, int(os.getenv("REALTIME_CACHE_TTL_SECONDS", "10")))
@@ -46,6 +46,18 @@ LIVE_SCAN_WORKERS = max(1, min(12, int(os.getenv("LIVE_SCAN_WORKERS", "5"))))
 DEEP_ANALYSIS_CANDIDATES = max(10, int(os.getenv("DEEP_ANALYSIS_CANDIDATES", "35")))
 LIVE_POSITION_PRICE_WORKERS = max(1, min(8, int(os.getenv("LIVE_POSITION_PRICE_WORKERS", "4"))))
 LIVE_STATUS_STALE_SECONDS = max(30, int(os.getenv("LIVE_STATUS_STALE_SECONDS", "90")))
+
+# V35 always-on paper execution. The workers never enter an idle state: a fast
+# rolling scan evaluates a small candidate batch between the deeper global
+# research cycles. Trades are still executed only when every data, forecast,
+# risk, and portfolio gate passes.
+ALWAYS_ON_TRADING = os.getenv("ALWAYS_ON_TRADING", "true").lower() == "true"
+FAST_SIGNAL_SCAN_ENABLED = os.getenv("FAST_SIGNAL_SCAN_ENABLED", "true").lower() == "true"
+STOCK_FAST_SCAN_SECONDS = max(5, int(os.getenv("STOCK_FAST_SCAN_SECONDS", "15")))
+CRYPTO_FAST_SCAN_SECONDS = max(5, int(os.getenv("CRYPTO_FAST_SCAN_SECONDS", "10")))
+FAST_SCAN_BATCH_SIZE = max(3, min(30, int(os.getenv("FAST_SCAN_BATCH_SIZE", "10"))))
+FAST_SCAN_TOP_RANKED = max(3, min(50, int(os.getenv("FAST_SCAN_TOP_RANKED", "20"))))
+WORKER_CYCLE_ERROR_BACKOFF_SECONDS = max(1, int(os.getenv("WORKER_CYCLE_ERROR_BACKOFF_SECONDS", "5")))
 ENABLE_AUTOTRADE = os.getenv("ENABLE_AUTOTRADE", "true").lower() == "true"
 ENABLE_NEWS = os.getenv("ENABLE_NEWS", "true").lower() == "true"
 NEWS_PRIORITY_CANDIDATES = max(3, int(os.getenv("NEWS_PRIORITY_CANDIDATES", "8")))
@@ -241,6 +253,19 @@ MAX_TRADE_VALUE_PCT = float(os.getenv("MAX_TRADE_VALUE_PCT", "0.08"))
 ENABLE_QUANT_TRADE_STANDARD = os.getenv("ENABLE_QUANT_TRADE_STANDARD", "true").lower() == "true"
 QUANT_MIN_QUALITY = float(os.getenv("QUANT_MIN_QUALITY", "68.0"))
 QUANT_MIN_NET_EV_PCT = float(os.getenv("QUANT_MIN_NET_EV_PCT", "0.001"))
+
+# =========================================================
+# LIVE DECISION DATA-INTEGRITY GATES
+# =========================================================
+# A recommendation cannot be presented as a trade-ready BUY when the live
+# quote, forecast, or data freshness is missing. These values are deliberately
+# configurable so the UI and paper broker can stay active across global markets
+# without treating stale/incomplete records as current opportunities.
+DECISION_STOCK_MAX_AGE_MINUTES = max(5, int(os.getenv("DECISION_STOCK_MAX_AGE_MINUTES", "180")))
+DECISION_CRYPTO_MAX_AGE_MINUTES = max(5, int(os.getenv("DECISION_CRYPTO_MAX_AGE_MINUTES", "45")))
+MIN_ACTIONABLE_MOVE_STOCK_PCT = max(0.0, float(os.getenv("MIN_ACTIONABLE_MOVE_STOCK_PCT", "0.75")))
+MIN_ACTIONABLE_MOVE_CRYPTO_PCT = max(0.0, float(os.getenv("MIN_ACTIONABLE_MOVE_CRYPTO_PCT", "1.25")))
+REQUIRE_TARGET_FOR_BUY = os.getenv("REQUIRE_TARGET_FOR_BUY", "true").lower() == "true"
 QUANT_MAX_SPREAD_PCT = float(os.getenv("QUANT_MAX_SPREAD_PCT", "0.006"))
 QUANT_MAX_SLIPPAGE_PCT = float(os.getenv("QUANT_MAX_SLIPPAGE_PCT", "0.005"))
 QUANT_ADVERSE_REJECT_SCORE = float(os.getenv("QUANT_ADVERSE_REJECT_SCORE", "70.0"))

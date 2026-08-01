@@ -7,9 +7,11 @@ from zoneinfo import ZoneInfo
 
 from config import (
     CRYPTO_DEEP_SCAN_SECONDS,
+    CRYPTO_FAST_SCAN_SECONDS,
     CRYPTO_PULSE_SECONDS,
     STOCK_CLOSED_SCAN_SECONDS,
     STOCK_DEEP_SCAN_SECONDS,
+    STOCK_FAST_SCAN_SECONDS,
     STOCK_PULSE_SECONDS,
 )
 
@@ -19,6 +21,7 @@ NEW_YORK = ZoneInfo("America/New_York")
 @dataclass(frozen=True)
 class RuntimeCadence:
     pulse_seconds: int
+    fast_scan_seconds: int
     deep_scan_seconds: int
     session_label: str
 
@@ -54,9 +57,19 @@ def cadence_for(market: str, now: datetime | None = None) -> RuntimeCadence:
     market = str(market or "").strip().lower()
     session = market_session(market, now)
     if market == "crypto":
-        return RuntimeCadence(CRYPTO_PULSE_SECONDS, CRYPTO_DEEP_SCAN_SECONDS, session)
+        return RuntimeCadence(
+            CRYPTO_PULSE_SECONDS,
+            CRYPTO_FAST_SCAN_SECONDS,
+            CRYPTO_DEEP_SCAN_SECONDS,
+            session,
+        )
     deep = STOCK_DEEP_SCAN_SECONDS if session in {"pre-market", "regular", "after-hours"} else STOCK_CLOSED_SCAN_SECONDS
-    return RuntimeCadence(STOCK_PULSE_SECONDS, deep, session)
+    return RuntimeCadence(
+        STOCK_PULSE_SECONDS,
+        STOCK_FAST_SCAN_SECONDS,
+        deep,
+        session,
+    )
 
 
 def seconds_until(when_monotonic: float, now_monotonic: float) -> int:

@@ -6,9 +6,14 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any, Iterator
 
-import psycopg
-from psycopg import Connection
-from psycopg.rows import dict_row
+try:
+    import psycopg
+    from psycopg import Connection
+    from psycopg.rows import dict_row
+except ImportError:  # Allows analysis/test imports before deployment dependencies install.
+    psycopg = None
+    Connection = Any
+    dict_row = None
 
 from config import (
     CRYPTO_PAPER_LEVERAGE,
@@ -43,6 +48,10 @@ def _database_url() -> str:
 
 @contextmanager
 def connect() -> Iterator[Connection]:
+    if psycopg is None:
+        raise RuntimeError(
+            "psycopg is not installed. Install requirements.txt before starting the app."
+        )
     conn = psycopg.connect(
         _database_url(),
         row_factory=dict_row,
@@ -190,12 +199,17 @@ def initialize_database() -> None:
             last_run TEXT,
             heartbeat TEXT,
             last_pulse TEXT,
+            last_fast_scan TEXT,
+            next_fast_scan_at TEXT,
             next_scan_at TEXT,
             session_label TEXT,
             pulse_seconds INTEGER,
+            fast_scan_seconds INTEGER,
             deep_scan_seconds INTEGER,
             execution_mode TEXT DEFAULT 'paper',
-            actions_last_cycle INTEGER DEFAULT 0
+            actions_last_cycle INTEGER DEFAULT 0,
+            fast_actions_last_cycle INTEGER DEFAULT 0,
+            cycle_errors INTEGER DEFAULT 0
         )
         """,
         """

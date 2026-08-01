@@ -11,10 +11,10 @@ import streamlit as st
 
 from ai_oracle import answer_market_question, openai_available
 from config import (
-    APP_NAME, EXECUTION_MODE, LIVE_STATUS_STALE_SECONDS, PAPER_BROKER_MODE,
-    UI_AUTO_REFRESH, UI_REFRESH_SECONDS,
+    ALWAYS_ON_TRADING, APP_NAME, EXECUTION_MODE, LIVE_STATUS_STALE_SECONDS,
+    PAPER_BROKER_MODE, UI_AUTO_REFRESH, UI_REFRESH_SECONDS,
 )
-from dashboard_helpers import as_float, worker_is_online
+from dashboard_helpers import as_float, format_asset_price, worker_is_online
 from database import initialize_database, row, rows
 from market_data import get_history
 from migrations import run_migrations
@@ -217,7 +217,7 @@ def clean_trade_frame(trades: list[dict[str, Any]]) -> pd.DataFrame:
     view = frame[desired].rename(columns=rename)
     if "Date" in view.columns:
         parsed = pd.to_datetime(view["Date"], errors="coerce", utc=True)
-        view["Date"] = parsed.dt.strftime("%b %d, %Y %I:%M:%S %p UTC").fillna(view["Date"].astype(str))
+        view["Date"] = parsed.dt.strftime("%b %d %H:%M UTC").fillna(view["Date"].astype(str))
     if "Portfolio" in view.columns:
         view["Portfolio"] = view["Portfolio"].map({"cash": "Stock", "crypto": "Crypto"}).fillna(view["Portfolio"])
     if "Action" in view.columns:
@@ -237,13 +237,22 @@ def decision_card(item: dict[str, Any], compact: bool = False) -> None:
     score = as_float(item.get("score"))
     risk = str(item.get("risk", "Unknown"))
     symbol = str(item.get("symbol", "")).upper()
-    market = "Stock" if str(item.get("market", "")).lower() == "cash" else "Crypto"
+    market_key = str(item.get("market", "")).lower()
+    market = "Stock" if market_key == "cash" else "Crypto"
     color = {"BUY": "green", "SELL": "red", "HOLD": "blue", "WAIT": "orange"}.get(action, "orange")
     supports, cautions = plain_reason(item.get("reason"))
+    ready = bool(item.get("trade_eligible"))
+    data_status = str(item.get("data_status") or "Data status unavailable")
 
     with st.container(border=True):
         st.markdown(f"### :{color}[{action} · {symbol}]")
-        st.caption(f"{market} portfolio · Current {money(price) if price else 'Not available'} · Target {money(target) if target else 'Not available'}")
+        current_text = format_asset_price(price, symbol, market_key)
+        target_text = format_asset_price(target, symbol, market_key)
+        st.caption(f"{market} portfolio · Current {current_text} · Target {target_text}")
+        if ready:
+            st.success(f"Trade-ready data · {data_status}")
+        else:
+            st.warning(data_status)
         if not compact:
             left, right = st.columns(2)
             with left:
@@ -258,9 +267,8 @@ def decision_card(item: dict[str, Any], compact: bool = False) -> None:
             st.markdown("**What to watch**")
             for point in cautions:
                 st.markdown(f"⚠️ {point}")
-            reference = money(price) if price else "Not available"
-            target_text = money(target) if target else "Not available"
-            stop_text = money(low) if low else "Not available"
+            reference = format_asset_price(price, symbol, market_key)
+            stop_text = format_asset_price(low, symbol, market_key)
             st.caption(f"Entry reference: {reference} · Target: {target_text} · Protective level: {stop_text}")
 
 def portfolio_table(positions: list[dict[str, Any]]) -> pd.DataFrame:
@@ -306,8 +314,10 @@ combined_start = stock_metrics["starting_balance"] + crypto_metrics["starting_ba
 combined_return = ((combined_equity / combined_start) - 1) * 100 if combined_start else 0.0
 combined_buying_power = stock_metrics["buying_power"] + crypto_metrics["buying_power"]
 combined_margin_debt = stock_metrics["margin_debt"] + crypto_metrics["margin_debt"]
-buy_decisions = [d for d in decisions if d["action"] == "BUY"]
-sell_decisions = [d for d in decisions if d["action"] == "SELL"]
+ready_decisions = [d for d in decisions if bool(d.get("trade_eligible"))]
+buy_decisions = [d for d in ready_decisions if d["action"] == "BUY"]
+sell_decisions = [d for d in ready_decisions if d["action"] == "SELL"]
+waiting_for_data = [d for d in decisions if not bool(d.get("trade_eligible"))]
 
 with st.sidebar:
     st.markdown("## 🔮 GARIBALDI ORACLE")
@@ -324,8 +334,14 @@ with st.sidebar:
         online = worker_live(record)
         label = "Stock" if market == "cash" else "Crypto"
         age = status_age_seconds(record.get("last_pulse"))
+        fast_age = status_age_seconds(record.get("last_fast_scan"))
         pulse_text = f"{int(age)}s ago" if age is not None else "waiting"
-        st.write(f"{'🟢' if online else '🔴'} **{label}** — {record.get('session_label') or record.get('status','waiting')} · pulse {pulse_text}")
+        fast_text = f"{int(fast_age)}s ago" if fast_age is not None else "starting"
+        st.write(
+            f"{'🟢' if online else '🔴'} **{label}** — "
+            f"{record.get('session_label') or record.get('status','waiting')} · "
+            f"heartbeat {pulse_text} · fast scan {fast_text}"
+        )
     st.caption(f"Auto-refresh: {'ON' if UI_AUTO_REFRESH else 'OFF'} · every {UI_REFRESH_SECONDS}s")
     if st.button("Refresh market data", use_container_width=True):
         st.cache_data.clear()
@@ -334,9 +350,9 @@ with st.sidebar:
 st.markdown(
     f"""
 <div class='hero'>
-  <div class='eyebrow'>Institutional Paper Broker · AI Chief Investment Officer</div>
+  <div class='eyebrow'>Always-On Institutional Paper Broker · AI Chief Investment Officer</div>
   <h1>{html.escape(APP_NAME)}</h1>
-  <p>Large simulated capital, controlled paper leverage, continuous scanning, live risk exits, market-history analysis, and clear decisions. The broker account is paper-only and does not submit real-money orders.</p>
+  <p>Large simulated capital, controlled paper leverage, rolling fast scans, deeper global research, continuous position monitoring, automatic rotation, live risk exits, and clear decisions. The broker account is paper-only and does not submit real-money orders.</p>
 </div>
 """,
     unsafe_allow_html=True,
@@ -345,22 +361,36 @@ st.markdown(
 live_records = [record for record in workers if worker_live(record)]
 mode_label = "LIVE INSTITUTIONAL PAPER BROKER" if EXECUTION_MODE == "paper" and PAPER_BROKER_MODE else ("LIVE PAPER TRADING" if EXECUTION_MODE == "paper" else f"LIVE {EXECUTION_MODE.upper()} EXECUTION")
 if len(live_records) == 2:
-    st.success(f"🟢 {mode_label} · stock and crypto workers are continuously scanning, refreshing open positions, and enforcing risk exits.")
+    always_text = "ALWAYS-ON" if ALWAYS_ON_TRADING else "CONTINUOUS MONITORING"
+    st.success(
+        f"🟢 {mode_label} · {always_text} · rolling fast scans, deep research, "
+        "position monitoring, qualified entries, rotations, and risk exits are active."
+    )
 elif live_records:
     st.warning(f"🟠 {mode_label} · only {len(live_records)} of 2 workers currently has a fresh heartbeat.")
 else:
     st.error("🔴 Live workers are not reporting fresh heartbeats. Check both Railway worker services.")
 
-status_cols = st.columns(3)
+status_cols = st.columns(4)
 for index, market in enumerate(("cash", "crypto")):
     record = next((r for r in workers if r.get("market") == market), {})
-    label = "Stock pulse" if market == "cash" else "Crypto pulse"
-    age = status_age_seconds(record.get("last_pulse"))
-    value = f"{int(age)}s ago" if age is not None else "Waiting"
-    status_cols[index].metric(label, value, f"Deep scan every {record.get('deep_scan_seconds') or '—'}s")
+    label = "Stock engine" if market == "cash" else "Crypto engine"
+    age = status_age_seconds(record.get("last_fast_scan"))
+    value = f"{int(age)}s ago" if age is not None else "Starting"
+    status_cols[index].metric(
+        label,
+        value,
+        f"Fast {record.get('fast_scan_seconds') or '—'}s · Deep {record.get('deep_scan_seconds') or '—'}s",
+    )
 latest_trade = recent_trades[0] if recent_trades else {}
 trade_label = f"{str(latest_trade.get('side','')).upper()} {latest_trade.get('symbol','')}".strip() or "No trade yet"
-status_cols[2].metric("Latest execution", trade_label, clean_trade_reason(latest_trade.get("reason")) if latest_trade else "Waiting for a qualified trade")
+status_cols[2].metric(
+    "Latest execution",
+    trade_label,
+    clean_trade_reason(latest_trade.get("reason")) if latest_trade else "Scanning for a qualified trade",
+)
+error_total = sum(int(as_float(record.get("cycle_errors"))) for record in workers)
+status_cols[3].metric("Auto recovery", "Ready" if error_total == 0 else "Recovering", f"Cycle errors: {error_total}")
 
 if page == "🏠 Dashboard":
     st.subheader("What should I do today?")
@@ -369,7 +399,7 @@ if page == "🏠 Dashboard":
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Broker Equity", money(combined_equity), pct(combined_return))
     c2.metric("Available Buying Power", money(combined_buying_power))
-    c3.metric("Buy Opportunities", len(buy_decisions))
+    c3.metric("Trade-ready Buys", len(buy_decisions), f"{len(waiting_for_data)} waiting on data")
     c4.metric("Active Risks", len(alerts))
     b1, b2, b3, b4 = st.columns(4)
     b1.metric("Stock Leverage", f"{stock_metrics['leverage_used']:.2f}x", f"Limit {stock_metrics['leverage_limit']:.1f}x")
@@ -400,9 +430,12 @@ if page == "🏠 Dashboard":
         for item in plan:
             st.markdown(f"- {item}")
 
-        st.markdown("### Top opportunities")
-        for item in decisions[:5]:
-            decision_card(item, compact=True)
+        st.markdown("### Top live opportunities")
+        if buy_decisions:
+            for item in buy_decisions[:5]:
+                decision_card(item, compact=True)
+        else:
+            st.info("No BUY has passed the live-price, forecast, freshness, and minimum-edge gates yet.")
 
     with right:
         st.markdown("### Portfolio health")
@@ -432,8 +465,8 @@ elif page == "📈 Markets":
             if not filtered:
                 st.info("No ranked opportunities are currently available for this market.")
             else:
-                frame = pd.DataFrame(filtered)[["symbol", "market", "action", "score", "confidence", "expected_return", "risk", "price", "target"]]
-                frame.columns = ["Symbol", "Market", "Decision", "Quality", "Confidence %", "Expected %", "Risk", "Price", "Target"]
+                frame = pd.DataFrame(filtered)[["symbol", "market", "action", "score", "confidence", "expected_return", "risk", "price", "target", "data_status", "trade_eligible"]]
+                frame.columns = ["Symbol", "Market", "Decision", "Quality", "Confidence %", "Expected %", "Risk", "Price", "Target", "Data Status", "Trade Ready"]
                 st.dataframe(frame, use_container_width=True, hide_index=True)
 
     st.markdown("### Chart and price history")
@@ -513,7 +546,7 @@ elif page == "💼 Portfolios":
                     st.warning("The largest holding is creating concentration risk.")
                 if health.position_count < 4 and health.invested > 0:
                     st.warning("The portfolio may benefit from broader diversification.")
-                related = [d for d in decisions if d["market"] == market][:3]
+                related = [d for d in ready_decisions if d["market"] == market][:3]
                 for item in related:
                     decision_card(item, compact=True)
 
@@ -622,6 +655,10 @@ elif page == "⚙ Professional":
             b.metric("Confidence", f"{as_float(d.get('confidence')):.0f}%")
             c.metric("Trade quality", f"{as_float(d.get('score')):.0f}/100")
             e.metric("Expected move", f"{as_float(d.get('expected_return')):+.1f}%")
+            if d.get("trade_eligible"):
+                st.success(str(d.get("data_status") or "Trade-ready data"))
+            else:
+                st.warning(str(d.get("data_status") or "Not trade-ready"))
             st.markdown("### Supporting evidence")
             for point in supports:
                 st.success(point)
