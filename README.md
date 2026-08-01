@@ -71,6 +71,7 @@ UNAVAILABLE_SYMBOL_COOLDOWN_SECONDS=1800
 GLOBAL_SCANNER_ENABLED=true
 GLOBAL_SCAN_SYMBOLS_PER_CYCLE=45
 GLOBAL_ACTIVE_CANDIDATES=20
+GLOBAL_CANDIDATE_TTL_SECONDS=1800
 GLOBAL_INCLUDE_PROVIDER_DISCOVERY=true
 GLOBAL_CORE_SYMBOLS_PER_CYCLE=12
 GLOBAL_ETF_SYMBOLS_PER_CYCLE=8
@@ -79,8 +80,15 @@ GLOBAL_GAP_MOVER_MIN_CHANGE_PCT=2.0
 GLOBAL_UNUSUAL_VOLUME_MIN_RATIO=1.8
 PENNY_STOCK_MIN_PRICE=0.50
 PENNY_STOCK_MAX_PRICE=5.00
+PENNY_STOCK_ENABLED=true
+PENNY_STOCK_MIN_DAILY_VOLUME=500000
 PENNY_STOCK_MIN_AVG_DOLLAR_VOLUME=2500000
 PENNY_STOCK_MAX_TRADE_VALUE_PCT=0.01
+PENNY_STOCK_MAX_OPEN_POSITIONS=3
+PENNY_STOCK_MAX_PORTFOLIO_PCT=0.02
+PENNY_STOCK_MIN_SCORE=75
+PENNY_STOCK_MIN_CONFIDENCE=0.70
+OTC_STOCKS_ENABLED=false
 ```
 
 Lower intervals increase provider traffic and can trigger rate limits. The defaults balance responsiveness with API reliability.
@@ -89,7 +97,7 @@ Lower intervals increase provider traffic and can trigger rate limits. The defau
 
 The stock worker now combines the fixed watchlist with dynamic discovery. Every scan keeps recurring coverage for GOOGL, GOOG, AMZN, AAPL, MSFT, NVDA and other core stocks, plus major ETFs. The rotating universe also supports blue-chip core stocks, large caps, mid caps, small caps, qualified penny stocks, ETFs, major gainers, major losers, gap movers, unusual-volume names, and global liquid leaders.
 
-Major movers are discovered by provider-backed price history: the scanner ranks one-day change, five-day change, relative volume, volatility, and average dollar volume. Provider errors, rate limits, and unavailable symbols enter temporary cooldowns so a bad symbol such as an unavailable crypto pair does not stop either worker.
+Major movers are discovered first through supported provider mover/snapshot capabilities, including Polygon stock snapshots, Alpha Vantage top gainers/losers/most-active data, and EODHD screener signals when those configured plans expose them. The scanner falls back to rotating price-history discovery and ranks one-day change, five-day change, relative volume, volatility, and average dollar volume. Provider errors, rate limits, and unavailable symbols enter temporary cooldowns so a bad symbol such as an unavailable crypto pair does not stop either worker. Candidate rows older than `GLOBAL_CANDIDATE_TTL_SECONDS` are ignored or removed so stale high scores cannot dominate current opportunities.
 
 Qualified penny stocks are kept in their own category and must pass separate minimum price and dollar-volume gates. The paper broker can further restrict sizing through `PENNY_STOCK_MAX_TRADE_VALUE_PCT`.
 

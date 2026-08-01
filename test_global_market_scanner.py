@@ -19,6 +19,7 @@ if "yfinance" not in sys.modules:
     sys.modules["yfinance"] = yf
 
 import pandas as pd
+from datetime import datetime, timedelta, timezone
 
 import global_market_scanner as scanner
 
@@ -45,7 +46,8 @@ def test_candidate_metrics_detects_liquid_mover(monkeypatch):
     assert candidate is not None
     assert candidate.mover_score > 0
     assert candidate.relative_volume > 1
-    assert candidate.category in {"major_gainer", "gap_mover", "unusual_volume", "dynamic_opportunity"}
+    assert candidate.primary_category == "dynamic_opportunity"
+    assert "major_gainer" in candidate.mover_tags
 
 
 def test_seed_universe_is_worldwide(monkeypatch):
@@ -75,3 +77,45 @@ def test_qualified_penny_stock_requires_strict_liquidity(monkeypatch):
     monkeypatch.setattr(scanner, "get_history", lambda *args, **kwargs: frame)
     candidate = scanner._candidate_metrics({"symbol":"SOUN","name":"SOUN","exchange":"US","region":"United States","sector":"qualified_penny"})
     assert candidate is None
+
+
+def test_blue_chip_can_also_be_major_mover(monkeypatch):
+    monkeypatch.setattr(scanner, "get_history", lambda *args, **kwargs: sample_history())
+    candidate = scanner._candidate_metrics({"symbol":"AAPL","name":"Apple","exchange":"US","region":"United States","sector":"mega_cap_core"})
+    assert candidate is not None
+    assert candidate.primary_category == "blue_chip"
+    assert "major_gainer" in candidate.mover_tags
+
+
+def test_expired_candidates_are_removed_from_active_list(monkeypatch):
+    now = datetime(2026, 8, 1, 12, 0, tzinfo=timezone.utc)
+    old = (now - timedelta(seconds=scanner.GLOBAL_CANDIDATE_TTL_SECONDS + 1)).isoformat()
+    fresh = (now - timedelta(seconds=10)).isoformat()
+    records = [
+        {"symbol": "OLD", "mover_score": 99, "scanned_at": old},
+        {"symbol": "NEW", "mover_score": 10, "scanned_at": fresh},
+    ]
+    assert [item["symbol"] for item in scanner.filter_fresh_candidates(records, now)] == ["NEW"]
+
+
+def test_provider_mover_discovery_uses_configured_alpha_capability(monkeypatch):
+    class Settings:
+        def get(self, name):
+            return "key" if name == "ALPHA_VANTAGE_API_KEY" else None
+
+    class Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "top_gainers": [{"ticker": "GAIN"}],
+                "top_losers": [{"ticker": "LOSE"}],
+                "most_actively_traded": [{"ticker": "VOL"}],
+            }
+
+    monkeypatch.setattr(scanner, "get_api_settings", lambda: Settings())
+    monkeypatch.setattr(scanner.requests, "get", lambda *args, **kwargs: Response())
+    monkeypatch.setattr(scanner, "cached_call", lambda namespace, ttl, fn, *args: fn(*args))
+    symbols = {item["symbol"]: item["mover_type"] for item in scanner.provider_mover_universe()}
+    assert symbols == {"GAIN": "major_gainer", "LOSE": "major_loser", "VOL": "unusual_volume"}

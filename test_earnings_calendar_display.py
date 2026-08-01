@@ -76,6 +76,22 @@ def test_invalid_zero_revenue_estimate_is_not_displayed_as_zero():
     assert "Rev. Est." not in row
 
 
+def test_reported_zero_revenue_actual_is_displayed():
+    prepared = prepare_events([_record("JPM", "2026-08-02", revenueActual=0)], today=date(2026, 8, 1))
+    row = table_rows(prepared["main"])[0]
+    assert row["Rev. Actual"] == "$0"
+
+
+def test_past_earnings_without_actuals_are_past_incomplete():
+    prepared = prepare_events(
+        [_record("MSFT", "2026-07-31", epsActual=None, revenueActual=None)],
+        today=date(2026, 8, 1),
+        start_date=date(2026, 7, 31),
+        end_date=date(2026, 8, 1),
+    )
+    assert prepared["main"][0]["status"] == "Past / Incomplete"
+
+
 def test_nearest_date_sorting_wins_before_priority():
     prepared = prepare_events(
         [

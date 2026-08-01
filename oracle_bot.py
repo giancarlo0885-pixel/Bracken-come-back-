@@ -878,6 +878,59 @@ def _latest_opportunity_score(market: str, symbol: str) -> float:
         return 50.0
 
 
+def _is_penny_stock(symbol: str, price: float, signal: Any) -> bool:
+    exchange = safe_text(signal_value(signal, "exchange", "")).upper()
+    return (
+        PENNY_STOCK_MIN_PRICE <= price <= PENNY_STOCK_MAX_PRICE
+        or exchange in {"OTC", "PINK"}
+        or bool(signal_value(signal, "penny_stock", False))
+    )
+
+
+def _penny_position_count(market: str) -> int:
+    try:
+        positions = rows("SELECT symbol,current_price,average_price,entry_price FROM positions WHERE market=%s", (market,))
+    except Exception:
+        return 0
+    total = 0
+    for position in positions:
+        price = safe_float(position.get("current_price"), safe_float(position.get("average_price"), safe_float(position.get("entry_price"))))
+        if PENNY_STOCK_MIN_PRICE <= price <= PENNY_STOCK_MAX_PRICE:
+            total += 1
+    return total
+
+
+def _penny_stock_gate(market: str, symbol: str, price: float, signal: Any, score: float, confidence: float) -> tuple[bool, str]:
+    if not _is_penny_stock(symbol, price, signal):
+        return True, "not a penny stock"
+    if not PENNY_STOCK_ENABLED:
+        return False, "penny-stock entries disabled"
+    exchange = safe_text(signal_value(signal, "exchange", "")).upper()
+    if exchange in {"OTC", "PINK"} and not OTC_STOCKS_ENABLED:
+        return False, "OTC penny stocks disabled"
+    if price < PENNY_STOCK_MIN_PRICE or price > PENNY_STOCK_MAX_PRICE:
+        return False, "penny-stock price is outside allowed bounds"
+    if score < PENNY_STOCK_MIN_SCORE:
+        return False, f"penny-stock score {score:.1f} below {PENNY_STOCK_MIN_SCORE:.1f}"
+    if confidence < PENNY_STOCK_MIN_CONFIDENCE:
+        return False, f"penny-stock confidence {confidence:.2f} below {PENNY_STOCK_MIN_CONFIDENCE:.2f}"
+    created = _parse_utc(signal_value(signal, "created_at", signal_value(signal, "timestamp", "")))
+    if created is None:
+        return False, "penny-stock signal timestamp is missing"
+    age_minutes = max(0.0, (datetime.now(timezone.utc) - created).total_seconds() / 60.0)
+    if age_minutes > DECISION_STOCK_MAX_AGE_MINUTES:
+        return False, f"penny-stock signal is stale ({age_minutes:.0f} minutes old)"
+    volume = safe_float(signal_value(signal, "volume", signal_value(signal, "daily_volume", 0.0)))
+    avg_dollar_volume = safe_float(signal_value(signal, "avg_dollar_volume", signal_value(signal, "average_dollar_volume", 0.0)))
+    if volume < PENNY_STOCK_MIN_DAILY_VOLUME:
+        return False, "penny-stock daily volume is insufficient"
+    if avg_dollar_volume < PENNY_STOCK_MIN_AVG_DOLLAR_VOLUME:
+        return False, "penny-stock dollar volume is insufficient"
+    if _penny_position_count(market) >= PENNY_STOCK_MAX_OPEN_POSITIONS:
+        return False, "penny-stock position limit reached"
+    return True, "penny-stock controls passed"
+
+
 def _rotate_for_stronger_candidate(
     market: str,
     incoming_symbol: str,
@@ -1401,6 +1454,16 @@ def process_signals(
                 minimum_score,
                 confidence,
                 minimum_confidence,
+            )
+            continue
+
+        penny_ready, penny_reason = _penny_stock_gate(market, symbol, price, signal, score, confidence)
+        if not penny_ready:
+            log.info(
+                "%s | REJECT | %s | penny-stock gate: %s",
+                market.upper(),
+                symbol,
+                penny_reason,
             )
             continue
 

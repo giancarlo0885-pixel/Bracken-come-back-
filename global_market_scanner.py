@@ -8,7 +8,7 @@ and returns only a small active list to the full Oracle decision stack.
 """
 
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
 import logging
 import os
@@ -20,6 +20,7 @@ import requests
 from cache import cached_call
 from config import API_CACHE_TTL_SECONDS
 from config import (
+    GLOBAL_CANDIDATE_TTL_SECONDS,
     GLOBAL_CORE_SYMBOLS_PER_CYCLE,
     GLOBAL_ETF_SYMBOLS_PER_CYCLE,
     GLOBAL_GAP_MOVER_MIN_CHANGE_PCT,
@@ -28,8 +29,12 @@ from config import (
     GLOBAL_UNUSUAL_VOLUME_MIN_RATIO,
     PENNY_STOCK_MAX_PRICE,
     PENNY_STOCK_MIN_AVG_DOLLAR_VOLUME,
+    PENNY_STOCK_MIN_DAILY_VOLUME,
     PENNY_STOCK_MIN_PRICE,
+    PENNY_STOCK_ENABLED,
+    OTC_STOCKS_ENABLED,
 )
+from api_manager import get_api_settings
 from database import connect, utc_now
 from market_data import get_history
 
@@ -146,6 +151,12 @@ class GlobalCandidate:
     avg_dollar_volume: float
     volatility_pct: float
     mover_score: float
+    primary_category: str
+    mover_tags: list[str]
+    discovery_source: str
+    discovery_timestamp: str
+    quote_timestamp: str
+    data_freshness_seconds: float | None
     category: str
     risk_bucket: str
     tradeable: bool
@@ -163,10 +174,19 @@ def _ensure_tables() -> None:
             change_5d_pct DOUBLE PRECISION, relative_volume DOUBLE PRECISION,
             avg_dollar_volume DOUBLE PRECISION, volatility_pct DOUBLE PRECISION,
             mover_score DOUBLE PRECISION, category TEXT DEFAULT 'unknown',
+            primary_category TEXT DEFAULT 'unknown', mover_tags JSONB DEFAULT '[]'::jsonb,
+            discovery_source TEXT DEFAULT 'rotating_universe', discovery_timestamp TEXT,
+            quote_timestamp TEXT, data_freshness_seconds DOUBLE PRECISION,
             risk_bucket TEXT DEFAULT 'standard', tradeable BOOLEAN DEFAULT TRUE,
             payload JSONB, scanned_at TEXT NOT NULL)""")
         for statement in (
             "ALTER TABLE global_market_candidates ADD COLUMN IF NOT EXISTS category TEXT DEFAULT 'unknown'",
+            "ALTER TABLE global_market_candidates ADD COLUMN IF NOT EXISTS primary_category TEXT DEFAULT 'unknown'",
+            "ALTER TABLE global_market_candidates ADD COLUMN IF NOT EXISTS mover_tags JSONB DEFAULT '[]'::jsonb",
+            "ALTER TABLE global_market_candidates ADD COLUMN IF NOT EXISTS discovery_source TEXT DEFAULT 'rotating_universe'",
+            "ALTER TABLE global_market_candidates ADD COLUMN IF NOT EXISTS discovery_timestamp TEXT",
+            "ALTER TABLE global_market_candidates ADD COLUMN IF NOT EXISTS quote_timestamp TEXT",
+            "ALTER TABLE global_market_candidates ADD COLUMN IF NOT EXISTS data_freshness_seconds DOUBLE PRECISION",
             "ALTER TABLE global_market_candidates ADD COLUMN IF NOT EXISTS risk_bucket TEXT DEFAULT 'standard'",
             "ALTER TABLE global_market_candidates ADD COLUMN IF NOT EXISTS tradeable BOOLEAN DEFAULT TRUE",
         ):
@@ -246,6 +266,26 @@ def global_universe() -> list[dict[str, str]]:
     return cached_call("global_equity_universe", GLOBAL_UNIVERSE_TTL_SECONDS, _load_universe)
 
 
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _parse_time(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
 def _series(frame: pd.DataFrame, column: str) -> pd.Series:
     value = frame[column]
     if isinstance(value, pd.DataFrame):
@@ -253,34 +293,160 @@ def _series(frame: pd.DataFrame, column: str) -> pd.Series:
     return pd.to_numeric(value, errors="coerce").dropna()
 
 
-def _classify_candidate(meta: dict[str, str], price: float, change_1d: float, relative_volume: float, avg_dollar_volume: float) -> tuple[str, str, bool]:
+def _classify_candidate(meta: dict[str, str], price: float, change_1d: float, relative_volume: float, avg_dollar_volume: float, daily_volume: float) -> tuple[str, list[str], str, bool]:
     sector = str(meta.get("sector") or "").lower()
     if "etf" in sector:
-        category = "etf"
+        primary = "etf"
     elif price <= PENNY_STOCK_MAX_PRICE:
-        category = "qualified_penny_stock"
+        primary = "penny_stock"
     elif "mega_cap" in sector or meta.get("symbol") in CORE_STOCKS:
-        category = "blue_chip_core"
+        primary = "blue_chip"
     elif "large_cap" in sector:
-        category = "large_cap"
+        primary = "large_cap"
     elif "mid_cap" in sector:
-        category = "mid_cap"
+        primary = "mid_cap"
     elif "small_cap" in sector:
-        category = "small_cap"
-    elif change_1d >= GLOBAL_MAJOR_MOVER_MIN_CHANGE_PCT:
-        category = "major_gainer"
-    elif change_1d <= -GLOBAL_MAJOR_MOVER_MIN_CHANGE_PCT:
-        category = "major_loser"
-    elif abs(change_1d) >= GLOBAL_GAP_MOVER_MIN_CHANGE_PCT:
-        category = "gap_mover"
-    elif relative_volume >= GLOBAL_UNUSUAL_VOLUME_MIN_RATIO:
-        category = "unusual_volume"
+        primary = "small_cap"
     else:
-        category = "dynamic_opportunity"
+        primary = "dynamic_opportunity"
+    tags: list[str] = []
+    if change_1d >= GLOBAL_MAJOR_MOVER_MIN_CHANGE_PCT:
+        tags.append("major_gainer")
+    if change_1d <= -GLOBAL_MAJOR_MOVER_MIN_CHANGE_PCT:
+        tags.append("major_loser")
+    if abs(change_1d) >= GLOBAL_GAP_MOVER_MIN_CHANGE_PCT:
+        tags.append("gap_mover")
+    if relative_volume >= GLOBAL_UNUSUAL_VOLUME_MIN_RATIO:
+        tags.append("unusual_volume")
     if price <= PENNY_STOCK_MAX_PRICE:
-        tradeable = price >= PENNY_STOCK_MIN_PRICE and avg_dollar_volume >= PENNY_STOCK_MIN_AVG_DOLLAR_VOLUME
-        return category, "strict_penny_controls", tradeable
-    return category, "standard", True
+        tradeable = (
+            PENNY_STOCK_ENABLED
+            and price >= PENNY_STOCK_MIN_PRICE
+            and daily_volume >= PENNY_STOCK_MIN_DAILY_VOLUME
+            and avg_dollar_volume >= PENNY_STOCK_MIN_AVG_DOLLAR_VOLUME
+            and (OTC_STOCKS_ENABLED or str(meta.get("exchange") or "").upper() not in {"OTC", "PINK"})
+        )
+        return primary, tags, "strict_penny_controls", tradeable
+    return primary, tags, "standard", True
+
+
+def _mover_meta(symbol: str, mover_type: str, source: str, name: str | None = None) -> dict[str, str]:
+    return {
+        "symbol": str(symbol or "").upper().strip(),
+        "name": name or str(symbol or "").upper().strip(),
+        "exchange": "US",
+        "region": "United States",
+        "sector": mover_type,
+        "discovery_source": source,
+        "mover_type": mover_type,
+        "discovery_timestamp": _now_iso(),
+    }
+
+
+def _alpha_vantage_movers(key: str) -> list[dict[str, str]]:
+    response = requests.get(
+        "https://www.alphavantage.co/query",
+        params={"function": "TOP_GAINERS_LOSERS", "apikey": key},
+        timeout=15,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    out: list[dict[str, str]] = []
+    for field, mover_type in (("top_gainers", "major_gainer"), ("top_losers", "major_loser"), ("most_actively_traded", "unusual_volume")):
+        for item in payload.get(field, [])[:25]:
+            symbol = item.get("ticker")
+            if symbol:
+                out.append(_mover_meta(symbol, mover_type, "alpha_vantage_top_gainers_losers"))
+    return out
+
+
+def _polygon_snapshot_movers(key: str) -> list[dict[str, str]]:
+    response = requests.get(
+        "https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers",
+        params={"apiKey": key},
+        timeout=20,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    tickers = payload.get("tickers", [])
+    if not isinstance(tickers, list):
+        return []
+    ranked: list[tuple[float, str, str]] = []
+    for item in tickers:
+        symbol = item.get("ticker")
+        day = item.get("day") or {}
+        prev = item.get("prevDay") or {}
+        close = float(day.get("c") or 0)
+        prev_close = float(prev.get("c") or 0)
+        volume = float(day.get("v") or 0)
+        prev_volume = float(prev.get("v") or 0)
+        change = ((close / prev_close) - 1.0) * 100.0 if close > 0 and prev_close > 0 else 0.0
+        rel_volume = volume / prev_volume if prev_volume > 0 else 1.0
+        if not symbol:
+            continue
+        if change >= GLOBAL_MAJOR_MOVER_MIN_CHANGE_PCT:
+            ranked.append((abs(change), symbol, "major_gainer"))
+        elif change <= -GLOBAL_MAJOR_MOVER_MIN_CHANGE_PCT:
+            ranked.append((abs(change), symbol, "major_loser"))
+        if abs(change) >= GLOBAL_GAP_MOVER_MIN_CHANGE_PCT:
+            ranked.append((abs(change), symbol, "gap_mover"))
+        if rel_volume >= GLOBAL_UNUSUAL_VOLUME_MIN_RATIO:
+            ranked.append((rel_volume, symbol, "unusual_volume"))
+    ranked.sort(reverse=True)
+    return [_mover_meta(symbol, mover_type, "polygon_snapshot") for _, symbol, mover_type in ranked[:75]]
+
+
+def _eodhd_screener_movers(key: str) -> list[dict[str, str]]:
+    out: list[dict[str, str]] = []
+    for signal, mover_type in (("top_gainers", "major_gainer"), ("top_losers", "major_loser")):
+        response = requests.get(
+            "https://eodhd.com/api/screener",
+            params={"api_token": key, "fmt": "json", "signals": signal, "limit": 25},
+            timeout=15,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        for item in payload.get("data", []) if isinstance(payload, dict) else []:
+            code = str(item.get("code") or item.get("symbol") or "").replace(".US", "")
+            if code:
+                out.append(_mover_meta(code, mover_type, "eodhd_screener", item.get("name")))
+    return out
+
+
+def provider_mover_universe() -> list[dict[str, str]]:
+    settings = get_api_settings()
+    discovered: dict[str, dict[str, str]] = {}
+    for key_name, loader in (
+        ("POLYGON_API_KEY", _polygon_snapshot_movers),
+        ("ALPHA_VANTAGE_API_KEY", _alpha_vantage_movers),
+        ("EODHD_API_KEY", _eodhd_screener_movers),
+    ):
+        key = settings.get(key_name)
+        if not key:
+            continue
+        try:
+            for meta in cached_call(f"mover_discovery_{key_name}", API_CACHE_TTL_SECONDS, loader, key):
+                if meta.get("symbol"):
+                    discovered.setdefault(meta["symbol"], meta)
+        except Exception as exc:
+            log.debug("Mover discovery unavailable via %s: %s", key_name, exc)
+    return list(discovered.values())
+
+
+def filter_fresh_candidates(records: list[dict[str, Any]], now: datetime | None = None) -> list[dict[str, Any]]:
+    current = now or datetime.now(timezone.utc)
+    fresh: list[dict[str, Any]] = []
+    for record in records:
+        scanned = _parse_time(record.get("scanned_at"))
+        if scanned is None:
+            continue
+        if (current - scanned).total_seconds() <= GLOBAL_CANDIDATE_TTL_SECONDS:
+            fresh.append(record)
+    return sorted(
+        fresh,
+        key=lambda item: (float(item.get("mover_score") or 0), str(item.get("scanned_at") or "")),
+        reverse=True,
+    )
 
 
 def _candidate_metrics(meta: dict[str, str]) -> GlobalCandidate | None:
@@ -315,16 +481,26 @@ def _candidate_metrics(meta: dict[str, str]) -> GlobalCandidate | None:
         + min(10.0, max(0.0, volatility - 0.5) * 4.0)
         + min(5.0, max(0.0, (avg_dollar_volume / 50_000_000.0)))
     )
-    category, risk_bucket, tradeable = _classify_candidate(meta, price, change_1d, relative_volume, avg_dollar_volume)
+    category, mover_tags, risk_bucket, tradeable = _classify_candidate(meta, price, change_1d, relative_volume, avg_dollar_volume, float(volume.iloc[-1]) if len(volume) else 0.0)
     if not tradeable:
         return None
+    route = dict(hist.attrs.get("provider_route") or {})
+    quote_time = str(route.get("fetched_at") or utc_now())
+    quote_dt = _parse_time(quote_time)
+    freshness = max(0.0, (datetime.now(timezone.utc) - quote_dt).total_seconds()) if quote_dt else None
+    explicit_mover = str(meta.get("mover_type") or "").strip()
+    if explicit_mover and explicit_mover not in mover_tags:
+        mover_tags.append(explicit_mover)
     return GlobalCandidate(
         symbol=meta["symbol"], name=meta.get("name", meta["symbol"]),
         exchange=meta.get("exchange", "Unknown"), region=meta.get("region", "Unknown"),
         sector=meta.get("sector", "Unknown"), price=price, change_1d_pct=change_1d,
         change_5d_pct=change_5d, relative_volume=relative_volume,
         avg_dollar_volume=avg_dollar_volume, volatility_pct=volatility,
-        mover_score=round(mover_score, 3), category=category,
+        mover_score=round(mover_score, 3), primary_category=category,
+        mover_tags=mover_tags, discovery_source=str(meta.get("discovery_source") or "rotating_universe"),
+        discovery_timestamp=str(meta.get("discovery_timestamp") or utc_now()),
+        quote_timestamp=quote_time, data_freshness_seconds=freshness, category=category,
         risk_bucket=risk_bucket, tradeable=tradeable, scanned_at=utc_now(),
     )
 
@@ -340,13 +516,14 @@ def scan_global_markets() -> list[dict[str, Any]]:
     with connect() as conn:
         status = conn.execute("SELECT cursor FROM global_scanner_status WHERE id=1").fetchone()
         cursor = int((status or {}).get("cursor", 0) or 0)
+    discovered_meta = provider_mover_universe()
     # Always include core stocks/ETFs and regional anchors, then rotate through the full universe.
     seed_meta = [x for x in universe if x.get("exchange") == "SEED"][:12]
     core_meta = [x for x in universe if x.get("symbol") in CORE_STOCKS][:GLOBAL_CORE_SYMBOLS_PER_CYCLE]
     etf_meta = [x for x in universe if x.get("symbol") in ETF_SEEDS][:GLOBAL_ETF_SYMBOLS_PER_CYCLE]
     rotating_count = max(1, GLOBAL_SCAN_SYMBOLS_PER_CYCLE - len(seed_meta) - len(core_meta) - len(etf_meta))
     rotating = [universe[(cursor + i) % len(universe)] for i in range(rotating_count)]
-    batch = list({x["symbol"]: x for x in seed_meta + core_meta + etf_meta + rotating}.values())
+    batch = list({x["symbol"]: x for x in discovered_meta + seed_meta + core_meta + etf_meta + rotating}.values())
     found: list[GlobalCandidate] = []
     for meta in batch:
         try:
@@ -360,19 +537,28 @@ def scan_global_markets() -> list[dict[str, Any]]:
             payload = candidate.to_dict()
             conn.execute("""INSERT INTO global_market_candidates
                 (symbol,name,exchange,region,sector,price,change_1d_pct,change_5d_pct,
-                 relative_volume,avg_dollar_volume,volatility_pct,mover_score,category,risk_bucket,tradeable,payload,scanned_at)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s)
+                 relative_volume,avg_dollar_volume,volatility_pct,mover_score,category,primary_category,
+                 mover_tags,discovery_source,discovery_timestamp,quote_timestamp,data_freshness_seconds,
+                 risk_bucket,tradeable,payload,scanned_at)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s,%s,%s,%s,%s,%s::jsonb,%s)
                 ON CONFLICT (symbol) DO UPDATE SET name=EXCLUDED.name,exchange=EXCLUDED.exchange,
                 region=EXCLUDED.region,sector=EXCLUDED.sector,price=EXCLUDED.price,
                 change_1d_pct=EXCLUDED.change_1d_pct,change_5d_pct=EXCLUDED.change_5d_pct,
                 relative_volume=EXCLUDED.relative_volume,avg_dollar_volume=EXCLUDED.avg_dollar_volume,
                 volatility_pct=EXCLUDED.volatility_pct,mover_score=EXCLUDED.mover_score,
-                category=EXCLUDED.category,risk_bucket=EXCLUDED.risk_bucket,tradeable=EXCLUDED.tradeable,
+                category=EXCLUDED.category,primary_category=EXCLUDED.primary_category,
+                mover_tags=EXCLUDED.mover_tags,discovery_source=EXCLUDED.discovery_source,
+                discovery_timestamp=EXCLUDED.discovery_timestamp,quote_timestamp=EXCLUDED.quote_timestamp,
+                data_freshness_seconds=EXCLUDED.data_freshness_seconds,
+                risk_bucket=EXCLUDED.risk_bucket,tradeable=EXCLUDED.tradeable,
                 payload=EXCLUDED.payload,scanned_at=EXCLUDED.scanned_at""",
                 (candidate.symbol,candidate.name,candidate.exchange,candidate.region,candidate.sector,
                  candidate.price,candidate.change_1d_pct,candidate.change_5d_pct,candidate.relative_volume,
                  candidate.avg_dollar_volume,candidate.volatility_pct,candidate.mover_score,
-                 candidate.category,candidate.risk_bucket,candidate.tradeable,json.dumps(payload),candidate.scanned_at))
+                 candidate.category,candidate.primary_category,json.dumps(candidate.mover_tags),
+                 candidate.discovery_source,candidate.discovery_timestamp,candidate.quote_timestamp,
+                 candidate.data_freshness_seconds,candidate.risk_bucket,candidate.tradeable,
+                 json.dumps(payload),candidate.scanned_at))
         next_cursor = (cursor + rotating_count) % len(universe)
         conn.execute("""INSERT INTO global_scanner_status
             (id,cursor,universe_size,scanned_count,active_count,status,message,updated_at)
@@ -382,11 +568,15 @@ def scan_global_markets() -> list[dict[str, Any]]:
             status=EXCLUDED.status,message=EXCLUDED.message,updated_at=EXCLUDED.updated_at""",
             (next_cursor,len(universe),len(batch),len(found),
              f"Scanned {len(batch)} worldwide symbols; {len(found)} passed liquidity and data checks.",utc_now()))
+        cutoff = (datetime.now(timezone.utc) - timedelta(seconds=GLOBAL_CANDIDATE_TTL_SECONDS)).isoformat()
+        conn.execute("DELETE FROM global_market_candidates WHERE scanned_at < %s", (cutoff,))
         rows = conn.execute("""SELECT symbol,name,exchange,region,sector,price,change_1d_pct,
             change_5d_pct,relative_volume,avg_dollar_volume,volatility_pct,mover_score,
-            category,risk_bucket,tradeable,scanned_at
-            FROM global_market_candidates ORDER BY mover_score DESC, scanned_at DESC LIMIT %s""",
-            (GLOBAL_ACTIVE_CANDIDATES,)).fetchall()
+            category,primary_category,mover_tags,discovery_source,discovery_timestamp,quote_timestamp,
+            data_freshness_seconds,risk_bucket,tradeable,scanned_at
+            FROM global_market_candidates WHERE scanned_at >= %s
+            ORDER BY mover_score DESC, scanned_at DESC LIMIT %s""",
+            (cutoff, GLOBAL_ACTIVE_CANDIDATES,)).fetchall()
     return [dict(row) for row in rows]
 
 

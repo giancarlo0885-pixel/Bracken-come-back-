@@ -41,3 +41,16 @@ def test_rate_limited_provider_enters_cooldown(monkeypatch):
     provider_router._symbol_cooldowns.clear()
     second = provider_router.route_history("MSFT", "1d", "1m", lambda *args: pd.DataFrame())
     assert any(attempt.status == "provider_cooldown" for attempt in second.attempts)
+
+
+def test_provider_failures_are_aggregated_not_logged_per_symbol(monkeypatch):
+    provider_router._failure_summary.clear()
+    provider_router._provider_cooldowns.clear()
+    provider_router._last_failure_log = 0
+    messages = []
+    monkeypatch.setattr(provider_router.log, "info", lambda message, *args: messages.append(message % args))
+    provider_router._record_failure("Polygon", "degraded", "AAA")
+    provider_router._record_failure("Polygon", "degraded", "BBB")
+    assert len(messages) == 1
+    assert "affected_symbols=1" in messages[0]
+    assert "History route failed" not in messages[0]

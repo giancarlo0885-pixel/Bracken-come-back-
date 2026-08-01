@@ -99,11 +99,11 @@ def _safe_float(value: Any) -> float | None:
         return None
 
 
-def _safe_money(value: Any) -> float | None:
+def _safe_money(value: Any, *, allow_zero: bool = False) -> float | None:
     number = _safe_float(value)
     if number is None:
         return None
-    if number == 0:
+    if number == 0 and not allow_zero:
         return None
     return number
 
@@ -290,8 +290,8 @@ def validate_symbol(symbol: Any, exchange: Any = None) -> tuple[str, bool, str]:
     return normalized, True, "validated" if exchange_text else "validated without exchange metadata"
 
 
-def format_revenue(value: Any) -> str | None:
-    number = _safe_money(value)
+def format_revenue(value: Any, *, allow_zero: bool = False) -> str | None:
+    number = _safe_money(value, allow_zero=allow_zero)
     if number is None:
         return None
     sign = "-" if number < 0 else ""
@@ -341,9 +341,18 @@ def event_status(event_date: date | None, has_actual: bool, complete: bool, toda
     current = today or date.today()
     if has_actual:
         return "Reported"
+    if event_date and event_date < current:
+        return "Past / Incomplete"
     if event_date == current:
         return "Reporting Today"
     return "Upcoming"
+
+
+def _reported_zero(payload: dict[str, Any], *names: str) -> bool:
+    for name in names:
+        if bool(payload.get(f"{name}_reported_zero")) or bool(payload.get(f"{name}ReportedZero")):
+            return True
+    return False
 
 
 def prepare_events(
@@ -401,8 +410,18 @@ def prepare_events(
 
         eps_estimate = _safe_float(payload.get("eps_estimate", payload.get("epsEstimate")))
         eps_actual = _safe_float(payload.get("eps_actual", payload.get("epsActual")))
-        revenue_estimate = _safe_money(payload.get("revenue_estimate", payload.get("revenueEstimate")))
-        revenue_actual = _safe_money(payload.get("revenue_actual", payload.get("revenueActual")))
+        revenue_estimate = _safe_money(
+            payload.get("revenue_estimate", payload.get("revenueEstimate")),
+            allow_zero=_reported_zero(payload, "revenue_estimate", "revenueEstimate"),
+        )
+        revenue_actual = _safe_money(
+            payload.get("revenue_actual", payload.get("revenueActual")),
+            allow_zero=(
+                _reported_zero(payload, "revenue_actual", "revenueActual")
+                or "revenue_actual" in payload
+                or "revenueActual" in payload
+            ),
+        )
         has_actual = eps_actual is not None or revenue_actual is not None
         complete = bool(symbol_ok and event_date)
         status = event_status(event_date, has_actual, complete, current)
@@ -424,7 +443,7 @@ def prepare_events(
             "eps_actual": format_eps(eps_actual),
             "eps_surprise_pct": format_surprise(eps_actual, eps_estimate),
             "revenue_estimate": format_revenue(revenue_estimate),
-            "revenue_actual": format_revenue(revenue_actual),
+            "revenue_actual": format_revenue(revenue_actual, allow_zero=revenue_actual == 0),
             "revenue_surprise_pct": format_surprise(revenue_actual, revenue_estimate),
             "provider": payload.get("provider") or source.get("provider") or "Unknown",
             "status": status,

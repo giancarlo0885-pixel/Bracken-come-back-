@@ -1,4 +1,5 @@
 from pathlib import Path
+from datetime import datetime, timedelta, timezone
 
 from realtime_runtime import cadence_for
 
@@ -128,3 +129,60 @@ def test_buy_portfolio_row_missing_returns_three_value_tuple(monkeypatch):
         {"symbol": "NEW", "score": 90, "confidence": .9, "price": 100},
     )
     assert result == (False, "portfolio row missing", None)
+
+
+def test_penny_stock_gate_rejects_stale_or_illiquid_data(monkeypatch):
+    import oracle_bot
+
+    monkeypatch.setattr(oracle_bot, "_penny_position_count", lambda market: 0)
+    stale = (datetime.now(timezone.utc) - timedelta(hours=12)).isoformat()
+    ok, reason = oracle_bot._penny_stock_gate(
+        "cash",
+        "SOUN",
+        2.0,
+        {"created_at": stale, "volume": 1_000_000, "avg_dollar_volume": 3_000_000},
+        90,
+        .9,
+    )
+    assert ok is False
+    assert "stale" in reason
+
+    now = datetime.now(timezone.utc).isoformat()
+    ok, reason = oracle_bot._penny_stock_gate(
+        "cash",
+        "SOUN",
+        2.0,
+        {"created_at": now, "volume": 1_000, "avg_dollar_volume": 3_000_000},
+        90,
+        .9,
+    )
+    assert ok is False
+    assert "volume" in reason
+
+
+def test_penny_stock_gate_rejects_normal_quality_and_otc(monkeypatch):
+    import oracle_bot
+
+    monkeypatch.setattr(oracle_bot, "_penny_position_count", lambda market: 0)
+    now = datetime.now(timezone.utc).isoformat()
+    ok, reason = oracle_bot._penny_stock_gate(
+        "cash",
+        "OTC",
+        2.0,
+        {"created_at": now, "exchange": "OTC", "volume": 1_000_000, "avg_dollar_volume": 3_000_000},
+        90,
+        .9,
+    )
+    assert ok is False
+    assert "OTC" in reason
+
+    ok, reason = oracle_bot._penny_stock_gate(
+        "cash",
+        "SOUN",
+        2.0,
+        {"created_at": now, "volume": 1_000_000, "avg_dollar_volume": 3_000_000},
+        70,
+        .9,
+    )
+    assert ok is False
+    assert "score" in reason

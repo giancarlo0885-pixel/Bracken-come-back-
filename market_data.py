@@ -3,6 +3,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import math
 from typing import Iterable
 
 import pandas as pd
@@ -34,21 +35,33 @@ def _normalize(frame: pd.DataFrame) -> pd.DataFrame:
     return frame[keep].dropna(subset=["Close"])
 
 
-def _series(frame: pd.DataFrame, column: str) -> pd.Series:
-    value = frame[column]
+def finite_scalar(value: object) -> float | None:
+    """Return the most recent finite numeric value from scalar/Series/DataFrame input."""
     if isinstance(value, pd.DataFrame):
-        value = value.iloc[:, -1]
-    return pd.to_numeric(value, errors="coerce").dropna()
-
-
-def _scalar(value: object, default: float = 0.0) -> float:
+        if value.empty:
+            return None
+        if len(value.columns) == 1:
+            value = value.iloc[:, 0]
+        else:
+            value = value.stack()
     if isinstance(value, pd.Series):
-        value = value.dropna().iloc[-1] if not value.dropna().empty else default
+        numeric = pd.to_numeric(value, errors="coerce")
+        numeric = numeric[numeric.map(lambda item: item is not None and math.isfinite(float(item)))]
+        if numeric.empty:
+            return None
+        return float(numeric.iloc[-1])
     try:
         result = float(value)
-        return result if result == result else default
     except (TypeError, ValueError):
-        return default
+        return None
+    return result if math.isfinite(result) else None
+
+
+def _column(frame: pd.DataFrame, column: str) -> pd.Series:
+    value = frame[column]
+    if isinstance(value, pd.DataFrame):
+        value = value.iloc[:, 0] if len(value.columns) == 1 else value.iloc[:, -1]
+    return pd.to_numeric(value, errors="coerce")
 
 
 def _download_yahoo(symbol: str, period: str, interval: str) -> pd.DataFrame:
@@ -74,11 +87,18 @@ def get_history(symbol: str, period: str = "1y", interval: str = "1d") -> pd.Dat
 def _snapshot_from_history(symbol: str, history: pd.DataFrame, interval: str) -> MarketSnapshot | None:
     if history is None or history.empty:
         return None
-    closes = _series(history, "Close")
-    price = _scalar(closes.iloc[-1])
-    previous = _scalar(closes.iloc[-2]) if len(closes) > 1 else price
+    if "Close" not in history.columns:
+        return None
+    closes = _column(history, "Close")
+    price = finite_scalar(closes)
+    if price is None:
+        return None
+    valid_closes = closes[closes.map(lambda item: item is not None and math.isfinite(float(item)) if pd.notna(item) else False)]
+    previous = finite_scalar(valid_closes.iloc[:-1]) if len(valid_closes) > 1 else price
+    previous = previous if previous is not None else price
     change = ((price / previous) - 1) * 100 if previous else 0.0
-    volume = _scalar(_series(history, "Volume").iloc[-1]) if "Volume" in history.columns else 0.0
+    volume = finite_scalar(_column(history, "Volume")) if "Volume" in history.columns else None
+    volume = volume if volume is not None else 0.0
     route = dict(history.attrs.get("provider_route") or {})
     fetched_at = str(route.get("fetched_at") or datetime.now(timezone.utc).isoformat())
     return MarketSnapshot(
