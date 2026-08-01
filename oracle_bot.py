@@ -1040,7 +1040,7 @@ def _buy(
                 (market,),
             ).fetchone()
             if not portfolio_record:
-                return False, "portfolio row missing"
+                return False, "portfolio row missing", None
 
             current_positions = conn.execute(
                 "SELECT * FROM positions WHERE market=%s FOR UPDATE",

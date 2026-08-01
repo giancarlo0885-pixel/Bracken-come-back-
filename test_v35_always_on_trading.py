@@ -90,3 +90,41 @@ def test_rejected_replacement_buy_does_not_emit_rotation_sell(monkeypatch):
     )
     assert captured["rotation_candidate"] is rotation_candidate
     assert actions == []
+
+
+def test_buy_portfolio_row_missing_returns_three_value_tuple(monkeypatch):
+    import oracle_bot
+
+    class MissingPortfolioConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def execute(self, *args, **kwargs):
+            return self
+
+        def fetchone(self):
+            return None
+
+    monkeypatch.setattr(
+        oracle_bot,
+        "portfolio_equity",
+        lambda market: {
+            "equity": 10_000,
+            "buying_power": 10_000,
+            "gross_exposure": 0,
+            "leverage_limit": 1,
+            "leverage_used": 0,
+        },
+    )
+    monkeypatch.setattr(oracle_bot, "connect", lambda: MissingPortfolioConnection())
+
+    result = oracle_bot._buy(
+        "cash",
+        "NEW",
+        100,
+        {"symbol": "NEW", "score": 90, "confidence": .9, "price": 100},
+    )
+    assert result == (False, "portfolio row missing", None)
