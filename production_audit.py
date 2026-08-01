@@ -9,7 +9,7 @@ from provider_router import normalize_symbol
 
 
 MERGE_COMMIT_SHA = "3a9d5de6d609b934c2619c7fde8c449787195a43"
-AUDIT_STATUSES = {"valid", "suspected_price_corruption", "invalid", "reviewed"}
+AUDIT_STATUSES = {"unreviewed", "valid", "suspected_price_corruption", "invalid", "reviewed"}
 
 
 @dataclass
@@ -102,6 +102,18 @@ def audit_legacy_paper_records(cutoff: datetime, *, mark: bool = True) -> AuditR
                     (item.get("id"), item.get("market"), item.get("symbol"), f"opened before merge commit {MERGE_COMMIT_SHA}", "{}", now),
                 )
         return report
+
+
+def clean_paper_portfolio_command(market: str, *, approved_by: str = "") -> dict[str, Any]:
+    """Return the protected command metadata without executing a reset/create action."""
+    return {
+        "command": "create_clean_paper_portfolio",
+        "market": market,
+        "approved_by": approved_by,
+        "requires_explicit_operator_confirmation": True,
+        "executed": False,
+        "reason": "Historical records are never deleted or rewritten by the audit command.",
+    }
 
 
 if __name__ == "__main__":

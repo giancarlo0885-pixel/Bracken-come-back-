@@ -9,6 +9,7 @@ from config import (
     FORECAST_MIN_VALIDATION_SAMPLES,
 )
 from database import rows
+from model_registry import ModelStatus, model_status
 from provider_router import normalize_symbol
 
 
@@ -83,6 +84,9 @@ def validation_summary(symbol: str, asset_class: str, source_interval: str, mode
 def model_execution_approved(symbol: str, asset_class: str, source_interval: str, model: str, model_version: str = "") -> tuple[bool, str]:
     if FORECAST_MIN_VALIDATION_SAMPLES <= 0:
         return True, "forecast validation gate disabled"
+    status = model_status(model, model_version)
+    if status in {ModelStatus.EXPERIMENTAL, ModelStatus.SHADOW, ModelStatus.DISABLED}:
+        return False, f"forecast model status is {status.value}"
     summary = validation_summary(symbol, asset_class, source_interval, model, model_version)
     if summary.sample_count < FORECAST_MIN_VALIDATION_SAMPLES:
         return False, f"forecast model has {summary.sample_count} validation samples; needs {FORECAST_MIN_VALIDATION_SAMPLES}"

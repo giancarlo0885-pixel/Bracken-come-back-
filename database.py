@@ -413,6 +413,271 @@ def initialize_database() -> None:
             created_at TEXT NOT NULL
         )
         """,
+        """
+        CREATE TABLE IF NOT EXISTS advisor_profiles (
+            id BIGSERIAL PRIMARY KEY,
+            name TEXT NOT NULL,
+            investment_objective TEXT,
+            risk_tolerance TEXT,
+            investment_horizon TEXT,
+            available_capital DOUBLE PRECISION,
+            liquidity_needs DOUBLE PRECISION,
+            maximum_acceptable_drawdown DOUBLE PRECISION,
+            restricted_assets JSONB,
+            preferred_asset_classes JSONB,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS recommendations (
+            id BIGSERIAL PRIMARY KEY,
+            recommendation_id TEXT UNIQUE NOT NULL,
+            market TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            action TEXT NOT NULL,
+            confidence DOUBLE PRECISION,
+            opportunity_score DOUBLE PRECISION,
+            expected_return DOUBLE PRECISION,
+            expected_downside DOUBLE PRECISION,
+            data_quality_score DOUBLE PRECISION,
+            model_version TEXT,
+            payload JSONB,
+            expires_at TEXT,
+            created_at TEXT NOT NULL
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS recommendation_evidence (
+            id BIGSERIAL PRIMARY KEY,
+            recommendation_id TEXT NOT NULL,
+            evidence_type TEXT NOT NULL,
+            summary TEXT,
+            payload JSONB,
+            created_at TEXT NOT NULL
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS strategy_signals (
+            id BIGSERIAL PRIMARY KEY,
+            market TEXT,
+            symbol TEXT NOT NULL,
+            strategy TEXT NOT NULL,
+            score DOUBLE PRECISION,
+            confidence DOUBLE PRECISION,
+            available BOOLEAN,
+            message TEXT,
+            evidence JSONB,
+            created_at TEXT NOT NULL
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS forecast_registry (
+            id BIGSERIAL PRIMARY KEY,
+            model TEXT NOT NULL,
+            model_version TEXT,
+            asset_class TEXT,
+            source_interval TEXT,
+            status TEXT NOT NULL DEFAULT 'experimental',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS forecast_results (
+            id BIGSERIAL PRIMARY KEY,
+            forecast_id TEXT UNIQUE,
+            market TEXT,
+            symbol TEXT NOT NULL,
+            asset_class TEXT,
+            source_interval TEXT,
+            source_quote_timestamp TEXT,
+            horizon_bars INTEGER,
+            horizon_minutes DOUBLE PRECISION,
+            horizon_days DOUBLE PRECISION,
+            target_price DOUBLE PRECISION,
+            probability_up DOUBLE PRECISION,
+            validation_status TEXT,
+            data_quality_score DOUBLE PRECISION,
+            payload JSONB,
+            created_at TEXT NOT NULL
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS model_registry (
+            id BIGSERIAL PRIMARY KEY,
+            model TEXT NOT NULL,
+            model_version TEXT,
+            status TEXT NOT NULL DEFAULT 'experimental',
+            reason TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS model_performance (
+            id BIGSERIAL PRIMARY KEY,
+            model TEXT NOT NULL,
+            model_version TEXT,
+            symbol TEXT,
+            asset_class TEXT,
+            strategy TEXT,
+            source_interval TEXT,
+            market_regime TEXT,
+            horizon_bars INTEGER,
+            metrics JSONB,
+            created_at TEXT NOT NULL
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS provider_capabilities (
+            id BIGSERIAL PRIMARY KEY,
+            provider TEXT NOT NULL,
+            capability TEXT NOT NULL,
+            supported BOOLEAN NOT NULL DEFAULT FALSE,
+            available BOOLEAN NOT NULL DEFAULT FALSE,
+            cooldown_until TEXT,
+            limitation TEXT,
+            checked_at TEXT NOT NULL,
+            UNIQUE(provider, capability)
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS quote_verifications (
+            id BIGSERIAL PRIMARY KEY,
+            symbol TEXT NOT NULL,
+            market TEXT,
+            primary_provider TEXT,
+            secondary_provider TEXT,
+            primary_price DOUBLE PRECISION,
+            secondary_price DOUBLE PRECISION,
+            difference_pct DOUBLE PRECISION,
+            consensus_status TEXT,
+            payload JSONB,
+            created_at TEXT NOT NULL
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS order_proposals (
+            id BIGSERIAL PRIMARY KEY,
+            idempotency_key TEXT UNIQUE NOT NULL,
+            symbol TEXT NOT NULL,
+            side TEXT NOT NULL,
+            quantity DOUBLE PRECISION NOT NULL,
+            order_type TEXT NOT NULL,
+            limit_price DOUBLE PRECISION,
+            recommendation_id TEXT,
+            approval_status TEXT NOT NULL DEFAULT 'proposed',
+            payload JSONB,
+            expires_at TEXT,
+            created_at TEXT NOT NULL
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS order_events (
+            id BIGSERIAL PRIMARY KEY,
+            idempotency_key TEXT,
+            status TEXT NOT NULL,
+            reason TEXT,
+            payload JSONB,
+            created_at TEXT NOT NULL
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS shadow_orders (
+            id BIGSERIAL PRIMARY KEY,
+            idempotency_key TEXT UNIQUE NOT NULL,
+            symbol TEXT NOT NULL,
+            side TEXT NOT NULL,
+            payload JSONB,
+            created_at TEXT NOT NULL
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS shadow_fills (
+            id BIGSERIAL PRIMARY KEY,
+            idempotency_key TEXT,
+            symbol TEXT NOT NULL,
+            side TEXT NOT NULL,
+            filled_quantity DOUBLE PRECISION,
+            fill_price DOUBLE PRECISION,
+            status TEXT,
+            payload JSONB,
+            created_at TEXT NOT NULL
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS strategy_performance (
+            id BIGSERIAL PRIMARY KEY,
+            strategy TEXT NOT NULL,
+            symbol TEXT,
+            asset_class TEXT,
+            market_regime TEXT,
+            metrics JSONB,
+            status TEXT,
+            created_at TEXT NOT NULL
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS trade_audits (
+            id BIGSERIAL PRIMARY KEY,
+            trade_id BIGINT,
+            symbol TEXT,
+            recorded_price DOUBLE PRECISION,
+            reference_price DOUBLE PRECISION,
+            difference_pct DOUBLE PRECISION,
+            status TEXT NOT NULL DEFAULT 'unreviewed',
+            reason TEXT,
+            reviewer TEXT,
+            reviewed_at TEXT,
+            estimated_pnl_impact DOUBLE PRECISION,
+            created_at TEXT NOT NULL
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS position_audits (
+            id BIGSERIAL PRIMARY KEY,
+            position_id BIGINT,
+            symbol TEXT,
+            recorded_price DOUBLE PRECISION,
+            reference_price DOUBLE PRECISION,
+            difference_pct DOUBLE PRECISION,
+            status TEXT NOT NULL DEFAULT 'unreviewed',
+            reason TEXT,
+            reviewer TEXT,
+            reviewed_at TEXT,
+            estimated_pnl_impact DOUBLE PRECISION,
+            created_at TEXT NOT NULL
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS risk_events (
+            id BIGSERIAL PRIMARY KEY,
+            market TEXT,
+            symbol TEXT,
+            risk_state TEXT,
+            event TEXT,
+            payload JSONB,
+            created_at TEXT NOT NULL
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS execution_switch_history (
+            id BIGSERIAL PRIMARY KEY,
+            switch_name TEXT NOT NULL,
+            enabled BOOLEAN NOT NULL,
+            reason TEXT,
+            actor TEXT,
+            created_at TEXT NOT NULL
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS idx_recommendations_market_created ON recommendations (market, created_at DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_recommendations_symbol_created ON recommendations (symbol, created_at DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_order_proposals_status ON order_proposals (approval_status, created_at DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_strategy_signals_symbol_strategy ON strategy_signals (symbol, strategy, created_at DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_risk_events_market_created ON risk_events (market, created_at DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_trade_audits_status ON trade_audits (status, created_at DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_position_audits_status ON position_audits (status, created_at DESC)",
     ]
 
     with connect() as conn:

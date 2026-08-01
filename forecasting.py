@@ -30,12 +30,15 @@ INTERVAL_MINUTES = {
 
 @dataclass
 class Forecast:
-    horizon_days: float
-    target_price: float
-    low_price: float
-    high_price: float
-    probability_up: float
-    model: str
+    symbol: str = ""
+    market: str = ""
+    asset_class: str = "stock"
+    horizon_days: float = 0.0
+    target_price: float = 0.0
+    low_price: float = 0.0
+    high_price: float = 0.0
+    probability_up: float = 0.0
+    model: str = "regime-aware ensemble"
     requested_symbol: str = ""
     provider_symbol: str = ""
     source_interval: str = "1d"
@@ -47,7 +50,10 @@ class Forecast:
     model_version: str = FORECAST_MODEL_VERSION
     data_quality_score: float = 0.0
     forecast_id: str = ""
-    asset_class: str = "stock"
+    spot_price: float = 0.0
+    volatility: float = 0.0
+    regime: str = "unknown"
+    validation_status: str = "unvalidated"
     bars_per_year: float = 252.0
 
 
@@ -152,7 +158,7 @@ def forecast_price(
     horizon_days: float | None = None,
     asset_class: str | None = None,
     market: str = "",
-    model: str = "log-return diffusion",
+    model: str = "regime-aware ensemble",
     model_version: str = FORECAST_MODEL_VERSION,
 ) -> Forecast | None:
     if history is None or history.empty or len(history) < 40 or "Close" not in history.columns:
@@ -198,6 +204,9 @@ def forecast_price(
         [requested_symbol, provider_symbol, interval, source_quote_timestamp, str(bars), model_version, generated_at]
     )
     return Forecast(
+        symbol=requested_symbol,
+        market=str(market or "cash"),
+        asset_class=asset,
         horizon_days=float(calendar_days),
         target_price=float(target),
         low_price=float(low),
@@ -215,6 +224,9 @@ def forecast_price(
         model_version=model_version,
         data_quality_score=_quality_score(close, returns),
         forecast_id=hashlib.sha256(forecast_key.encode("utf-8")).hexdigest()[:24],
-        asset_class=asset,
+        spot_price=spot,
+        volatility=vol_per_bar,
+        regime=str(route.get("regime") or "unknown"),
+        validation_status="shadow",
         bars_per_year=bars_per_year(interval, asset),
     )

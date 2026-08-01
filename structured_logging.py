@@ -14,8 +14,12 @@ class StructuredFormatter(logging.Formatter):
             "event": getattr(record, "event", record.getMessage()),
             "symbol": getattr(record, "symbol", ""),
             "provider": getattr(record, "provider", ""),
+            "strategy": getattr(record, "strategy", ""),
             "scan_type": getattr(record, "scan_type", ""),
             "severity": record.levelname,
+            "execution_enabled": getattr(record, "execution_enabled", ""),
+            "recommendation_id": getattr(record, "recommendation_id", ""),
+            "order_id": getattr(record, "order_id", ""),
             "timestamp": datetime.fromtimestamp(record.created, timezone.utc).isoformat(),
             "message": record.getMessage(),
         }

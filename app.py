@@ -289,7 +289,10 @@ def portfolio_table(positions: list[dict[str, Any]]) -> pd.DataFrame:
     return pd.DataFrame(data)
 
 
-bootstrap()
+try:
+    bootstrap()
+except RuntimeError as exc:
+    st.warning(str(exc))
 stock_portfolio, stock_positions, stock_metrics = get_portfolio("cash")
 crypto_portfolio, crypto_positions, crypto_metrics = get_portfolio("crypto")
 all_positions = stock_positions + crypto_positions
@@ -456,6 +459,52 @@ if page == "Dashboard":
                 st.warning(f"**{a.get('title','Alert')}** — {a.get('message','')}")
         else:
             st.success("No unresolved high-priority alerts.")
+
+    st.markdown("### Advisor Foundation")
+    advisor_tabs = st.tabs([
+        "Advisor Brief",
+        "Opportunities Now",
+        "Proposed Trades",
+        "Watchlist",
+        "Strategy Scorecards",
+        "Forecast Accuracy",
+        "Provider Health",
+        "Risk Center",
+        "Historical Audit",
+        "Worker Status",
+        "Settings",
+    ])
+    with advisor_tabs[0]:
+        st.info("Advisor mode is active for recommendations and diagnostics. Live brokerage submission remains disabled.")
+    with advisor_tabs[1]:
+        st.caption("Opportunities are filtered by verified price, forecast quality, data quality, liquidity, and risk controls.")
+    with advisor_tabs[2]:
+        proposals = safe_rows("SELECT * FROM order_proposals ORDER BY id DESC LIMIT 25")
+        if proposals:
+            st.dataframe(pd.DataFrame(proposals), width="stretch", hide_index=True)
+        else:
+            st.info("No trade proposals are waiting for manual review.")
+    with advisor_tabs[3]:
+        st.caption("Watchlist candidates continue to update from fixed watchlists and dynamic discovery.")
+    with advisor_tabs[4]:
+        scorecards = safe_rows("SELECT * FROM strategy_performance ORDER BY id DESC LIMIT 25")
+        st.dataframe(pd.DataFrame(scorecards), width="stretch", hide_index=True) if scorecards else st.info("Strategy scorecards will appear after enough paper or shadow observations.")
+    with advisor_tabs[5]:
+        validation = safe_rows("SELECT * FROM forecast_validation ORDER BY id DESC LIMIT 25")
+        st.dataframe(pd.DataFrame(validation), width="stretch", hide_index=True) if validation else st.info("Forecast accuracy records will appear as walk-forward outcomes mature.")
+    with advisor_tabs[6]:
+        diagnostics = provider_diagnostics()
+        st.dataframe(pd.DataFrame(diagnostics), width="stretch", hide_index=True)
+    with advisor_tabs[7]:
+        risk_events = safe_rows("SELECT * FROM risk_events ORDER BY id DESC LIMIT 25")
+        st.dataframe(pd.DataFrame(risk_events), width="stretch", hide_index=True) if risk_events else st.success("No advisor risk events are currently recorded.")
+    with advisor_tabs[8]:
+        audits = safe_rows("SELECT * FROM trade_audits ORDER BY id DESC LIMIT 25")
+        st.dataframe(pd.DataFrame(audits), width="stretch", hide_index=True) if audits else st.info("Historical audit records are non-destructive and appear here after review.")
+    with advisor_tabs[9]:
+        st.dataframe(pd.DataFrame(workers), width="stretch", hide_index=True) if workers else st.info("Workers have not reported status yet.")
+    with advisor_tabs[10]:
+        st.caption("Execution switches default to disabled. Railway variables must be intentionally changed before any paper automation can run.")
 
 elif page == "Markets":
     st.subheader("Global Market Opportunity Center")
