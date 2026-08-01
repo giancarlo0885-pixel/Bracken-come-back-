@@ -68,6 +68,9 @@ LIVE_POSITION_PRICE_WORKERS=4
 DEEP_ANALYSIS_CANDIDATES=35
 PROVIDER_RATE_LIMIT_COOLDOWN_SECONDS=900
 UNAVAILABLE_SYMBOL_COOLDOWN_SECONDS=1800
+ENABLE_AUTOTRADE=true
+ENABLE_STOCK_AUTOTRADE=false
+ENABLE_CRYPTO_AUTOTRADE=false
 GLOBAL_SCANNER_ENABLED=true
 GLOBAL_SCAN_SYMBOLS_PER_CYCLE=45
 GLOBAL_ACTIVE_CANDIDATES=20
@@ -89,6 +92,11 @@ PENNY_STOCK_MAX_PORTFOLIO_PCT=0.02
 PENNY_STOCK_MIN_SCORE=75
 PENNY_STOCK_MIN_CONFIDENCE=0.70
 OTC_STOCKS_ENABLED=false
+FORECAST_MIN_VALIDATION_SAMPLES=0
+FORECAST_MIN_DIRECTIONAL_ACCURACY=0.52
+FORECAST_MAX_CALIBRATION_ERROR=0.18
+FORECAST_MIN_DATA_QUALITY_SCORE=55
+FORECAST_MODEL_VERSION=v36-timeframe-aware
 ```
 
 Lower intervals increase provider traffic and can trigger rate limits. The defaults balance responsiveness with API reliability.
@@ -118,3 +126,11 @@ The stock and crypto workers now use three simultaneous cadences:
 3. **Deep global scan** performs broader research, news analysis, ranking, and market-memory work.
 
 The workers automatically retry after cycle errors and Railway is configured to restart them if the process exits. The engine never forces a low-quality trade: it remains active at all times and executes immediately when a candidate passes live-data, forecast, portfolio, quant, leverage, and risk gates. When the portfolio is full, it can rotate out of a materially weaker holding for a stronger approved opportunity.
+
+## V36 Forecast And Provider Quality
+
+Forecasts are timeframe-aware: five-minute, hourly, daily, and crypto 24/7 inputs are scaled by their actual bar interval instead of being treated as daily returns. Newly saved forecasts record source interval, source quote timestamp, scan type, model version, expected move, data quality, and requested/provider symbol identity. Execution gates only use a forecast that matches the signal and quote that produced it, so a fast intraday forecast cannot replace a deep daily forecast.
+
+Provider diagnostics include endpoint capability cooldowns. A 402, 403, or plan-limited response disables only that provider capability for a long cooldown while other capabilities can continue. Stock and crypto execution are split behind `ENABLE_STOCK_AUTOTRADE` and `ENABLE_CRYPTO_AUTOTRADE`; advisor scanning, signals, forecasts, rankings, and diagnostics continue while execution is disabled.
+
+Use `python production_audit.py` for a non-destructive paper-data audit of trades and positions created before the V35 symbol-price-isolation merge. The audit writes review markings to a separate table and reports affected symbols, trades, positions, and estimated P/L impact.

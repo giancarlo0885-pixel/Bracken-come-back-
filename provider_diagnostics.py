@@ -9,6 +9,7 @@ from typing import Any
 import requests
 
 from api_manager import KEY_NAMES, resolve_api_key
+from provider_capabilities import diagnostics as capability_diagnostics
 
 
 @dataclass
@@ -146,6 +147,20 @@ def provider_diagnostics(*, force: bool = False) -> list[dict[str, Any]]:
         "YAHOO_FINANCE", True, "available",
         "Public market-data fallback is available without a key.", capability="fallback"
     )))
+    for item in capability_diagnostics():
+        if not item.get("available") and item.get("limitation"):
+            records.append(
+                {
+                    "provider": item["provider"],
+                    "configured": True,
+                    "status": "capability_cooldown",
+                    "latency_ms": None,
+                    "capability": item["capability"],
+                    "message": item["limitation"],
+                    "checked_at": _now(),
+                    "cooldown_remaining_seconds": item["cooldown_remaining_seconds"],
+                }
+            )
     return records
 
 

@@ -13,6 +13,8 @@ from config import (
     ALWAYS_ON_TRADING,
     DEEP_ANALYSIS_CANDIDATES,
     ENABLE_AUTOTRADE,
+    ENABLE_CRYPTO_AUTOTRADE,
+    ENABLE_STOCK_AUTOTRADE,
     EXECUTION_MODE,
     FAST_SCAN_BATCH_SIZE,
     FAST_SCAN_TOP_RANKED,
@@ -53,6 +55,7 @@ stop_event = Event()
 trade_cycle_lock = Lock()
 _rolling_offsets: dict[str, int] = {"cash": 0, "crypto": 0}
 _EXECUTION_DISABLED_LOGGED = False
+_INITIAL_ENABLE_AUTOTRADE = ENABLE_AUTOTRADE
 
 
 def _request_stop(*_: object) -> None:
@@ -60,12 +63,22 @@ def _request_stop(*_: object) -> None:
     stop_event.set()
 
 
-def _execution_enabled() -> bool:
+def _market_execution_switch(market: str) -> bool:
+    specific = ENABLE_CRYPTO_AUTOTRADE if str(market or "").lower() == "crypto" else ENABLE_STOCK_AUTOTRADE
+    if ENABLE_AUTOTRADE != _INITIAL_ENABLE_AUTOTRADE:
+        return bool(ENABLE_AUTOTRADE)
+    return bool(ENABLE_AUTOTRADE and specific)
+
+
+def _execution_enabled(market: str = "cash") -> bool:
     global _EXECUTION_DISABLED_LOGGED
-    if ENABLE_AUTOTRADE:
+    if _market_execution_switch(market):
         return True
     if not _EXECUTION_DISABLED_LOGGED:
-        log.warning("Execution disabled because ENABLE_AUTOTRADE=false; scanning and persistence continue.")
+        log.warning(
+            "Execution disabled for %s because ENABLE_AUTOTRADE/market autotrade switch is false; scanning and persistence continue.",
+            market,
+        )
         _EXECUTION_DISABLED_LOGGED = True
     return False
 
@@ -411,9 +424,14 @@ def fast_scan_market(market: str) -> list[Any]:
                         },
                     },
                 )
-                forecast = forecast_price(history, 3 if market == "cash" else 1)
+                forecast = forecast_price(
+                    history,
+                    3 if market == "cash" else 1,
+                    market=market,
+                    source_interval=dict(getattr(history, "attrs", {}).get("provider_route", {}) or {}).get("interval", "1d"),
+                )
                 if forecast:
-                    save_forecast(market, symbol, forecast)
+                    save_forecast(market, symbol, forecast, scan_type="fast", signal_created_at=utc_now())
             except Exception as exc:
                 log.debug("Fast persistence failed | market=%s | symbol=%s | error=%s", market, symbol, exc)
 
@@ -429,7 +447,7 @@ def fast_scan_market(market: str) -> list[Any]:
 
     actions: list[Any] = []
     with trade_cycle_lock:
-        if _execution_enabled():
+        if _execution_enabled(market):
             try:
                 update_prices(market, prices)
             except Exception as exc:
@@ -554,9 +572,14 @@ def scan_market(market: str) -> list[Any]:
                     "oracle_council": council,
                 },
             )
-            forecast = forecast_price(history, 5)
+            forecast = forecast_price(
+                history,
+                5,
+                market=market,
+                source_interval=dict(getattr(history, "attrs", {}).get("provider_route", {}) or {}).get("interval", "1d"),
+            )
             if forecast:
-                save_forecast(market, symbol, forecast)
+                save_forecast(market, symbol, forecast, scan_type="deep", signal_created_at=utc_now())
         except Exception as exc:
             log.warning("Oracle pass failed | market=%s | symbol=%s | error=%s", market, symbol, exc)
 
@@ -648,7 +671,7 @@ def scan_market(market: str) -> list[Any]:
 
     actions: list[Any] = []
     with trade_cycle_lock:
-        if _execution_enabled():
+        if _execution_enabled(market):
             try:
                 update_prices(market, prices)
             except Exception as exc:
@@ -687,7 +710,7 @@ def live_position_pulse(market: str) -> tuple[list[Any], int, str]:
         return [], 0, provider_text
     actions: list[Any] = []
     with trade_cycle_lock:
-        if _execution_enabled():
+        if _execution_enabled(market):
             try:
                 update_prices(market, prices)
             except Exception as exc:
@@ -931,9 +954,7 @@ def run_worker(market: str) -> None:
 
 if __name__ == "__main__":
     import os
+    from structured_logging import configure_structured_logging
 
-    logging.basicConfig(
-        level=os.getenv("LOG_LEVEL", "INFO").upper(),
-        format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-    )
+    configure_structured_logging(os.getenv("LOG_LEVEL", "INFO"))
     run_worker(os.getenv("WORKER_MARKET", "cash"))
