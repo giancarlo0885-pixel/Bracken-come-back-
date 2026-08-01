@@ -11,10 +11,18 @@ class Forecast:
     probability_up: float
     model: str
 
+def _series(frame: pd.DataFrame, column: str) -> pd.Series:
+    value = frame[column]
+    if isinstance(value, pd.DataFrame):
+        value = value.iloc[:, -1]
+    return pd.to_numeric(value, errors="coerce").dropna()
+
 def forecast_price(history: pd.DataFrame, days=5) -> Forecast | None:
     if history.empty or len(history)<40:
         return None
-    close=history["Close"].astype(float).dropna()
+    close=_series(history, "Close")
+    if close.empty:
+        return None
     spot=float(close.iloc[-1])
     returns=np.log(close/close.shift(1)).dropna()
     recent=returns.tail(60)
