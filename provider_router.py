@@ -134,7 +134,12 @@ def _stamp_frame(
     return out
 
 
-def _normalise(frame: pd.DataFrame, symbol: str = "") -> pd.DataFrame:
+def _daily_like(interval: str) -> bool:
+    text = str(interval or "1d").lower().strip()
+    return text.endswith("d") or text in {"1wk", "1mo", "3mo", "1y"}
+
+
+def _normalise(frame: pd.DataFrame, symbol: str = "", interval: str = "1d") -> pd.DataFrame:
     if frame is None or frame.empty:
         return pd.DataFrame()
     original_attrs = dict(getattr(frame, "attrs", {}) or {})
@@ -155,7 +160,12 @@ def _normalise(frame: pd.DataFrame, symbol: str = "") -> pd.DataFrame:
     if "Close" not in keep:
         return pd.DataFrame()
     out = out[keep].apply(pd.to_numeric, errors="coerce").dropna(subset=["Close"])
-    out.index = pd.to_datetime(out.index, errors="coerce", utc=True)
+    index = pd.to_datetime(out.index, errors="coerce")
+    if getattr(index, "tz", None) is None and not _daily_like(interval):
+        return pd.DataFrame()
+    if getattr(index, "tz", None) is not None:
+        index = index.tz_convert(timezone.utc)
+    out.index = index
     out = out[~out.index.isna()].sort_index()
     out = out[~out.index.duplicated(keep="last")]
     out.attrs.update(original_attrs)
@@ -174,7 +184,7 @@ def _verified_history(
 ) -> pd.DataFrame:
     if not requested_symbol or not _symbol_matches(requested_symbol, provider_symbol):
         return pd.DataFrame()
-    normalized = _normalise(frame, requested_symbol)
+    normalized = _normalise(frame, requested_symbol, interval)
     if normalized.empty:
         return pd.DataFrame()
     return _stamp_frame(
@@ -494,7 +504,10 @@ def route_history(
                 f"_adjusted_true_extended_{str(intraday).lower()}"
             )
             frame = cached_call(namespace, ttl, function, symbol, period, interval, key)
-            frame = _normalise(frame, symbol)
+            frame = _normalise(frame, symbol, interval)
+            if not frame.empty:
+                frame.attrs["cache_identity"] = namespace
+                frame.attrs.setdefault("source_identity", f"{provider}:{symbol}:{period}:{interval}")
             if not frame.empty and verify_frame_symbol(frame, symbol):
                 frame = frame.copy(deep=True)
                 attempts.append(ProviderAttempt(provider, True, len(frame), "healthy"))

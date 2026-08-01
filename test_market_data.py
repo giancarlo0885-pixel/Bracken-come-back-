@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 import pandas as pd
 import numpy as np
 
@@ -12,7 +14,7 @@ from market_data import (
     finite_scalar,
     get_many_snapshots,
 )
-from provider_router import _redact_url
+from provider_router import _redact_url, _verified_history
 
 
 def _history(close, volume=None, symbol="BTC-USD"):
@@ -171,7 +173,7 @@ def test_etf_quote_cannot_be_reused_for_stock(monkeypatch):
     assert get_many_snapshots(["AAPL"], live=False) == {}
 
 
-def test_duplicate_price_anomaly_quarantines_provider_results():
+def test_duplicate_price_alone_does_not_quarantine_provider_results():
     snapshots = {
         symbol: MarketSnapshot(
             symbol=symbol,
@@ -185,7 +187,26 @@ def test_duplicate_price_anomaly_quarantines_provider_results():
         )
         for symbol in ("GM", "F", "AAPL")
     }
-    assert _duplicate_price_quarantine(snapshots) == {"GM", "F", "AAPL"}
+    assert _duplicate_price_quarantine(snapshots) == set()
+
+
+def test_identical_cache_identity_quarantines_provider_results():
+    snapshots = {
+        symbol: MarketSnapshot(
+            symbol=symbol,
+            price=price,
+            change_pct=0,
+            volume=100,
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            provider="unit",
+            requested_symbol=symbol,
+            provider_symbol=symbol,
+            cache_identity="shared-cache",
+            ohlcv_fingerprint="same-ohlcv",
+        )
+        for symbol, price in (("GM", 88.59), ("F", 162.0))
+    }
+    assert _duplicate_price_quarantine(snapshots) == {"GM", "F"}
 
 
 def test_provider_error_logs_redact_api_keys():
@@ -198,3 +219,13 @@ def test_provider_error_logs_redact_api_keys():
     assert "ALSOSECRET" not in redacted
     assert "api_token=REDACTED" in redacted
     assert "apikey=REDACTED" in redacted
+
+
+def test_daily_date_only_index_retains_exchange_session_date():
+    frame = pd.DataFrame(
+        {"Close": [200.0], "Volume": [1000]},
+        index=pd.DatetimeIndex(["2026-07-31"]),
+    )
+    verified = _verified_history(frame, "unit", "AAPL", "AAPL", "5d", "1d")
+    assert str(verified.index[-1].date()) == "2026-07-31"
+    assert verified.index.tz is None

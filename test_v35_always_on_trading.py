@@ -1,5 +1,6 @@
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 from realtime_runtime import cadence_for
 from engine import OracleSignal
@@ -49,6 +50,25 @@ def _verified_candidate(**overrides):
     }
     candidate.update(overrides)
     return candidate
+
+
+def _verified_quote(symbol: str = "AAPL", price: float = 100.0, **overrides):
+    now = datetime.now(timezone.utc).isoformat()
+    quote = {
+        "symbol": symbol,
+        "requested_symbol": symbol,
+        "provider_symbol": symbol,
+        "provider": "unit",
+        "price": price,
+        "quote_timestamp": now,
+        "interval": "1d",
+        "quote_verified": True,
+        "source_identity": f"unit:{symbol}",
+        "cache_identity": f"cache:{symbol}",
+        "ohlcv_fingerprint": f"ohlcv:{symbol}",
+    }
+    quote.update(overrides)
+    return quote
 
 
 def test_always_on_runtime_has_fast_and_deep_cadences():
@@ -142,12 +162,13 @@ def test_rejected_replacement_buy_does_not_emit_rotation_sell(monkeypatch):
             "price": 20,
             "market_data_route": {
                 "requested_symbol": "NEW",
-                "provider_symbol": "NEW",
-                "quote_timestamp": now,
-                "interval": "1d",
-            },
-        }],
-        {"NEW": 20},
+                    "provider_symbol": "NEW",
+                    "quote_timestamp": now,
+                    "interval": "1d",
+                    "quote_verified": True,
+                },
+            }],
+            {"NEW": _verified_quote("NEW", 20, quote_timestamp=now)},
     )
     assert captured["rotation_candidate"] is rotation_candidate
     assert actions == []
@@ -193,12 +214,13 @@ def test_buy_portfolio_row_missing_returns_three_value_tuple(monkeypatch):
             "price": 100,
             "market_data_route": {
                 "requested_symbol": "NEW",
-                "provider_symbol": "NEW",
-                "quote_timestamp": datetime.now(timezone.utc).isoformat(),
-                "interval": "1d",
+                    "provider_symbol": "NEW",
+                    "quote_timestamp": datetime.now(timezone.utc).isoformat(),
+                    "interval": "1d",
+                    "quote_verified": True,
+                },
             },
-        },
-    )
+        )
     assert result == (False, "portfolio row missing", None)
 
 
@@ -401,14 +423,195 @@ def test_duplicate_price_anomaly_blocks_execution(monkeypatch):
             "action": "BUY",
             "score": 95,
             "confidence": .95,
-            "market_data_route": {
-                "requested_symbol": symbol,
-                "provider_symbol": symbol,
-                "quote_timestamp": now,
-                "interval": "1d",
-            },
+            "market_data_route": _verified_quote(
+                symbol,
+                88.59,
+                quote_timestamp=now,
+                cache_identity="same-cache-entry",
+                ohlcv_fingerprint="same-ohlcv",
+            ),
         }
         for symbol in ("GM", "F", "AAPL")
     ]
-    actions = oracle_bot.process_signals("cash", signals, {"GM": 88.59, "F": 88.59, "AAPL": 88.59})
+    actions = oracle_bot.process_signals(
+        "cash",
+        signals,
+        {symbol: _verified_quote(symbol, 88.59, cache_identity="same-cache-entry", ohlcv_fingerprint="same-ohlcv") for symbol in ("GM", "F", "AAPL")},
+    )
     assert actions == []
+
+
+def test_enable_autotrade_false_blocks_buys(monkeypatch):
+    import oracle_bot
+
+    monkeypatch.setattr(oracle_bot, "ENABLE_AUTOTRADE", False)
+    ok, reason, rotation = oracle_bot._buy(
+        "cash",
+        "AAPL",
+        100,
+        {"symbol": "AAPL", "market_data_route": _verified_quote("AAPL", 100)},
+    )
+    assert ok is False
+    assert reason == "autotrade disabled"
+    assert rotation is None
+
+
+def test_enable_autotrade_false_blocks_sell_signals(monkeypatch):
+    import oracle_bot
+
+    monkeypatch.setattr(oracle_bot, "ENABLE_AUTOTRADE", False)
+    monkeypatch.setattr(oracle_bot, "row", lambda *args, **kwargs: {"symbol": "AAPL", "quantity": 1})
+    monkeypatch.setattr(oracle_bot, "_close_position", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("sell executed")))
+    actions = oracle_bot.process_signals(
+        "cash",
+        [{"symbol": "AAPL", "action": "SELL", "price": 100, "market_data_route": _verified_quote("AAPL", 100)}],
+        {"AAPL": _verified_quote("AAPL", 100)},
+    )
+    assert actions == []
+
+
+def test_enable_autotrade_false_blocks_stop_losses_and_take_profits(monkeypatch):
+    import oracle_bot
+
+    monkeypatch.setattr(oracle_bot, "ENABLE_AUTOTRADE", False)
+    monkeypatch.setattr(
+        oracle_bot,
+        "rows",
+        lambda *args, **kwargs: [{"symbol": "AAPL", "quantity": 1, "entry_price": 100, "current_price": 80}],
+    )
+    monkeypatch.setattr(oracle_bot, "_close_position", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("exit executed")))
+    assert oracle_bot.risk_exits("cash", {"AAPL": _verified_quote("AAPL", 80)}) == []
+
+
+def test_scanning_and_signal_persistence_continue_when_execution_disabled(monkeypatch):
+    import market_worker
+
+    saved = {"signals": 0, "forecasts": 0}
+    history = SimpleNamespace(
+        attrs={
+            "provider_route": _verified_quote(
+                "AAPL",
+                100,
+                provider="unit-history",
+                quote_timestamp=datetime.now(timezone.utc).isoformat(),
+            )
+        }
+    )
+
+    class Signal:
+        symbol = "AAPL"
+        price = 100.0
+        score = 0.9
+        action = "BUY"
+        confidence = 0.9
+
+        def to_dict(self):
+            return {"symbol": self.symbol, "price": self.price}
+
+    monkeypatch.setattr(market_worker, "ENABLE_AUTOTRADE", False)
+    monkeypatch.setattr(market_worker, "_fast_candidate_batch", lambda market: [("AAPL", "Apple")])
+    monkeypatch.setattr(market_worker, "_fast_discover_symbol", lambda *args, **kwargs: (Signal(), history))
+    monkeypatch.setattr(market_worker, "save_json_signal", lambda *args, **kwargs: saved.__setitem__("signals", saved["signals"] + 1))
+    monkeypatch.setattr(market_worker, "forecast_price", lambda *args, **kwargs: {"target_price": 105})
+    monkeypatch.setattr(market_worker, "save_forecast", lambda *args, **kwargs: saved.__setitem__("forecasts", saved["forecasts"] + 1))
+    monkeypatch.setattr(market_worker, "update_prices", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("update called")))
+    monkeypatch.setattr(market_worker, "risk_exits", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("risk called")))
+    monkeypatch.setattr(market_worker, "process_signals", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("process called")))
+    monkeypatch.setattr(market_worker, "snapshot", lambda *args, **kwargs: None)
+
+    assert market_worker.fast_scan_market("cash") == []
+    assert saved == {"signals": 1, "forecasts": 1}
+
+
+def test_mismatched_price_cannot_update_position_current_price(monkeypatch):
+    import oracle_bot
+
+    calls = []
+    monkeypatch.setattr(oracle_bot, "ENABLE_AUTOTRADE", True)
+    monkeypatch.setattr(oracle_bot, "rows", lambda *args, **kwargs: [{"symbol": "F", "quantity": 1}])
+    monkeypatch.setattr(oracle_bot, "execute", lambda *args, **kwargs: calls.append(args))
+    updated = oracle_bot.update_prices("cash", {"F": _verified_quote("GM", 88.59)})
+    assert updated == 0
+    assert calls == []
+
+
+def test_mismatched_price_cannot_trigger_risk_exits(monkeypatch):
+    import oracle_bot
+
+    monkeypatch.setattr(oracle_bot, "ENABLE_AUTOTRADE", True)
+    monkeypatch.setattr(
+        oracle_bot,
+        "rows",
+        lambda *args, **kwargs: [{"symbol": "F", "quantity": 1, "entry_price": 100, "highest_price": 120}],
+    )
+    monkeypatch.setattr(oracle_bot, "_close_position", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("exit executed")))
+    assert oracle_bot.risk_exits("cash", {"F": _verified_quote("GM", 50)}) == []
+
+
+def test_quote_verified_false_is_rejected():
+    import oracle_bot
+
+    ok, reason = oracle_bot._execution_quote_guard(
+        "cash",
+        "AAPL",
+        100,
+        {"symbol": "AAPL", "market_data_route": _verified_quote("AAPL", 100, quote_verified=False)},
+    )
+    assert ok is False
+    assert "not provider verified" in reason
+
+
+def test_missing_quote_identity_is_rejected():
+    import oracle_bot
+
+    payload = _verified_quote("AAPL", 100)
+    payload.pop("requested_symbol")
+    ok, reason = oracle_bot._execution_quote_guard(
+        "cash",
+        "AAPL",
+        100,
+        {"symbol": "AAPL", "market_data_route": payload},
+    )
+    assert ok is False
+    assert "requested quote symbol is missing" in reason
+
+
+def test_anomaly_quarantine_runs_before_update_prices_and_risk_exits(monkeypatch):
+    import oracle_bot
+
+    quote_a = _verified_quote("AAPL", 100, ohlcv_fingerprint="same-sequence")
+    quote_b = _verified_quote("MSFT", 200, ohlcv_fingerprint="same-sequence")
+    monkeypatch.setattr(oracle_bot, "ENABLE_AUTOTRADE", True)
+    monkeypatch.setattr(
+        oracle_bot,
+        "rows",
+        lambda *args, **kwargs: [
+            {"symbol": "AAPL", "quantity": 1, "entry_price": 110, "highest_price": 120},
+            {"symbol": "MSFT", "quantity": 1, "entry_price": 210, "highest_price": 220},
+        ],
+    )
+    monkeypatch.setattr(oracle_bot, "execute", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("price updated")))
+    monkeypatch.setattr(oracle_bot, "_close_position", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("exit executed")))
+    quotes = {"AAPL": quote_a, "MSFT": quote_b}
+    assert oracle_bot.update_prices("cash", quotes) == 0
+    assert oracle_bot.risk_exits("cash", quotes) == []
+
+
+def test_two_legitimate_stocks_same_rounded_price_not_automatically_quarantined():
+    import oracle_bot
+
+    quotes = {
+        "AAPL": _verified_quote("AAPL", 88.59, source_identity="unit:a", cache_identity="cache:a", ohlcv_fingerprint="ohlcv:a"),
+        "MSFT": _verified_quote("MSFT", 88.59, source_identity="unit:b", cache_identity="cache:b", ohlcv_fingerprint="ohlcv:b"),
+    }
+    assert oracle_bot._duplicate_price_anomaly_symbols(quotes) == set()
+
+
+def test_corrupted_identical_ohlcv_cache_data_is_quarantined():
+    import oracle_bot
+
+    quotes = {
+        "AAPL": _verified_quote("AAPL", 88.59, cache_identity="shared-cache", ohlcv_fingerprint="same"),
+        "MSFT": _verified_quote("MSFT", 162.00, cache_identity="shared-cache", ohlcv_fingerprint="same"),
+    }
+    assert oracle_bot._duplicate_price_anomaly_symbols(quotes) == {"AAPL", "MSFT"}

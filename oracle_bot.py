@@ -13,6 +13,8 @@ from database import connect, row, rows, utc_now
 from quant_trade_standard import assess_trade
 from oracle_intelligence import evaluate_opportunity
 from market_memory import record_closed_trade_memory
+from market_data import MarketSnapshot
+from provider_router import normalize_symbol
 from market_sessions import (
     confirmed_us_listing,
     is_otc_exchange,
@@ -31,6 +33,8 @@ from paper_broker import (
 
 
 log = logging.getLogger("oracle-bot")
+_AUTOTRADE_DISABLED_LOGGED = False
+PAPER_MARGIN_REDUCTION_REASON = "paper_margin_reduction"
 
 
 # =========================================================
@@ -221,7 +225,21 @@ def signal_price(
 
 
 def _normalized_symbol(value: Any) -> str:
-    return safe_text(value).upper()
+    return normalize_symbol(value)
+
+
+def _autotrade_enabled() -> bool:
+    return bool(globals().get("ENABLE_AUTOTRADE", False))
+
+
+def _execution_disabled(reason: str) -> bool:
+    global _AUTOTRADE_DISABLED_LOGGED
+    if _autotrade_enabled():
+        return False
+    if not _AUTOTRADE_DISABLED_LOGGED:
+        log.warning("Execution disabled because ENABLE_AUTOTRADE=false; %s blocked.", reason)
+        _AUTOTRADE_DISABLED_LOGGED = True
+    return True
 
 
 def _signal_route(signal: Any) -> dict[str, Any]:
@@ -245,11 +263,62 @@ def _quote_identity_metadata(signal: Any) -> dict[str, Any]:
         "timestamp",
         "interval",
         "quote_verified",
+        "source_identity",
+        "cache_identity",
+        "ohlcv_fingerprint",
     ):
         value = signal_value(signal, key, None)
         if value not in (None, "", []):
             metadata[key] = value
     return metadata
+
+
+def _quote_payload(value: Any, symbol: str = "") -> dict[str, Any]:
+    if isinstance(value, MarketSnapshot):
+        return value.to_quote_payload()
+    if isinstance(value, dict):
+        return dict(value)
+    return {}
+
+
+def _verified_quote_for(
+    symbol: str,
+    quotes: dict[str, Any] | None,
+    market: str = "cash",
+) -> dict[str, Any] | None:
+    symbol = _normalized_symbol(symbol)
+    if not quotes:
+        return None
+    payload = _quote_payload(quotes.get(symbol) or quotes.get(symbol.lower()), symbol)
+    if not payload:
+        return None
+    price = safe_float(payload.get("price"))
+    if price <= 0:
+        return None
+    requested = _normalized_symbol(payload.get("requested_symbol"))
+    provider_symbol = _normalized_symbol(payload.get("provider_symbol"))
+    quote_symbol = _normalized_symbol(payload.get("symbol") or symbol)
+    if quote_symbol != symbol or requested != symbol or provider_symbol != symbol:
+        return None
+    if payload.get("quote_verified") is not True:
+        return None
+    quote_timestamp = payload.get("quote_timestamp") or payload.get("timestamp")
+    if _parse_utc(quote_timestamp) is None:
+        return None
+    if not quote_is_fresh(
+        quote_timestamp,
+        safe_text(payload.get("interval"), "1d"),
+        max_intraday_age_seconds=DECISION_STOCK_MAX_AGE_MINUTES * 60,
+        symbol=symbol,
+    ):
+        return None
+    payload["price"] = price
+    return payload
+
+
+def _verified_price_for(symbol: str, quotes: dict[str, Any] | None, market: str = "cash") -> float:
+    quote = _verified_quote_for(symbol, quotes, market)
+    return safe_float(quote.get("price")) if quote else 0.0
 
 
 def _execution_quote_guard(
@@ -258,6 +327,7 @@ def _execution_quote_guard(
     price: float,
     signal: Any,
     position: dict[str, Any] | None = None,
+    quote_metadata: dict[str, Any] | None = None,
 ) -> tuple[bool, str]:
     symbol = _normalized_symbol(symbol)
     signal_symbol = _normalized_symbol(signal_value(signal, "symbol", symbol))
@@ -270,12 +340,20 @@ def _execution_quote_guard(
     if price <= 0 or not math.isfinite(price):
         return False, "quote price is invalid"
     metadata = _quote_identity_metadata(signal)
+    if quote_metadata:
+        metadata.update({key: value for key, value in quote_metadata.items() if value not in (None, "", [])})
     if not metadata:
         return False, "verified quote identity metadata is missing"
-    requested = _normalized_symbol(metadata.get("requested_symbol") or metadata.get("quote_symbol") or metadata.get("symbol"))
-    provider_symbol = _normalized_symbol(metadata.get("provider_symbol") or metadata.get("quote_symbol") or metadata.get("symbol"))
+    requested = _normalized_symbol(metadata.get("requested_symbol") or metadata.get("quote_symbol"))
+    provider_symbol = _normalized_symbol(metadata.get("provider_symbol") or metadata.get("quote_symbol"))
+    if not requested:
+        return False, "requested quote symbol is missing"
+    if not provider_symbol:
+        return False, "provider quote symbol is missing"
     if requested != symbol or provider_symbol != symbol:
         return False, f"provider quote identity mismatch ({requested}/{provider_symbol}/{symbol})"
+    if metadata.get("quote_verified") is not True:
+        return False, "quote is not provider verified"
     quote_timestamp = metadata.get("quote_timestamp") or metadata.get("timestamp")
     if _parse_utc(quote_timestamp) is None:
         return False, "verified quote timestamp is missing"
@@ -289,21 +367,25 @@ def _execution_quote_guard(
     return True, "quote identity verified"
 
 
-def _duplicate_price_anomaly_symbols(prices: dict[str, float]) -> set[str]:
-    grouped: dict[float, list[str]] = {}
+def _duplicate_price_anomaly_symbols(prices: dict[str, Any]) -> set[str]:
+    grouped: dict[str, list[str]] = {}
     for raw_symbol, raw_price in (prices or {}).items():
         symbol = _normalized_symbol(raw_symbol)
-        price = safe_float(raw_price)
-        if symbol and price > 0:
-            grouped.setdefault(price, []).append(symbol)
+        payload = _quote_payload(raw_price, symbol)
+        if not payload:
+            continue
+        for field in ("cache_identity", "source_identity", "ohlcv_fingerprint"):
+            identity = safe_text(payload.get(field))
+            if symbol and identity:
+                grouped.setdefault(identity, []).append(symbol)
     blocked: set[str] = set()
-    for price, symbols in grouped.items():
+    for identity, symbols in grouped.items():
         unique = sorted(set(symbols))
-        if len(unique) >= 3:
+        if len(unique) >= 2:
             blocked.update(unique)
             log.warning(
-                "Duplicate-price execution anomaly blocked | price=%.6f affected_symbols=%d sample=%s",
-                price,
+                "Duplicate provider/cache execution anomaly blocked | identity=%s affected_symbols=%d sample=%s",
+                identity[:80],
                 len(unique),
                 ",".join(unique[:8]),
             )
@@ -590,12 +672,15 @@ def recent_trade(
 
 def update_prices(
     market: str,
-    prices: dict[str, float] | None = None,
+    prices: dict[str, Any] | None = None,
     *_: Any,
     **__: Any,
 ) -> int:
     market = safe_text(market).lower()
     prices = prices or {}
+    if _execution_disabled("price updates"):
+        return 0
+    anomalous_symbols = _duplicate_price_anomaly_symbols(prices)
 
     updated = 0
 
@@ -608,52 +693,11 @@ def update_prices(
         (market,),
     )
 
-    # The paper broker behaves like a real prime broker: when leverage reaches
-    # the hard utilization ceiling, it reduces the weakest positions until the
-    # account returns to the warning band. This is simulated risk control only.
-    closed_for_margin: set[str] = set()
-    account_state = portfolio_equity(market)
-    if (
-        PAPER_BROKER_MODE
-        and positions
-        and (
-            bool(account_state.get("margin_call"))
-            or safe_float(account_state.get("margin_utilization_pct"))
-            > PAPER_MAX_MARGIN_UTILIZATION_PCT * 100.0
-        )
-    ):
-        def position_return(item: dict[str, Any]) -> float:
-            entry = safe_float(item.get("average_price", item.get("entry_price")))
-            current = safe_float(prices.get(safe_text(item.get("symbol")).upper()), safe_float(item.get("current_price")))
-            return (current - entry) / entry if entry > 0 and current > 0 else -999.0
-
-        for position in sorted(positions, key=position_return):
-            symbol = safe_text(position.get("symbol")).upper()
-            current_price = safe_float(prices.get(symbol), safe_float(position.get("current_price")))
-            if current_price <= 0:
-                continue
-            if _close_position(market, position, current_price, "paper_margin_reduction"):
-                closed_for_margin.add(symbol)
-                actions.append({
-                    "market": market, "symbol": symbol, "action": "SELL",
-                    "price": current_price, "reason": "paper_margin_reduction",
-                    "return_pct": position_return(position),
-                })
-            account_state = portfolio_equity(market)
-            if (
-                not bool(account_state.get("margin_call"))
-                and safe_float(account_state.get("margin_utilization_pct"))
-                < PAPER_MARGIN_WARNING_PCT * 100.0
-            ):
-                break
-
     for position in positions:
-        if safe_text(position.get("symbol")).upper() in closed_for_margin:
-            continue
         symbol = safe_text(position.get("symbol")).upper()
-        current_price = safe_float(
-            prices.get(symbol, prices.get(symbol.lower()))
-        )
+        if symbol in anomalous_symbols:
+            continue
+        current_price = _verified_price_for(symbol, prices, market)
 
         if current_price <= 0:
             continue
@@ -703,6 +747,8 @@ def _close_position(
     reason: str,
 ) -> bool:
     market = safe_text(market).lower()
+    if _execution_disabled("position close"):
+        return False
     symbol = safe_text(position.get("symbol")).upper()
     quantity = safe_float(position.get("quantity"))
     price = safe_float(price)
@@ -840,12 +886,15 @@ def _close_position(
 
 def risk_exits(
     market: str,
-    prices: dict[str, float] | None = None,
+    prices: dict[str, Any] | None = None,
     *_: Any,
     **__: Any,
 ) -> list[dict[str, Any]]:
     market = safe_text(market).lower()
     prices = prices or {}
+    if _execution_disabled("risk exits"):
+        return []
+    anomalous_symbols = _duplicate_price_anomaly_symbols(prices)
 
     actions: list[dict[str, Any]] = []
 
@@ -860,6 +909,8 @@ def risk_exits(
 
     for position in positions:
         symbol = safe_text(position.get("symbol")).upper()
+        if symbol in anomalous_symbols:
+            continue
 
         entry_price = safe_float(
             position.get(
@@ -868,14 +919,10 @@ def risk_exits(
             )
         )
 
-        current_price = safe_float(
-            prices.get(symbol, prices.get(symbol.lower()))
-        )
-
-        if current_price <= 0:
-            current_price = safe_float(
-                position.get("current_price", 0.0)
-            )
+        quote = _verified_quote_for(symbol, prices, market)
+        if quote is None:
+            continue
+        current_price = safe_float(quote.get("price"))
 
         highest_price = safe_float(
             position.get("highest_price"),
@@ -910,12 +957,7 @@ def risk_exits(
         if not reason:
             continue
 
-        if _close_position(
-            market,
-            position,
-            current_price,
-            reason,
-        ):
+        if _close_position(market, position, current_price, reason):
             actions.append(
                 {
                     "market": market,
@@ -1220,6 +1262,8 @@ def _buy(
 ) -> tuple[bool, str, dict[str, Any] | None]:
     """Execute an institutional paper-broker buy with controlled leverage."""
     market = safe_text(market).lower()
+    if _execution_disabled("buy"):
+        return False, "autotrade disabled", None
     symbol = safe_text(symbol).upper()
     price = safe_float(price)
     rotation_action = (
@@ -1543,13 +1587,15 @@ def _buy(
 def process_signals(
     market: str,
     signals: list[Any] | tuple[Any, ...] | None,
-    prices: dict[str, float] | None = None,
+    prices: dict[str, Any] | None = None,
     *_: Any,
     **__: Any,
 ) -> list[dict[str, Any]]:
     market = safe_text(market).lower()
     signals = list(signals or [])
     prices = prices or {}
+    if _execution_disabled("signal execution"):
+        return []
     actions: list[dict[str, Any]] = []
     anomalous_symbols = _duplicate_price_anomaly_symbols(prices)
 
@@ -1577,10 +1623,8 @@ def process_signals(
         action = signal_action(signal)
         score = normalized_score(signal)
         confidence = normalized_confidence(signal)
-        price = signal_price(
-            signal,
-            safe_float(prices.get(symbol, prices.get(symbol.lower()))),
-        )
+        quote = _verified_quote_for(symbol, prices, market)
+        price = signal_price(signal, safe_float(quote.get("price")) if quote else 0.0)
 
         log.info(
             "%s | CANDIDATE | %s | action=%s | score=%.2f | "
@@ -1626,7 +1670,7 @@ def process_signals(
                     symbol,
                 )
                 continue
-            quote_ok, quote_reason = _execution_quote_guard(market, symbol, price, signal, position)
+            quote_ok, quote_reason = _execution_quote_guard(market, symbol, price, signal, position, quote)
             if not quote_ok:
                 log.info(
                     "%s | REJECT SELL | %s | %s",
@@ -1680,7 +1724,7 @@ def process_signals(
                 action,
             )
             continue
-        quote_ok, quote_reason = _execution_quote_guard(market, symbol, price, signal)
+        quote_ok, quote_reason = _execution_quote_guard(market, symbol, price, signal, quote)
         if not quote_ok:
             log.info(
                 "%s | REJECT BUY | %s | %s",

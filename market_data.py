@@ -12,7 +12,7 @@ import yfinance as yf
 
 from config import LIVE_POSITION_PRICE_WORKERS
 from provider_router import normalize_symbol, route_history, verify_frame_symbol
-from market_sessions import latest_valid_bar_timestamp
+from market_sessions import latest_valid_bar_timestamp, quote_is_fresh
 
 log = logging.getLogger("market-data")
 
@@ -30,6 +30,24 @@ class MarketSnapshot:
     requested_symbol: str | None = None
     provider_symbol: str | None = None
     quote_verified: bool = True
+    source_identity: str | None = None
+    cache_identity: str | None = None
+    ohlcv_fingerprint: str | None = None
+
+    def to_quote_payload(self) -> dict[str, object]:
+        return {
+            "symbol": self.symbol,
+            "requested_symbol": self.requested_symbol,
+            "provider_symbol": self.provider_symbol,
+            "provider": self.provider,
+            "price": self.price,
+            "quote_timestamp": self.timestamp,
+            "interval": self.interval,
+            "quote_verified": self.quote_verified,
+            "source_identity": self.source_identity,
+            "cache_identity": self.cache_identity,
+            "ohlcv_fingerprint": self.ohlcv_fingerprint,
+        }
 
 
 def _select_multiindex_symbol(frame: pd.DataFrame, symbol: str) -> pd.DataFrame:
@@ -76,6 +94,17 @@ def _stamp_history(frame: pd.DataFrame, requested_symbol: str, provider_symbol: 
         }
     )
     return out
+
+
+def _ohlcv_fingerprint(frame: pd.DataFrame, rows: int = 5) -> str:
+    if frame is None or frame.empty:
+        return ""
+    columns = [column for column in ("Open", "High", "Low", "Close", "Volume") if column in frame.columns]
+    if not columns:
+        return ""
+    tail = frame[columns].tail(rows).copy()
+    tail.index = [str(value) for value in tail.index]
+    return str(hash(tuple(tuple(row) for row in tail.round(8).fillna("").itertuples(index=True, name=None))))
 
 
 def finite_scalar(value: object) -> float | None:
@@ -166,8 +195,12 @@ def get_history(symbol: str, period: str = "1y", interval: str = "1d") -> pd.Dat
     route_metadata.update(
         {
             "requested_symbol": normalize_symbol(symbol),
-            "provider_symbol": normalize_symbol(frame.attrs.get("provider_symbol") or symbol),
+        "provider_symbol": normalize_symbol(frame.attrs.get("provider_symbol") or symbol),
             "interval": interval,
+            "source_identity": frame.attrs.get("source_identity"),
+            "cache_identity": frame.attrs.get("cache_identity"),
+            "ohlcv_fingerprint": _ohlcv_fingerprint(frame),
+            "quote_verified": True,
         }
     )
     quote_time = latest_bar_timestamp(frame, interval, symbol=symbol)
@@ -223,6 +256,9 @@ def _snapshot_from_history(symbol: str, history: pd.DataFrame, interval: str) ->
         requested_symbol=str(route.get("requested_symbol") or history.attrs.get("requested_symbol") or symbol),
         provider_symbol=str(route.get("provider_symbol") or history.attrs.get("provider_symbol") or ""),
         quote_verified=True,
+        source_identity=str(route.get("source_identity") or route.get("provider") or ""),
+        cache_identity=str(route.get("cache_identity") or ""),
+        ohlcv_fingerprint=str(route.get("ohlcv_fingerprint") or _ohlcv_fingerprint(history)),
     )
 
 
@@ -250,24 +286,53 @@ def get_snapshot(symbol: str) -> MarketSnapshot | None:
     return _snapshot_from_history(symbol, history, "1d")
 
 
+def snapshot_is_verified(snapshot: MarketSnapshot | None, symbol: str) -> bool:
+    if snapshot is None:
+        return False
+    requested = normalize_symbol(symbol)
+    if (
+        normalize_symbol(snapshot.symbol) != requested
+        or normalize_symbol(snapshot.requested_symbol) != requested
+        or normalize_symbol(snapshot.provider_symbol) != requested
+    ):
+        return False
+    if snapshot.quote_verified is not True:
+        return False
+    price = finite_scalar(snapshot.price)
+    if price is None or price <= 0:
+        return False
+    return quote_is_fresh(
+        snapshot.timestamp,
+        snapshot.interval,
+        symbol=requested,
+    )
+
+
 def _duplicate_price_quarantine(snapshots: dict[str, MarketSnapshot]) -> set[str]:
-    grouped: dict[tuple[str, float], list[str]] = {}
+    grouped: dict[tuple[str, str], list[str]] = {}
     for symbol, snapshot in snapshots.items():
         price = finite_scalar(snapshot.price)
         if price is None or price <= 0:
             continue
         provider = str(snapshot.provider or "unknown")
-        grouped.setdefault((provider, price), []).append(symbol)
+        identities = [
+            str(snapshot.cache_identity or ""),
+            str(snapshot.source_identity or ""),
+            str(snapshot.ohlcv_fingerprint or ""),
+        ]
+        for identity in identities:
+            if identity:
+                grouped.setdefault((provider, identity), []).append(symbol)
     quarantined: set[str] = set()
-    for (provider, price), symbols in grouped.items():
+    for (provider, identity), symbols in grouped.items():
         unrelated = sorted(set(symbols))
-        if len(unrelated) < 3:
+        if len(unrelated) < 2:
             continue
         quarantined.update(unrelated)
         log.warning(
-            "Quarantined duplicate provider price anomaly | provider=%s price=%.6f affected_symbols=%d sample=%s",
+            "Quarantined duplicate provider/cache anomaly | provider=%s identity=%s affected_symbols=%d sample=%s",
             provider,
-            price,
+            identity[:80],
             len(unrelated),
             ",".join(unrelated[:8]),
         )
@@ -290,11 +355,7 @@ def get_many_snapshots(symbols: Iterable[str], live: bool = False) -> dict[str, 
             except Exception:
                 snapshot = None
             if snapshot is not None:
-                if (
-                    normalize_symbol(snapshot.symbol) == symbol
-                    and normalize_symbol(snapshot.requested_symbol) == symbol
-                    and normalize_symbol(snapshot.provider_symbol) == symbol
-                ):
+                if snapshot_is_verified(snapshot, symbol):
                     results[symbol] = snapshot
     quarantined = _duplicate_price_quarantine(results)
     for symbol in quarantined:
