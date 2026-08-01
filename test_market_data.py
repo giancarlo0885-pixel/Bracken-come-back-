@@ -69,5 +69,5 @@ def test_snapshot_uses_latest_bar_timestamp_and_preserves_fetched_at():
     }
     snapshot = _snapshot_from_history("AAPL", history, "1d")
     assert snapshot is not None
-    assert snapshot.timestamp == "2026-01-02T00:00:00+00:00"
+    assert snapshot.timestamp == "2026-01-02T23:59:00+00:00"
     assert snapshot.fetched_at == "2026-08-01T12:00:00+00:00"

@@ -11,6 +11,7 @@ import yfinance as yf
 
 from config import LIVE_POSITION_PRICE_WORKERS
 from provider_router import route_history
+from market_sessions import latest_valid_bar_timestamp
 
 
 @dataclass
@@ -82,6 +83,25 @@ def latest_valid_index(frame: pd.DataFrame, column: str = "Close") -> datetime |
     return timestamp.to_pydatetime().astimezone(timezone.utc)
 
 
+def latest_bar_timestamp(
+    frame: pd.DataFrame,
+    interval: str,
+    exchange: str = "",
+    region: str = "",
+    symbol: str = "",
+) -> datetime | None:
+    route = dict(getattr(frame, "attrs", {}).get("provider_route") or {})
+    bar = latest_valid_bar_timestamp(
+        frame,
+        interval,
+        exchange=exchange or str(route.get("exchange") or ""),
+        region=region or str(route.get("region") or ""),
+        symbol=symbol,
+        provider_timezone=route.get("timezone") or route.get("provider_timezone") or "",
+    )
+    return bar.timestamp if bar else None
+
+
 def _download_yahoo(symbol: str, period: str, interval: str) -> pd.DataFrame:
     data = yf.download(
         symbol,
@@ -119,7 +139,7 @@ def _snapshot_from_history(symbol: str, history: pd.DataFrame, interval: str) ->
     volume = volume if volume is not None else 0.0
     route = dict(history.attrs.get("provider_route") or {})
     fetched_at = str(route.get("fetched_at") or datetime.now(timezone.utc).isoformat())
-    latest_quote = latest_valid_index(history, "Close")
+    latest_quote = latest_bar_timestamp(history, interval, symbol=symbol)
     quote_timestamp = str(route.get("quote_timestamp") or (latest_quote.isoformat() if latest_quote else fetched_at))
     return MarketSnapshot(
         symbol=symbol,

@@ -2,9 +2,12 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+import pandas as pd
+
 from market_sessions import (
     completed_daily_bar_is_fresh,
     latest_completed_trading_day,
+    latest_valid_bar_timestamp,
     local_time,
     market_session_open,
     quote_is_fresh,
@@ -57,3 +60,32 @@ def test_unknown_foreign_exchange_uses_conservative_age_rule():
     now = datetime(2026, 8, 3, 14, 0, tzinfo=timezone.utc)
     assert quote_is_fresh("2026-08-03T13:50:00+00:00", "1d", now, exchange="UNKNOWN") is True
     assert quote_is_fresh("2026-08-02T13:50:00+00:00", "1d", now, exchange="UNKNOWN") is False
+
+
+def test_yfinance_us_daily_date_only_stays_new_york_session_date():
+    frame = pd.DataFrame({"Close": [100]}, index=pd.DatetimeIndex(["2026-07-31"]))
+    bar = latest_valid_bar_timestamp(frame, "1d", exchange="NASDAQ", symbol="AAPL")
+    assert bar is not None
+    assert bar.session_date.isoformat() == "2026-07-31"
+    assert bar.timestamp.isoformat() == "2026-07-31T20:00:00+00:00"
+
+
+def test_london_daily_date_only_stays_london_session_date():
+    frame = pd.DataFrame({"Close": [100]}, index=pd.DatetimeIndex(["2026-07-31"]))
+    bar = latest_valid_bar_timestamp(frame, "1d", exchange="LSE", symbol="HSBA.L")
+    assert bar is not None
+    assert bar.session_date.isoformat() == "2026-07-31"
+    assert bar.timestamp.isoformat() == "2026-07-31T15:30:00+00:00"
+
+
+def test_tokyo_daily_date_only_stays_tokyo_session_date():
+    frame = pd.DataFrame({"Close": [100]}, index=pd.DatetimeIndex(["2026-07-31"]))
+    bar = latest_valid_bar_timestamp(frame, "1d", exchange="TSE", symbol="7203.T")
+    assert bar is not None
+    assert bar.session_date.isoformat() == "2026-07-31"
+    assert bar.timestamp.isoformat() == "2026-07-31T06:00:00+00:00"
+
+
+def test_ambiguous_naive_intraday_timestamp_is_rejected():
+    frame = pd.DataFrame({"Close": [100]}, index=pd.DatetimeIndex(["2026-07-31 10:15"]))
+    assert latest_valid_bar_timestamp(frame, "1m", exchange="NASDAQ", symbol="AAPL") is None

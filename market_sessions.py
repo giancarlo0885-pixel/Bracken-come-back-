@@ -6,6 +6,8 @@ from functools import lru_cache
 from typing import Any
 from zoneinfo import ZoneInfo
 
+import pandas as pd
+
 
 NY_TZ = ZoneInfo("America/New_York")
 OTC_EXCHANGES = {"OTC", "PINK", "OTCQX", "OTCQB", "GREY"}
@@ -78,6 +80,13 @@ class ExchangeSession:
     open_time: time
     close_time: time
     holiday_profile: str = "weekday"
+
+
+@dataclass(frozen=True)
+class BarTimestamp:
+    timestamp: datetime
+    session_date: date
+    verified: bool
 
 
 EXCHANGE_SESSIONS: dict[str, ExchangeSession] = {
@@ -389,3 +398,53 @@ def completed_daily_bar_is_fresh(
         return age is not None and age <= max_unknown_age_seconds
     zone = ZoneInfo(EXCHANGE_SESSIONS[resolved].timezone)
     return quote_dt.astimezone(zone).date() == latest_completed_trading_day(now, resolved)
+
+
+def _is_daily_like(interval: Any) -> bool:
+    text = str(interval or "1d").lower().strip()
+    return text.endswith("d") or text in {"1wk", "1mo", "1w", "weekly", "monthly"}
+
+
+def latest_valid_bar_timestamp(
+    frame: pd.DataFrame,
+    interval: Any,
+    exchange: Any = "",
+    region: Any = "",
+    symbol: Any = "",
+    column: str = "Close",
+    provider_timezone: Any = "",
+) -> BarTimestamp | None:
+    if frame is None or frame.empty or column not in frame.columns:
+        return None
+    values = frame[column]
+    if isinstance(values, pd.DataFrame):
+        values = values.iloc[:, -1]
+    numeric = pd.to_numeric(values, errors="coerce").dropna()
+    if numeric.empty:
+        return None
+    try:
+        stamp = pd.Timestamp(numeric.index[-1])
+    except Exception:
+        return None
+
+    resolved = resolve_exchange(exchange, region, symbol)
+    session = EXCHANGE_SESSIONS.get(resolved)
+    zone = ZoneInfo(session.timezone if session else "UTC")
+    if _is_daily_like(interval):
+        session_date = stamp.date() if stamp.tzinfo is None else stamp.tz_convert(zone).date()
+        close_time = session.close_time if session else time(23, 59)
+        local_close = datetime.combine(session_date, close_time, tzinfo=zone)
+        return BarTimestamp(local_close.astimezone(timezone.utc), session_date, True)
+
+    if stamp.tzinfo is None:
+        provider_zone = str(provider_timezone or "").strip()
+        if not provider_zone:
+            return None
+        try:
+            localized = stamp.tz_localize(ZoneInfo(provider_zone))
+        except Exception:
+            return None
+    else:
+        localized = stamp
+    utc_timestamp = localized.to_pydatetime().astimezone(timezone.utc)
+    return BarTimestamp(utc_timestamp, utc_timestamp.astimezone(zone).date(), True)

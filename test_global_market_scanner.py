@@ -138,6 +138,35 @@ def test_provider_mover_discovery_uses_configured_alpha_capability(monkeypatch):
     monkeypatch.setattr(scanner, "cached_call", lambda namespace, ttl, fn, *args: fn(*args))
     symbols = {item["symbol"]: item["mover_type"] for item in scanner.provider_mover_universe()}
     assert symbols == {"GAIN": "major_gainer", "LOSE": "major_loser", "VOL": "unusual_volume"}
+    [gain] = [item for item in scanner.provider_mover_universe() if item["symbol"] == "GAIN"]
+    assert gain["quote_verified"] is False
+    assert "provider_fetched_at" in gain
+    assert "quote_timestamp" not in gain
+    assert "market_session" not in gain
+
+
+def test_eodhd_screener_without_quote_timestamp_is_discovery_only(monkeypatch):
+    class Settings:
+        def get(self, name):
+            return "key" if name == "EODHD_API_KEY" else None
+
+    class Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"data": [{"code": "GAIN.US", "exchange": "NASDAQ", "close": 12, "volume": 1_000_000}]}
+
+    monkeypatch.setattr(scanner, "get_api_settings", lambda: Settings())
+    monkeypatch.setattr(scanner.requests, "get", lambda *args, **kwargs: Response())
+    monkeypatch.setattr(scanner, "cached_call", lambda namespace, ttl, fn, *args: fn(*args))
+    records = scanner.provider_mover_universe()
+    assert records
+    record = records[0]
+    assert record["quote_verified"] is False
+    assert "provider_fetched_at" in record
+    assert "quote_timestamp" not in record
+    assert "market_session" not in record
 
 
 def test_provider_discovered_core_stock_keeps_mover_metadata(monkeypatch):
@@ -275,6 +304,7 @@ def test_provider_without_in_progress_daily_candle_uses_snapshot_during_regular_
             "quote_timestamp": "2026-08-03T14:01:00+00:00",
             "quote_provider": "polygon_snapshot",
             "market_session": "regular",
+            "quote_verified": True,
         },
         now=datetime(2026, 8, 3, 14, 2, tzinfo=timezone.utc),
     )
@@ -322,6 +352,7 @@ def test_premarket_mover_uses_current_premarket_quote(monkeypatch):
             "quote_timestamp": "2026-08-03T12:00:00+00:00",
             "quote_provider": "polygon_premarket",
             "market_session": "premarket",
+            "quote_verified": True,
         },
         now=datetime(2026, 8, 3, 12, 1, tzinfo=timezone.utc),
     )
@@ -346,6 +377,7 @@ def test_after_hours_mover_uses_current_after_hours_quote(monkeypatch):
             "quote_timestamp": "2026-08-03T21:00:00+00:00",
             "quote_provider": "polygon_afterhours",
             "market_session": "after-hours",
+            "quote_verified": True,
         },
         now=datetime(2026, 8, 3, 21, 1, tzinfo=timezone.utc),
     )
@@ -391,6 +423,7 @@ def test_provider_snapshot_values_enter_mover_ranking(monkeypatch):
             "quote_timestamp": "2026-08-03T14:05:00+00:00",
             "quote_provider": "alpha",
             "market_session": "regular",
+            "quote_verified": True,
         },
         now=datetime(2026, 8, 3, 14, 6, tzinfo=timezone.utc),
     )
@@ -418,6 +451,7 @@ def test_foreign_stock_freshness_uses_own_exchange_calendar(monkeypatch):
             "quote_timestamp": "2026-07-31T08:30:00+00:00",
             "quote_provider": "eodhd",
             "market_session": "regular",
+            "quote_verified": True,
         },
         now=datetime(2026, 7, 31, 8, 31, tzinfo=timezone.utc),
     )
@@ -452,8 +486,64 @@ def test_provider_fallback_when_current_quote_data_is_incomplete(monkeypatch):
             "quote_timestamp": "2026-08-03T14:03:00+00:00",
             "quote_provider": "incomplete_provider",
             "market_session": "regular",
+            "quote_verified": True,
         },
         now=datetime(2026, 8, 3, 14, 4, tzinfo=timezone.utc),
     )
     assert candidate is not None
     assert candidate.quote_provider == "fallback_intraday"
+
+
+def test_provider_fetched_at_is_never_accepted_as_quote_timestamp(monkeypatch):
+    monkeypatch.setattr(scanner, "get_history", lambda *args, **kwargs: previous_session_history())
+    monkeypatch.setattr(scanner, "get_live_snapshot", lambda symbol: None)
+    candidate = scanner._candidate_metrics(
+        {
+            "symbol": "AAPL",
+            "name": "Apple",
+            "exchange": "NASDAQ",
+            "region": "United States",
+            "sector": "mega_cap_core",
+            "price": 122,
+            "change_1d_pct": 6,
+            "daily_volume": 5_000_000,
+            "provider_fetched_at": "2026-08-03T14:03:00+00:00",
+            "quote_provider": "alpha_vantage_top_gainers_losers",
+            "quote_verified": False,
+        },
+        now=datetime(2026, 8, 3, 14, 4, tzinfo=timezone.utc),
+    )
+    assert candidate is None
+
+
+def test_fresh_live_snapshot_upgrades_discovery_only_mover(monkeypatch):
+    monkeypatch.setattr(scanner, "get_history", lambda *args, **kwargs: previous_session_history())
+    monkeypatch.setattr(
+        scanner,
+        "get_live_snapshot",
+        lambda symbol: SimpleNamespace(
+            price=123,
+            change_pct=7,
+            volume=6_000_000,
+            timestamp="2026-08-03T14:03:00+00:00",
+            interval="1m",
+            provider="live_snapshot",
+        ),
+    )
+    candidate = scanner._candidate_metrics(
+        {
+            "symbol": "AAPL",
+            "name": "Apple",
+            "exchange": "NASDAQ",
+            "region": "United States",
+            "sector": "mega_cap_core",
+            "mover_tags": ["major_gainer"],
+            "provider_fetched_at": "2026-08-03T14:02:00+00:00",
+            "quote_verified": False,
+        },
+        now=datetime(2026, 8, 3, 14, 4, tzinfo=timezone.utc),
+    )
+    assert candidate is not None
+    assert candidate.quote_provider == "live_snapshot"
+    assert candidate.quote_verified is True
+    assert candidate.quote_timestamp == "2026-08-03T14:03:00+00:00"
