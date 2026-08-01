@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+import json
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -900,28 +901,133 @@ def _penny_position_count(market: str) -> int:
     return total
 
 
+def _decode_tags(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [safe_text(item) for item in value if safe_text(item)]
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return []
+        try:
+            parsed = json.loads(text)
+            if isinstance(parsed, list):
+                return [safe_text(item) for item in parsed if safe_text(item)]
+        except Exception:
+            pass
+        return [part.strip() for part in text.replace("|", ",").split(",") if part.strip()]
+    return []
+
+
+def _latest_verified_candidate_metadata(symbol: str) -> dict[str, Any] | None:
+    try:
+        record = row(
+            """
+            SELECT symbol, exchange, price, daily_volume, relative_volume, avg_dollar_volume,
+                   primary_category, mover_tags, discovery_source,
+                   discovery_timestamp, quote_timestamp, data_freshness_seconds,
+                   scanned_at, payload
+            FROM global_market_candidates
+            WHERE symbol=%s
+            ORDER BY scanned_at DESC
+            LIMIT 1
+            """,
+            (symbol,),
+        )
+    except Exception:
+        return None
+    if not record:
+        return None
+    metadata = dict(record)
+    payload = metadata.get("payload")
+    if isinstance(payload, str):
+        try:
+            payload = json.loads(payload)
+        except Exception:
+            payload = {}
+    if isinstance(payload, dict):
+        for key, value in payload.items():
+            metadata.setdefault(key, value)
+    metadata["mover_tags"] = _decode_tags(metadata.get("mover_tags"))
+    return metadata
+
+
+def _verified_signal_metadata(symbol: str, signal: Any) -> dict[str, Any]:
+    metadata: dict[str, Any] = {}
+    for key in (
+        "exchange",
+        "daily_volume",
+        "volume",
+        "avg_dollar_volume",
+        "average_dollar_volume",
+        "primary_category",
+        "mover_tags",
+        "discovery_source",
+        "discovery_timestamp",
+        "quote_timestamp",
+        "created_at",
+        "timestamp",
+    ):
+        value = signal_value(signal, key, None)
+        if value not in (None, "", []):
+            metadata[key] = value
+    candidate = _latest_verified_candidate_metadata(symbol)
+    if candidate:
+        metadata.update({key: value for key, value in candidate.items() if value not in (None, "", [])})
+    metadata["mover_tags"] = _decode_tags(metadata.get("mover_tags"))
+    return metadata
+
+
+def _penny_portfolio_exposure_after(
+    positions: list[dict[str, Any]],
+    equity: float,
+    proposed_trade_value: float,
+) -> tuple[float, float]:
+    existing_value = 0.0
+    for position in positions:
+        current = safe_float(
+            position.get(
+                "current_price",
+                position.get("average_price", position.get("entry_price")),
+            )
+        )
+        if PENNY_STOCK_MIN_PRICE <= current <= PENNY_STOCK_MAX_PRICE:
+            existing_value += safe_float(position.get("quantity")) * current
+    total_value = max(0.0, existing_value) + max(0.0, proposed_trade_value)
+    pct = total_value / equity if equity > 0 else 1.0
+    return total_value, pct
+
+
 def _penny_stock_gate(market: str, symbol: str, price: float, signal: Any, score: float, confidence: float) -> tuple[bool, str]:
     if not _is_penny_stock(symbol, price, signal):
         return True, "not a penny stock"
     if not PENNY_STOCK_ENABLED:
         return False, "penny-stock entries disabled"
-    exchange = safe_text(signal_value(signal, "exchange", "")).upper()
+    metadata = _verified_signal_metadata(symbol, signal)
+    exchange = safe_text(metadata.get("exchange", "")).upper()
     if exchange in {"OTC", "PINK"} and not OTC_STOCKS_ENABLED:
         return False, "OTC penny stocks disabled"
+    if not exchange:
+        return False, "penny-stock verified exchange metadata is missing"
     if price < PENNY_STOCK_MIN_PRICE or price > PENNY_STOCK_MAX_PRICE:
         return False, "penny-stock price is outside allowed bounds"
     if score < PENNY_STOCK_MIN_SCORE:
         return False, f"penny-stock score {score:.1f} below {PENNY_STOCK_MIN_SCORE:.1f}"
     if confidence < PENNY_STOCK_MIN_CONFIDENCE:
         return False, f"penny-stock confidence {confidence:.2f} below {PENNY_STOCK_MIN_CONFIDENCE:.2f}"
-    created = _parse_utc(signal_value(signal, "created_at", signal_value(signal, "timestamp", "")))
-    if created is None:
-        return False, "penny-stock signal timestamp is missing"
-    age_minutes = max(0.0, (datetime.now(timezone.utc) - created).total_seconds() / 60.0)
+    quote_timestamp = metadata.get("quote_timestamp") or metadata.get("created_at") or metadata.get("timestamp")
+    quote_time = _parse_utc(quote_timestamp)
+    if quote_time is None:
+        return False, "penny-stock verified quote timestamp is missing"
+    age_minutes = max(0.0, (datetime.now(timezone.utc) - quote_time).total_seconds() / 60.0)
     if age_minutes > DECISION_STOCK_MAX_AGE_MINUTES:
-        return False, f"penny-stock signal is stale ({age_minutes:.0f} minutes old)"
-    volume = safe_float(signal_value(signal, "volume", signal_value(signal, "daily_volume", 0.0)))
-    avg_dollar_volume = safe_float(signal_value(signal, "avg_dollar_volume", signal_value(signal, "average_dollar_volume", 0.0)))
+        return False, f"penny-stock verified market data is stale ({age_minutes:.0f} minutes old)"
+    primary_category = safe_text(metadata.get("primary_category")).lower()
+    if primary_category and primary_category != "penny_stock":
+        return False, f"penny-stock metadata category is inconsistent ({primary_category})"
+    if not safe_text(metadata.get("discovery_source")):
+        return False, "penny-stock discovery source metadata is missing"
+    volume = safe_float(metadata.get("daily_volume", metadata.get("volume", 0.0)))
+    avg_dollar_volume = safe_float(metadata.get("avg_dollar_volume", metadata.get("average_dollar_volume", 0.0)))
     if volume < PENNY_STOCK_MIN_DAILY_VOLUME:
         return False, "penny-stock daily volume is insufficient"
     if avg_dollar_volume < PENNY_STOCK_MIN_AVG_DOLLAR_VOLUME:
@@ -1144,6 +1250,22 @@ def _buy(
             trade_value = min(trade_value, current_available)
             if trade_value < MIN_TRADE_VALUE:
                 return False, f"buying power changed during execution; available={current_available:.2f}", None
+
+            if PENNY_STOCK_MIN_PRICE <= price <= PENNY_STOCK_MAX_PRICE:
+                _, penny_pct = _penny_portfolio_exposure_after(
+                    [dict(position) for position in active_positions],
+                    account.equity,
+                    trade_value,
+                )
+                if penny_pct > PENNY_STOCK_MAX_PORTFOLIO_PCT:
+                    return (
+                        False,
+                        (
+                            f"penny-stock portfolio limit exceeded "
+                            f"({penny_pct:.2%}/{PENNY_STOCK_MAX_PORTFOLIO_PCT:.2%})"
+                        ),
+                        None,
+                    )
 
             cash_reserve = max(0.0, account.equity * MIN_CASH_RESERVE_PCT)
             new_cash, new_margin_debt, cash_used, borrowed = allocate_purchase(

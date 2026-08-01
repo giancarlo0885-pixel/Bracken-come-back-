@@ -414,16 +414,15 @@ def prepare_events(
             payload.get("revenue_estimate", payload.get("revenueEstimate")),
             allow_zero=_reported_zero(payload, "revenue_estimate", "revenueEstimate"),
         )
+        raw_revenue_actual = payload.get("revenue_actual", payload.get("revenueActual"))
+        revenue_actual_reported_zero = _reported_zero(payload, "revenue_actual", "revenueActual")
+        questionable_zero_actual = _safe_float(raw_revenue_actual) == 0 and not revenue_actual_reported_zero
         revenue_actual = _safe_money(
-            payload.get("revenue_actual", payload.get("revenueActual")),
-            allow_zero=(
-                _reported_zero(payload, "revenue_actual", "revenueActual")
-                or "revenue_actual" in payload
-                or "revenueActual" in payload
-            ),
+            raw_revenue_actual,
+            allow_zero=revenue_actual_reported_zero,
         )
         has_actual = eps_actual is not None or revenue_actual is not None
-        complete = bool(symbol_ok and event_date)
+        complete = bool(symbol_ok and event_date and not questionable_zero_actual)
         status = event_status(event_date, has_actual, complete, current)
         if reporting_today and status != "Reporting Today":
             continue

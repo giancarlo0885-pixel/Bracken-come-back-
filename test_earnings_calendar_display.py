@@ -76,8 +76,18 @@ def test_invalid_zero_revenue_estimate_is_not_displayed_as_zero():
     assert "Rev. Est." not in row
 
 
-def test_reported_zero_revenue_actual_is_displayed():
+def test_ambiguous_zero_revenue_actual_is_incomplete_and_hidden():
     prepared = prepare_events([_record("JPM", "2026-08-02", revenueActual=0)], today=date(2026, 8, 1))
+    assert prepared["main"] == []
+    row = table_rows(prepared["incomplete"])[0]
+    assert "Rev. Actual" not in row
+
+
+def test_provider_confirmed_zero_revenue_actual_is_displayed():
+    prepared = prepare_events(
+        [_record("JPM", "2026-08-02", revenueActual=0, revenueActualReportedZero=True)],
+        today=date(2026, 8, 1),
+    )
     row = table_rows(prepared["main"])[0]
     assert row["Rev. Actual"] == "$0"
 

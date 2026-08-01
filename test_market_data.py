@@ -59,3 +59,15 @@ def test_snapshot_handles_dataframe_shaped_close_and_volume_columns():
     assert snapshot is not None
     assert snapshot.price == 110.0
     assert snapshot.volume == 1500.0
+
+
+def test_snapshot_uses_latest_bar_timestamp_and_preserves_fetched_at():
+    history = _history([100, 101], [1000, 1100])
+    history.attrs["provider_route"] = {
+        "provider": "unit",
+        "fetched_at": "2026-08-01T12:00:00+00:00",
+    }
+    snapshot = _snapshot_from_history("AAPL", history, "1d")
+    assert snapshot is not None
+    assert snapshot.timestamp == "2026-01-02T00:00:00+00:00"
+    assert snapshot.fetched_at == "2026-08-01T12:00:00+00:00"

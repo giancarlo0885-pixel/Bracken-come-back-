@@ -22,6 +22,7 @@ class MarketSnapshot:
     timestamp: str
     provider: str = "unknown"
     interval: str = "1d"
+    fetched_at: str | None = None
 
 
 def _normalize(frame: pd.DataFrame) -> pd.DataFrame:
@@ -64,6 +65,23 @@ def _column(frame: pd.DataFrame, column: str) -> pd.Series:
     return pd.to_numeric(value, errors="coerce")
 
 
+def latest_valid_index(frame: pd.DataFrame, column: str = "Close") -> datetime | None:
+    if frame is None or frame.empty or column not in frame.columns:
+        return None
+    values = _column(frame, column)
+    valid = values[values.map(lambda item: item is not None and math.isfinite(float(item)) if pd.notna(item) else False)]
+    if valid.empty:
+        return None
+    index_value = valid.index[-1]
+    try:
+        timestamp = pd.Timestamp(index_value)
+    except Exception:
+        return None
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.tz_localize(timezone.utc)
+    return timestamp.to_pydatetime().astimezone(timezone.utc)
+
+
 def _download_yahoo(symbol: str, period: str, interval: str) -> pd.DataFrame:
     data = yf.download(
         symbol,
@@ -101,14 +119,17 @@ def _snapshot_from_history(symbol: str, history: pd.DataFrame, interval: str) ->
     volume = volume if volume is not None else 0.0
     route = dict(history.attrs.get("provider_route") or {})
     fetched_at = str(route.get("fetched_at") or datetime.now(timezone.utc).isoformat())
+    latest_quote = latest_valid_index(history, "Close")
+    quote_timestamp = str(route.get("quote_timestamp") or (latest_quote.isoformat() if latest_quote else fetched_at))
     return MarketSnapshot(
         symbol=symbol,
         price=price,
         change_pct=change,
         volume=volume,
-        timestamp=fetched_at,
+        timestamp=quote_timestamp,
         provider=str(route.get("provider") or "unknown"),
         interval=interval,
+        fetched_at=fetched_at,
     )
 
 

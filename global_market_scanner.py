@@ -36,7 +36,7 @@ from config import (
 )
 from api_manager import get_api_settings
 from database import connect, utc_now
-from market_data import get_history
+from market_data import get_history, latest_valid_index
 
 log = logging.getLogger("global-market-scanner")
 
@@ -147,6 +147,7 @@ class GlobalCandidate:
     price: float
     change_1d_pct: float
     change_5d_pct: float
+    daily_volume: float
     relative_volume: float
     avg_dollar_volume: float
     volatility_pct: float
@@ -156,6 +157,7 @@ class GlobalCandidate:
     discovery_source: str
     discovery_timestamp: str
     quote_timestamp: str
+    fetched_at: str
     data_freshness_seconds: float | None
     category: str
     risk_bucket: str
@@ -171,21 +173,24 @@ def _ensure_tables() -> None:
         conn.execute("""CREATE TABLE IF NOT EXISTS global_market_candidates (
             symbol TEXT PRIMARY KEY, name TEXT, exchange TEXT, region TEXT, sector TEXT,
             price DOUBLE PRECISION, change_1d_pct DOUBLE PRECISION,
-            change_5d_pct DOUBLE PRECISION, relative_volume DOUBLE PRECISION,
+            change_5d_pct DOUBLE PRECISION, daily_volume DOUBLE PRECISION,
+            relative_volume DOUBLE PRECISION,
             avg_dollar_volume DOUBLE PRECISION, volatility_pct DOUBLE PRECISION,
             mover_score DOUBLE PRECISION, category TEXT DEFAULT 'unknown',
             primary_category TEXT DEFAULT 'unknown', mover_tags JSONB DEFAULT '[]'::jsonb,
             discovery_source TEXT DEFAULT 'rotating_universe', discovery_timestamp TEXT,
-            quote_timestamp TEXT, data_freshness_seconds DOUBLE PRECISION,
+            quote_timestamp TEXT, fetched_at TEXT, data_freshness_seconds DOUBLE PRECISION,
             risk_bucket TEXT DEFAULT 'standard', tradeable BOOLEAN DEFAULT TRUE,
             payload JSONB, scanned_at TEXT NOT NULL)""")
         for statement in (
             "ALTER TABLE global_market_candidates ADD COLUMN IF NOT EXISTS category TEXT DEFAULT 'unknown'",
             "ALTER TABLE global_market_candidates ADD COLUMN IF NOT EXISTS primary_category TEXT DEFAULT 'unknown'",
             "ALTER TABLE global_market_candidates ADD COLUMN IF NOT EXISTS mover_tags JSONB DEFAULT '[]'::jsonb",
+            "ALTER TABLE global_market_candidates ADD COLUMN IF NOT EXISTS daily_volume DOUBLE PRECISION",
             "ALTER TABLE global_market_candidates ADD COLUMN IF NOT EXISTS discovery_source TEXT DEFAULT 'rotating_universe'",
             "ALTER TABLE global_market_candidates ADD COLUMN IF NOT EXISTS discovery_timestamp TEXT",
             "ALTER TABLE global_market_candidates ADD COLUMN IF NOT EXISTS quote_timestamp TEXT",
+            "ALTER TABLE global_market_candidates ADD COLUMN IF NOT EXISTS fetched_at TEXT",
             "ALTER TABLE global_market_candidates ADD COLUMN IF NOT EXISTS data_freshness_seconds DOUBLE PRECISION",
             "ALTER TABLE global_market_candidates ADD COLUMN IF NOT EXISTS risk_bucket TEXT DEFAULT 'standard'",
             "ALTER TABLE global_market_candidates ADD COLUMN IF NOT EXISTS tradeable BOOLEAN DEFAULT TRUE",
@@ -286,6 +291,54 @@ def _parse_time(value: Any) -> datetime | None:
     return parsed.astimezone(timezone.utc)
 
 
+def _is_weekend(value: datetime) -> bool:
+    return value.weekday() >= 5
+
+
+def _market_session_open(value: datetime) -> bool:
+    if _is_weekend(value):
+        return False
+    minutes = value.hour * 60 + value.minute
+    return (14 * 60 + 30) <= minutes <= (21 * 60)
+
+
+def _previous_trading_day(value: datetime) -> datetime.date:
+    day = value.date()
+    step = 1
+    while True:
+        candidate = day - timedelta(days=step)
+        if candidate.weekday() < 5:
+            return candidate
+        step += 1
+
+
+def quote_freshness_seconds(quote_time: Any, now: datetime | None = None) -> float | None:
+    quote_dt = _parse_time(quote_time)
+    if quote_dt is None:
+        return None
+    current = now or datetime.now(timezone.utc)
+    return max(0.0, (current - quote_dt).total_seconds())
+
+
+def quote_is_fresh(quote_time: Any, interval: str = "1d", now: datetime | None = None) -> bool:
+    quote_dt = _parse_time(quote_time)
+    if quote_dt is None:
+        return False
+    current = now or datetime.now(timezone.utc)
+    interval_text = str(interval or "").lower()
+    age = max(0.0, (current - quote_dt).total_seconds())
+    if interval_text.endswith("m") or interval_text.endswith("h"):
+        return age <= max(60, API_CACHE_TTL_SECONDS * 2)
+    quote_date = quote_dt.date()
+    if quote_date == current.date():
+        return True
+    if _is_weekend(current):
+        return quote_date == _previous_trading_day(current)
+    if _market_session_open(current):
+        return False
+    return quote_date >= _previous_trading_day(current)
+
+
 def _series(frame: pd.DataFrame, column: str) -> pd.Series:
     value = frame[column]
     if isinstance(value, pd.DataFrame):
@@ -341,6 +394,44 @@ def _mover_meta(symbol: str, mover_type: str, source: str, name: str | None = No
         "mover_type": mover_type,
         "discovery_timestamp": _now_iso(),
     }
+
+
+def _tag_list(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    if isinstance(value, str) and value.strip():
+        return [part.strip() for part in value.replace("|", ",").split(",") if part.strip()]
+    return []
+
+
+def merge_candidate_metadata(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    merged: dict[str, dict[str, Any]] = {}
+    for item in items:
+        symbol = str(item.get("symbol") or "").upper().strip()
+        if not symbol:
+            continue
+        current = merged.setdefault(symbol, {"symbol": symbol})
+        for key, value in item.items():
+            if value in (None, "", []):
+                continue
+            if key in {"mover_type", "mover_tags"}:
+                existing_tags = _tag_list(current.get("mover_tags"))
+                for tag in _tag_list(value) + ([str(value)] if key == "mover_type" and str(value).strip() else []):
+                    if tag not in existing_tags:
+                        existing_tags.append(tag)
+                current["mover_tags"] = existing_tags
+                if key == "mover_type" and not current.get("mover_type"):
+                    current["mover_type"] = value
+                continue
+            if key in {"discovery_source", "discovery_timestamp", "quote_timestamp", "fetched_at"}:
+                if not current.get(key) or str(current.get("discovery_source", "")).startswith("rotating"):
+                    current[key] = value
+                continue
+            if not current.get(key):
+                current[key] = value
+            elif key == "sector" and "core" in str(value).lower():
+                current[key] = value
+    return list(merged.values())
 
 
 def _alpha_vantage_movers(key: str) -> list[dict[str, str]]:
@@ -481,26 +572,28 @@ def _candidate_metrics(meta: dict[str, str]) -> GlobalCandidate | None:
         + min(10.0, max(0.0, volatility - 0.5) * 4.0)
         + min(5.0, max(0.0, (avg_dollar_volume / 50_000_000.0)))
     )
-    category, mover_tags, risk_bucket, tradeable = _classify_candidate(meta, price, change_1d, relative_volume, avg_dollar_volume, float(volume.iloc[-1]) if len(volume) else 0.0)
+    daily_volume = float(volume.iloc[-1]) if len(volume) else 0.0
+    category, mover_tags, risk_bucket, tradeable = _classify_candidate(meta, price, change_1d, relative_volume, avg_dollar_volume, daily_volume)
     if not tradeable:
         return None
     route = dict(hist.attrs.get("provider_route") or {})
-    quote_time = str(route.get("fetched_at") or utc_now())
-    quote_dt = _parse_time(quote_time)
-    freshness = max(0.0, (datetime.now(timezone.utc) - quote_dt).total_seconds()) if quote_dt else None
-    explicit_mover = str(meta.get("mover_type") or "").strip()
-    if explicit_mover and explicit_mover not in mover_tags:
-        mover_tags.append(explicit_mover)
+    fetched_at = str(route.get("fetched_at") or utc_now())
+    latest_quote = latest_valid_index(hist, "Close")
+    quote_time = str(route.get("quote_timestamp") or (latest_quote.isoformat() if latest_quote else ""))
+    freshness = quote_freshness_seconds(quote_time)
+    for explicit_mover in _tag_list(meta.get("mover_tags")) + _tag_list(meta.get("mover_type")):
+        if explicit_mover and explicit_mover not in mover_tags:
+            mover_tags.append(explicit_mover)
     return GlobalCandidate(
         symbol=meta["symbol"], name=meta.get("name", meta["symbol"]),
         exchange=meta.get("exchange", "Unknown"), region=meta.get("region", "Unknown"),
         sector=meta.get("sector", "Unknown"), price=price, change_1d_pct=change_1d,
-        change_5d_pct=change_5d, relative_volume=relative_volume,
+        change_5d_pct=change_5d, daily_volume=daily_volume, relative_volume=relative_volume,
         avg_dollar_volume=avg_dollar_volume, volatility_pct=volatility,
         mover_score=round(mover_score, 3), primary_category=category,
         mover_tags=mover_tags, discovery_source=str(meta.get("discovery_source") or "rotating_universe"),
         discovery_timestamp=str(meta.get("discovery_timestamp") or utc_now()),
-        quote_timestamp=quote_time, data_freshness_seconds=freshness, category=category,
+        quote_timestamp=quote_time or fetched_at, fetched_at=fetched_at, data_freshness_seconds=freshness, category=category,
         risk_bucket=risk_bucket, tradeable=tradeable, scanned_at=utc_now(),
     )
 
@@ -523,7 +616,7 @@ def scan_global_markets() -> list[dict[str, Any]]:
     etf_meta = [x for x in universe if x.get("symbol") in ETF_SEEDS][:GLOBAL_ETF_SYMBOLS_PER_CYCLE]
     rotating_count = max(1, GLOBAL_SCAN_SYMBOLS_PER_CYCLE - len(seed_meta) - len(core_meta) - len(etf_meta))
     rotating = [universe[(cursor + i) % len(universe)] for i in range(rotating_count)]
-    batch = list({x["symbol"]: x for x in discovered_meta + seed_meta + core_meta + etf_meta + rotating}.values())
+    batch = merge_candidate_metadata(seed_meta + core_meta + etf_meta + rotating + discovered_meta)
     found: list[GlobalCandidate] = []
     for meta in batch:
         try:
@@ -537,27 +630,29 @@ def scan_global_markets() -> list[dict[str, Any]]:
             payload = candidate.to_dict()
             conn.execute("""INSERT INTO global_market_candidates
                 (symbol,name,exchange,region,sector,price,change_1d_pct,change_5d_pct,
-                 relative_volume,avg_dollar_volume,volatility_pct,mover_score,category,primary_category,
-                 mover_tags,discovery_source,discovery_timestamp,quote_timestamp,data_freshness_seconds,
+                 daily_volume,relative_volume,avg_dollar_volume,volatility_pct,mover_score,category,primary_category,
+                 mover_tags,discovery_source,discovery_timestamp,quote_timestamp,fetched_at,data_freshness_seconds,
                  risk_bucket,tradeable,payload,scanned_at)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s,%s,%s,%s,%s,%s::jsonb,%s)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s)
                 ON CONFLICT (symbol) DO UPDATE SET name=EXCLUDED.name,exchange=EXCLUDED.exchange,
                 region=EXCLUDED.region,sector=EXCLUDED.sector,price=EXCLUDED.price,
                 change_1d_pct=EXCLUDED.change_1d_pct,change_5d_pct=EXCLUDED.change_5d_pct,
+                daily_volume=EXCLUDED.daily_volume,
                 relative_volume=EXCLUDED.relative_volume,avg_dollar_volume=EXCLUDED.avg_dollar_volume,
                 volatility_pct=EXCLUDED.volatility_pct,mover_score=EXCLUDED.mover_score,
                 category=EXCLUDED.category,primary_category=EXCLUDED.primary_category,
                 mover_tags=EXCLUDED.mover_tags,discovery_source=EXCLUDED.discovery_source,
                 discovery_timestamp=EXCLUDED.discovery_timestamp,quote_timestamp=EXCLUDED.quote_timestamp,
+                fetched_at=EXCLUDED.fetched_at,
                 data_freshness_seconds=EXCLUDED.data_freshness_seconds,
                 risk_bucket=EXCLUDED.risk_bucket,tradeable=EXCLUDED.tradeable,
                 payload=EXCLUDED.payload,scanned_at=EXCLUDED.scanned_at""",
                 (candidate.symbol,candidate.name,candidate.exchange,candidate.region,candidate.sector,
-                 candidate.price,candidate.change_1d_pct,candidate.change_5d_pct,candidate.relative_volume,
+                 candidate.price,candidate.change_1d_pct,candidate.change_5d_pct,candidate.daily_volume,candidate.relative_volume,
                  candidate.avg_dollar_volume,candidate.volatility_pct,candidate.mover_score,
                  candidate.category,candidate.primary_category,json.dumps(candidate.mover_tags),
                  candidate.discovery_source,candidate.discovery_timestamp,candidate.quote_timestamp,
-                 candidate.data_freshness_seconds,candidate.risk_bucket,candidate.tradeable,
+                 candidate.fetched_at,candidate.data_freshness_seconds,candidate.risk_bucket,candidate.tradeable,
                  json.dumps(payload),candidate.scanned_at))
         next_cursor = (cursor + rotating_count) % len(universe)
         conn.execute("""INSERT INTO global_scanner_status
@@ -571,9 +666,9 @@ def scan_global_markets() -> list[dict[str, Any]]:
         cutoff = (datetime.now(timezone.utc) - timedelta(seconds=GLOBAL_CANDIDATE_TTL_SECONDS)).isoformat()
         conn.execute("DELETE FROM global_market_candidates WHERE scanned_at < %s", (cutoff,))
         rows = conn.execute("""SELECT symbol,name,exchange,region,sector,price,change_1d_pct,
-            change_5d_pct,relative_volume,avg_dollar_volume,volatility_pct,mover_score,
+            change_5d_pct,daily_volume,relative_volume,avg_dollar_volume,volatility_pct,mover_score,
             category,primary_category,mover_tags,discovery_source,discovery_timestamp,quote_timestamp,
-            data_freshness_seconds,risk_bucket,tradeable,scanned_at
+            fetched_at,data_freshness_seconds,risk_bucket,tradeable,scanned_at
             FROM global_market_candidates WHERE scanned_at >= %s
             ORDER BY mover_score DESC, scanned_at DESC LIMIT %s""",
             (cutoff, GLOBAL_ACTIVE_CANDIDATES,)).fetchall()

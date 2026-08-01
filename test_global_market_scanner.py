@@ -31,7 +31,7 @@ def sample_history() -> pd.DataFrame:
         "Low": [99,100,101,102,103,104],
         "Close": [101,102,103,104,106,110],
         "Volume": [1_000_000,1_050_000,1_100_000,1_000_000,1_200_000,2_500_000],
-    })
+    }, index=pd.date_range("2026-07-27", periods=6, tz="UTC"))
 
 
 def test_yahoo_symbol_mapping():
@@ -119,3 +119,49 @@ def test_provider_mover_discovery_uses_configured_alpha_capability(monkeypatch):
     monkeypatch.setattr(scanner, "cached_call", lambda namespace, ttl, fn, *args: fn(*args))
     symbols = {item["symbol"]: item["mover_type"] for item in scanner.provider_mover_universe()}
     assert symbols == {"GAIN": "major_gainer", "LOSE": "major_loser", "VOL": "unusual_volume"}
+
+
+def test_provider_discovered_core_stock_keeps_mover_metadata(monkeypatch):
+    merged = scanner.merge_candidate_metadata([
+        {"symbol": "AAPL", "name": "Apple", "exchange": "US", "sector": "mega_cap_core"},
+        {
+            "symbol": "AAPL",
+            "mover_type": "major_gainer",
+            "discovery_source": "polygon_snapshot",
+            "discovery_timestamp": "2026-08-01T12:00:00+00:00",
+        },
+    ])
+    assert len(merged) == 1
+    assert merged[0]["discovery_source"] == "polygon_snapshot"
+    assert "major_gainer" in merged[0]["mover_tags"]
+
+    monkeypatch.setattr(scanner, "get_history", lambda *args, **kwargs: sample_history())
+    candidate = scanner._candidate_metrics(merged[0])
+    assert candidate is not None
+    assert candidate.primary_category == "blue_chip"
+    assert "major_gainer" in candidate.mover_tags
+    assert candidate.discovery_source == "polygon_snapshot"
+
+
+def test_quote_freshness_uses_bar_time_not_fetch_time():
+    now = datetime(2026, 8, 3, 16, 0, tzinfo=timezone.utc)
+    old_bar = datetime(2026, 7, 31, 20, 0, tzinfo=timezone.utc)
+    assert scanner.quote_is_fresh(old_bar.isoformat(), "1m", now) is False
+
+
+def test_fresh_intraday_bar_is_fresh():
+    now = datetime(2026, 8, 3, 16, 0, tzinfo=timezone.utc)
+    bar = now - timedelta(minutes=2)
+    assert scanner.quote_is_fresh(bar.isoformat(), "1m", now) is True
+
+
+def test_friday_daily_bar_is_fresh_during_weekend():
+    now = datetime(2026, 8, 1, 18, 0, tzinfo=timezone.utc)
+    friday_close = datetime(2026, 7, 31, 20, 0, tzinfo=timezone.utc)
+    assert scanner.quote_is_fresh(friday_close.isoformat(), "1d", now) is True
+
+
+def test_stale_daily_bar_is_not_fresh_during_open_session():
+    now = datetime(2026, 8, 3, 16, 0, tzinfo=timezone.utc)
+    friday_close = datetime(2026, 7, 31, 20, 0, tzinfo=timezone.utc)
+    assert scanner.quote_is_fresh(friday_close.isoformat(), "1d", now) is False
