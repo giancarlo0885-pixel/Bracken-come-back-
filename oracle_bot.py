@@ -12,6 +12,13 @@ from database import connect, row, rows, utc_now
 from quant_trade_standard import assess_trade
 from oracle_intelligence import evaluate_opportunity
 from market_memory import record_closed_trade_memory
+from market_sessions import (
+    confirmed_us_listing,
+    is_otc_exchange,
+    normalize_exchange,
+    parse_utc,
+    quote_is_fresh,
+)
 from paper_broker import (
     accrued_interest,
     allocate_purchase,
@@ -109,16 +116,7 @@ def safe_text(
 
 
 def _parse_utc(value: Any) -> datetime | None:
-    text = safe_text(value)
-    if not text:
-        return None
-    try:
-        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
+    return parse_utc(value)
 
 
 def _entry_forecast_gate(market: str, symbol: str, price: float) -> tuple[bool, str]:
@@ -880,10 +878,10 @@ def _latest_opportunity_score(market: str, symbol: str) -> float:
 
 
 def _is_penny_stock(symbol: str, price: float, signal: Any) -> bool:
-    exchange = safe_text(signal_value(signal, "exchange", "")).upper()
+    exchange = signal_value(signal, "exchange", "")
     return (
         PENNY_STOCK_MIN_PRICE <= price <= PENNY_STOCK_MAX_PRICE
-        or exchange in {"OTC", "PINK"}
+        or is_otc_exchange(exchange)
         or bool(signal_value(signal, "penny_stock", False))
     )
 
@@ -918,6 +916,12 @@ def _decode_tags(value: Any) -> list[str]:
     return []
 
 
+def _truthy(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    return safe_text(value).lower() in {"true", "1", "yes", "y"}
+
+
 def _latest_verified_candidate_metadata(symbol: str) -> dict[str, Any] | None:
     try:
         record = row(
@@ -925,7 +929,7 @@ def _latest_verified_candidate_metadata(symbol: str) -> dict[str, Any] | None:
             SELECT symbol, exchange, price, daily_volume, relative_volume, avg_dollar_volume,
                    primary_category, mover_tags, discovery_source,
                    discovery_timestamp, quote_timestamp, data_freshness_seconds,
-                   scanned_at, payload
+                   risk_bucket, tradeable, scanned_at, payload
             FROM global_market_candidates
             WHERE symbol=%s
             ORDER BY scanned_at DESC
@@ -966,6 +970,8 @@ def _verified_signal_metadata(symbol: str, signal: Any) -> dict[str, Any]:
         "quote_timestamp",
         "created_at",
         "timestamp",
+        "scanned_at",
+        "tradeable",
     ):
         value = signal_value(signal, key, None)
         if value not in (None, "", []):
@@ -1003,24 +1009,32 @@ def _penny_stock_gate(market: str, symbol: str, price: float, signal: Any, score
     if not PENNY_STOCK_ENABLED:
         return False, "penny-stock entries disabled"
     metadata = _verified_signal_metadata(symbol, signal)
-    exchange = safe_text(metadata.get("exchange", "")).upper()
-    if exchange in {"OTC", "PINK"} and not OTC_STOCKS_ENABLED:
+    exchange = normalize_exchange(metadata.get("exchange", ""))
+    if is_otc_exchange(exchange) and not OTC_STOCKS_ENABLED:
         return False, "OTC penny stocks disabled"
     if not exchange:
         return False, "penny-stock verified exchange metadata is missing"
+    if not confirmed_us_listing(exchange):
+        return False, f"penny-stock exchange is not a confirmed listed venue ({exchange})"
     if price < PENNY_STOCK_MIN_PRICE or price > PENNY_STOCK_MAX_PRICE:
         return False, "penny-stock price is outside allowed bounds"
     if score < PENNY_STOCK_MIN_SCORE:
         return False, f"penny-stock score {score:.1f} below {PENNY_STOCK_MIN_SCORE:.1f}"
     if confidence < PENNY_STOCK_MIN_CONFIDENCE:
         return False, f"penny-stock confidence {confidence:.2f} below {PENNY_STOCK_MIN_CONFIDENCE:.2f}"
-    quote_timestamp = metadata.get("quote_timestamp") or metadata.get("created_at") or metadata.get("timestamp")
-    quote_time = _parse_utc(quote_timestamp)
-    if quote_time is None:
+    scanned_at = _parse_utc(metadata.get("scanned_at"))
+    if scanned_at is None:
+        return False, "penny-stock verified candidate timestamp is missing"
+    candidate_age = max(0.0, (datetime.now(timezone.utc) - scanned_at).total_seconds())
+    if candidate_age > GLOBAL_CANDIDATE_TTL_SECONDS:
+        return False, "penny-stock verified candidate is expired"
+    if not _truthy(metadata.get("tradeable")):
+        return False, "penny-stock verified candidate is not tradeable"
+    quote_timestamp = metadata.get("quote_timestamp")
+    if _parse_utc(quote_timestamp) is None:
         return False, "penny-stock verified quote timestamp is missing"
-    age_minutes = max(0.0, (datetime.now(timezone.utc) - quote_time).total_seconds() / 60.0)
-    if age_minutes > DECISION_STOCK_MAX_AGE_MINUTES:
-        return False, f"penny-stock verified market data is stale ({age_minutes:.0f} minutes old)"
+    if not quote_is_fresh(quote_timestamp, "1d", max_intraday_age_seconds=DECISION_STOCK_MAX_AGE_MINUTES * 60):
+        return False, "penny-stock verified market data is stale"
     primary_category = safe_text(metadata.get("primary_category")).lower()
     if primary_category and primary_category != "penny_stock":
         return False, f"penny-stock metadata category is inconsistent ({primary_category})"

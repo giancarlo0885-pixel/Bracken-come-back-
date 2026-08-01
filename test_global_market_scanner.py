@@ -31,7 +31,14 @@ def sample_history() -> pd.DataFrame:
         "Low": [99,100,101,102,103,104],
         "Close": [101,102,103,104,106,110],
         "Volume": [1_000_000,1_050_000,1_100_000,1_000_000,1_200_000,2_500_000],
-    }, index=pd.date_range("2026-07-27", periods=6, tz="UTC"))
+    }, index=pd.date_range("2026-07-26", periods=6, tz="UTC"))
+
+
+def penny_history() -> pd.DataFrame:
+    frame = sample_history().copy()
+    frame["Close"] = [1.1, 1.15, 1.2, 1.25, 1.3, 1.4]
+    frame["Volume"] = [1_000_000, 1_100_000, 1_200_000, 1_300_000, 1_400_000, 2_000_000]
+    return frame
 
 
 def test_yahoo_symbol_mapping():
@@ -42,7 +49,10 @@ def test_yahoo_symbol_mapping():
 
 def test_candidate_metrics_detects_liquid_mover(monkeypatch):
     monkeypatch.setattr(scanner, "get_history", lambda *args, **kwargs: sample_history())
-    candidate = scanner._candidate_metrics({"symbol":"SAP.DE","name":"SAP","exchange":"XETRA","region":"Europe","sector":"Technology"})
+    candidate = scanner._candidate_metrics(
+        {"symbol":"SAP.DE","name":"SAP","exchange":"XETRA","region":"Europe","sector":"Technology"},
+        now=datetime(2026, 8, 1, 16, 0, tzinfo=timezone.utc),
+    )
     assert candidate is not None
     assert candidate.mover_score > 0
     assert candidate.relative_volume > 1
@@ -81,7 +91,10 @@ def test_qualified_penny_stock_requires_strict_liquidity(monkeypatch):
 
 def test_blue_chip_can_also_be_major_mover(monkeypatch):
     monkeypatch.setattr(scanner, "get_history", lambda *args, **kwargs: sample_history())
-    candidate = scanner._candidate_metrics({"symbol":"AAPL","name":"Apple","exchange":"US","region":"United States","sector":"mega_cap_core"})
+    candidate = scanner._candidate_metrics(
+        {"symbol":"AAPL","name":"Apple","exchange":"US","region":"United States","sector":"mega_cap_core"},
+        now=datetime(2026, 8, 1, 16, 0, tzinfo=timezone.utc),
+    )
     assert candidate is not None
     assert candidate.primary_category == "blue_chip"
     assert "major_gainer" in candidate.mover_tags
@@ -136,7 +149,7 @@ def test_provider_discovered_core_stock_keeps_mover_metadata(monkeypatch):
     assert "major_gainer" in merged[0]["mover_tags"]
 
     monkeypatch.setattr(scanner, "get_history", lambda *args, **kwargs: sample_history())
-    candidate = scanner._candidate_metrics(merged[0])
+    candidate = scanner._candidate_metrics(merged[0], now=datetime(2026, 8, 1, 16, 0, tzinfo=timezone.utc))
     assert candidate is not None
     assert candidate.primary_category == "blue_chip"
     assert "major_gainer" in candidate.mover_tags
@@ -165,3 +178,76 @@ def test_stale_daily_bar_is_not_fresh_during_open_session():
     now = datetime(2026, 8, 3, 16, 0, tzinfo=timezone.utc)
     friday_close = datetime(2026, 7, 31, 20, 0, tzinfo=timezone.utc)
     assert scanner.quote_is_fresh(friday_close.isoformat(), "1d", now) is False
+
+
+def test_candidate_metrics_rejects_stale_candidate(monkeypatch):
+    stale = sample_history()
+    stale.index = pd.date_range("2026-07-20", periods=6, tz="UTC")
+    monkeypatch.setattr(scanner, "get_history", lambda *args, **kwargs: stale)
+    candidate = scanner._candidate_metrics(
+        {"symbol": "AAPL", "name": "Apple", "exchange": "NASDAQ", "region": "United States", "sector": "mega_cap_core"},
+        now=datetime(2026, 8, 1, 16, 0, tzinfo=timezone.utc),
+    )
+    assert candidate is None
+
+
+def test_candidate_metrics_accepts_friday_daily_bar_during_saturday(monkeypatch):
+    monkeypatch.setattr(scanner, "get_history", lambda *args, **kwargs: sample_history())
+    candidate = scanner._candidate_metrics(
+        {"symbol": "AAPL", "name": "Apple", "exchange": "NASDAQ", "region": "United States", "sector": "mega_cap_core"},
+        now=datetime(2026, 8, 1, 16, 0, tzinfo=timezone.utc),
+    )
+    assert candidate is not None
+    assert candidate.quote_timestamp.startswith("2026-07-31")
+
+
+def test_candidate_metrics_rejects_previous_session_bar_after_monday_open(monkeypatch):
+    monkeypatch.setattr(scanner, "get_history", lambda *args, **kwargs: sample_history())
+    candidate = scanner._candidate_metrics(
+        {"symbol": "AAPL", "name": "Apple", "exchange": "NASDAQ", "region": "United States", "sector": "mega_cap_core"},
+        now=datetime(2026, 8, 3, 14, 0, tzinfo=timezone.utc),
+    )
+    assert candidate is None
+
+
+def test_candidate_metrics_rejects_provider_discovered_otc_penny(monkeypatch):
+    monkeypatch.setattr(scanner, "get_history", lambda *args, **kwargs: penny_history())
+    candidate = scanner._candidate_metrics(
+        {"symbol": "PENNY", "name": "Penny", "exchange": "OTCQB", "region": "United States", "sector": "major_gainer"},
+        now=datetime(2026, 8, 1, 16, 0, tzinfo=timezone.utc),
+    )
+    assert candidate is None
+
+
+def test_candidate_metrics_rejects_unknown_exchange_penny(monkeypatch):
+    monkeypatch.setattr(scanner, "get_history", lambda *args, **kwargs: penny_history())
+    candidate = scanner._candidate_metrics(
+        {"symbol": "PENNY", "name": "Penny", "exchange": "", "region": "United States", "sector": "major_gainer"},
+        now=datetime(2026, 8, 1, 16, 0, tzinfo=timezone.utc),
+    )
+    assert candidate is None
+
+
+def test_one_ticker_retains_multiple_provider_mover_tags(monkeypatch):
+    class Settings:
+        def get(self, name):
+            return "key" if name == "ALPHA_VANTAGE_API_KEY" else None
+
+    class Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "top_gainers": [{"ticker": "MIX", "exchange": "NASDAQ"}],
+                "top_losers": [],
+                "most_actively_traded": [{"ticker": "MIX", "exchange": "NASDAQ"}],
+            }
+
+    monkeypatch.setattr(scanner, "get_api_settings", lambda: Settings())
+    monkeypatch.setattr(scanner.requests, "get", lambda *args, **kwargs: Response())
+    monkeypatch.setattr(scanner, "cached_call", lambda namespace, ttl, fn, *args: fn(*args))
+    [record] = scanner.provider_mover_universe()
+    assert record["symbol"] == "MIX"
+    assert set(record["mover_tags"]) >= {"major_gainer", "unusual_volume"}
+    assert record["exchange"] == "NASDAQ"

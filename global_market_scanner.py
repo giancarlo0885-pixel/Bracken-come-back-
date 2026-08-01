@@ -37,6 +37,14 @@ from config import (
 from api_manager import get_api_settings
 from database import connect, utc_now
 from market_data import get_history, latest_valid_index
+from market_sessions import (
+    confirmed_us_listing,
+    is_otc_exchange,
+    normalize_exchange,
+    parse_utc,
+    quote_freshness_seconds,
+    quote_is_fresh,
+)
 
 log = logging.getLogger("global-market-scanner")
 
@@ -73,6 +81,14 @@ DISCOVERY_SYMBOLS = {
     "mid_cap": ["CELH", "DUOL", "RBLX", "DKNG", "TOST", "FIVE"],
     "small_cap": ["IONQ", "RKLB", "SOFI", "ACHR", "RXRX", "JOBY"],
     "qualified_penny": ["SOUN", "BBAI", "OPEN", "LUMN", "WULF", "BITF"],
+}
+QUALIFIED_PENNY_EXCHANGES = {
+    "BBAI": "NYSE",
+    "BITF": "NASDAQ",
+    "LUMN": "NYSE",
+    "OPEN": "NASDAQ",
+    "SOUN": "NASDAQ",
+    "WULF": "NASDAQ",
 }
 
 # EODHD exchange code -> Yahoo Finance suffix. US/Canada use special handling.
@@ -244,7 +260,7 @@ def _load_universe() -> list[dict[str, str]]:
                 universe.setdefault(symbol, {
                     "symbol": symbol,
                     "name": symbol,
-                    "exchange": "US",
+                    "exchange": QUALIFIED_PENNY_EXCHANGES.get(symbol, "US"),
                     "region": "United States",
                     "sector": category,
                 })
@@ -273,70 +289,6 @@ def global_universe() -> list[dict[str, str]]:
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
-
-
-def _parse_time(value: Any) -> datetime | None:
-    if isinstance(value, datetime):
-        parsed = value
-    else:
-        text = str(value or "").strip()
-        if not text:
-            return None
-        try:
-            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
-        except ValueError:
-            return None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
-
-
-def _is_weekend(value: datetime) -> bool:
-    return value.weekday() >= 5
-
-
-def _market_session_open(value: datetime) -> bool:
-    if _is_weekend(value):
-        return False
-    minutes = value.hour * 60 + value.minute
-    return (14 * 60 + 30) <= minutes <= (21 * 60)
-
-
-def _previous_trading_day(value: datetime) -> datetime.date:
-    day = value.date()
-    step = 1
-    while True:
-        candidate = day - timedelta(days=step)
-        if candidate.weekday() < 5:
-            return candidate
-        step += 1
-
-
-def quote_freshness_seconds(quote_time: Any, now: datetime | None = None) -> float | None:
-    quote_dt = _parse_time(quote_time)
-    if quote_dt is None:
-        return None
-    current = now or datetime.now(timezone.utc)
-    return max(0.0, (current - quote_dt).total_seconds())
-
-
-def quote_is_fresh(quote_time: Any, interval: str = "1d", now: datetime | None = None) -> bool:
-    quote_dt = _parse_time(quote_time)
-    if quote_dt is None:
-        return False
-    current = now or datetime.now(timezone.utc)
-    interval_text = str(interval or "").lower()
-    age = max(0.0, (current - quote_dt).total_seconds())
-    if interval_text.endswith("m") or interval_text.endswith("h"):
-        return age <= max(60, API_CACHE_TTL_SECONDS * 2)
-    quote_date = quote_dt.date()
-    if quote_date == current.date():
-        return True
-    if _is_weekend(current):
-        return quote_date == _previous_trading_day(current)
-    if _market_session_open(current):
-        return False
-    return quote_date >= _previous_trading_day(current)
 
 
 def _series(frame: pd.DataFrame, column: str) -> pd.Series:
@@ -377,22 +329,32 @@ def _classify_candidate(meta: dict[str, str], price: float, change_1d: float, re
             and price >= PENNY_STOCK_MIN_PRICE
             and daily_volume >= PENNY_STOCK_MIN_DAILY_VOLUME
             and avg_dollar_volume >= PENNY_STOCK_MIN_AVG_DOLLAR_VOLUME
-            and (OTC_STOCKS_ENABLED or str(meta.get("exchange") or "").upper() not in {"OTC", "PINK"})
+            and confirmed_us_listing(meta.get("exchange"))
+            and (OTC_STOCKS_ENABLED or not is_otc_exchange(meta.get("exchange")))
         )
         return primary, tags, "strict_penny_controls", tradeable
     return primary, tags, "standard", True
 
 
-def _mover_meta(symbol: str, mover_type: str, source: str, name: str | None = None) -> dict[str, str]:
+def _mover_meta(
+    symbol: str,
+    mover_type: str,
+    source: str,
+    name: str | None = None,
+    exchange: Any = "",
+    **metadata: Any,
+) -> dict[str, Any]:
+    normalized_exchange = normalize_exchange(exchange)
     return {
         "symbol": str(symbol or "").upper().strip(),
         "name": name or str(symbol or "").upper().strip(),
-        "exchange": "US",
+        "exchange": normalized_exchange,
         "region": "United States",
         "sector": mover_type,
         "discovery_source": source,
         "mover_type": mover_type,
         "discovery_timestamp": _now_iso(),
+        **{key: value for key, value in metadata.items() if value not in (None, "", [])},
     }
 
 
@@ -423,9 +385,27 @@ def merge_candidate_metadata(items: list[dict[str, Any]]) -> list[dict[str, Any]
                 if key == "mover_type" and not current.get("mover_type"):
                     current["mover_type"] = value
                 continue
-            if key in {"discovery_source", "discovery_timestamp", "quote_timestamp", "fetched_at"}:
-                if not current.get(key) or str(current.get("discovery_source", "")).startswith("rotating"):
+            if key == "discovery_source":
+                sources = _tag_list(current.get("discovery_source"))
+                for source in _tag_list(value):
+                    if source not in sources:
+                        sources.append(source)
+                current[key] = ",".join(sources) if sources else value
+                continue
+            if key in {"discovery_timestamp", "quote_timestamp", "fetched_at"}:
+                if not current.get(key):
                     current[key] = value
+                else:
+                    current_dt = parse_utc(current.get(key))
+                    value_dt = parse_utc(value)
+                    if value_dt and (current_dt is None or value_dt > current_dt):
+                        current[key] = value
+                continue
+            if key == "exchange":
+                normalized = normalize_exchange(value)
+                current_exchange = normalize_exchange(current.get("exchange"))
+                if normalized and (not current_exchange or current_exchange == "US" or is_otc_exchange(normalized)):
+                    current[key] = normalized
                 continue
             if not current.get(key):
                 current[key] = value
@@ -447,7 +427,12 @@ def _alpha_vantage_movers(key: str) -> list[dict[str, str]]:
         for item in payload.get(field, [])[:25]:
             symbol = item.get("ticker")
             if symbol:
-                out.append(_mover_meta(symbol, mover_type, "alpha_vantage_top_gainers_losers"))
+                out.append(_mover_meta(
+                    symbol,
+                    mover_type,
+                    "alpha_vantage_top_gainers_losers",
+                    exchange=item.get("exchange") or item.get("market") or item.get("exchangeCode"),
+                ))
     return out
 
 
@@ -462,7 +447,7 @@ def _polygon_snapshot_movers(key: str) -> list[dict[str, str]]:
     tickers = payload.get("tickers", [])
     if not isinstance(tickers, list):
         return []
-    ranked: list[tuple[float, str, str]] = []
+    ranked: list[tuple[float, dict[str, Any], str]] = []
     for item in tickers:
         symbol = item.get("ticker")
         day = item.get("day") or {}
@@ -476,15 +461,24 @@ def _polygon_snapshot_movers(key: str) -> list[dict[str, str]]:
         if not symbol:
             continue
         if change >= GLOBAL_MAJOR_MOVER_MIN_CHANGE_PCT:
-            ranked.append((abs(change), symbol, "major_gainer"))
+            ranked.append((abs(change), item, "major_gainer"))
         elif change <= -GLOBAL_MAJOR_MOVER_MIN_CHANGE_PCT:
-            ranked.append((abs(change), symbol, "major_loser"))
+            ranked.append((abs(change), item, "major_loser"))
         if abs(change) >= GLOBAL_GAP_MOVER_MIN_CHANGE_PCT:
-            ranked.append((abs(change), symbol, "gap_mover"))
+            ranked.append((abs(change), item, "gap_mover"))
         if rel_volume >= GLOBAL_UNUSUAL_VOLUME_MIN_RATIO:
-            ranked.append((rel_volume, symbol, "unusual_volume"))
-    ranked.sort(reverse=True)
-    return [_mover_meta(symbol, mover_type, "polygon_snapshot") for _, symbol, mover_type in ranked[:75]]
+            ranked.append((rel_volume, item, "unusual_volume"))
+    ranked.sort(key=lambda entry: entry[0], reverse=True)
+    return [
+        _mover_meta(
+            item.get("ticker"),
+            mover_type,
+            "polygon_snapshot",
+            exchange=item.get("primaryExchange") or item.get("exchange") or item.get("market"),
+            provider_metadata={"polygon_snapshot": item},
+        )
+        for _, item, mover_type in ranked[:75]
+    ]
 
 
 def _eodhd_screener_movers(key: str) -> list[dict[str, str]]:
@@ -500,13 +494,14 @@ def _eodhd_screener_movers(key: str) -> list[dict[str, str]]:
         for item in payload.get("data", []) if isinstance(payload, dict) else []:
             code = str(item.get("code") or item.get("symbol") or "").replace(".US", "")
             if code:
-                out.append(_mover_meta(code, mover_type, "eodhd_screener", item.get("name")))
+                exchange = item.get("exchange") or item.get("Exchange") or str(item.get("code") or "").split(".")[-1]
+                out.append(_mover_meta(code, mover_type, "eodhd_screener", item.get("name"), exchange=exchange, provider_metadata={"eodhd": item}))
     return out
 
 
 def provider_mover_universe() -> list[dict[str, str]]:
     settings = get_api_settings()
-    discovered: dict[str, dict[str, str]] = {}
+    discovered: list[dict[str, Any]] = []
     for key_name, loader in (
         ("POLYGON_API_KEY", _polygon_snapshot_movers),
         ("ALPHA_VANTAGE_API_KEY", _alpha_vantage_movers),
@@ -518,17 +513,17 @@ def provider_mover_universe() -> list[dict[str, str]]:
         try:
             for meta in cached_call(f"mover_discovery_{key_name}", API_CACHE_TTL_SECONDS, loader, key):
                 if meta.get("symbol"):
-                    discovered.setdefault(meta["symbol"], meta)
+                    discovered.append(meta)
         except Exception as exc:
             log.debug("Mover discovery unavailable via %s: %s", key_name, exc)
-    return list(discovered.values())
+    return merge_candidate_metadata(discovered)
 
 
 def filter_fresh_candidates(records: list[dict[str, Any]], now: datetime | None = None) -> list[dict[str, Any]]:
     current = now or datetime.now(timezone.utc)
     fresh: list[dict[str, Any]] = []
     for record in records:
-        scanned = _parse_time(record.get("scanned_at"))
+        scanned = parse_utc(record.get("scanned_at"))
         if scanned is None:
             continue
         if (current - scanned).total_seconds() <= GLOBAL_CANDIDATE_TTL_SECONDS:
@@ -540,7 +535,7 @@ def filter_fresh_candidates(records: list[dict[str, Any]], now: datetime | None 
     )
 
 
-def _candidate_metrics(meta: dict[str, str]) -> GlobalCandidate | None:
+def _candidate_metrics(meta: dict[str, str], now: datetime | None = None) -> GlobalCandidate | None:
     hist = get_history(meta["symbol"], "1mo", "1d")
     if hist is None or hist.empty or len(hist) < 6:
         return None
@@ -580,13 +575,16 @@ def _candidate_metrics(meta: dict[str, str]) -> GlobalCandidate | None:
     fetched_at = str(route.get("fetched_at") or utc_now())
     latest_quote = latest_valid_index(hist, "Close")
     quote_time = str(route.get("quote_timestamp") or (latest_quote.isoformat() if latest_quote else ""))
-    freshness = quote_freshness_seconds(quote_time)
+    interval = str(route.get("interval") or "1d")
+    if not quote_is_fresh(quote_time, interval, now, max_intraday_age_seconds=max(60, API_CACHE_TTL_SECONDS * 2)):
+        return None
+    freshness = quote_freshness_seconds(quote_time, now)
     for explicit_mover in _tag_list(meta.get("mover_tags")) + _tag_list(meta.get("mover_type")):
         if explicit_mover and explicit_mover not in mover_tags:
             mover_tags.append(explicit_mover)
     return GlobalCandidate(
         symbol=meta["symbol"], name=meta.get("name", meta["symbol"]),
-        exchange=meta.get("exchange", "Unknown"), region=meta.get("region", "Unknown"),
+        exchange=normalize_exchange(meta.get("exchange")) or "Unknown", region=meta.get("region", "Unknown"),
         sector=meta.get("sector", "Unknown"), price=price, change_1d_pct=change_1d,
         change_5d_pct=change_5d, daily_volume=daily_volume, relative_volume=relative_volume,
         avg_dollar_volume=avg_dollar_volume, volatility_pct=volatility,

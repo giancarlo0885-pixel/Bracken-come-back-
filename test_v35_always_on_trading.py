@@ -3,6 +3,7 @@ from datetime import datetime, timedelta, timezone
 
 from realtime_runtime import cadence_for
 from engine import OracleSignal
+from market_sessions import quote_is_fresh
 
 
 def _oracle_signal(symbol: str = "SOUN", price: float = 2.0) -> OracleSignal:
@@ -42,6 +43,8 @@ def _verified_candidate(**overrides):
         "quote_timestamp": now,
         "data_freshness_seconds": 30,
         "scanned_at": now,
+        "tradeable": True,
+        "risk_bucket": "strict_penny_controls",
         "payload": {},
     }
     candidate.update(overrides)
@@ -180,24 +183,25 @@ def test_penny_stock_gate_rejects_stale_or_illiquid_data(monkeypatch):
 
     monkeypatch.setattr(oracle_bot, "_penny_position_count", lambda market: 0)
     monkeypatch.setattr(oracle_bot, "row", lambda *args, **kwargs: None)
-    stale = (datetime.now(timezone.utc) - timedelta(hours=12)).isoformat()
+    stale = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     ok, reason = oracle_bot._penny_stock_gate(
         "cash",
         "SOUN",
         2.0,
-        {"created_at": stale, "exchange": "NASDAQ", "volume": 1_000_000, "avg_dollar_volume": 3_000_000, "primary_category": "penny_stock", "discovery_source": "unit"},
+        {"quote_timestamp": stale, "scanned_at": now, "tradeable": True, "exchange": "NASDAQ", "volume": 1_000_000, "avg_dollar_volume": 3_000_000, "primary_category": "penny_stock", "discovery_source": "unit"},
         90,
         .9,
     )
     assert ok is False
     assert "stale" in reason
 
-    now = datetime.now(timezone.utc).isoformat()
+    monkeypatch.setattr(oracle_bot, "quote_is_fresh", lambda *args, **kwargs: True)
     ok, reason = oracle_bot._penny_stock_gate(
         "cash",
         "SOUN",
         2.0,
-        {"created_at": now, "exchange": "NASDAQ", "volume": 1_000, "avg_dollar_volume": 3_000_000, "primary_category": "penny_stock", "discovery_source": "unit"},
+        {"quote_timestamp": now, "scanned_at": now, "tradeable": True, "exchange": "NASDAQ", "volume": 1_000, "avg_dollar_volume": 3_000_000, "primary_category": "penny_stock", "discovery_source": "unit"},
         90,
         .9,
     )
@@ -226,7 +230,7 @@ def test_penny_stock_gate_rejects_normal_quality_and_otc(monkeypatch):
         "cash",
         "SOUN",
         2.0,
-        {"created_at": now, "exchange": "NASDAQ", "volume": 1_000_000, "avg_dollar_volume": 3_000_000, "primary_category": "penny_stock", "discovery_source": "unit"},
+        {"quote_timestamp": now, "scanned_at": now, "tradeable": True, "exchange": "NASDAQ", "volume": 1_000_000, "avg_dollar_volume": 3_000_000, "primary_category": "penny_stock", "discovery_source": "unit"},
         70,
         .9,
     )
@@ -239,6 +243,7 @@ def test_real_oracle_signal_qualified_penny_can_pass_with_verified_metadata(monk
 
     monkeypatch.setattr(oracle_bot, "_penny_position_count", lambda market: 0)
     monkeypatch.setattr(oracle_bot, "row", lambda *args, **kwargs: _verified_candidate())
+    monkeypatch.setattr(oracle_bot, "quote_is_fresh", lambda *args, **kwargs: True)
 
     ok, reason = oracle_bot._penny_stock_gate("cash", "SOUN", 2.0, _oracle_signal(), 92, .86)
     assert ok is True
@@ -259,13 +264,59 @@ def test_real_oracle_signal_penny_rejects_missing_metadata(monkeypatch):
 def test_real_oracle_signal_penny_rejects_stale_verified_metadata(monkeypatch):
     import oracle_bot
 
-    stale = (datetime.now(timezone.utc) - timedelta(hours=12)).isoformat()
+    stale = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
     monkeypatch.setattr(oracle_bot, "_penny_position_count", lambda market: 0)
     monkeypatch.setattr(oracle_bot, "row", lambda *args, **kwargs: _verified_candidate(quote_timestamp=stale))
 
     ok, reason = oracle_bot._penny_stock_gate("cash", "SOUN", 2.0, _oracle_signal(), 92, .86)
     assert ok is False
     assert "stale" in reason
+
+
+def test_real_oracle_signal_penny_allows_valid_weekend_daily_metadata(monkeypatch):
+    import oracle_bot
+
+    saturday = datetime(2026, 8, 1, 16, 0, tzinfo=timezone.utc)
+    candidate = _verified_candidate(
+        quote_timestamp="2026-07-31T20:00:00+00:00",
+        scanned_at=datetime.now(timezone.utc).isoformat(),
+    )
+    monkeypatch.setattr(oracle_bot, "_penny_position_count", lambda market: 0)
+    monkeypatch.setattr(oracle_bot, "row", lambda *args, **kwargs: candidate)
+    monkeypatch.setattr(
+        oracle_bot,
+        "quote_is_fresh",
+        lambda value, interval, **kwargs: quote_is_fresh(value, interval, saturday),
+    )
+
+    ok, reason = oracle_bot._penny_stock_gate("cash", "SOUN", 2.0, _oracle_signal(), 92, .86)
+    assert ok is True
+    assert reason == "penny-stock controls passed"
+
+
+def test_real_oracle_signal_penny_rejects_stale_database_candidate(monkeypatch):
+    import oracle_bot
+
+    old_scan = (datetime.now(timezone.utc) - timedelta(seconds=oracle_bot.GLOBAL_CANDIDATE_TTL_SECONDS + 5)).isoformat()
+    monkeypatch.setattr(oracle_bot, "_penny_position_count", lambda market: 0)
+    monkeypatch.setattr(oracle_bot, "row", lambda *args, **kwargs: _verified_candidate(scanned_at=old_scan))
+    monkeypatch.setattr(oracle_bot, "quote_is_fresh", lambda *args, **kwargs: True)
+
+    ok, reason = oracle_bot._penny_stock_gate("cash", "SOUN", 2.0, _oracle_signal(), 92, .86)
+    assert ok is False
+    assert "expired" in reason
+
+
+def test_real_oracle_signal_penny_rejects_non_tradeable_candidate(monkeypatch):
+    import oracle_bot
+
+    monkeypatch.setattr(oracle_bot, "_penny_position_count", lambda market: 0)
+    monkeypatch.setattr(oracle_bot, "row", lambda *args, **kwargs: _verified_candidate(tradeable=False))
+    monkeypatch.setattr(oracle_bot, "quote_is_fresh", lambda *args, **kwargs: True)
+
+    ok, reason = oracle_bot._penny_stock_gate("cash", "SOUN", 2.0, _oracle_signal(), 92, .86)
+    assert ok is False
+    assert "not tradeable" in reason
 
 
 def test_penny_portfolio_limit_allows_below_limit():
