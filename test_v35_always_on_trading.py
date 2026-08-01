@@ -2,9 +2,18 @@ from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
+import pytest
+
 from realtime_runtime import cadence_for
 from engine import OracleSignal
 from market_sessions import quote_is_fresh
+
+
+@pytest.fixture(autouse=True)
+def _enable_stock_autotrade_for_legacy_execution_tests(monkeypatch):
+    import oracle_bot
+
+    monkeypatch.setattr(oracle_bot, "ENABLE_STOCK_AUTOTRADE", True)
 
 
 def _oracle_signal(symbol: str = "SOUN", price: float = 2.0) -> OracleSignal:

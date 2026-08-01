@@ -131,13 +131,41 @@ def build_decisions(
     limit: int = 30,
 ) -> list[dict[str, Any]]:
     latest_signal: dict[tuple[str, str], dict[str, Any]] = {}
-    latest_forecast: dict[tuple[str, str], dict[str, Any]] = {}
+    latest_forecasts: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for item in signals:
         key = (str(item.get("market", "cash")), str(item.get("symbol", "")).upper())
         latest_signal.setdefault(key, item)
     for item in forecasts:
         key = (str(item.get("market", "cash")), str(item.get("symbol", "")).upper())
-        latest_forecast.setdefault(key, item)
+        latest_forecasts.setdefault(key, []).append(item)
+
+    def matching_forecast(key: tuple[str, str], signal: dict[str, Any]) -> dict[str, Any]:
+        candidates = latest_forecasts.get(key, [])
+        if not candidates:
+            return {}
+        signal_interval = str(signal.get("source_interval") or signal.get("interval") or "").strip()
+        signal_scan = str(signal.get("scan_type") or "").strip()
+        signal_quote_time = signal.get("source_quote_timestamp") or signal.get("quote_timestamp")
+        requested = str(signal.get("symbol") or key[1]).upper()
+        for candidate in candidates:
+            forecast_interval = str(candidate.get("source_interval") or "").strip()
+            if forecast_interval and signal_interval and forecast_interval != signal_interval:
+                continue
+            forecast_scan = str(candidate.get("scan_type") or "").strip()
+            if forecast_scan and signal_scan and forecast_scan != signal_scan:
+                continue
+            forecast_quote = candidate.get("source_quote_timestamp")
+            if forecast_quote and signal_quote_time:
+                left = _timestamp(forecast_quote)
+                right = _timestamp(signal_quote_time)
+                if left is None or right is None or abs((left - right).total_seconds()) > 1:
+                    continue
+            if str(candidate.get("requested_symbol") or requested).upper() != requested:
+                continue
+            if str(candidate.get("provider_symbol") or requested).upper() != requested:
+                continue
+            return candidate
+        return candidates[0]
 
     results: list[dict[str, Any]] = []
     for op in opportunities:
@@ -145,7 +173,7 @@ def build_decisions(
         symbol = str(op.get("symbol", "")).upper()
         score = _f(op.get("opportunity_score"))
         sig = latest_signal.get((market, symbol), {})
-        fc = latest_forecast.get((market, symbol), {})
+        fc = matching_forecast((market, symbol), sig)
         payload = _payload(op.get("payload"))
         confidence = _f(sig.get("confidence"), _f(payload.get("confidence"), score))
         if confidence <= 1:

@@ -32,7 +32,7 @@ except ImportError:  # deployment installs it; local tests can still import modu
 
 st.set_page_config(
     page_title=f"{APP_NAME} — AI Chief Investment Officer",
-    page_icon="🔮",
+    page_icon="ORCL",
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -267,7 +267,7 @@ def decision_card(item: dict[str, Any], compact: bool = False) -> None:
                 st.markdown(f"✅ {point}")
             st.markdown("**What to watch**")
             for point in cautions:
-                st.markdown(f"⚠️ {point}")
+                st.markdown(f"Warning: {point}")
             reference = format_asset_price(price, symbol, market_key)
             stop_text = format_asset_price(low, symbol, market_key)
             st.caption(f"Entry reference: {reference} · Target: {target_text} · Protective level: {stop_text}")
@@ -321,11 +321,11 @@ sell_decisions = [d for d in ready_decisions if d["action"] == "SELL"]
 waiting_for_data = [d for d in decisions if not bool(d.get("trade_eligible"))]
 
 with st.sidebar:
-    st.markdown("## 🔮 GARIBALDI ORACLE")
+    st.markdown("## GARIBALDI ORACLE")
     st.caption("The AI Chief Investment Officer")
     page = st.radio(
         "Main navigation",
-        ["🏠 Dashboard", "📈 Markets", "💼 Portfolios", "🤖 Oracle", "🌍 Intelligence", "⚙ Professional"],
+        ["Dashboard", "Markets", "Portfolios", "Oracle", "Intelligence", "Professional"],
         label_visibility="collapsed",
     )
     st.divider()
@@ -393,7 +393,7 @@ status_cols[2].metric(
 error_total = sum(int(as_float(record.get("cycle_errors"))) for record in workers)
 status_cols[3].metric("Auto recovery", "Ready" if error_total == 0 else "Recovering", f"Cycle errors: {error_total}")
 
-if page == "🏠 Dashboard":
+if page == "Dashboard":
     st.subheader("What should I do today?")
     top = buy_decisions[0] if buy_decisions else (decisions[0] if decisions else None)
     market_state = "Constructive" if buy_decisions else "Cautious"
@@ -457,7 +457,7 @@ if page == "🏠 Dashboard":
         else:
             st.success("No unresolved high-priority alerts.")
 
-elif page == "📈 Markets":
+elif page == "Markets":
     st.subheader("Global Market Opportunity Center")
     tab1, tab2, tab3 = st.tabs(["Top Ranked", "Stocks", "Crypto"])
     for tab, market_filter in ((tab1, None), (tab2, "cash"), (tab3, "crypto")):
@@ -487,7 +487,7 @@ elif page == "📈 Markets":
     except Exception as exc:
         st.warning(f"Price history could not be loaded: {exc}")
 
-elif page == "💼 Portfolios":
+elif page == "Portfolios":
     st.subheader("Portfolio Center")
     portfolio_tabs = st.tabs(["Stock Portfolio", "Crypto Portfolio", "Trade History", "Hypothetical Analyzer"])
     for tab, name, market, positions, metrics, health in (
@@ -598,7 +598,7 @@ elif page == "💼 Portfolios":
             st.markdown("**What changes:** " + "; ".join(result["reasons"]) + ".")
             st.caption("This is a portfolio-structure simulation, not a guarantee of future return. Live market evidence should be checked before acting.")
 
-elif page == "🤖 Oracle":
+elif page == "Oracle":
     st.subheader("Oracle Decisions")
     st.caption("Only four plain decisions: BUY, HOLD, WAIT, or SELL.")
     filter_action = st.segmented_control("Show", ["ALL", "BUY", "HOLD", "WAIT", "SELL"], default="ALL")
@@ -621,7 +621,7 @@ elif page == "🤖 Oracle":
         else:
             st.info("Add an OpenAI API key to enable conversational explanations. The deterministic decision cards remain available without it.")
 
-elif page == "🌍 Intelligence":
+elif page == "Intelligence":
     st.subheader("Financial Intelligence")
     st.caption("Only market-moving information: macroeconomics, policy, earnings, capital flow, insiders, options, and global events.")
     earnings_events = [e for e in events if str(e.get("category") or "") == "Earnings Calendar"]
@@ -715,7 +715,7 @@ elif page == "🌍 Intelligence":
                 unsafe_allow_html=True,
             )
 
-elif page == "⚙ Professional":
+elif page == "Professional":
     st.subheader("Professional Research & System Evidence")
     st.caption("Advanced tools are kept here so everyday investors are not overwhelmed.")
     tabs = st.tabs(["Evidence Ledger", "Backtesting", "Provider Health", "Raw Signals"])

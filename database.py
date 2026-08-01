@@ -137,7 +137,20 @@ def initialize_database() -> None:
             id BIGSERIAL PRIMARY KEY,
             market TEXT NOT NULL,
             symbol TEXT NOT NULL,
+            requested_symbol TEXT,
+            provider_symbol TEXT,
+            source_interval TEXT,
+            source_quote_timestamp TEXT,
+            scan_type TEXT,
+            model_version TEXT,
+            expected_move_pct DOUBLE PRECISION,
+            signal_id BIGINT,
+            signal_created_at TEXT,
+            data_quality_score DOUBLE PRECISION,
+            forecast_id TEXT,
             horizon_days INTEGER NOT NULL,
+            horizon_bars INTEGER,
+            horizon_minutes DOUBLE PRECISION,
             target_price DOUBLE PRECISION NOT NULL,
             low_price DOUBLE PRECISION NOT NULL,
             high_price DOUBLE PRECISION NOT NULL,
@@ -356,6 +369,49 @@ def initialize_database() -> None:
         """
         ALTER TABLE portfolios
         ADD COLUMN IF NOT EXISTS risk_state TEXT DEFAULT 'normal'
+        """,
+        "ALTER TABLE forecasts ADD COLUMN IF NOT EXISTS requested_symbol TEXT",
+        "ALTER TABLE forecasts ADD COLUMN IF NOT EXISTS provider_symbol TEXT",
+        "ALTER TABLE forecasts ADD COLUMN IF NOT EXISTS source_interval TEXT",
+        "ALTER TABLE forecasts ADD COLUMN IF NOT EXISTS source_quote_timestamp TEXT",
+        "ALTER TABLE forecasts ADD COLUMN IF NOT EXISTS scan_type TEXT",
+        "ALTER TABLE forecasts ADD COLUMN IF NOT EXISTS model_version TEXT",
+        "ALTER TABLE forecasts ADD COLUMN IF NOT EXISTS expected_move_pct DOUBLE PRECISION",
+        "ALTER TABLE forecasts ADD COLUMN IF NOT EXISTS signal_id BIGINT",
+        "ALTER TABLE forecasts ADD COLUMN IF NOT EXISTS signal_created_at TEXT",
+        "ALTER TABLE forecasts ADD COLUMN IF NOT EXISTS data_quality_score DOUBLE PRECISION",
+        "ALTER TABLE forecasts ADD COLUMN IF NOT EXISTS forecast_id TEXT",
+        "ALTER TABLE forecasts ADD COLUMN IF NOT EXISTS horizon_bars INTEGER",
+        "ALTER TABLE forecasts ADD COLUMN IF NOT EXISTS horizon_minutes DOUBLE PRECISION",
+        """
+        CREATE TABLE IF NOT EXISTS forecast_validation (
+            id BIGSERIAL PRIMARY KEY,
+            symbol TEXT NOT NULL,
+            asset_class TEXT NOT NULL,
+            source_interval TEXT NOT NULL,
+            model TEXT NOT NULL,
+            model_version TEXT,
+            probability_up DOUBLE PRECISION,
+            predicted_move_pct DOUBLE PRECISION,
+            realized_move_pct DOUBLE PRECISION,
+            direction_correct BOOLEAN,
+            mape DOUBLE PRECISION,
+            created_at TEXT NOT NULL
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS paper_data_audit (
+            id BIGSERIAL PRIMARY KEY,
+            record_type TEXT NOT NULL,
+            record_id BIGINT,
+            market TEXT,
+            symbol TEXT,
+            status TEXT NOT NULL DEFAULT 'suspected_price_corruption',
+            reason TEXT,
+            payload JSONB,
+            reviewed_at TEXT,
+            created_at TEXT NOT NULL
+        )
         """,
     ]
 
@@ -629,6 +685,10 @@ def save_forecast(
     market: str,
     symbol: str,
     forecast: Any,
+    *,
+    scan_type: str | None = None,
+    signal_id: int | None = None,
+    signal_created_at: str | None = None,
 ) -> None:
     with connect() as conn:
         with conn.cursor() as cursor:
@@ -637,7 +697,20 @@ def save_forecast(
                 INSERT INTO forecasts (
                     market,
                     symbol,
+                    requested_symbol,
+                    provider_symbol,
+                    source_interval,
+                    source_quote_timestamp,
+                    scan_type,
+                    model_version,
+                    expected_move_pct,
+                    signal_id,
+                    signal_created_at,
+                    data_quality_score,
+                    forecast_id,
                     horizon_days,
+                    horizon_bars,
+                    horizon_minutes,
                     target_price,
                     low_price,
                     high_price,
@@ -645,18 +718,31 @@ def save_forecast(
                     model,
                     created_at
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     market,
                     symbol,
-                    int(forecast.horizon_days),
+                    str(getattr(forecast, "requested_symbol", "") or symbol),
+                    str(getattr(forecast, "provider_symbol", "") or symbol),
+                    str(getattr(forecast, "source_interval", "") or "1d"),
+                    str(getattr(forecast, "source_quote_timestamp", "") or ""),
+                    scan_type,
+                    str(getattr(forecast, "model_version", "") or ""),
+                    float(getattr(forecast, "expected_move_pct", 0.0) or 0.0),
+                    signal_id,
+                    signal_created_at,
+                    float(getattr(forecast, "data_quality_score", 0.0) or 0.0),
+                    str(getattr(forecast, "forecast_id", "") or ""),
+                    int(float(forecast.horizon_days)),
+                    int(getattr(forecast, "horizon_bars", 0) or 0),
+                    float(getattr(forecast, "horizon_minutes", 0.0) or 0.0),
                     float(forecast.target_price),
                     float(forecast.low_price),
                     float(forecast.high_price),
                     float(forecast.probability_up),
                     str(forecast.model),
-                    utc_now(),
+                    str(getattr(forecast, "generated_at", "") or utc_now()),
                 ),
             )
 

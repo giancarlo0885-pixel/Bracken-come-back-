@@ -10,6 +10,7 @@ from typing import Any
 
 from config import *
 from database import connect, row, rows, utc_now
+from forecast_quality import model_execution_approved
 from quant_trade_standard import assess_trade
 from oracle_intelligence import evaluate_opportunity
 from market_memory import record_closed_trade_memory
@@ -34,6 +35,7 @@ from paper_broker import (
 
 log = logging.getLogger("oracle-bot")
 _AUTOTRADE_DISABLED_LOGGED = False
+_INITIAL_ENABLE_AUTOTRADE = ENABLE_AUTOTRADE
 PAPER_MARGIN_REDUCTION_REASON = "paper_margin_reduction"
 QUOTE_PRICE_TOLERANCE_PCT = 0.001
 
@@ -125,7 +127,13 @@ def _parse_utc(value: Any) -> datetime | None:
     return parse_utc(value)
 
 
-def _entry_forecast_gate(market: str, symbol: str, price: float) -> tuple[bool, str]:
+def _entry_forecast_gate(
+    market: str,
+    symbol: str,
+    price: float,
+    signal: Any | None = None,
+    quote: dict[str, Any] | None = None,
+) -> tuple[bool, str]:
     """Require a fresh, actionable forecast before a new paper entry.
 
     The deep worker saves the forecast before calling ``process_signals``. This
@@ -137,7 +145,10 @@ def _entry_forecast_gate(market: str, symbol: str, price: float) -> tuple[bool, 
 
     forecast = row(
         """
-        SELECT target_price, low_price, high_price, probability_up, created_at
+        SELECT target_price, low_price, high_price, probability_up, created_at,
+               requested_symbol, provider_symbol, source_interval,
+               source_quote_timestamp, scan_type, model, model_version,
+               expected_move_pct, data_quality_score
         FROM forecasts
         WHERE market = %s AND symbol = %s
         ORDER BY id DESC
@@ -151,6 +162,32 @@ def _entry_forecast_gate(market: str, symbol: str, price: float) -> tuple[bool, 
     if target <= 0:
         return False, "missing current forecast target"
 
+    quote = quote or {}
+    source_interval = safe_text(forecast.get("source_interval"))
+    quote_interval = safe_text(quote.get("interval") or signal_value(signal, "source_interval", ""))
+    if source_interval and quote_interval and source_interval != quote_interval:
+        return False, f"forecast interval {source_interval} does not match signal interval {quote_interval}"
+    forecast_scan = safe_text(forecast.get("scan_type"))
+    signal_scan = safe_text(signal_value(signal, "scan_type", "") or _signal_route(signal).get("scan_type", ""))
+    if forecast_scan and signal_scan and forecast_scan != signal_scan:
+        return False, f"forecast scan type {forecast_scan} does not match signal scan type {signal_scan}"
+    requested = _normalized_symbol(forecast.get("requested_symbol") or symbol)
+    provider_symbol = _normalized_symbol(forecast.get("provider_symbol") or symbol)
+    if requested != _normalized_symbol(symbol) or provider_symbol != _normalized_symbol(symbol):
+        return False, "forecast symbol identity does not match signal"
+    source_quote_time = forecast.get("source_quote_timestamp")
+    quote_time = quote.get("quote_timestamp") or quote.get("timestamp")
+    if source_quote_time and quote_time:
+        forecast_quote = _parse_utc(source_quote_time)
+        signal_quote = _parse_utc(quote_time)
+        if forecast_quote is None or signal_quote is None:
+            return False, "forecast quote timestamp is invalid"
+        if abs((forecast_quote - signal_quote).total_seconds()) > 1:
+            return False, "forecast quote timestamp does not match signal quote"
+    quality = safe_float(forecast.get("data_quality_score"), 100.0)
+    if quality < FORECAST_MIN_DATA_QUALITY_SCORE:
+        return False, f"forecast data quality {quality:.1f} is below {FORECAST_MIN_DATA_QUALITY_SCORE:.1f}"
+
     created = _parse_utc(forecast.get("created_at"))
     max_age = DECISION_CRYPTO_MAX_AGE_MINUTES if market == "crypto" else DECISION_STOCK_MAX_AGE_MINUTES
     if created is None:
@@ -163,6 +200,15 @@ def _entry_forecast_gate(market: str, symbol: str, price: float) -> tuple[bool, 
     minimum_move = MIN_ACTIONABLE_MOVE_CRYPTO_PCT if market == "crypto" else MIN_ACTIONABLE_MOVE_STOCK_PCT
     if expected_move_pct < minimum_move:
         return False, f"expected move {expected_move_pct:.2f}% is below {minimum_move:.2f}%"
+    validation_ok, validation_reason = model_execution_approved(
+        symbol,
+        "crypto" if market == "crypto" else "stock",
+        source_interval or quote_interval or "1d",
+        safe_text(forecast.get("model"), "log-return diffusion"),
+        safe_text(forecast.get("model_version")),
+    )
+    if not validation_ok:
+        return False, validation_reason
     return True, f"forecast approved with {expected_move_pct:.2f}% expected move"
 
 
@@ -229,16 +275,21 @@ def _normalized_symbol(value: Any) -> str:
     return normalize_symbol(value)
 
 
-def _autotrade_enabled() -> bool:
-    return bool(globals().get("ENABLE_AUTOTRADE", False))
+def _autotrade_enabled(market: str = "cash") -> bool:
+    legacy = bool(globals().get("ENABLE_AUTOTRADE", False))
+    if globals().get("ENABLE_AUTOTRADE", False) != _INITIAL_ENABLE_AUTOTRADE:
+        return legacy
+    market = safe_text(market).lower()
+    specific = bool(globals().get("ENABLE_CRYPTO_AUTOTRADE" if market == "crypto" else "ENABLE_STOCK_AUTOTRADE", False))
+    return bool(legacy and specific)
 
 
-def _execution_disabled(reason: str) -> bool:
+def _execution_disabled(reason: str, market: str = "cash") -> bool:
     global _AUTOTRADE_DISABLED_LOGGED
-    if _autotrade_enabled():
+    if _autotrade_enabled(market):
         return False
     if not _AUTOTRADE_DISABLED_LOGGED:
-        log.warning("Execution disabled because ENABLE_AUTOTRADE=false; %s blocked.", reason)
+        log.warning("Execution disabled because ENABLE_AUTOTRADE/market autotrade switch is false; %s blocked.", reason)
         _AUTOTRADE_DISABLED_LOGGED = True
     return True
 
@@ -694,7 +745,7 @@ def portfolio_equity(
     read_only: bool = False,
 ) -> dict[str, float]:
     market = safe_text(market).lower()
-    execution_enabled = _autotrade_enabled()
+    execution_enabled = _autotrade_enabled(market)
     portfolio = _load_portfolio_read_only(market) if read_only or not execution_enabled else ensure_portfolio(market)
     if not read_only and execution_enabled:
         portfolio = _accrue_paper_margin_interest(market, portfolio)
@@ -779,7 +830,7 @@ def update_prices(
 ) -> int:
     market = safe_text(market).lower()
     prices = prices or {}
-    if _execution_disabled("price updates"):
+    if _execution_disabled("price updates", market):
         return 0
     anomalous_symbols = _duplicate_price_anomaly_symbols(prices)
 
@@ -903,7 +954,7 @@ def _close_position(
     quote_metadata: dict[str, Any] | None = None,
 ) -> bool:
     market = safe_text(market).lower()
-    if _execution_disabled("position close"):
+    if _execution_disabled("position close", market):
         return False
     symbol = safe_text(position.get("symbol")).upper()
     quantity = safe_float(position.get("quantity"))
@@ -1073,7 +1124,7 @@ def risk_exits(
 ) -> list[dict[str, Any]]:
     market = safe_text(market).lower()
     prices = prices or {}
-    if _execution_disabled("risk exits"):
+    if _execution_disabled("risk exits", market):
         return []
     anomalous_symbols = _duplicate_price_anomaly_symbols(prices)
 
@@ -1460,7 +1511,7 @@ def _buy(
 ) -> tuple[bool, str, dict[str, Any] | None]:
     """Execute an institutional paper-broker buy with controlled leverage."""
     market = safe_text(market).lower()
-    if _execution_disabled("buy"):
+    if _execution_disabled("buy", market):
         return False, "autotrade disabled", None
     symbol = safe_text(symbol).upper()
     price = safe_float(price)
@@ -1815,7 +1866,7 @@ def process_signals(
     market = safe_text(market).lower()
     signals = list(signals or [])
     prices = prices or {}
-    if _execution_disabled("signal execution"):
+    if _execution_disabled("signal execution", market):
         return []
     actions: list[dict[str, Any]] = []
     anomalous_symbols = _duplicate_price_anomaly_symbols(prices)
@@ -1941,7 +1992,7 @@ def process_signals(
                 action,
             )
             continue
-        quote_ok, quote_reason = _execution_quote_guard(market, symbol, price, signal, quote)
+        quote_ok, quote_reason = _execution_quote_guard(market, symbol, price, signal, quote_metadata=quote)
         if not quote_ok:
             log.info(
                 "%s | REJECT BUY | %s | %s",
@@ -1951,7 +2002,7 @@ def process_signals(
             )
             continue
 
-        forecast_ready, forecast_reason = _entry_forecast_gate(market, symbol, price)
+        forecast_ready, forecast_reason = _entry_forecast_gate(market, symbol, price, signal, quote)
         if not forecast_ready:
             log.info(
                 "%s | REJECT | %s | forecast gate: %s",
@@ -2130,7 +2181,7 @@ def snapshot(
     **__: Any,
 ) -> dict[str, float]:
     market = safe_text(market).lower()
-    execution_enabled = _autotrade_enabled()
+    execution_enabled = _autotrade_enabled(market)
     data = portfolio_equity(market, read_only=not execution_enabled)
 
     equity = safe_float(data.get("equity"))
