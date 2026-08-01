@@ -423,18 +423,29 @@ def _repriced_positions(
     quotes: dict[str, Any],
     market: str,
     anomalous_symbols: set[str] | None = None,
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], list[str]]:
     anomalous_symbols = anomalous_symbols or set()
     repriced: list[dict[str, Any]] = []
+    missing: list[str] = []
     for position in positions:
         item = dict(position)
         symbol = _normalized_symbol(item.get("symbol"))
-        if symbol and symbol not in anomalous_symbols:
-            price = _verified_price_for(symbol, quotes, market)
-            if price > 0:
-                item["current_price"] = price
+        if not symbol:
+            missing.append("<missing-symbol>")
+            repriced.append(item)
+            continue
+        if symbol in anomalous_symbols:
+            missing.append(symbol)
+            repriced.append(item)
+            continue
+        price = _verified_price_for(symbol, quotes, market)
+        if price <= 0:
+            missing.append(symbol)
+            repriced.append(item)
+            continue
+        item["current_price"] = price
         repriced.append(item)
-    return repriced
+    return repriced, missing
 
 
 def _current_account_from_quotes(
@@ -442,12 +453,11 @@ def _current_account_from_quotes(
     positions: list[dict[str, Any]],
     quotes: dict[str, Any],
     anomalous_symbols: set[str],
-) -> Any:
-    return build_account(
-        market,
-        ensure_portfolio(market),
-        _repriced_positions(positions, quotes, market, anomalous_symbols),
-    )
+) -> tuple[Any | None, list[str], list[dict[str, Any]]]:
+    repriced, missing = _repriced_positions(positions, quotes, market, anomalous_symbols)
+    if missing:
+        return None, missing, repriced
+    return build_account(market, ensure_portfolio(market), repriced), [], repriced
 
 
 def execute(
@@ -785,10 +795,18 @@ def update_prices(
     )
 
     closed_for_margin: set[str] = set()
-    account = _current_account_from_quotes(market, list(positions), prices, anomalous_symbols)
+    account, incomplete_margin_symbols, _ = _current_account_from_quotes(market, list(positions), prices, anomalous_symbols)
+    if incomplete_margin_symbols and positions:
+        log.info(
+            "%s | margin reduction deferred: incomplete verified portfolio pricing affected_symbols=%d sample=%s",
+            market.upper(),
+            len(set(incomplete_margin_symbols)),
+            ",".join(sorted(set(incomplete_margin_symbols))[:8]),
+        )
     if (
         PAPER_BROKER_MODE
         and positions
+        and account is not None
         and (
             bool(account.margin_call)
             or safe_float(account.margin_utilization_pct)
@@ -812,7 +830,15 @@ def update_prices(
             if _close_position(market, position, current_price, PAPER_MARGIN_REDUCTION_REASON, quote_metadata=quote):
                 closed_for_margin.add(symbol)
             remaining = [p for p in positions if safe_text(p.get("symbol")).upper() not in closed_for_margin]
-            account = _current_account_from_quotes(market, list(remaining), prices, anomalous_symbols)
+            account, incomplete_margin_symbols, _ = _current_account_from_quotes(market, list(remaining), prices, anomalous_symbols)
+            if account is None:
+                log.info(
+                    "%s | margin reduction stopped: incomplete verified portfolio pricing affected_symbols=%d sample=%s",
+                    market.upper(),
+                    len(set(incomplete_margin_symbols)),
+                    ",".join(sorted(set(incomplete_margin_symbols))[:8]),
+                )
+                break
             if (
                 not bool(account.margin_call)
                 and safe_float(account.margin_utilization_pct)

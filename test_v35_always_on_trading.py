@@ -755,6 +755,102 @@ def test_margin_reduction_rejects_missing_stale_or_mismatched_quotes(monkeypatch
     assert oracle_bot.update_prices("cash", {"AAPL": mismatched}) == 0
 
 
+def test_margin_reduction_defers_when_one_position_quote_is_missing(monkeypatch):
+    import oracle_bot
+
+    closed = []
+    monkeypatch.setattr(oracle_bot, "ENABLE_AUTOTRADE", True)
+    monkeypatch.setattr(
+        oracle_bot,
+        "rows",
+        lambda *args, **kwargs: [
+            {"symbol": "AAPL", "quantity": 1, "entry_price": 100, "current_price": 999},
+            {"symbol": "MSFT", "quantity": 1, "entry_price": 200, "current_price": 999},
+        ],
+    )
+    monkeypatch.setattr(oracle_bot, "ensure_portfolio", lambda market: {"cash": 0, "starting_balance": 1000, "margin_debt": 500, "leverage_limit": 4})
+    monkeypatch.setattr(oracle_bot, "_close_position", lambda *args, **kwargs: closed.append(args) or True)
+    monkeypatch.setattr(oracle_bot, "execute", lambda *args, **kwargs: None)
+    updated = oracle_bot.update_prices("cash", {"AAPL": _verified_quote("AAPL", 80)})
+    assert updated == 1
+    assert closed == []
+
+
+def test_margin_reduction_defers_when_any_position_quote_is_stale(monkeypatch):
+    import oracle_bot
+
+    stale = _verified_quote("MSFT", 180, quote_timestamp=(datetime.now(timezone.utc) - timedelta(days=7)).isoformat())
+    closed = []
+    monkeypatch.setattr(oracle_bot, "ENABLE_AUTOTRADE", True)
+    monkeypatch.setattr(
+        oracle_bot,
+        "rows",
+        lambda *args, **kwargs: [
+            {"symbol": "AAPL", "quantity": 1, "entry_price": 100, "current_price": 999},
+            {"symbol": "MSFT", "quantity": 1, "entry_price": 200, "current_price": 999},
+        ],
+    )
+    monkeypatch.setattr(oracle_bot, "ensure_portfolio", lambda market: {"cash": 0, "starting_balance": 1000, "margin_debt": 500, "leverage_limit": 4})
+    monkeypatch.setattr(oracle_bot, "_close_position", lambda *args, **kwargs: closed.append(args) or True)
+    monkeypatch.setattr(oracle_bot, "execute", lambda *args, **kwargs: None)
+    updated = oracle_bot.update_prices("cash", {"AAPL": _verified_quote("AAPL", 80), "MSFT": stale})
+    assert updated == 1
+    assert closed == []
+
+
+def test_margin_reduction_defers_when_any_position_quote_is_quarantined(monkeypatch):
+    import oracle_bot
+
+    closed = []
+    monkeypatch.setattr(oracle_bot, "ENABLE_AUTOTRADE", True)
+    monkeypatch.setattr(
+        oracle_bot,
+        "rows",
+        lambda *args, **kwargs: [
+            {"symbol": "AAPL", "quantity": 1, "entry_price": 100, "current_price": 999},
+            {"symbol": "MSFT", "quantity": 1, "entry_price": 200, "current_price": 999},
+        ],
+    )
+    monkeypatch.setattr(oracle_bot, "ensure_portfolio", lambda market: {"cash": 0, "starting_balance": 1000, "margin_debt": 500, "leverage_limit": 4})
+    monkeypatch.setattr(oracle_bot, "_close_position", lambda *args, **kwargs: closed.append(args) or True)
+    monkeypatch.setattr(oracle_bot, "execute", lambda *args, **kwargs: None)
+    quotes = {
+        "AAPL": _verified_quote("AAPL", 80, ohlcv_fingerprint="same-portfolio"),
+        "MSFT": _verified_quote("MSFT", 180, ohlcv_fingerprint="same-portfolio"),
+    }
+    assert oracle_bot.update_prices("cash", quotes) == 0
+    assert closed == []
+
+
+def test_margin_reduction_requires_every_position_fresh_exact_quote(monkeypatch):
+    import oracle_bot
+
+    closed = []
+    monkeypatch.setattr(oracle_bot, "ENABLE_AUTOTRADE", True)
+    monkeypatch.setattr(
+        oracle_bot,
+        "rows",
+        lambda *args, **kwargs: [
+            {"symbol": "AAPL", "quantity": 1, "entry_price": 100, "current_price": 999},
+            {"symbol": "MSFT", "quantity": 1, "entry_price": 200, "current_price": 999},
+        ],
+    )
+    monkeypatch.setattr(oracle_bot, "ensure_portfolio", lambda market: {"cash": 0, "starting_balance": 1000, "margin_debt": 500, "leverage_limit": 4})
+
+    class Account:
+        def __init__(self, call, utilization):
+            self.margin_call = call
+            self.margin_utilization_pct = utilization
+
+    states = iter([Account(True, 101), Account(False, 1)])
+    monkeypatch.setattr(oracle_bot, "build_account", lambda *args, **kwargs: next(states))
+    monkeypatch.setattr(oracle_bot, "_close_position", lambda market, position, price, reason, **kwargs: closed.append((position["symbol"], price, reason)) or True)
+    monkeypatch.setattr(oracle_bot, "execute", lambda *args, **kwargs: None)
+    quotes = {"AAPL": _verified_quote("AAPL", 80), "MSFT": _verified_quote("MSFT", 180)}
+    oracle_bot.update_prices("cash", quotes)
+    assert closed == [("AAPL", 80.0, oracle_bot.PAPER_MARGIN_REDUCTION_REASON)]
+
+
 def test_hold_never_executes_buy(monkeypatch):
     import oracle_bot
 
