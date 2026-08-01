@@ -17,9 +17,16 @@ from api_manager import get_api_settings
 from cache import cached_call
 from config import (
     API_CACHE_TTL_SECONDS,
+    PROVIDER_PERMISSION_COOLDOWN_SECONDS,
     PROVIDER_RATE_LIMIT_COOLDOWN_SECONDS,
     REALTIME_CACHE_TTL_SECONDS,
     UNAVAILABLE_SYMBOL_COOLDOWN_SECONDS,
+)
+from asset_routing import infer_asset_class
+from provider_capabilities import (
+    capability_available,
+    classify_plan_limited_status,
+    disable_capability,
 )
 
 log = logging.getLogger("provider-router")
@@ -242,6 +249,27 @@ def symbol_is_unavailable(symbol: str) -> bool:
 
 def _mark_provider_limited(provider: str) -> None:
     _provider_cooldowns[provider] = time.time() + PROVIDER_RATE_LIMIT_COOLDOWN_SECONDS
+
+
+def _history_capability(symbol: str, interval: str) -> str:
+    asset = infer_asset_class(symbol)
+    if asset == "crypto":
+        return "crypto"
+    if asset == "international_equity":
+        return "international_history"
+    return "us_history"
+
+
+def _provider_status_from_exception(exc: Exception) -> int | None:
+    response = getattr(exc, "response", None)
+    status_code = getattr(response, "status_code", None)
+    if isinstance(status_code, int):
+        return status_code
+    text = str(exc)
+    for code in (402, 403, 401, 429, 404, 500, 503):
+        if str(code) in text:
+            return code
+    return None
 
 
 def _record_failure(provider: str, status: str, symbol: str) -> None:
@@ -485,6 +513,8 @@ def route_history(
     settings = get_api_settings()
     attempts: list[ProviderAttempt] = []
     intraday = _is_intraday(interval)
+    asset_class = infer_asset_class(symbol)
+    capability = _history_capability(symbol, interval)
     ttl = REALTIME_CACHE_TTL_SECONDS if intraday else API_CACHE_TTL_SECONDS
     symbol = str(symbol or "").upper().strip()
     if symbol_is_unavailable(symbol):
@@ -495,7 +525,14 @@ def route_history(
             datetime.now(timezone.utc).isoformat(),
         )
 
-    if intraday:
+    if asset_class == "crypto":
+        routes = [
+            ("Polygon", "POLYGON_API_KEY", _polygon),
+            ("Finnhub", "FINNHUB_API_KEY", _finnhub),
+            ("EODHD", "EODHD_API_KEY", _eodhd),
+            ("Alpha Vantage", "ALPHA_VANTAGE_API_KEY", _alpha),
+        ]
+    elif intraday:
         routes = [
             ("Polygon", "POLYGON_API_KEY", _polygon),
             ("Finnhub", "FINNHUB_API_KEY", _finnhub),
@@ -510,6 +547,9 @@ def route_history(
         ]
 
     for provider, key_name, function in routes:
+        if not capability_available(provider, capability):
+            attempts.append(ProviderAttempt(provider, False, 0, "capability_cooldown_or_unsupported"))
+            continue
         if _cooldown_active(_provider_cooldowns, provider):
             attempts.append(ProviderAttempt(provider, False, 0, "provider_cooldown"))
             continue
@@ -537,7 +577,18 @@ def route_history(
             attempts.append(ProviderAttempt(provider, False, 0, "symbol_mismatch_or_no_data"))
         except Exception as exc:
             text = _redact_url(str(exc))[:220]
-            status = "rate_limited" if "429" in text or "limit" in text.lower() else "degraded"
+            status_code = _provider_status_from_exception(exc)
+            if classify_plan_limited_status(status_code, text):
+                disable_capability(
+                    provider,
+                    capability,
+                    text,
+                    status_code=status_code,
+                    seconds=PROVIDER_PERMISSION_COOLDOWN_SECONDS,
+                )
+                status = "capability_plan_limited"
+            else:
+                status = "rate_limited" if status_code == 429 or "429" in text or "limit" in text.lower() else "degraded"
             if status == "rate_limited":
                 _mark_provider_limited(provider)
             attempts.append(ProviderAttempt(provider, False, 0, status, text))
