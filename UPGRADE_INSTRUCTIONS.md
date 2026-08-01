@@ -32,3 +32,15 @@ V33 keeps all execution simulated while giving the stock and crypto workers inst
 ## Important
 
 This package does not connect to or submit orders to a real brokerage. Leverage, margin debt, interest, buying power, maintenance requirements, and forced reductions are all simulated in PostgreSQL.
+
+## V35 always-on deployment
+
+Deploy all three services from the same commit:
+
+1. Stock worker — `python stock_worker.py`
+2. Crypto worker — `python crypto_worker.py`
+3. Web — `python start_web.py`
+
+Add the V35 variables from `railway_variables.example`. Keep `EXECUTION_MODE=paper` and `PAPER_CAPITAL_UPGRADE=false` after the institutional balances have already been created. The stock and crypto logs should say `always-on worker` and show pulse, fast-scan, and deep-scan cadences.
+
+The system is designed to remain active continuously. It monitors positions on every pulse, rotates through candidates on fast scans, runs deep global research in parallel, and retries automatically after cycle errors. It does not manufacture trades when the evidence gates reject every candidate.

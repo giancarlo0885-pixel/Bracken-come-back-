@@ -107,6 +107,60 @@ def safe_text(
     return str(value).strip()
 
 
+def _parse_utc(value: Any) -> datetime | None:
+    text = safe_text(value)
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _entry_forecast_gate(market: str, symbol: str, price: float) -> tuple[bool, str]:
+    """Require a fresh, actionable forecast before a new paper entry.
+
+    The deep worker saves the forecast before calling ``process_signals``. This
+    final execution gate keeps stale ranking records and quote-only signals from
+    reaching the institutional paper broker as new purchases.
+    """
+    if not REQUIRE_TARGET_FOR_BUY:
+        return True, "forecast gate disabled"
+
+    forecast = row(
+        """
+        SELECT target_price, low_price, high_price, probability_up, created_at
+        FROM forecasts
+        WHERE market = %s AND symbol = %s
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (market, symbol),
+    ) or {}
+    target = safe_float(forecast.get("target_price"))
+    if price <= 0:
+        return False, "missing live entry price"
+    if target <= 0:
+        return False, "missing current forecast target"
+
+    created = _parse_utc(forecast.get("created_at"))
+    max_age = DECISION_CRYPTO_MAX_AGE_MINUTES if market == "crypto" else DECISION_STOCK_MAX_AGE_MINUTES
+    if created is None:
+        return False, "forecast timestamp is missing"
+    age_minutes = max(0.0, (datetime.now(timezone.utc) - created).total_seconds() / 60.0)
+    if age_minutes > max_age:
+        return False, f"forecast is stale ({age_minutes:.0f} minutes old)"
+
+    expected_move_pct = ((target / price) - 1.0) * 100.0
+    minimum_move = MIN_ACTIONABLE_MOVE_CRYPTO_PCT if market == "crypto" else MIN_ACTIONABLE_MOVE_STOCK_PCT
+    if expected_move_pct < minimum_move:
+        return False, f"expected move {expected_move_pct:.2f}% is below {minimum_move:.2f}%"
+    return True, f"forecast approved with {expected_move_pct:.2f}% expected move"
+
+
 def signal_value(
     signal: Any,
     name: str,
@@ -807,6 +861,78 @@ def _open_position_count(
         return 0
 
 
+def _latest_opportunity_score(market: str, symbol: str) -> float:
+    try:
+        record = row(
+            """
+            SELECT opportunity_score
+            FROM opportunity_rankings
+            WHERE market=%s AND symbol=%s
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            (market, symbol),
+        ) or {}
+        return safe_float(record.get("opportunity_score"), 50.0)
+    except Exception:
+        return 50.0
+
+
+def _rotate_for_stronger_candidate(
+    market: str,
+    incoming_symbol: str,
+    incoming_score: float,
+) -> dict[str, Any] | None:
+    """Select a rotation candidate without closing it.
+
+    The actual continuous_rotation_to_* sell is executed in the same locked
+    transaction as the replacement BUY, after the incoming order passes
+    cooldown, sizing, cash, leverage, quant, and risk checks.
+    """
+    if not ROTATION_ENABLED:
+        return None
+    positions = rows(
+        """
+        SELECT * FROM positions
+        WHERE market=%s AND symbol<>%s
+        """,
+        (market, incoming_symbol),
+    )
+    if not positions:
+        return None
+
+    ranked: list[tuple[float, float, dict[str, Any]]] = []
+    for position in positions:
+        symbol = safe_text(position.get("symbol")).upper()
+        current = safe_float(position.get("current_price"))
+        entry = safe_float(position.get("average_price"), safe_float(position.get("entry_price")))
+        return_pct = ((current / entry) - 1.0) * 100.0 if entry > 0 and current > 0 else -999.0
+        held_score = _latest_opportunity_score(market, symbol)
+        ranked.append((held_score, return_pct, position))
+
+    held_score, return_pct, weakest = min(ranked, key=lambda item: (item[0], item[1]))
+    score_gap = incoming_score - held_score
+    if score_gap < ROTATION_MIN_SCORE_GAP:
+        return None
+
+    weakest_symbol = safe_text(weakest.get("symbol")).upper()
+    exit_price = safe_float(weakest.get("current_price"))
+    if exit_price <= 0:
+        return None
+    candidate = dict(weakest)
+    candidate["_rotation_action"] = {
+        "market": market,
+        "symbol": weakest_symbol,
+        "action": "SELL",
+        "price": exit_price,
+        "reason": f"continuous_rotation_to_{incoming_symbol}",
+        "rotation_target": incoming_symbol,
+        "score_gap": score_gap,
+        "return_pct": return_pct,
+    }
+    return candidate
+
+
 # =========================================================
 # BUY EXECUTION
 # =========================================================
@@ -818,18 +944,24 @@ def _buy(
     signal: Any,
     quant_assessment: Any | None = None,
     target_trade_value: float | None = None,
-) -> tuple[bool, str]:
+    rotation_candidate: dict[str, Any] | None = None,
+) -> tuple[bool, str, dict[str, Any] | None]:
     """Execute an institutional paper-broker buy with controlled leverage."""
     market = safe_text(market).lower()
     symbol = safe_text(symbol).upper()
     price = safe_float(price)
+    rotation_action = (
+        dict(rotation_candidate.get("_rotation_action"))
+        if rotation_candidate and isinstance(rotation_candidate.get("_rotation_action"), dict)
+        else None
+    )
 
     if not market:
-        return False, "missing market"
+        return False, "missing market", None
     if not symbol:
-        return False, "missing symbol"
+        return False, "missing symbol", None
     if price <= 0:
-        return False, f"invalid price={price}"
+        return False, f"invalid price={price}", None
 
     equity_data = portfolio_equity(market)
     equity = max(safe_float(equity_data.get("equity"), market_starting_capital(market)), 0.01)
@@ -840,15 +972,21 @@ def _buy(
     risk_limited_buying_power = max(0.0, maximum_gross - gross_exposure)
     available_buying_power = min(buying_power, risk_limited_buying_power)
 
-    if available_buying_power < MIN_TRADE_VALUE:
+    if available_buying_power < MIN_TRADE_VALUE and not rotation_candidate:
         return (
             False,
             f"insufficient paper buying power={available_buying_power:.2f}; "
             f"leverage={safe_float(equity_data.get('leverage_used')):.2f}x/{leverage_limit:.2f}x",
+            None,
         )
 
+    sizing_buying_power = (
+        available_buying_power
+        if not rotation_candidate
+        else equity * leverage_limit * PAPER_MAX_MARGIN_UTILIZATION_PCT
+    )
     maximum_trade_value = min(
-        available_buying_power,
+        sizing_buying_power,
         equity * MAX_TRADE_VALUE_PCT,
     )
 
@@ -882,7 +1020,7 @@ def _buy(
 
     trade_value = min(
         maximum_trade_value * strength * quant_multiplier,
-        available_buying_power,
+        sizing_buying_power,
     )
     if target_trade_value is not None:
         target_value = max(0.0, safe_float(target_trade_value))
@@ -890,9 +1028,10 @@ def _buy(
             trade_value = min(trade_value, target_value)
 
     if trade_value < MIN_TRADE_VALUE:
-        return False, f"trade value too small={trade_value:.2f}; minimum={MIN_TRADE_VALUE:.2f}"
+        return False, f"trade value too small={trade_value:.2f}; minimum={MIN_TRADE_VALUE:.2f}", None
 
     now = utc_now()
+    closed_memory: tuple[dict[str, Any], float, float, float, str] | None = None
 
     try:
         with connect() as conn:
@@ -901,13 +1040,41 @@ def _buy(
                 (market,),
             ).fetchone()
             if not portfolio_record:
-                return False, "portfolio row missing"
+                return False, "portfolio row missing", None
 
             current_positions = conn.execute(
                 "SELECT * FROM positions WHERE market=%s FOR UPDATE",
                 (market,),
             ).fetchall()
-            account = build_account(market, portfolio_record, current_positions)
+            active_positions = list(current_positions)
+            execution_portfolio = dict(portfolio_record)
+            margin_repayment = 0.0
+            if rotation_candidate:
+                rotation_symbol = safe_text(rotation_candidate.get("symbol")).upper()
+                locked_rotation = next(
+                    (p for p in active_positions if safe_text(p.get("symbol")).upper() == rotation_symbol),
+                    None,
+                )
+                if locked_rotation is None:
+                    return False, "rotation candidate is no longer open", None
+                exit_price = safe_float(rotation_action.get("price") if rotation_action else 0.0)
+                quantity_to_sell = safe_float(locked_rotation.get("quantity"))
+                if exit_price <= 0 or quantity_to_sell <= 0:
+                    return False, "rotation candidate has invalid exit data", None
+                sale_value = quantity_to_sell * exit_price
+                new_cash_after_sale, new_debt_after_sale, margin_repayment = allocate_sale(
+                    cash=safe_float(execution_portfolio.get("cash")),
+                    margin_debt=safe_float(execution_portfolio.get("margin_debt")),
+                    sale_value=sale_value,
+                )
+                execution_portfolio["cash"] = new_cash_after_sale
+                execution_portfolio["margin_debt"] = new_debt_after_sale
+                active_positions = [
+                    p for p in active_positions
+                    if safe_text(p.get("symbol")).upper() != rotation_symbol
+                ]
+
+            account = build_account(market, execution_portfolio, active_positions)
             current_maximum_gross = (
                 account.equity
                 * account.leverage_limit
@@ -919,7 +1086,7 @@ def _buy(
             )
             trade_value = min(trade_value, current_available)
             if trade_value < MIN_TRADE_VALUE:
-                return False, f"buying power changed during execution; available={current_available:.2f}"
+                return False, f"buying power changed during execution; available={current_available:.2f}", None
 
             cash_reserve = max(0.0, account.equity * MIN_CASH_RESERVE_PCT)
             new_cash, new_margin_debt, cash_used, borrowed = allocate_purchase(
@@ -930,12 +1097,60 @@ def _buy(
             )
             quantity = trade_value / price
             if quantity <= 0:
-                return False, f"invalid quantity={quantity}"
+                return False, f"invalid quantity={quantity}", None
 
             existing = next(
-                (p for p in current_positions if safe_text(p.get("symbol")).upper() == symbol),
+                (p for p in active_positions if safe_text(p.get("symbol")).upper() == symbol),
                 None,
             )
+            if rotation_candidate and rotation_action:
+                rotation_symbol = safe_text(rotation_action.get("symbol")).upper()
+                locked_rotation = next(
+                    (p for p in current_positions if safe_text(p.get("symbol")).upper() == rotation_symbol),
+                    None,
+                )
+                if locked_rotation is None:
+                    return False, "rotation candidate disappeared before execution", None
+                entry_price = safe_float(
+                    locked_rotation.get(
+                        "average_price",
+                        locked_rotation.get("entry_price", exit_price),
+                    ),
+                    exit_price,
+                )
+                realized_pnl = (exit_price - entry_price) * quantity_to_sell
+                conn.execute(
+                    """
+                    DELETE FROM positions
+                    WHERE market = %s
+                      AND symbol = %s
+                    """,
+                    (market, rotation_symbol),
+                )
+                conn.execute(
+                    """
+                    INSERT INTO trades(
+                        market,symbol,side,quantity,price,value,realized_pnl,score,reason,created_at
+                    ) VALUES (%s,%s,'SELL',%s,%s,%s,%s,NULL,%s,%s)
+                    """,
+                    (
+                        market,
+                        rotation_symbol,
+                        quantity_to_sell,
+                        exit_price,
+                        quantity_to_sell * exit_price,
+                        realized_pnl,
+                        rotation_action.get("reason", f"continuous_rotation_to_{symbol}"),
+                        now,
+                    ),
+                )
+                closed_memory = (
+                    dict(locked_rotation),
+                    exit_price,
+                    realized_pnl,
+                    quantity_to_sell,
+                    safe_text(rotation_action.get("reason"), f"continuous_rotation_to_{symbol}"),
+                )
             if existing:
                 old_quantity = safe_float(existing.get("quantity"))
                 old_average = safe_float(
@@ -944,7 +1159,7 @@ def _buy(
                 )
                 combined_quantity = old_quantity + quantity
                 if combined_quantity <= 0:
-                    return False, "combined position quantity is invalid"
+                    return False, "combined position quantity is invalid", None
                 combined_average = (old_quantity * old_average + quantity * price) / combined_quantity
                 old_highest = safe_float(existing.get("highest_price"), price)
                 conn.execute(
@@ -998,14 +1213,32 @@ def _buy(
             "value=%.2f | borrowed=%.2f | score=%.2f | confidence=%.3f",
             market.upper(), symbol, quantity, price, trade_value, borrowed, score, confidence,
         )
+        if closed_memory is not None:
+            closed_position, exit_price, realized_pnl, closed_quantity, exit_reason = closed_memory
+            record_closed_trade_memory(
+                market=market,
+                symbol=safe_text(closed_position.get("symbol")).upper(),
+                position=closed_position,
+                exit_price=exit_price,
+                pnl=realized_pnl,
+                exit_reason=exit_reason,
+                quantity=closed_quantity,
+            )
+            log.info(
+                "%s | CONTINUOUS ROTATION | sold=%s incoming=%s margin_repaid=%.2f",
+                market.upper(),
+                safe_text(closed_position.get("symbol")).upper(),
+                symbol,
+                margin_repayment,
+            )
         return True, (
             f"paper buy executed: ${trade_value:,.2f}; "
             f"cash ${cash_used:,.2f}; margin ${borrowed:,.2f}"
-        )
+        ), rotation_action
 
     except Exception as exc:
         log.exception("%s | BUY FAILED | %s", market.upper(), symbol)
-        return False, f"database execution error: {exc}"
+        return False, f"database execution error: {exc}", None
 
 
 # =========================================================
@@ -1136,6 +1369,16 @@ def process_signals(
             )
             continue
 
+        forecast_ready, forecast_reason = _entry_forecast_gate(market, symbol, price)
+        if not forecast_ready:
+            log.info(
+                "%s | REJECT | %s | forecast gate: %s",
+                market.upper(),
+                symbol,
+                forecast_reason,
+            )
+            continue
+
         # A BUY qualifies through either score or confidence. Only signals
         # that are weak on both measurements are rejected.
         minimum_score = max(45.0, HIGH_SCORE_THRESHOLD - 7.0)
@@ -1219,17 +1462,6 @@ def process_signals(
             (market, symbol),
         )
 
-        open_count = _open_position_count(market)
-        if not existing_position and open_count >= maximum_positions:
-            log.info(
-                "%s | REJECT | %s | position limit reached %d/%d",
-                market.upper(),
-                symbol,
-                open_count,
-                maximum_positions,
-            )
-            continue
-
         recent = recent_trade(market, symbol)
         if recent:
             log.info(
@@ -1239,9 +1471,24 @@ def process_signals(
             )
             continue
 
-        success, reason = _buy(
+        open_count = _open_position_count(market)
+        rotation_candidate = None
+        if not existing_position and open_count >= maximum_positions:
+            rotation_candidate = _rotate_for_stronger_candidate(market, symbol, score)
+            if rotation_candidate is None:
+                log.info(
+                    "%s | REJECT | %s | position limit reached %d/%d and no superior rotation",
+                    market.upper(),
+                    symbol,
+                    open_count,
+                    maximum_positions,
+                )
+                continue
+
+        success, reason, rotation_action = _buy(
             market, symbol, price, signal, quant_assessment,
             target_trade_value=target_trade_value,
+            rotation_candidate=rotation_candidate,
         )
         if not success:
             log.info(
@@ -1252,6 +1499,8 @@ def process_signals(
             )
             continue
 
+        if rotation_action:
+            actions.append(rotation_action)
         actions.append(
             {
                 "market": market,

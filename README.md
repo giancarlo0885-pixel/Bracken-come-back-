@@ -73,3 +73,17 @@ Lower intervals increase provider traffic and can trigger rate limits. The defau
 ## Risk controls
 
 Continuous operation does not mean forced trading. A trade still must pass signal, evidence, positive expected-value, portfolio, concentration, cash, correlation, cooldown, and risk checks. The workers keep scanning when no trade qualifies and execute only when all enabled rules approve the paper order.
+
+## V34 live data-integrity rules
+
+The normal investor interface will never label an asset as a trade-ready BUY unless it has a positive live price, a current forecast target, acceptable data freshness, and a minimum expected move. Incomplete or stale records remain visible as WAIT with a plain-English reason. Global asset quotes retain their native currency label (for example JPY or INR) while portfolio totals remain USD.
+
+## V35 Always-On Trading Engine
+
+The stock and crypto workers now use three simultaneous cadences:
+
+1. **Risk pulse** refreshes open positions and enforces stops.
+2. **Fast rolling scan** continuously rechecks holdings, recent leaders, and a rotating part of the universe.
+3. **Deep global scan** performs broader research, news analysis, ranking, and market-memory work.
+
+The workers automatically retry after cycle errors and Railway is configured to restart them if the process exits. The engine never forces a low-quality trade: it remains active at all times and executes immediately when a candidate passes live-data, forecast, portfolio, quant, leverage, and risk gates. When the portfolio is full, it can rotate out of a materially weaker holding for a stronger approved opportunity.

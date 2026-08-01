@@ -6,18 +6,23 @@ import signal
 import time
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
-from threading import Event
+from threading import Event, Lock
 from typing import Any
 
 from config import (
+    ALWAYS_ON_TRADING,
     DEEP_ANALYSIS_CANDIDATES,
     EXECUTION_MODE,
+    FAST_SCAN_BATCH_SIZE,
+    FAST_SCAN_TOP_RANKED,
+    FAST_SIGNAL_SCAN_ENABLED,
     INTELLIGENCE_REFRESH_SECONDS,
     LIVE_SCAN_WORKERS,
     NEWS_PRIORITY_CANDIDATES,
     OPPORTUNITY_LIMIT,
     REALTIME_MODE,
     WATCHLISTS,
+    WORKER_CYCLE_ERROR_BACKOFF_SECONDS,
 )
 from database import (
     connect,
@@ -42,6 +47,8 @@ from realtime_runtime import cadence_for, seconds_until
 
 log = logging.getLogger("market-worker")
 stop_event = Event()
+trade_cycle_lock = Lock()
+_rolling_offsets: dict[str, int] = {"cash": 0, "crypto": 0}
 
 
 def _request_stop(*_: object) -> None:
@@ -64,23 +71,33 @@ def _ensure_status_table() -> None:
                 last_run TEXT,
                 heartbeat TEXT,
                 last_pulse TEXT,
+                last_fast_scan TEXT,
+                next_fast_scan_at TEXT,
                 next_scan_at TEXT,
                 session_label TEXT,
                 pulse_seconds INTEGER,
+                fast_scan_seconds INTEGER,
                 deep_scan_seconds INTEGER,
                 execution_mode TEXT DEFAULT 'paper',
-                actions_last_cycle INTEGER DEFAULT 0
+                actions_last_cycle INTEGER DEFAULT 0,
+                fast_actions_last_cycle INTEGER DEFAULT 0,
+                cycle_errors INTEGER DEFAULT 0
             )
             """
         )
         for statement in (
             "ALTER TABLE market_worker_status ADD COLUMN IF NOT EXISTS last_pulse TEXT",
+            "ALTER TABLE market_worker_status ADD COLUMN IF NOT EXISTS last_fast_scan TEXT",
+            "ALTER TABLE market_worker_status ADD COLUMN IF NOT EXISTS next_fast_scan_at TEXT",
             "ALTER TABLE market_worker_status ADD COLUMN IF NOT EXISTS next_scan_at TEXT",
             "ALTER TABLE market_worker_status ADD COLUMN IF NOT EXISTS session_label TEXT",
             "ALTER TABLE market_worker_status ADD COLUMN IF NOT EXISTS pulse_seconds INTEGER",
+            "ALTER TABLE market_worker_status ADD COLUMN IF NOT EXISTS fast_scan_seconds INTEGER",
             "ALTER TABLE market_worker_status ADD COLUMN IF NOT EXISTS deep_scan_seconds INTEGER",
             "ALTER TABLE market_worker_status ADD COLUMN IF NOT EXISTS execution_mode TEXT DEFAULT 'paper'",
             "ALTER TABLE market_worker_status ADD COLUMN IF NOT EXISTS actions_last_cycle INTEGER DEFAULT 0",
+            "ALTER TABLE market_worker_status ADD COLUMN IF NOT EXISTS fast_actions_last_cycle INTEGER DEFAULT 0",
+            "ALTER TABLE market_worker_status ADD COLUMN IF NOT EXISTS cycle_errors INTEGER DEFAULT 0",
         ):
             conn.execute(statement)
 
@@ -92,11 +109,16 @@ def set_market_status(
     completed: bool = False,
     *,
     pulse: bool = False,
+    fast_scan: bool = False,
+    next_fast_scan_at: str | None = None,
     next_scan_at: str | None = None,
     session_label: str | None = None,
     pulse_seconds: int | None = None,
+    fast_scan_seconds: int | None = None,
     deep_scan_seconds: int | None = None,
     actions_last_cycle: int | None = None,
+    fast_actions_last_cycle: int | None = None,
+    cycle_errors: int | None = None,
 ) -> None:
     now = utc_now()
     status_market = market
@@ -105,22 +127,29 @@ def set_market_status(
             """
             INSERT INTO market_worker_status (
                 market, status, message, last_run, heartbeat, last_pulse,
-                next_scan_at, session_label, pulse_seconds, deep_scan_seconds,
-                execution_mode, actions_last_cycle
+                last_fast_scan, next_fast_scan_at, next_scan_at, session_label,
+                pulse_seconds, fast_scan_seconds, deep_scan_seconds,
+                execution_mode, actions_last_cycle, fast_actions_last_cycle,
+                cycle_errors
             )
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
             ON CONFLICT (market) DO UPDATE SET
                 status = EXCLUDED.status,
                 message = EXCLUDED.message,
                 heartbeat = EXCLUDED.heartbeat,
                 last_run = CASE WHEN %s THEN EXCLUDED.last_run ELSE market_worker_status.last_run END,
                 last_pulse = CASE WHEN %s THEN EXCLUDED.last_pulse ELSE market_worker_status.last_pulse END,
+                last_fast_scan = CASE WHEN %s THEN EXCLUDED.last_fast_scan ELSE market_worker_status.last_fast_scan END,
+                next_fast_scan_at = COALESCE(EXCLUDED.next_fast_scan_at, market_worker_status.next_fast_scan_at),
                 next_scan_at = COALESCE(EXCLUDED.next_scan_at, market_worker_status.next_scan_at),
                 session_label = COALESCE(EXCLUDED.session_label, market_worker_status.session_label),
                 pulse_seconds = COALESCE(EXCLUDED.pulse_seconds, market_worker_status.pulse_seconds),
+                fast_scan_seconds = COALESCE(EXCLUDED.fast_scan_seconds, market_worker_status.fast_scan_seconds),
                 deep_scan_seconds = COALESCE(EXCLUDED.deep_scan_seconds, market_worker_status.deep_scan_seconds),
                 execution_mode = EXCLUDED.execution_mode,
-                actions_last_cycle = COALESCE(EXCLUDED.actions_last_cycle, market_worker_status.actions_last_cycle)
+                actions_last_cycle = COALESCE(EXCLUDED.actions_last_cycle, market_worker_status.actions_last_cycle),
+                fast_actions_last_cycle = COALESCE(EXCLUDED.fast_actions_last_cycle, market_worker_status.fast_actions_last_cycle),
+                cycle_errors = COALESCE(EXCLUDED.cycle_errors, market_worker_status.cycle_errors)
             """,
             (
                 status_market,
@@ -129,17 +158,22 @@ def set_market_status(
                 now if completed else None,
                 now,
                 now if pulse else None,
+                now if fast_scan else None,
+                next_fast_scan_at,
                 next_scan_at,
                 session_label,
                 pulse_seconds,
+                fast_scan_seconds,
                 deep_scan_seconds,
                 EXECUTION_MODE,
                 actions_last_cycle,
+                fast_actions_last_cycle,
+                cycle_errors,
                 completed,
                 pulse,
+                fast_scan,
             ),
         )
-
 
 def _format_action(action_record: Any) -> str:
     if not isinstance(action_record, dict):
@@ -195,6 +229,168 @@ def _held_symbols(market: str) -> set[str]:
     except Exception:
         return set()
 
+
+
+def _rolling_batch(items: list[tuple[str, str]], market: str, size: int) -> list[tuple[str, str]]:
+    """Return a rotating slice so the always-on loop eventually covers the full universe."""
+    if not items or size <= 0:
+        return []
+    size = min(size, len(items))
+    start = _rolling_offsets.get(market, 0) % len(items)
+    batch = [items[(start + index) % len(items)] for index in range(size)]
+    _rolling_offsets[market] = (start + size) % len(items)
+    return batch
+
+
+def _latest_ranked_symbols(market: str, limit: int) -> list[str]:
+    try:
+        with connect() as conn:
+            records = conn.execute(
+                """
+                SELECT DISTINCT ON (symbol) symbol, opportunity_score, created_at
+                FROM opportunity_rankings
+                WHERE market = %s
+                ORDER BY symbol, created_at DESC
+                """,
+                (market,),
+            ).fetchall()
+        records = sorted(
+            records,
+            key=lambda item: float(item.get("opportunity_score", 0.0) or 0.0),
+            reverse=True,
+        )
+        return [str(item.get("symbol", "")).upper() for item in records[:limit] if item.get("symbol")]
+    except Exception as exc:
+        log.debug("%s fast ranking lookup unavailable: %s", market, exc)
+        return []
+
+
+def _fast_candidate_batch(market: str) -> list[tuple[str, str]]:
+    """Blend holdings, current leaders, and a rotating universe slice."""
+    watchlist = dict(WATCHLISTS[market])
+    candidates: dict[str, str] = {}
+    for symbol in sorted(_held_symbols(market)):
+        candidates[symbol] = watchlist.get(symbol, symbol)
+    for symbol in _latest_ranked_symbols(market, FAST_SCAN_TOP_RANKED):
+        candidates.setdefault(symbol, watchlist.get(symbol, symbol))
+    universe = [(str(symbol).upper(), str(name)) for symbol, name in watchlist.items()]
+    for symbol, name in _rolling_batch(universe, market, FAST_SCAN_BATCH_SIZE):
+        candidates.setdefault(symbol, name)
+    return list(candidates.items())[: max(FAST_SCAN_BATCH_SIZE, FAST_SCAN_TOP_RANKED)]
+
+
+def _fast_discover_symbol(market: str, symbol: str, name: str) -> tuple[Any, Any] | None:
+    """Build a low-latency intraday signal without the expensive news pass."""
+    if stop_event.is_set():
+        return None
+    attempts = (("5d", "5m"), ("1mo", "1h"))
+    for period, interval in attempts:
+        try:
+            history = get_history(symbol, period, interval)
+            if history is None or history.empty or len(history) < 60:
+                continue
+            signal = analyze_market(symbol, history, 0.0)
+            if signal is None:
+                continue
+            signal.reason = (
+                f"Always-on {interval} market pulse. " + str(getattr(signal, "reason", ""))
+            ).strip()
+            return signal, history
+        except Exception as exc:
+            log.debug("Fast discovery failed | market=%s | symbol=%s | error=%s", market, symbol, exc)
+    return None
+
+
+def fast_scan_market(market: str) -> list[Any]:
+    """Continuously evaluate a rolling candidate batch between deep scans.
+
+    This loop never forces a trade. It keeps searching and executes immediately
+    whenever a candidate passes the live-data, forecast, quant, portfolio, and
+    risk gates.
+    """
+    batch = _fast_candidate_batch(market)
+    if not batch:
+        return []
+
+    signals: list[Any] = []
+    prices: dict[str, float] = {}
+    workers = min(LIVE_SCAN_WORKERS, max(1, len(batch)))
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix=f"{market}-fast-symbol") as executor:
+        futures = {
+            executor.submit(_fast_discover_symbol, market, symbol, name): symbol
+            for symbol, name in batch
+        }
+        for future in as_completed(futures):
+            if stop_event.is_set():
+                break
+            symbol = futures[future]
+            try:
+                result = future.result()
+            except Exception as exc:
+                log.debug("Fast candidate failed | market=%s | symbol=%s | error=%s", market, symbol, exc)
+                continue
+            if result is None:
+                continue
+            signal, history = result
+            signals.append(signal)
+            prices[symbol] = float(getattr(signal, "price", 0.0) or 0.0)
+            try:
+                save_json_signal(
+                    market,
+                    symbol,
+                    signal.price,
+                    signal.score,
+                    signal.action,
+                    signal.confidence,
+                    signal.to_dict()
+                    | {
+                        "always_on_fast_scan": True,
+                        "market_data_route": dict(getattr(history, "attrs", {}).get("provider_route", {}) or {}),
+                        "trade_configuration": {
+                            "mode": EXECUTION_MODE,
+                            "scan": "fast",
+                            "action": str(signal.action),
+                            "confidence": float(signal.confidence),
+                            "score": float(signal.score),
+                            "entry_price": float(signal.price),
+                        },
+                    },
+                )
+                forecast = forecast_price(history, 3 if market == "cash" else 1)
+                if forecast:
+                    save_forecast(market, symbol, forecast)
+            except Exception as exc:
+                log.debug("Fast persistence failed | market=%s | symbol=%s | error=%s", market, symbol, exc)
+
+    if not signals:
+        return []
+    signals.sort(
+        key=lambda signal: (
+            float(getattr(signal, "score", 0.0) or 0.0),
+            float(getattr(signal, "confidence", 0.0) or 0.0),
+        ),
+        reverse=True,
+    )
+
+    actions: list[Any] = []
+    with trade_cycle_lock:
+        try:
+            update_prices(market, prices)
+        except Exception as exc:
+            log.debug("%s fast price update failed: %s", market, exc)
+        try:
+            actions.extend(risk_exits(market, prices) or [])
+        except Exception as exc:
+            log.exception("%s fast risk exits failed: %s", market, exc)
+        try:
+            actions.extend(process_signals(market, signals, prices=prices) or [])
+        except Exception as exc:
+            log.exception("%s fast execution failed: %s", market, exc)
+        try:
+            snapshot(market)
+        except Exception as exc:
+            log.debug("%s fast snapshot failed: %s", market, exc)
+    return actions
 
 def scan_market(market: str) -> list[Any]:
     """Run the deeper worldwide research and paper-execution cycle."""
@@ -392,24 +588,24 @@ def scan_market(market: str) -> list[Any]:
         except Exception as exc:
             log.exception("%s rotation planning failed: %s", market, exc)
 
-    try:
-        update_prices(market, prices)
-    except Exception as exc:
-        log.exception("%s price update failed: %s", market, exc)
-
     actions: list[Any] = []
-    try:
-        actions.extend(risk_exits(market, prices) or [])
-    except Exception as exc:
-        log.exception("%s deep-scan risk exits failed: %s", market, exc)
-    try:
-        actions.extend(process_signals(market, signals) or [])
-    except Exception as exc:
-        log.exception("%s signal execution failed: %s", market, exc)
-    try:
-        snapshot(market)
-    except Exception as exc:
-        log.exception("%s portfolio snapshot failed: %s", market, exc)
+    with trade_cycle_lock:
+        try:
+            update_prices(market, prices)
+        except Exception as exc:
+            log.exception("%s price update failed: %s", market, exc)
+        try:
+            actions.extend(risk_exits(market, prices) or [])
+        except Exception as exc:
+            log.exception("%s deep-scan risk exits failed: %s", market, exc)
+        try:
+            actions.extend(process_signals(market, signals, prices=prices) or [])
+        except Exception as exc:
+            log.exception("%s signal execution failed: %s", market, exc)
+        try:
+            snapshot(market)
+        except Exception as exc:
+            log.exception("%s portfolio snapshot failed: %s", market, exc)
     return actions
 
 
@@ -430,19 +626,20 @@ def live_position_pulse(market: str) -> tuple[list[Any], int, str]:
     provider_text = ", ".join(provider_names[:2]) if provider_names else "unavailable"
     if not prices:
         return [], 0, provider_text
-    try:
-        update_prices(market, prices)
-    except Exception as exc:
-        log.warning("%s pulse price update failed: %s", market, exc)
     actions: list[Any] = []
-    try:
-        actions.extend(risk_exits(market, prices) or [])
-    except Exception as exc:
-        log.exception("%s pulse risk exits failed: %s", market, exc)
-    try:
-        snapshot(market)
-    except Exception as exc:
-        log.warning("%s pulse snapshot failed: %s", market, exc)
+    with trade_cycle_lock:
+        try:
+            update_prices(market, prices)
+        except Exception as exc:
+            log.warning("%s pulse price update failed: %s", market, exc)
+        try:
+            actions.extend(risk_exits(market, prices) or [])
+        except Exception as exc:
+            log.exception("%s pulse risk exits failed: %s", market, exc)
+        try:
+            snapshot(market)
+        except Exception as exc:
+            log.warning("%s pulse snapshot failed: %s", market, exc)
     return actions, len(prices), provider_text
 
 
@@ -487,9 +684,10 @@ def run_worker(market: str) -> None:
     label = "Stock Market" if market == "cash" else "Crypto Market"
     initial = cadence_for(market)
     log.info(
-        "Starting %s live worker | pulse=%ss deep=%ss session=%s mode=%s",
+        "Starting %s always-on worker | pulse=%ss fast=%ss deep=%ss session=%s mode=%s",
         label,
         initial.pulse_seconds,
+        initial.fast_scan_seconds,
         initial.deep_scan_seconds,
         initial.session_label,
         EXECUTION_MODE,
@@ -497,90 +695,169 @@ def run_worker(market: str) -> None:
     set_market_status(
         market,
         "starting",
-        f"{label} live pulse is starting.",
+        f"{label} always-on trading engine is starting.",
         session_label=initial.session_label,
         pulse_seconds=initial.pulse_seconds,
+        fast_scan_seconds=initial.fast_scan_seconds,
         deep_scan_seconds=initial.deep_scan_seconds,
+        cycle_errors=0,
     )
 
     deep_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"{market}-deep")
+    fast_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"{market}-fast")
     intelligence_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="market-intelligence") if market == "cash" else None
     deep_future: Future[list[Any]] | None = None
+    fast_future: Future[list[Any]] | None = None
     intelligence_future: Future[None] | None = None
     next_deep_due = time.monotonic()
+    next_fast_due = time.monotonic()
     next_intelligence_due = time.monotonic()
     last_deep_actions = 0
+    last_fast_actions = 0
+    consecutive_errors = 0
 
     try:
         while not stop_event.is_set():
-            cadence = cadence_for(market)
-            now_monotonic = time.monotonic()
+            try:
+                cadence = cadence_for(market)
+                now_monotonic = time.monotonic()
 
-            completed_actions, deep_error = _future_result(deep_future, label)
-            if completed_actions is not None:
-                deep_future = None
-                last_deep_actions = len(completed_actions)
-                message = _build_completion_message(label, completed_actions)
-                if deep_error:
-                    message = f"{label} deep scan error: {deep_error}"
+                completed_actions, deep_error = _future_result(deep_future, label)
+                if completed_actions is not None:
+                    deep_future = None
+                    last_deep_actions = len(completed_actions)
+                    message = _build_completion_message(label, completed_actions)
+                    if deep_error:
+                        message = f"{label} deep scan error: {deep_error}"
+                    set_market_status(
+                        market,
+                        "running" if not deep_error else "degraded",
+                        message,
+                        completed=not deep_error,
+                        session_label=cadence.session_label,
+                        pulse_seconds=cadence.pulse_seconds,
+                        fast_scan_seconds=cadence.fast_scan_seconds,
+                        deep_scan_seconds=cadence.deep_scan_seconds,
+                        actions_last_cycle=last_deep_actions,
+                        cycle_errors=consecutive_errors,
+                    )
+                    log.info(message)
+
+                completed_fast, fast_error = _future_result(fast_future, f"{label} fast scan")
+                if completed_fast is not None:
+                    fast_future = None
+                    last_fast_actions = len(completed_fast)
+                    fast_message = (
+                        f"{label} fast scan completed. "
+                        + (
+                            "Actions: " + ", ".join(_format_action(action) for action in completed_fast)
+                            if completed_fast
+                            else "No qualified trade this pass; scanning continues."
+                        )
+                    )
+                    if fast_error:
+                        fast_message = f"{label} fast scan error: {fast_error}; automatic retry remains active."
+                    set_market_status(
+                        market,
+                        "running" if not fast_error else "degraded",
+                        fast_message,
+                        fast_scan=True,
+                        session_label=cadence.session_label,
+                        pulse_seconds=cadence.pulse_seconds,
+                        fast_scan_seconds=cadence.fast_scan_seconds,
+                        deep_scan_seconds=cadence.deep_scan_seconds,
+                        fast_actions_last_cycle=last_fast_actions,
+                        cycle_errors=consecutive_errors,
+                    )
+                    log.info(fast_message)
+
+                if deep_future is None and now_monotonic >= next_deep_due:
+                    deep_future = deep_executor.submit(scan_market, market)
+                    next_deep_due = now_monotonic + cadence.deep_scan_seconds
+                    log.info("%s deep scan launched; next target in %ss", label, cadence.deep_scan_seconds)
+
+                if (
+                    ALWAYS_ON_TRADING
+                    and FAST_SIGNAL_SCAN_ENABLED
+                    and fast_future is None
+                    and now_monotonic >= next_fast_due
+                ):
+                    fast_future = fast_executor.submit(fast_scan_market, market)
+                    next_fast_due = now_monotonic + cadence.fast_scan_seconds
+                    log.info("%s fast scan launched; next target in %ss", label, cadence.fast_scan_seconds)
+
+                if market == "cash" and intelligence_executor is not None:
+                    if intelligence_future is not None and intelligence_future.done():
+                        try:
+                            intelligence_future.result()
+                        except Exception as exc:
+                            log.warning("Intelligence refresh failed: %s", exc)
+                        intelligence_future = None
+                    if intelligence_future is None and now_monotonic >= next_intelligence_due:
+                        intelligence_future = intelligence_executor.submit(_collect_stock_intelligence)
+                        next_intelligence_due = now_monotonic + INTELLIGENCE_REFRESH_SECONDS
+
+                pulse_actions: list[Any] = []
+                refreshed = 0
+                provider_text = "none"
+                if REALTIME_MODE:
+                    pulse_actions, refreshed, provider_text = live_position_pulse(market)
+
+                seconds_to_deep = seconds_until(next_deep_due, time.monotonic())
+                seconds_to_fast = seconds_until(next_fast_due, time.monotonic())
+                next_scan_at = (datetime.now(timezone.utc) + timedelta(seconds=seconds_to_deep)).isoformat()
+                next_fast_scan_at = (datetime.now(timezone.utc) + timedelta(seconds=seconds_to_fast)).isoformat()
+                deep_text = "deep scan running" if deep_future is not None else f"deep scan in {seconds_to_deep}s"
+                fast_text = "fast scan running" if fast_future is not None else f"fast scan in {seconds_to_fast}s"
+                pulse_text = (
+                    f"Always-on engine active · {refreshed} positions refreshed via {provider_text} · "
+                    f"{fast_text} · {deep_text} · {cadence.session_label} session"
+                )
+                if pulse_actions:
+                    pulse_text += " · Actions: " + ", ".join(_format_action(action) for action in pulse_actions)
                 set_market_status(
                     market,
-                    "running" if not deep_error else "degraded",
-                    message,
-                    completed=not deep_error,
+                    "running",
+                    pulse_text,
+                    pulse=True,
+                    next_fast_scan_at=next_fast_scan_at,
+                    next_scan_at=next_scan_at,
                     session_label=cadence.session_label,
                     pulse_seconds=cadence.pulse_seconds,
+                    fast_scan_seconds=cadence.fast_scan_seconds,
                     deep_scan_seconds=cadence.deep_scan_seconds,
-                    actions_last_cycle=last_deep_actions,
+                    actions_last_cycle=last_deep_actions + len(pulse_actions),
+                    fast_actions_last_cycle=last_fast_actions,
+                    cycle_errors=consecutive_errors,
                 )
-                log.info(message)
+                consecutive_errors = 0
 
-            if deep_future is None and now_monotonic >= next_deep_due:
-                deep_future = deep_executor.submit(scan_market, market)
-                next_deep_due = now_monotonic + cadence.deep_scan_seconds
-                log.info("%s deep scan launched; next target in %ss", label, cadence.deep_scan_seconds)
-
-            if market == "cash" and intelligence_executor is not None:
-                if intelligence_future is not None and intelligence_future.done():
-                    try:
-                        intelligence_future.result()
-                    except Exception as exc:
-                        log.warning("Intelligence refresh failed: %s", exc)
-                    intelligence_future = None
-                if intelligence_future is None and now_monotonic >= next_intelligence_due:
-                    intelligence_future = intelligence_executor.submit(_collect_stock_intelligence)
-                    next_intelligence_due = now_monotonic + INTELLIGENCE_REFRESH_SECONDS
-
-            pulse_actions: list[Any] = []
-            refreshed = 0
-            provider_text = "none"
-            if REALTIME_MODE:
-                pulse_actions, refreshed, provider_text = live_position_pulse(market)
-            seconds_to_scan = seconds_until(next_deep_due, time.monotonic())
-            next_scan_at = (datetime.now(timezone.utc) + timedelta(seconds=seconds_to_scan)).isoformat()
-            running_text = "deep scan running" if deep_future is not None else f"next deep scan in {seconds_to_scan}s"
-            pulse_text = (
-                f"Live pulse active · {refreshed} positions refreshed via {provider_text} · "
-                f"{running_text} · {cadence.session_label} session"
-            )
-            if pulse_actions:
-                pulse_text += " · Actions: " + ", ".join(_format_action(action) for action in pulse_actions)
-            set_market_status(
-                market,
-                "running",
-                pulse_text,
-                pulse=True,
-                next_scan_at=next_scan_at,
-                session_label=cadence.session_label,
-                pulse_seconds=cadence.pulse_seconds,
-                deep_scan_seconds=cadence.deep_scan_seconds,
-                actions_last_cycle=last_deep_actions + len(pulse_actions),
-            )
-
-            if stop_event.wait(cadence.pulse_seconds):
-                break
+                if stop_event.wait(cadence.pulse_seconds):
+                    break
+            except Exception as exc:
+                consecutive_errors += 1
+                log.exception(
+                    "%s always-on cycle error #%s; retrying in %ss: %s",
+                    label,
+                    consecutive_errors,
+                    WORKER_CYCLE_ERROR_BACKOFF_SECONDS,
+                    exc,
+                )
+                try:
+                    set_market_status(
+                        market,
+                        "degraded",
+                        f"Automatic recovery active after cycle error: {exc}",
+                        session_label=cadence_for(market).session_label,
+                        cycle_errors=consecutive_errors,
+                    )
+                except Exception:
+                    log.exception("Could not write degraded worker status.")
+                if stop_event.wait(WORKER_CYCLE_ERROR_BACKOFF_SECONDS):
+                    break
     finally:
         deep_executor.shutdown(wait=False, cancel_futures=True)
+        fast_executor.shutdown(wait=False, cancel_futures=True)
         if intelligence_executor is not None:
             intelligence_executor.shutdown(wait=False, cancel_futures=True)
 
