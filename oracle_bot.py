@@ -985,9 +985,13 @@ def _buy(
         if not rotation_candidate
         else equity * leverage_limit * PAPER_MAX_MARGIN_UTILIZATION_PCT
     )
+    max_trade_pct = MAX_TRADE_VALUE_PCT
+    if PENNY_STOCK_MIN_PRICE <= price <= PENNY_STOCK_MAX_PRICE:
+        max_trade_pct = min(max_trade_pct, PENNY_STOCK_MAX_TRADE_VALUE_PCT)
+
     maximum_trade_value = min(
         sizing_buying_power,
-        equity * MAX_TRADE_VALUE_PCT,
+        equity * max_trade_pct,
     )
 
     # Rich paper capital must still respect realistic liquidity. When the global

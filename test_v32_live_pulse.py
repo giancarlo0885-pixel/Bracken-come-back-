@@ -15,6 +15,8 @@ def test_dashboard_auto_refresh_and_native_cards():
     assert "with st.container(border=True):" in source
     assert "metric_html" not in source
     assert "LIVE PAPER TRADING" in source
+    assert "use_container_width" not in source
+    assert 'width="stretch"' in source
 
 
 def test_realtime_variables_are_documented():

@@ -15,10 +15,18 @@ class OracleSignal:
 
 def _clip(x,a=-1,b=1): return max(a,min(b,x))
 
+def _series(frame: pd.DataFrame, column: str) -> pd.Series:
+    value = frame[column]
+    if isinstance(value, pd.DataFrame):
+        value = value.iloc[:, -1]
+    return pd.to_numeric(value, errors="coerce").dropna()
+
 def analyze_market(symbol, history, news_sentiment=0.0):
     if history is None or history.empty or len(history)<60:
         return None
-    close=history["Close"].astype(float).dropna()
+    close=_series(history, "Close")
+    if len(close)<60:
+        return None
     price=float(close.iloc[-1])
     ret=close.pct_change().dropna()
     m5=float(close.iloc[-1]/close.iloc[-6]-1)
@@ -28,8 +36,10 @@ def analyze_market(symbol, history, news_sentiment=0.0):
     sma10=float(close.tail(10).mean()); sma30=float(close.tail(30).mean())
     trend=(sma10/sma30)-1 if sma30 else 0
     vr=1.0
-    if "Volume" in history and history["Volume"].notna().sum()>=20:
-        v=history["Volume"].astype(float); av=float(v.tail(20).mean()); vr=float(v.iloc[-1]/av) if av else 1.0
+    if "Volume" in history:
+        v=_series(history, "Volume")
+        if len(v)>=20:
+            av=float(v.tail(20).mean()); vr=float(v.iloc[-1]/av) if av else 1.0
     _,_,mh=macd(close)
     a=atr(history); atr_pct=a/price if price else 0
     bp=bollinger_position(close)

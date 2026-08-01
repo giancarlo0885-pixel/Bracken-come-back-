@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
+import time
 from typing import Callable
 
 import pandas as pd
@@ -10,9 +11,16 @@ import requests
 
 from api_manager import get_api_settings
 from cache import cached_call
-from config import API_CACHE_TTL_SECONDS, REALTIME_CACHE_TTL_SECONDS
+from config import (
+    API_CACHE_TTL_SECONDS,
+    PROVIDER_RATE_LIMIT_COOLDOWN_SECONDS,
+    REALTIME_CACHE_TTL_SECONDS,
+    UNAVAILABLE_SYMBOL_COOLDOWN_SECONDS,
+)
 
 log = logging.getLogger("provider-router")
+_provider_cooldowns: dict[str, float] = {}
+_symbol_cooldowns: dict[str, float] = {}
 
 
 @dataclass
@@ -53,6 +61,7 @@ def _normalise(frame: pd.DataFrame) -> pd.DataFrame:
         if found is not None:
             mapping[found] = wanted
     out = out.rename(columns=mapping)
+    out = out.loc[:, ~out.columns.duplicated(keep="last")]
     keep = [c for c in ("Open", "High", "Low", "Close", "Volume") if c in out.columns]
     if "Close" not in keep:
         return pd.DataFrame()
@@ -65,6 +74,28 @@ def _normalise(frame: pd.DataFrame) -> pd.DataFrame:
 def _is_intraday(interval: str) -> bool:
     text = str(interval or "1d").lower().strip()
     return not text.endswith("d") and text not in {"1wk", "1mo", "3mo"}
+
+
+def _cooldown_active(store: dict[str, float], key: str) -> bool:
+    until = store.get(key, 0.0)
+    if until <= time.time():
+        store.pop(key, None)
+        return False
+    return True
+
+
+def mark_symbol_unavailable(symbol: str, seconds: int = UNAVAILABLE_SYMBOL_COOLDOWN_SECONDS) -> None:
+    symbol = str(symbol or "").upper().strip()
+    if symbol:
+        _symbol_cooldowns[symbol] = time.time() + max(1, int(seconds))
+
+
+def symbol_is_unavailable(symbol: str) -> bool:
+    return _cooldown_active(_symbol_cooldowns, str(symbol or "").upper().strip())
+
+
+def _mark_provider_limited(provider: str) -> None:
+    _provider_cooldowns[provider] = time.time() + PROVIDER_RATE_LIMIT_COOLDOWN_SECONDS
 
 
 def _period_days(period: str) -> int:
@@ -241,6 +272,14 @@ def route_history(
     attempts: list[ProviderAttempt] = []
     intraday = _is_intraday(interval)
     ttl = REALTIME_CACHE_TTL_SECONDS if intraday else API_CACHE_TTL_SECONDS
+    symbol = str(symbol or "").upper().strip()
+    if symbol_is_unavailable(symbol):
+        return RoutedHistory(
+            pd.DataFrame(),
+            "none",
+            [ProviderAttempt("all", False, 0, "symbol_cooldown", "temporarily skipped after unavailable data")],
+            datetime.now(timezone.utc).isoformat(),
+        )
 
     if intraday:
         routes = [
@@ -257,6 +296,9 @@ def route_history(
         ]
 
     for provider, key_name, function in routes:
+        if _cooldown_active(_provider_cooldowns, provider):
+            attempts.append(ProviderAttempt(provider, False, 0, "provider_cooldown"))
+            continue
         key = settings.get(key_name)
         if not key:
             attempts.append(ProviderAttempt(provider, False, status="not_configured"))
@@ -272,6 +314,8 @@ def route_history(
         except Exception as exc:
             text = str(exc)[:220]
             status = "rate_limited" if "429" in text or "limit" in text.lower() else "degraded"
+            if status == "rate_limited":
+                _mark_provider_limited(provider)
             attempts.append(ProviderAttempt(provider, False, 0, status, text))
             log.info("History route failed | provider=%s symbol=%s status=%s", provider, symbol, status)
 
@@ -283,4 +327,5 @@ def route_history(
     except Exception as exc:
         attempts.append(ProviderAttempt("Yahoo Finance", False, 0, "degraded", str(exc)[:220]))
 
+    mark_symbol_unavailable(symbol)
     return RoutedHistory(pd.DataFrame(), "none", attempts, datetime.now(timezone.utc).isoformat())

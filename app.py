@@ -344,7 +344,7 @@ with st.sidebar:
             f"heartbeat {pulse_text} · fast scan {fast_text}"
         )
     st.caption(f"Auto-refresh: {'ON' if UI_AUTO_REFRESH else 'OFF'} · every {UI_REFRESH_SECONDS}s")
-    if st.button("Refresh market data", use_container_width=True):
+    if st.button("Refresh market data", width="stretch"):
         st.cache_data.clear()
         st.rerun()
 
@@ -468,7 +468,7 @@ elif page == "📈 Markets":
             else:
                 frame = pd.DataFrame(filtered)[["symbol", "market", "action", "score", "confidence", "expected_return", "risk", "price", "target", "data_status", "trade_eligible"]]
                 frame.columns = ["Symbol", "Market", "Decision", "Quality", "Confidence %", "Expected %", "Risk", "Price", "Target", "Data Status", "Trade Ready"]
-                st.dataframe(frame, use_container_width=True, hide_index=True)
+                st.dataframe(frame, width="stretch", hide_index=True)
 
     st.markdown("### Chart and price history")
     symbols = sorted({d["symbol"] for d in decisions if d.get("symbol")})
@@ -480,7 +480,7 @@ elif page == "📈 Markets":
             chart = history.reset_index()
             date_col = chart.columns[0]
             fig = px.line(chart, x=date_col, y="Close", title=f"{selected} closing price")
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width="stretch")
             st.caption("The Oracle uses price history as evidence. A chart pattern alone does not qualify a trade without volume, regime, risk, and portfolio confirmation.")
         else:
             st.info("Price history is not available from the configured providers.")
@@ -519,7 +519,7 @@ elif page == "💼 Portfolios":
                 else:
                     st.dataframe(
                         frame.style.format({"Average Cost": "${:,.2f}", "Current Price": "${:,.2f}", "Current Value": "${:,.2f}", "Gain/Loss": "${:+,.2f}", "Return %": "{:+.1f}%"}),
-                        use_container_width=True, hide_index=True,
+                        width="stretch", hide_index=True,
                     )
             with activity_tab:
                 trades = safe_rows("SELECT * FROM trades WHERE market=%s ORDER BY id DESC LIMIT 300", (market,))
@@ -529,7 +529,7 @@ elif page == "💼 Portfolios":
                     view = clean_trade_frame(trades)
                     st.dataframe(
                         view.style.format({"Price": "${:,.4f}", "Trade Value": "${:,.2f}", "Profit / Loss": "${:+,.2f}"}, na_rep="—"),
-                        use_container_width=True,
+                        width="stretch",
                         hide_index=True,
                     )
             with advice_tab:
@@ -558,7 +558,7 @@ elif page == "💼 Portfolios":
             view = clean_trade_frame(trades)
             st.dataframe(
                 view.style.format({"Price": "${:,.4f}", "Trade Value": "${:,.2f}", "Profit / Loss": "${:+,.2f}"}, na_rep="—"),
-                use_container_width=True,
+                width="stretch",
                 hide_index=True,
             )
         else:
@@ -578,7 +578,7 @@ elif page == "💼 Portfolios":
             default_amount = min(100000.0, max(500.0, selected_metrics["equity"] * 0.01))
             amount = st.number_input("Dollar amount", min_value=0.0, value=float(default_amount), step=1000.0)
             assumed_price = st.number_input("Assumed price", min_value=0.000001, value=100.0, step=1.0)
-        if st.button("Analyze hypothetical trade", type="primary", use_container_width=True):
+        if st.button("Analyze hypothetical trade", type="primary", width="stretch"):
             result = simulate_trade(
                 cash, positions, action, symbol, amount, assumed_price,
                 selected_metrics["margin_debt"], selected_metrics["leverage_limit"],
@@ -594,7 +594,7 @@ elif page == "💼 Portfolios":
                 {"Measure": "Largest holding %", "Current": before["largest_position_pct"], "Proposed": after["largest_position_pct"]},
                 {"Measure": "Number of holdings", "Current": before["position_count"], "Proposed": after["position_count"]},
             ])
-            st.dataframe(comparison, use_container_width=True, hide_index=True)
+            st.dataframe(comparison, width="stretch", hide_index=True)
             st.markdown("**What changes:** " + "; ".join(result["reasons"]) + ".")
             st.caption("This is a portfolio-structure simulation, not a guarantee of future return. Live market evidence should be checked before acting.")
 
@@ -676,11 +676,11 @@ elif page == "🌍 Intelligence":
         )
         main_rows = table_rows(prepared_earnings["main"])
         if main_rows:
-            st.dataframe(pd.DataFrame(main_rows), use_container_width=True, hide_index=True)
+            st.dataframe(pd.DataFrame(main_rows), width="stretch", hide_index=True)
             with st.expander("Show more earnings"):
                 more_rows = table_rows(prepared_earnings["more"])
                 if more_rows:
-                    st.dataframe(pd.DataFrame(more_rows), use_container_width=True, hide_index=True)
+                    st.dataframe(pd.DataFrame(more_rows), width="stretch", hide_index=True)
                 else:
                     st.caption("No additional matching events.")
             with st.expander("Mobile card view"):
@@ -694,7 +694,7 @@ elif page == "🌍 Intelligence":
 
         if prepared_earnings["incomplete"]:
             with st.expander("Incomplete Provider Data"):
-                st.dataframe(pd.DataFrame(table_rows(prepared_earnings["incomplete"])), use_container_width=True, hide_index=True)
+                st.dataframe(pd.DataFrame(table_rows(prepared_earnings["incomplete"])), width="stretch", hide_index=True)
         with st.expander("Developer diagnostics: raw provider payload"):
             st.json([event.get("raw_payload") for event in prepared_earnings["main"] + prepared_earnings["more"] + prepared_earnings["incomplete"]])
 
@@ -748,19 +748,19 @@ elif page == "⚙ Professional":
     with tabs[1]:
         runs = safe_rows("SELECT * FROM backtest_runs ORDER BY id DESC LIMIT 100")
         if runs:
-            st.dataframe(pd.DataFrame(runs), use_container_width=True, hide_index=True)
+            st.dataframe(pd.DataFrame(runs), width="stretch", hide_index=True)
         else:
             st.info("No stored backtest runs are available yet.")
         st.caption("Production strategies should pass out-of-sample, walk-forward, fee, slippage, and drawdown testing before influencing live decisions.")
     with tabs[2]:
         try:
             diagnostics = provider_diagnostics()
-            st.dataframe(pd.DataFrame(diagnostics), use_container_width=True, hide_index=True)
+            st.dataframe(pd.DataFrame(diagnostics), width="stretch", hide_index=True)
         except Exception as exc:
             st.warning(f"Provider diagnostics unavailable: {exc}")
     with tabs[3]:
         if signals:
-            st.dataframe(pd.DataFrame(signals), use_container_width=True, hide_index=True)
+            st.dataframe(pd.DataFrame(signals), width="stretch", hide_index=True)
         else:
             st.info("No raw signals are available.")
 

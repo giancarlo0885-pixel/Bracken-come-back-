@@ -29,8 +29,26 @@ def _normalize(frame: pd.DataFrame) -> pd.DataFrame:
     frame = frame.copy()
     if isinstance(frame.columns, pd.MultiIndex):
         frame.columns = frame.columns.get_level_values(0)
+    frame = frame.loc[:, ~frame.columns.duplicated(keep="last")]
     keep = [c for c in ("Open", "High", "Low", "Close", "Volume") if c in frame.columns]
     return frame[keep].dropna(subset=["Close"])
+
+
+def _series(frame: pd.DataFrame, column: str) -> pd.Series:
+    value = frame[column]
+    if isinstance(value, pd.DataFrame):
+        value = value.iloc[:, -1]
+    return pd.to_numeric(value, errors="coerce").dropna()
+
+
+def _scalar(value: object, default: float = 0.0) -> float:
+    if isinstance(value, pd.Series):
+        value = value.dropna().iloc[-1] if not value.dropna().empty else default
+    try:
+        result = float(value)
+        return result if result == result else default
+    except (TypeError, ValueError):
+        return default
 
 
 def _download_yahoo(symbol: str, period: str, interval: str) -> pd.DataFrame:
@@ -56,11 +74,11 @@ def get_history(symbol: str, period: str = "1y", interval: str = "1d") -> pd.Dat
 def _snapshot_from_history(symbol: str, history: pd.DataFrame, interval: str) -> MarketSnapshot | None:
     if history is None or history.empty:
         return None
-    closes = history["Close"].astype(float)
-    price = float(closes.iloc[-1])
-    previous = float(closes.iloc[-2]) if len(closes) > 1 else price
+    closes = _series(history, "Close")
+    price = _scalar(closes.iloc[-1])
+    previous = _scalar(closes.iloc[-2]) if len(closes) > 1 else price
     change = ((price / previous) - 1) * 100 if previous else 0.0
-    volume = float(history["Volume"].iloc[-1]) if "Volume" in history.columns else 0.0
+    volume = _scalar(_series(history, "Volume").iloc[-1]) if "Volume" in history.columns else 0.0
     route = dict(history.attrs.get("provider_route") or {})
     fetched_at = str(route.get("fetched_at") or datetime.now(timezone.utc).isoformat())
     return MarketSnapshot(

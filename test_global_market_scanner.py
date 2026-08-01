@@ -45,6 +45,7 @@ def test_candidate_metrics_detects_liquid_mover(monkeypatch):
     assert candidate is not None
     assert candidate.mover_score > 0
     assert candidate.relative_volume > 1
+    assert candidate.category in {"major_gainer", "gap_mover", "unusual_volume", "dynamic_opportunity"}
 
 
 def test_seed_universe_is_worldwide(monkeypatch):
@@ -55,3 +56,22 @@ def test_seed_universe_is_worldwide(monkeypatch):
     assert "Japan" in regions
     assert "India" in regions
     assert "Latin America" in regions
+
+
+def test_dynamic_universe_includes_core_etfs_and_size_categories(monkeypatch):
+    monkeypatch.setattr(scanner, "EODHD_API_KEY", "")
+    universe = scanner._load_universe()
+    symbols = {item["symbol"] for item in universe}
+    sectors = {item["sector"] for item in universe}
+    assert {"GOOGL", "GOOG", "AMZN", "AAPL", "MSFT", "NVDA"}.issubset(symbols)
+    assert "SPY" in symbols
+    assert {"large_cap", "mid_cap", "small_cap", "qualified_penny"}.issubset(sectors)
+
+
+def test_qualified_penny_stock_requires_strict_liquidity(monkeypatch):
+    frame = sample_history().copy()
+    frame["Close"] = [1.1, 1.15, 1.2, 1.25, 1.3, 1.4]
+    frame["Volume"] = [100, 100, 100, 100, 100, 100]
+    monkeypatch.setattr(scanner, "get_history", lambda *args, **kwargs: frame)
+    candidate = scanner._candidate_metrics({"symbol":"SOUN","name":"SOUN","exchange":"US","region":"United States","sector":"qualified_penny"})
+    assert candidate is None
