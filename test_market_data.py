@@ -14,7 +14,8 @@ from market_data import (
     finite_scalar,
     get_many_snapshots,
 )
-from provider_router import _redact_url, _verified_history
+import provider_router
+from provider_router import _alpha, _eodhd, _redact_url, _verified_history
 
 
 def _history(close, volume=None, symbol="BTC-USD"):
@@ -229,3 +230,76 @@ def test_daily_date_only_index_retains_exchange_session_date():
     verified = _verified_history(frame, "unit", "AAPL", "AAPL", "5d", "1d")
     assert str(verified.index[-1].date()) == "2026-07-31"
     assert verified.index.tz is None
+
+
+def test_market_snapshot_defaults_quote_verified_false():
+    snapshot = MarketSnapshot("AAPL", 100, 0, 1000, "2026-07-31T20:00:00+00:00")
+    assert snapshot.quote_verified is False
+
+
+def test_two_yahoo_symbols_are_not_quarantined_by_provider_only_identity():
+    snapshots = {
+        "AAPL": MarketSnapshot(
+            "AAPL",
+            100,
+            0,
+            1000,
+            datetime.now(timezone.utc).isoformat(),
+            provider="Yahoo Finance",
+            requested_symbol="AAPL",
+            provider_symbol="AAPL",
+            quote_verified=True,
+            source_identity="Yahoo Finance:AAPL:5d:1d",
+        ),
+        "MSFT": MarketSnapshot(
+            "MSFT",
+            100,
+            0,
+            1000,
+            datetime.now(timezone.utc).isoformat(),
+            provider="Yahoo Finance",
+            requested_symbol="MSFT",
+            provider_symbol="MSFT",
+            quote_verified=True,
+            source_identity="Yahoo Finance:MSFT:5d:1d",
+        ),
+    }
+    assert _duplicate_price_quarantine(snapshots) == set()
+
+
+def test_eodhd_daily_dates_retain_original_session_date(monkeypatch):
+    class Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return [{"date": "2026-07-31", "open": 1, "high": 2, "low": 1, "close": 2, "volume": 100}]
+
+    monkeypatch.setattr(provider_router.requests, "get", lambda *args, **kwargs: Response())
+    frame = _eodhd("AAPL", "5d", "1d", "key")
+    assert str(frame.index[-1].date()) == "2026-07-31"
+    assert frame.index.tz is None
+
+
+def test_alpha_vantage_daily_dates_retain_original_session_date(monkeypatch):
+    class Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "Time Series (Daily)": {
+                    "2026-07-31": {
+                        "1. open": "1",
+                        "2. high": "2",
+                        "3. low": "1",
+                        "5. adjusted close": "2",
+                        "6. volume": "100",
+                    }
+                }
+            }
+
+    monkeypatch.setattr(provider_router.requests, "get", lambda *args, **kwargs: Response())
+    frame = _alpha("AAPL", "5d", "1d", "key")
+    assert str(frame.index[-1].date()) == "2026-07-31"
+    assert frame.index.tz is None

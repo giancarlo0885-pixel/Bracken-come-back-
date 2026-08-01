@@ -529,6 +529,7 @@ def test_mismatched_price_cannot_update_position_current_price(monkeypatch):
     calls = []
     monkeypatch.setattr(oracle_bot, "ENABLE_AUTOTRADE", True)
     monkeypatch.setattr(oracle_bot, "rows", lambda *args, **kwargs: [{"symbol": "F", "quantity": 1}])
+    monkeypatch.setattr(oracle_bot, "portfolio_equity", lambda market: {"margin_call": 0.0, "margin_utilization_pct": 0})
     monkeypatch.setattr(oracle_bot, "execute", lambda *args, **kwargs: calls.append(args))
     updated = oracle_bot.update_prices("cash", {"F": _verified_quote("GM", 88.59)})
     assert updated == 0
@@ -591,6 +592,7 @@ def test_anomaly_quarantine_runs_before_update_prices_and_risk_exits(monkeypatch
         ],
     )
     monkeypatch.setattr(oracle_bot, "execute", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("price updated")))
+    monkeypatch.setattr(oracle_bot, "portfolio_equity", lambda market: {"margin_call": 0.0, "margin_utilization_pct": 0})
     monkeypatch.setattr(oracle_bot, "_close_position", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("exit executed")))
     quotes = {"AAPL": quote_a, "MSFT": quote_b}
     assert oracle_bot.update_prices("cash", quotes) == 0
@@ -615,3 +617,127 @@ def test_corrupted_identical_ohlcv_cache_data_is_quarantined():
         "MSFT": _verified_quote("MSFT", 162.00, cache_identity="shared-cache", ohlcv_fingerprint="same"),
     }
     assert oracle_bot._duplicate_price_anomaly_symbols(quotes) == {"AAPL", "MSFT"}
+
+
+def test_enable_autotrade_false_cannot_accrue_or_alter_margin_debt(monkeypatch):
+    import oracle_bot
+
+    portfolio = {
+        "market": "cash",
+        "cash": 1000,
+        "starting_balance": 1000,
+        "margin_debt": 500,
+        "margin_interest_accrued": 0,
+        "margin_interest_updated_at": (datetime.now(timezone.utc) - timedelta(days=10)).isoformat(),
+        "leverage_limit": 4,
+    }
+    monkeypatch.setattr(oracle_bot, "ENABLE_AUTOTRADE", False)
+    monkeypatch.setattr(oracle_bot, "row", lambda *args, **kwargs: portfolio)
+    monkeypatch.setattr(oracle_bot, "rows", lambda *args, **kwargs: [])
+    monkeypatch.setattr(oracle_bot, "_accrue_paper_margin_interest", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("interest accrued")))
+    monkeypatch.setattr(oracle_bot, "execute", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("portfolio mutated")))
+    equity = oracle_bot.portfolio_equity("cash")
+    assert equity["margin_debt"] == 500
+
+
+def test_enable_autotrade_false_snapshot_does_not_update_portfolios_table(monkeypatch):
+    import oracle_bot
+
+    portfolio = {
+        "market": "cash",
+        "cash": 1000,
+        "starting_balance": 1000,
+        "margin_debt": 0,
+        "margin_interest_accrued": 0,
+        "leverage_limit": 4,
+    }
+    monkeypatch.setattr(oracle_bot, "ENABLE_AUTOTRADE", False)
+    monkeypatch.setattr(oracle_bot, "row", lambda *args, **kwargs: portfolio)
+    monkeypatch.setattr(oracle_bot, "rows", lambda *args, **kwargs: [])
+    monkeypatch.setattr(oracle_bot, "execute", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("snapshot mutated portfolio")))
+    result = oracle_bot.snapshot("cash")
+    assert result["equity"] == 1000
+
+
+def test_process_signals_uses_verified_quote_price_not_signal_price(monkeypatch):
+    import oracle_bot
+
+    captured = {}
+    quote = _verified_quote("AAPL", 100.0)
+    monkeypatch.setattr(oracle_bot, "ENABLE_AUTOTRADE", True)
+    monkeypatch.setattr(oracle_bot, "ENABLE_QUANT_TRADE_STANDARD", False)
+    monkeypatch.setattr(oracle_bot, "_entry_forecast_gate", lambda *args, **kwargs: (True, "fresh"))
+    monkeypatch.setattr(oracle_bot, "_penny_stock_gate", lambda *args, **kwargs: (True, "not penny"))
+    monkeypatch.setattr(oracle_bot, "row", lambda *args, **kwargs: None)
+    monkeypatch.setattr(oracle_bot, "recent_trade", lambda *args, **kwargs: None)
+    monkeypatch.setattr(oracle_bot, "_open_position_count", lambda market: 0)
+
+    def fake_buy(market, symbol, price, signal, *args, **kwargs):
+        captured["price"] = price
+        captured["verified_quote"] = kwargs.get("verified_quote")
+        return True, "ok", None
+
+    monkeypatch.setattr(oracle_bot, "_buy", fake_buy)
+    actions = oracle_bot.process_signals(
+        "cash",
+        [{"symbol": "AAPL", "action": "BUY", "score": 95, "confidence": .95, "price": 100.05, "market_data_route": quote}],
+        {"AAPL": quote},
+    )
+    assert captured["price"] == 100.0
+    assert captured["verified_quote"] == quote
+    assert actions[0]["price"] == 100.0
+
+
+def test_signal_verified_quote_price_mismatch_is_rejected(monkeypatch):
+    import oracle_bot
+
+    quote = _verified_quote("AAPL", 100.0)
+    monkeypatch.setattr(oracle_bot, "ENABLE_AUTOTRADE", True)
+    monkeypatch.setattr(oracle_bot, "_buy", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("buy executed")))
+    actions = oracle_bot.process_signals(
+        "cash",
+        [{"symbol": "AAPL", "action": "BUY", "score": 95, "confidence": .95, "price": 105.0, "market_data_route": quote}],
+        {"AAPL": quote},
+    )
+    assert actions == []
+
+
+def test_verified_margin_reduction_uses_exact_fresh_symbol_quote(monkeypatch):
+    import oracle_bot
+
+    closed = []
+    quote = _verified_quote("AAPL", 80.0)
+    monkeypatch.setattr(oracle_bot, "ENABLE_AUTOTRADE", True)
+    monkeypatch.setattr(
+        oracle_bot,
+        "rows",
+        lambda *args, **kwargs: [{"symbol": "AAPL", "quantity": 1, "entry_price": 100, "current_price": 120}],
+    )
+    states = iter([
+        {"margin_call": 1.0, "margin_utilization_pct": 101},
+        {"margin_call": 0.0, "margin_utilization_pct": 1},
+    ])
+    monkeypatch.setattr(oracle_bot, "portfolio_equity", lambda market: next(states))
+    monkeypatch.setattr(oracle_bot, "_close_position", lambda market, position, price, reason: closed.append((position["symbol"], price, reason)) or True)
+    monkeypatch.setattr(oracle_bot, "execute", lambda *args, **kwargs: None)
+    oracle_bot.update_prices("cash", {"AAPL": quote})
+    assert closed == [("AAPL", 80.0, oracle_bot.PAPER_MARGIN_REDUCTION_REASON)]
+
+
+def test_margin_reduction_rejects_missing_stale_or_mismatched_quotes(monkeypatch):
+    import oracle_bot
+
+    stale = _verified_quote("AAPL", 80.0, quote_timestamp=(datetime.now(timezone.utc) - timedelta(days=7)).isoformat())
+    mismatched = _verified_quote("MSFT", 80.0)
+    monkeypatch.setattr(oracle_bot, "ENABLE_AUTOTRADE", True)
+    monkeypatch.setattr(
+        oracle_bot,
+        "rows",
+        lambda *args, **kwargs: [{"symbol": "AAPL", "quantity": 1, "entry_price": 100, "current_price": 120}],
+    )
+    monkeypatch.setattr(oracle_bot, "portfolio_equity", lambda market: {"margin_call": 1.0, "margin_utilization_pct": 101})
+    monkeypatch.setattr(oracle_bot, "_close_position", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("margin close executed")))
+    monkeypatch.setattr(oracle_bot, "execute", lambda *args, **kwargs: None)
+    assert oracle_bot.update_prices("cash", {}) == 0
+    assert oracle_bot.update_prices("cash", {"AAPL": stale}) == 0
+    assert oracle_bot.update_prices("cash", {"AAPL": mismatched}) == 0

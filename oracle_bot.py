@@ -35,6 +35,7 @@ from paper_broker import (
 log = logging.getLogger("oracle-bot")
 _AUTOTRADE_DISABLED_LOGGED = False
 PAPER_MARGIN_REDUCTION_REASON = "paper_margin_reduction"
+QUOTE_PRICE_TOLERANCE_PCT = 0.001
 
 
 # =========================================================
@@ -259,6 +260,7 @@ def _quote_identity_metadata(signal: Any) -> dict[str, Any]:
         "provider_symbol",
         "quote_symbol",
         "provider",
+        "price",
         "quote_timestamp",
         "timestamp",
         "interval",
@@ -321,6 +323,15 @@ def _verified_price_for(symbol: str, quotes: dict[str, Any] | None, market: str 
     return safe_float(quote.get("price")) if quote else 0.0
 
 
+def _quote_price_matches(signal_price_value: float, quote_price_value: float) -> bool:
+    signal_price_value = safe_float(signal_price_value)
+    quote_price_value = safe_float(quote_price_value)
+    if signal_price_value <= 0 or quote_price_value <= 0:
+        return False
+    tolerance = max(0.01, quote_price_value * QUOTE_PRICE_TOLERANCE_PCT)
+    return abs(signal_price_value - quote_price_value) <= tolerance
+
+
 def _execution_quote_guard(
     market: str,
     symbol: str,
@@ -354,6 +365,11 @@ def _execution_quote_guard(
         return False, f"provider quote identity mismatch ({requested}/{provider_symbol}/{symbol})"
     if metadata.get("quote_verified") is not True:
         return False, "quote is not provider verified"
+    quote_price = safe_float(metadata.get("price"))
+    if quote_price <= 0:
+        return False, "verified quote price is missing"
+    if not _quote_price_matches(price, quote_price):
+        return False, "execution price differs from verified quote"
     quote_timestamp = metadata.get("quote_timestamp") or metadata.get("timestamp")
     if _parse_utc(quote_timestamp) is None:
         return False, "verified quote timestamp is missing"
@@ -535,6 +551,30 @@ def ensure_portfolio(
     )
 
 
+def _load_portfolio_read_only(market: str) -> dict[str, Any]:
+    market = safe_text(market).lower()
+    existing = row(
+        """
+        SELECT *
+        FROM portfolios
+        WHERE market = %s
+        """,
+        (market,),
+    )
+    if existing:
+        return existing
+    starting_capital = market_starting_capital(market)
+    return {
+        "market": market,
+        "cash": starting_capital,
+        "starting_balance": starting_capital,
+        "leverage_limit": market_leverage_limit(market),
+        "margin_debt": 0.0,
+        "margin_interest_accrued": 0.0,
+        "broker_profile": PAPER_BROKER_PROFILE,
+    }
+
+
 def _seconds_since(value: Any) -> float | None:
     try:
         then = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
@@ -598,9 +638,14 @@ def _accrue_paper_margin_interest(market: str, portfolio: dict[str, Any]) -> dic
 
 def portfolio_equity(
     market: str,
+    *,
+    read_only: bool = False,
 ) -> dict[str, float]:
     market = safe_text(market).lower()
-    portfolio = _accrue_paper_margin_interest(market, ensure_portfolio(market))
+    execution_enabled = _autotrade_enabled()
+    portfolio = _load_portfolio_read_only(market) if read_only or not execution_enabled else ensure_portfolio(market)
+    if not read_only and execution_enabled:
+        portfolio = _accrue_paper_margin_interest(market, portfolio)
 
     positions = rows(
         """
@@ -629,6 +674,10 @@ def portfolio_equity(
         "excess_liquidity": account.excess_liquidity,
         "margin_call": 1.0 if account.margin_call else 0.0,
     }
+
+
+def portfolio_equity_read_only(market: str) -> dict[str, float]:
+    return portfolio_equity(market, read_only=True)
 
 
 def recent_trade(
@@ -693,8 +742,44 @@ def update_prices(
         (market,),
     )
 
+    closed_for_margin: set[str] = set()
+    account_state = portfolio_equity(market)
+    if (
+        PAPER_BROKER_MODE
+        and positions
+        and (
+            bool(account_state.get("margin_call"))
+            or safe_float(account_state.get("margin_utilization_pct"))
+            > PAPER_MAX_MARGIN_UTILIZATION_PCT * 100.0
+        )
+    ):
+        def position_return(item: dict[str, Any]) -> float:
+            entry = safe_float(item.get("average_price", item.get("entry_price")))
+            symbol = safe_text(item.get("symbol")).upper()
+            current = 0.0 if symbol in anomalous_symbols else _verified_price_for(symbol, prices, market)
+            return (current - entry) / entry if entry > 0 and current > 0 else -999.0
+
+        for position in sorted(positions, key=position_return):
+            symbol = safe_text(position.get("symbol")).upper()
+            if symbol in anomalous_symbols:
+                continue
+            current_price = _verified_price_for(symbol, prices, market)
+            if current_price <= 0:
+                continue
+            if _close_position(market, position, current_price, PAPER_MARGIN_REDUCTION_REASON):
+                closed_for_margin.add(symbol)
+            account_state = portfolio_equity(market)
+            if (
+                not bool(account_state.get("margin_call"))
+                and safe_float(account_state.get("margin_utilization_pct"))
+                < PAPER_MARGIN_WARNING_PCT * 100.0
+            ):
+                break
+
     for position in positions:
         symbol = safe_text(position.get("symbol")).upper()
+        if symbol in closed_for_margin:
+            continue
         if symbol in anomalous_symbols:
             continue
         current_price = _verified_price_for(symbol, prices, market)
@@ -1259,6 +1344,7 @@ def _buy(
     quant_assessment: Any | None = None,
     target_trade_value: float | None = None,
     rotation_candidate: dict[str, Any] | None = None,
+    verified_quote: dict[str, Any] | None = None,
 ) -> tuple[bool, str, dict[str, Any] | None]:
     """Execute an institutional paper-broker buy with controlled leverage."""
     market = safe_text(market).lower()
@@ -1278,7 +1364,7 @@ def _buy(
         return False, "missing symbol", None
     if price <= 0:
         return False, f"invalid price={price}", None
-    quote_ok, quote_reason = _execution_quote_guard(market, symbol, price, signal)
+    quote_ok, quote_reason = _execution_quote_guard(market, symbol, price, signal, quote_metadata=verified_quote)
     if not quote_ok:
         return False, quote_reason, None
 
@@ -1624,7 +1710,20 @@ def process_signals(
         score = normalized_score(signal)
         confidence = normalized_confidence(signal)
         quote = _verified_quote_for(symbol, prices, market)
-        price = signal_price(signal, safe_float(quote.get("price")) if quote else 0.0)
+        if quote is None:
+            price = 0.0
+        else:
+            price = safe_float(quote.get("price"))
+            signal_price_value = signal_price(signal, price)
+            if not _quote_price_matches(signal_price_value, price):
+                log.info(
+                    "%s | REJECT | %s | signal price %.6f differs from verified quote %.6f",
+                    market.upper(),
+                    symbol,
+                    signal_price_value,
+                    price,
+                )
+                continue
 
         log.info(
             "%s | CANDIDATE | %s | action=%s | score=%.2f | "
@@ -1864,6 +1963,7 @@ def process_signals(
             market, symbol, price, signal, quant_assessment,
             target_trade_value=target_trade_value,
             rotation_candidate=rotation_candidate,
+            verified_quote=quote,
         )
         if not success:
             log.info(
@@ -1907,7 +2007,8 @@ def snapshot(
     **__: Any,
 ) -> dict[str, float]:
     market = safe_text(market).lower()
-    data = portfolio_equity(market)
+    execution_enabled = _autotrade_enabled()
+    data = portfolio_equity(market, read_only=not execution_enabled)
 
     equity = safe_float(data.get("equity"))
     cash = safe_float(data.get("cash"))
@@ -1926,6 +2027,22 @@ def snapshot(
         0.0,
         (equity - starting_balance) / starting_balance,
     )
+
+    if not execution_enabled:
+        return {
+            "cash": cash,
+            "positions_value": positions_value,
+            "equity": equity,
+            "starting_balance": starting_balance,
+            "drawdown": drawdown,
+            "margin_debt": safe_float(data.get("margin_debt")),
+            "leverage_used": safe_float(data.get("leverage_used")),
+            "margin_utilization_pct": safe_float(data.get("margin_utilization_pct")),
+            "buying_power": safe_float(data.get("buying_power")),
+            "maintenance_requirement": safe_float(data.get("maintenance_requirement")),
+            "excess_liquidity": safe_float(data.get("excess_liquidity")),
+            "margin_interest_accrued": safe_float(data.get("margin_interest_accrued")),
+        }
 
     try:
         now = utc_now()

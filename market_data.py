@@ -29,7 +29,7 @@ class MarketSnapshot:
     fetched_at: str | None = None
     requested_symbol: str | None = None
     provider_symbol: str | None = None
-    quote_verified: bool = True
+    quote_verified: bool = False
     source_identity: str | None = None
     cache_identity: str | None = None
     ohlcv_fingerprint: str | None = None
@@ -195,12 +195,13 @@ def get_history(symbol: str, period: str = "1y", interval: str = "1d") -> pd.Dat
     route_metadata.update(
         {
             "requested_symbol": normalize_symbol(symbol),
-        "provider_symbol": normalize_symbol(frame.attrs.get("provider_symbol") or symbol),
+            "provider_symbol": normalize_symbol(frame.attrs.get("provider_symbol") or symbol),
+            "period": period,
             "interval": interval,
             "source_identity": frame.attrs.get("source_identity"),
             "cache_identity": frame.attrs.get("cache_identity"),
             "ohlcv_fingerprint": _ohlcv_fingerprint(frame),
-            "quote_verified": True,
+            "quote_verified": frame.attrs.get("quote_verified") is True,
         }
     )
     quote_time = latest_bar_timestamp(frame, interval, symbol=symbol)
@@ -241,6 +242,14 @@ def _snapshot_from_history(symbol: str, history: pd.DataFrame, interval: str) ->
     volume = finite_scalar(_column(history, "Volume")) if "Volume" in history.columns else None
     volume = volume if volume is not None else 0.0
     route = dict(history.attrs.get("provider_route") or {})
+    requested_symbol = normalize_symbol(route.get("requested_symbol") or history.attrs.get("requested_symbol") or symbol)
+    provider_symbol = normalize_symbol(route.get("provider_symbol") or history.attrs.get("provider_symbol") or "")
+    provider = str(route.get("provider") or "unknown")
+    period = str(route.get("period") or history.attrs.get("period") or "")
+    cache_identity = str(route.get("cache_identity") or "")
+    source_identity = str(route.get("source_identity") or "")
+    if not source_identity and provider and requested_symbol and provider_symbol == requested_symbol and period:
+        source_identity = f"{provider}:{requested_symbol}:{period}:{interval}"
     fetched_at = str(route.get("fetched_at") or datetime.now(timezone.utc).isoformat())
     latest_quote = latest_bar_timestamp(history, interval, symbol=symbol)
     quote_timestamp = str(route.get("quote_timestamp") or (latest_quote.isoformat() if latest_quote else fetched_at))
@@ -250,14 +259,14 @@ def _snapshot_from_history(symbol: str, history: pd.DataFrame, interval: str) ->
         change_pct=change,
         volume=volume,
         timestamp=quote_timestamp,
-        provider=str(route.get("provider") or "unknown"),
+        provider=provider,
         interval=interval,
         fetched_at=fetched_at,
-        requested_symbol=str(route.get("requested_symbol") or history.attrs.get("requested_symbol") or symbol),
-        provider_symbol=str(route.get("provider_symbol") or history.attrs.get("provider_symbol") or ""),
-        quote_verified=True,
-        source_identity=str(route.get("source_identity") or route.get("provider") or ""),
-        cache_identity=str(route.get("cache_identity") or ""),
+        requested_symbol=requested_symbol,
+        provider_symbol=provider_symbol,
+        quote_verified=route.get("quote_verified") is True,
+        source_identity=source_identity,
+        cache_identity=cache_identity,
         ohlcv_fingerprint=str(route.get("ohlcv_fingerprint") or _ohlcv_fingerprint(history)),
     )
 

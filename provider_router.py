@@ -53,6 +53,11 @@ class RoutedHistory:
             "records": int(len(self.frame)),
             "requested_symbol": self.frame.attrs.get("requested_symbol"),
             "provider_symbol": self.frame.attrs.get("provider_symbol"),
+            "period": self.frame.attrs.get("period"),
+            "interval": self.frame.attrs.get("interval"),
+            "source_identity": self.frame.attrs.get("source_identity"),
+            "cache_identity": self.frame.attrs.get("cache_identity"),
+            "quote_verified": self.frame.attrs.get("quote_verified") is True,
         }
 
 
@@ -129,6 +134,7 @@ def _stamp_frame(
             "interval": str(interval),
             "adjusted": bool(adjusted),
             "extended_hours": bool(extended_hours),
+            "quote_verified": True,
         }
     )
     return out
@@ -339,7 +345,7 @@ def _eodhd(symbol: str, period: str, interval: str, key: str) -> pd.DataFrame:
     if not isinstance(records, list) or not records:
         return pd.DataFrame()
     frame = pd.DataFrame(records)
-    frame.index = pd.to_datetime(frame["date"], utc=True)
+    frame.index = pd.to_datetime(frame["date"], errors="coerce")
     return _verified_history(
         frame.rename(columns={"open": "Open", "high": "High", "low": "Low", "close": "Close", "volume": "Volume"}),
         "EODHD",
@@ -385,7 +391,7 @@ def _alpha(symbol: str, period: str, interval: str, key: str) -> pd.DataFrame:
         if not series:
             return pd.DataFrame()
         frame = pd.DataFrame.from_dict(series, orient="index")
-        frame.index = pd.to_datetime(frame.index, utc=True)
+        frame.index = pd.to_datetime(frame.index, errors="coerce").tz_localize("America/New_York").tz_convert(timezone.utc)
         return _verified_history(
             frame.rename(columns={"1. open": "Open", "2. high": "High", "3. low": "Low", "4. close": "Close", "5. volume": "Volume"}),
             "Alpha Vantage",
@@ -406,7 +412,7 @@ def _alpha(symbol: str, period: str, interval: str, key: str) -> pd.DataFrame:
     if not series:
         return pd.DataFrame()
     frame = pd.DataFrame.from_dict(series, orient="index")
-    frame.index = pd.to_datetime(frame.index, utc=True)
+    frame.index = pd.to_datetime(frame.index, errors="coerce")
     return _verified_history(
         frame.rename(columns={"1. open": "Open", "2. high": "High", "3. low": "Low", "5. adjusted close": "Close", "6. volume": "Volume"}),
         "Alpha Vantage",
@@ -508,6 +514,9 @@ def route_history(
             if not frame.empty:
                 frame.attrs["cache_identity"] = namespace
                 frame.attrs.setdefault("source_identity", f"{provider}:{symbol}:{period}:{interval}")
+                frame.attrs["period"] = period
+                frame.attrs["interval"] = interval
+                frame.attrs["quote_verified"] = True
             if not frame.empty and verify_frame_symbol(frame, symbol):
                 frame = frame.copy(deep=True)
                 attempts.append(ProviderAttempt(provider, True, len(frame), "healthy"))
@@ -524,6 +533,10 @@ def route_history(
     try:
         frame = _verified_history(yahoo_loader(symbol, period, interval), "Yahoo Finance", symbol, symbol, period, interval)
         if not frame.empty and verify_frame_symbol(frame, symbol):
+            frame.attrs["source_identity"] = f"Yahoo Finance:{symbol}:{period}:{interval}"
+            frame.attrs["period"] = period
+            frame.attrs["interval"] = interval
+            frame.attrs["quote_verified"] = True
             attempts.append(ProviderAttempt("Yahoo Finance", True, len(frame), "fallback"))
             return RoutedHistory(frame, "Yahoo Finance", attempts, datetime.now(timezone.utc).isoformat())
     except Exception as exc:
