@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+import hashlib
 import json
 import logging
 import math
@@ -142,20 +143,41 @@ def _entry_forecast_gate(
     """
     if not REQUIRE_TARGET_FOR_BUY:
         return True, "forecast gate disabled"
+    signal_id = signal_value(signal, "signal_id", signal_value(signal, "id", None))
+    if signal_id in (None, ""):
+        return False, "forecast signal_id is missing"
 
     forecast = row(
         """
-        SELECT target_price, low_price, high_price, probability_up, created_at,
+        SELECT signal_id, target_price, low_price, high_price, probability_up, created_at,
                requested_symbol, provider_symbol, source_interval,
                source_quote_timestamp, scan_type, model, model_version,
-               expected_move_pct, data_quality_score
+               expected_move_pct, data_quality_score, forecast_id, symbol
         FROM forecasts
-        WHERE market = %s AND symbol = %s
+        WHERE market = %s AND symbol = %s AND signal_id = %s
         ORDER BY id DESC
         LIMIT 1
         """,
-        (market, symbol),
+        (market, symbol, signal_id),
     ) or {}
+    if not forecast:
+        return False, "forecast linked to current signal is missing"
+    required_fields = (
+        "signal_id",
+        "requested_symbol",
+        "provider_symbol",
+        "scan_type",
+        "source_interval",
+        "source_quote_timestamp",
+        "model",
+        "model_version",
+        "data_quality_score",
+        "forecast_id",
+        "created_at",
+    )
+    for field in required_fields:
+        if forecast.get(field) in (None, ""):
+            return False, f"forecast {field} is missing"
     target = safe_float(forecast.get("target_price"))
     if price <= 0:
         return False, "missing live entry price"
@@ -165,26 +187,31 @@ def _entry_forecast_gate(
     quote = quote or {}
     source_interval = safe_text(forecast.get("source_interval"))
     quote_interval = safe_text(quote.get("interval") or signal_value(signal, "source_interval", ""))
-    if source_interval and quote_interval and source_interval != quote_interval:
+    if not quote_interval:
+        return False, "signal interval is missing"
+    if source_interval != quote_interval:
         return False, f"forecast interval {source_interval} does not match signal interval {quote_interval}"
     forecast_scan = safe_text(forecast.get("scan_type"))
     signal_scan = safe_text(signal_value(signal, "scan_type", "") or _signal_route(signal).get("scan_type", ""))
-    if forecast_scan and signal_scan and forecast_scan != signal_scan:
+    if not signal_scan:
+        return False, "signal scan type is missing"
+    if forecast_scan != signal_scan:
         return False, f"forecast scan type {forecast_scan} does not match signal scan type {signal_scan}"
-    requested = _normalized_symbol(forecast.get("requested_symbol") or symbol)
-    provider_symbol = _normalized_symbol(forecast.get("provider_symbol") or symbol)
-    if requested != _normalized_symbol(symbol) or provider_symbol != _normalized_symbol(symbol):
+    requested = _normalized_symbol(forecast.get("requested_symbol"))
+    provider_symbol = _normalized_symbol(forecast.get("provider_symbol"))
+    if _normalized_symbol(forecast.get("symbol")) != _normalized_symbol(symbol) or requested != _normalized_symbol(symbol) or provider_symbol != _normalized_symbol(symbol):
         return False, "forecast symbol identity does not match signal"
     source_quote_time = forecast.get("source_quote_timestamp")
     quote_time = quote.get("quote_timestamp") or quote.get("timestamp")
-    if source_quote_time and quote_time:
-        forecast_quote = _parse_utc(source_quote_time)
-        signal_quote = _parse_utc(quote_time)
-        if forecast_quote is None or signal_quote is None:
-            return False, "forecast quote timestamp is invalid"
-        if abs((forecast_quote - signal_quote).total_seconds()) > 1:
-            return False, "forecast quote timestamp does not match signal quote"
-    quality = safe_float(forecast.get("data_quality_score"), 100.0)
+    if not quote_time:
+        return False, "verified execution quote timestamp is missing"
+    forecast_quote = _parse_utc(source_quote_time)
+    signal_quote = _parse_utc(quote_time)
+    if forecast_quote is None or signal_quote is None:
+        return False, "forecast quote timestamp is invalid"
+    if abs((forecast_quote - signal_quote).total_seconds()) > 1:
+        return False, "forecast quote timestamp does not match signal quote"
+    quality = safe_float(forecast.get("data_quality_score"), -1.0)
     if quality < FORECAST_MIN_DATA_QUALITY_SCORE:
         return False, f"forecast data quality {quality:.1f} is below {FORECAST_MIN_DATA_QUALITY_SCORE:.1f}"
 
@@ -530,6 +557,111 @@ def execute(
 ) -> None:
     with connect() as conn:
         conn.execute(sql, params)
+
+
+def _claim_field(value: Any) -> str:
+    return safe_text(value, "")
+
+
+def _forecast_id_for_signal(market: str, symbol: str, signal_id: Any) -> str:
+    if signal_id in (None, ""):
+        return ""
+    record = row(
+        "SELECT forecast_id FROM forecasts WHERE market=%s AND symbol=%s AND signal_id=%s ORDER BY id DESC LIMIT 1",
+        (market, symbol, signal_id),
+    ) or {}
+    return safe_text(record.get("forecast_id"))
+
+
+def _execution_key(
+    *,
+    market: str,
+    symbol: str,
+    side: str,
+    price: float,
+    quote: dict[str, Any],
+    signal: Any | None = None,
+    position: dict[str, Any] | None = None,
+) -> tuple[str, str]:
+    signal_id = signal_value(signal, "signal_id", signal_value(signal, "id", ""))
+    forecast_id = signal_value(signal, "forecast_id", "") or _forecast_id_for_signal(market, symbol, signal_id)
+    quote_timestamp = _claim_field(quote.get("quote_timestamp") or quote.get("timestamp"))
+    source_identity = _claim_field(quote.get("source_identity") or quote.get("cache_identity") or quote.get("provider"))
+    parts = [
+        market,
+        _normalized_symbol(symbol),
+        side.upper(),
+        f"{safe_float(price):.8f}",
+        quote_timestamp,
+        source_identity,
+        _claim_field(signal_id),
+        _claim_field(forecast_id),
+    ]
+    if side.upper() == "SELL" and position:
+        parts.extend([_claim_field(position.get("id")), _claim_field(position.get("opened_at"))])
+    decision_id = "|".join(parts)
+    return hashlib.sha256(decision_id.encode("utf-8")).hexdigest(), decision_id
+
+
+def _try_execution_claim(
+    conn: Any,
+    *,
+    market: str,
+    symbol: str,
+    side: str,
+    price: float,
+    quote: dict[str, Any],
+    signal: Any | None = None,
+    position: dict[str, Any] | None = None,
+) -> tuple[bool, str, str]:
+    quote_timestamp = _claim_field(quote.get("quote_timestamp") or quote.get("timestamp"))
+    source_identity = _claim_field(quote.get("source_identity") or quote.get("cache_identity") or quote.get("provider"))
+    if not quote_timestamp or not source_identity:
+        return False, "", "execution claim requires quote timestamp and source identity"
+    execution_key, decision_id = _execution_key(
+        market=market,
+        symbol=symbol,
+        side=side,
+        price=price,
+        quote=quote,
+        signal=signal,
+        position=position,
+    )
+    try:
+        conn.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (execution_key,))
+    except Exception:
+        pass
+    record = conn.execute(
+        """
+        INSERT INTO execution_claims
+        (execution_key, decision_id, market, symbol, side, quote_timestamp,
+         verified_price, source_identity, status, created_at)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,'claimed',%s)
+        ON CONFLICT DO NOTHING
+        RETURNING execution_key
+        """,
+        (
+            execution_key,
+            decision_id,
+            market,
+            symbol,
+            side.upper(),
+            quote_timestamp,
+            safe_float(price),
+            source_identity,
+            utc_now(),
+        ),
+    ).fetchone()
+    if not record:
+        return False, execution_key, "duplicate execution claim"
+    return True, execution_key, "execution claimed"
+
+
+def _complete_execution_claim(conn: Any, execution_key: str) -> None:
+    conn.execute(
+        "UPDATE execution_claims SET status='completed', completed_at=%s WHERE execution_key=%s",
+        (utc_now(), execution_key),
+    )
 
 
 # =========================================================
@@ -989,7 +1121,7 @@ def _close_position(
         log.info("%s | REJECT CLOSE | %s | %s", market.upper(), symbol, quote_reason)
         return False
 
-    return _execute_close_position(market, position, price, reason)
+    return _execute_close_position(market, position, price, reason, quote_metadata=quote_metadata)
 
 
 def _execute_close_position(
@@ -997,6 +1129,7 @@ def _execute_close_position(
     position: dict[str, Any],
     price: float,
     reason: str,
+    quote_metadata: dict[str, Any] | None = None,
 ) -> bool:
     market = safe_text(market).lower()
     symbol = safe_text(position.get("symbol")).upper()
@@ -1018,6 +1151,19 @@ def _execute_close_position(
 
     try:
         with connect() as conn:
+            quote_metadata = quote_metadata or {}
+            claimed, execution_key, claim_reason = _try_execution_claim(
+                conn,
+                market=market,
+                symbol=symbol,
+                side="SELL",
+                price=price,
+                quote=quote_metadata,
+                position=position,
+            )
+            if not claimed:
+                log.info("%s | REJECT SELL | %s | %s", market.upper(), symbol, claim_reason)
+                return False
             portfolio = conn.execute(
                 """
                 SELECT *
@@ -1095,6 +1241,7 @@ def _execute_close_position(
                     now,
                 ),
             )
+            _complete_execution_claim(conn, execution_key)
 
         record_closed_trade_memory(
             market=market,
@@ -1630,6 +1777,17 @@ def _buy(
             ).fetchone()
             if not portfolio_record:
                 return False, "portfolio row missing", None
+            claimed, execution_key, claim_reason = _try_execution_claim(
+                conn,
+                market=market,
+                symbol=symbol,
+                side="BUY",
+                price=price,
+                quote=verified_quote or {},
+                signal=signal,
+            )
+            if not claimed:
+                return False, claim_reason, None
 
             current_positions = conn.execute(
                 "SELECT * FROM positions WHERE market=%s FOR UPDATE",
@@ -1673,6 +1831,18 @@ def _buy(
                 quantity_to_sell = safe_float(locked_rotation.get("quantity"))
                 if exit_price <= 0 or quantity_to_sell <= 0:
                     return False, "rotation candidate has invalid exit data", None
+                rotation_claimed, rotation_execution_key, rotation_claim_reason = _try_execution_claim(
+                    conn,
+                    market=market,
+                    symbol=rotation_symbol,
+                    side="SELL",
+                    price=exit_price,
+                    quote=outgoing_quote,
+                    signal={"symbol": rotation_symbol},
+                    position=locked_rotation,
+                )
+                if not rotation_claimed:
+                    return False, f"rotation outgoing duplicate rejected: {rotation_claim_reason}", None
                 sale_value = quantity_to_sell * exit_price
                 new_cash_after_sale, new_debt_after_sale, margin_repayment = allocate_sale(
                     cash=safe_float(execution_portfolio.get("cash")),
@@ -1772,6 +1942,7 @@ def _buy(
                         now,
                     ),
                 )
+                _complete_execution_claim(conn, rotation_execution_key)
                 closed_memory = (
                     dict(locked_rotation),
                     exit_price,
@@ -1835,6 +2006,7 @@ def _buy(
                 """,
                 (market, symbol, quantity, price, trade_value, score, reason_text, now),
             )
+            _complete_execution_claim(conn, execution_key)
 
         log.info(
             "%s | INSTITUTIONAL PAPER BUY | %s | quantity=%.8f | price=%.6f | "

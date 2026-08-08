@@ -101,26 +101,39 @@ def test_execution_forecast_gate_rejects_missing_forecast(monkeypatch) -> None:
     monkeypatch.setattr(oracle_bot, "row", lambda *args, **kwargs: None)
     approved, reason = oracle_bot._entry_forecast_gate("cash", "AAPL", 200.0)
     assert approved is False
-    assert "missing current forecast" in reason
+    assert "signal_id" in reason
 
 
 def test_execution_forecast_gate_accepts_fresh_edge(monkeypatch) -> None:
     import oracle_bot
 
+    quote_time = datetime.now(timezone.utc).isoformat()
     monkeypatch.setattr(
         oracle_bot,
         "row",
         lambda *args, **kwargs: {
+            "signal_id": 123,
+            "symbol": "AAPL",
             "target_price": 205.0,
             "created_at": datetime.now(timezone.utc).isoformat(),
             "requested_symbol": "AAPL",
             "provider_symbol": "AAPL",
+            "source_interval": "1d",
+            "source_quote_timestamp": quote_time,
+            "scan_type": "deep",
             "model": "log-return diffusion",
             "model_version": "unit",
             "data_quality_score": 90,
+            "forecast_id": "fc-123",
         },
     )
     monkeypatch.setattr(oracle_bot, "model_execution_approved", lambda *args, **kwargs: (True, "approved"))
-    approved, reason = oracle_bot._entry_forecast_gate("cash", "AAPL", 200.0)
+    approved, reason = oracle_bot._entry_forecast_gate(
+        "cash",
+        "AAPL",
+        200.0,
+        {"symbol": "AAPL", "signal_id": 123, "scan_type": "deep", "source_interval": "1d"},
+        {"quote_timestamp": quote_time, "interval": "1d"},
+    )
     assert approved is True
     assert "forecast approved" in reason

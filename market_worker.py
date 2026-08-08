@@ -400,7 +400,7 @@ def fast_scan_market(market: str) -> list[Any]:
             try:
                 signal_created_at = utc_now()
                 setattr(signal, "created_at", signal_created_at)
-                save_json_signal(
+                signal_id = save_json_signal(
                     market,
                     symbol,
                     signal.price,
@@ -422,6 +422,7 @@ def fast_scan_market(market: str) -> list[Any]:
                     },
                     created_at=signal_created_at,
                 )
+                setattr(signal, "signal_id", signal_id)
                 forecast = forecast_price(
                     history,
                     3 if market == "cash" else 1,
@@ -429,7 +430,7 @@ def fast_scan_market(market: str) -> list[Any]:
                     source_interval=dict(getattr(history, "attrs", {}).get("provider_route", {}) or {}).get("interval", "1d"),
                 )
                 if forecast:
-                    save_forecast(market, symbol, forecast, scan_type="fast", signal_created_at=signal_created_at)
+                    save_forecast(market, symbol, forecast, scan_type="fast", signal_id=signal_id, signal_created_at=signal_created_at)
             except Exception as exc:
                 log.debug("Fast persistence failed | market=%s | symbol=%s | error=%s", market, symbol, exc)
 
@@ -552,7 +553,7 @@ def scan_market(market: str) -> list[Any]:
             prices[symbol] = _quote_payload_from_history(symbol, history, float(signal.price))
             signal_created_at = utc_now()
             setattr(signal, "created_at", signal_created_at)
-            save_json_signal(
+            signal_id = save_json_signal(
                 market,
                 symbol,
                 signal.price,
@@ -576,6 +577,7 @@ def scan_market(market: str) -> list[Any]:
                 },
                 created_at=signal_created_at,
             )
+            setattr(signal, "signal_id", signal_id)
             forecast = forecast_price(
                 history,
                 5,
@@ -583,7 +585,7 @@ def scan_market(market: str) -> list[Any]:
                 source_interval=dict(getattr(history, "attrs", {}).get("provider_route", {}) or {}).get("interval", "1d"),
             )
             if forecast:
-                save_forecast(market, symbol, forecast, scan_type="deep", signal_created_at=signal_created_at)
+                save_forecast(market, symbol, forecast, scan_type="deep", signal_id=signal_id, signal_created_at=signal_created_at)
         except Exception as exc:
             log.warning("Oracle pass failed | market=%s | symbol=%s | error=%s", market, symbol, exc)
 

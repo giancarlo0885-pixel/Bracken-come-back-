@@ -7,6 +7,7 @@ from functools import lru_cache
 from typing import Any
 
 from openai import OpenAI
+from security import safe_exception
 
 log = logging.getLogger("garibaldi-ai-oracle")
 
@@ -21,6 +22,27 @@ OPENAI_MAX_INPUT_CHARS = int(os.getenv("OPENAI_MAX_INPUT_CHARS", "30000"))
 
 def openai_available() -> bool:
     return ENABLE_OPENAI and bool(OPENAI_API_KEY)
+
+
+def _openai_safe_error(exc: Exception) -> str:
+    status = getattr(exc, "status_code", None)
+    text = safe_exception(exc)
+    lowered = text.lower()
+    if status == 401 or "401" in lowered:
+        return "OpenAI API key is invalid or revoked."
+    if status == 403 or "403" in lowered:
+        return "OpenAI project or model access was denied."
+    if status == 404 or "404" in lowered:
+        return "The configured OpenAI model is unavailable or incorrect."
+    if status == 429 or "429" in lowered:
+        if "insufficient_quota" in lowered:
+            return "OpenAI API billing or credits are unavailable."
+        return "OpenAI API rate limit reached."
+    if "timeout" in lowered or "timed out" in lowered:
+        return "OpenAI request timed out."
+    if "connection" in lowered or "connect" in lowered:
+        return "Could not connect to OpenAI."
+    return text
 
 
 @lru_cache(maxsize=1)
@@ -85,11 +107,14 @@ def _call_openai(
 
 
 def test_openai_connection() -> dict[str, Any]:
+    key_configured = bool(OPENAI_API_KEY)
     if not openai_available():
         return {
             "available": False,
             "provider": "OpenAI",
             "model": OPENAI_MODEL,
+            "api_key_configured": key_configured,
+            "status": "disabled",
             "message": "OPENAI_API_KEY is missing or ENABLE_OPENAI is false.",
         }
 
@@ -104,15 +129,19 @@ def test_openai_connection() -> dict[str, Any]:
             "available": True,
             "provider": "OpenAI",
             "model": OPENAI_MODEL,
+            "api_key_configured": key_configured,
+            "status": "online",
             "message": (response.output_text or "Connected").strip(),
         }
     except Exception as exc:
-        log.exception("OpenAI connection test failed")
+        log.warning("OpenAI connection test failed: %s", _openai_safe_error(exc))
         return {
             "available": False,
             "provider": "OpenAI",
             "model": OPENAI_MODEL,
-            "message": str(exc),
+            "api_key_configured": key_configured,
+            "status": "error",
+            "message": _openai_safe_error(exc),
         }
 
 

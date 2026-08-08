@@ -9,13 +9,13 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-from ai_oracle import answer_market_question, openai_available
+from ai_oracle import answer_market_question, openai_available, test_openai_connection
 from config import (
     ALWAYS_ON_TRADING, APP_NAME, EXECUTION_MODE, LIVE_STATUS_STALE_SECONDS,
     PAPER_BROKER_MODE, UI_AUTO_REFRESH, UI_REFRESH_SECONDS,
 )
 from dashboard_helpers import as_float, format_asset_price, worker_is_online
-from database import connect, initialize_database, row, rows, utc_now
+from database import initialize_database, row, rows
 from earnings_calendar import mobile_card_lines, prepare_events, table_rows
 from market_data import get_history
 from migrations import run_migrations
@@ -482,36 +482,7 @@ if page == "Dashboard":
         proposals = safe_rows("SELECT * FROM order_proposals ORDER BY id DESC LIMIT 25")
         if proposals:
             st.dataframe(pd.DataFrame(proposals), width="stretch", hide_index=True)
-            pending = [p for p in proposals if str(p.get("approval_status", "")).lower() == "proposed"]
-            for proposal in pending[:10]:
-                key = str(proposal.get("idempotency_key") or proposal.get("id"))
-                symbol = str(proposal.get("symbol") or "")
-                cols = st.columns([2, 1, 1])
-                cols[0].caption(f"{symbol} {proposal.get('side', '')} proposal")
-                if cols[1].button("Approve", key=f"approve-{key}"):
-                    with connect() as conn:
-                        now = utc_now()
-                        conn.execute(
-                            "UPDATE order_proposals SET approval_status='approved' WHERE idempotency_key=%s AND approval_status='proposed'",
-                            (key,),
-                        )
-                        conn.execute(
-                            "INSERT INTO order_events (idempotency_key,status,reason,payload,created_at) VALUES (%s,'approved','manual dashboard approval','{}'::jsonb,%s)",
-                            (key, now),
-                        )
-                    st.success(f"{symbol} proposal approved for paper/manual review.")
-                if cols[2].button("Reject", key=f"reject-{key}"):
-                    with connect() as conn:
-                        now = utc_now()
-                        conn.execute(
-                            "UPDATE order_proposals SET approval_status='rejected' WHERE idempotency_key=%s AND approval_status='proposed'",
-                            (key,),
-                        )
-                        conn.execute(
-                            "INSERT INTO order_events (idempotency_key,status,reason,payload,created_at) VALUES (%s,'rejected','manual dashboard rejection','{}'::jsonb,%s)",
-                            (key, now),
-                        )
-                    st.info(f"{symbol} proposal rejected.")
+            st.warning("Authenticated trade approval is not enabled yet.")
         else:
             st.info("No trade proposals are waiting for manual review.")
     with advisor_tabs[3]:
@@ -535,6 +506,17 @@ if page == "Dashboard":
         st.dataframe(pd.DataFrame(workers), width="stretch", hide_index=True) if workers else st.info("Workers have not reported status yet.")
     with advisor_tabs[10]:
         st.caption("Execution switches default to disabled. Railway variables must be intentionally changed before any paper automation can run.")
+        st.write(f"OpenAI enabled: {'Yes' if openai_available() else 'No'}")
+        if st.button("Test OpenAI Connection"):
+            result = test_openai_connection()
+            st.write(f"API key configured: {'Yes' if result.get('api_key_configured') else 'No'}")
+            st.write(f"Configured model: {result.get('model', '')}")
+            st.write(f"Connection status: {result.get('status', 'unavailable')}")
+            message = str(result.get("message") or "")
+            if result.get("available") and message.strip() == "GARIBALDI AI ONLINE":
+                st.success("GARIBALDI AI ONLINE")
+            else:
+                st.warning(message or "OpenAI diagnostic did not complete.")
 
 elif page == "Markets":
     st.subheader("Global Market Opportunity Center")

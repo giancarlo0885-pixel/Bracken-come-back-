@@ -80,6 +80,8 @@ def test_forecast_gate_requires_matching_quote_identity_and_timestamp(monkeypatc
         oracle_bot,
         "row",
         lambda *args, **kwargs: {
+            "signal_id": 99,
+            "symbol": "AAPL",
             "target_price": 105,
             "created_at": datetime.now(timezone.utc).isoformat(),
             "requested_symbol": "AAPL",
@@ -90,13 +92,14 @@ def test_forecast_gate_requires_matching_quote_identity_and_timestamp(monkeypatc
             "model": "log-return diffusion",
             "model_version": "unit",
             "data_quality_score": 90,
+            "forecast_id": "fc-99",
         },
     )
     ok, reason = oracle_bot._entry_forecast_gate(
         "cash",
         "AAPL",
         100,
-        {"symbol": "AAPL", "scan_type": "deep"},
+        {"symbol": "AAPL", "signal_id": 99, "scan_type": "deep", "source_interval": "1d"},
         {"interval": "1d", "quote_timestamp": quote_time},
     )
     assert ok is False

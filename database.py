@@ -518,6 +518,33 @@ def initialize_database() -> None:
         )
         """,
         """
+        CREATE TABLE IF NOT EXISTS model_registry_events (
+            id BIGSERIAL PRIMARY KEY,
+            model TEXT NOT NULL,
+            model_version TEXT,
+            old_status TEXT,
+            new_status TEXT NOT NULL,
+            actor TEXT NOT NULL,
+            reason TEXT,
+            created_at TEXT NOT NULL
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS execution_claims (
+            execution_key TEXT PRIMARY KEY,
+            decision_id TEXT NOT NULL,
+            market TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            side TEXT NOT NULL,
+            quote_timestamp TEXT NOT NULL,
+            verified_price DOUBLE PRECISION NOT NULL,
+            source_identity TEXT NOT NULL,
+            status TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            completed_at TEXT
+        )
+        """,
+        """
         CREATE TABLE IF NOT EXISTS model_performance (
             id BIGSERIAL PRIMARY KEY,
             model TEXT NOT NULL,
@@ -677,6 +704,8 @@ def initialize_database() -> None:
         "CREATE INDEX IF NOT EXISTS idx_recommendations_market_created ON recommendations (market, created_at DESC)",
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_paper_data_audit_record ON paper_data_audit (record_type, record_id)",
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_model_registry_model_version ON model_registry (model, model_version)",
+        "CREATE INDEX IF NOT EXISTS idx_model_registry_events_created ON model_registry_events (created_at DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_execution_claims_symbol_created ON execution_claims (market, symbol, created_at DESC)",
         "CREATE INDEX IF NOT EXISTS idx_recommendations_symbol_created ON recommendations (symbol, created_at DESC)",
         "CREATE INDEX IF NOT EXISTS idx_order_proposals_status ON order_proposals (approval_status, created_at DESC)",
         "CREATE INDEX IF NOT EXISTS idx_strategy_signals_symbol_strategy ON strategy_signals (symbol, strategy, created_at DESC)",
@@ -918,7 +947,7 @@ def save_json_signal(
     confidence: float,
     details: Any,
     created_at: str | None = None,
-) -> None:
+) -> int | None:
     created_at = created_at or utc_now()
     with connect() as conn:
         with conn.cursor() as cursor:
@@ -935,6 +964,7 @@ def save_json_signal(
                     created_at
                 )
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                RETURNING id
                 """,
                 (
                     market,
@@ -947,6 +977,8 @@ def save_json_signal(
                     created_at,
                 ),
             )
+            record = cursor.fetchone()
+            return int(record.get("id")) if record and record.get("id") is not None else None
 
 
 # =========================================================

@@ -288,6 +288,7 @@ def test_alpha_vantage_daily_dates_retain_original_session_date(monkeypatch):
 
         def json(self):
             return {
+                "Meta Data": {"2. Symbol": "AAPL"},
                 "Time Series (Daily)": {
                     "2026-07-31": {
                         "1. open": "1",
@@ -312,7 +313,7 @@ def test_foreign_alpha_vantage_intraday_uses_provider_timezone(monkeypatch):
 
         def json(self):
             return {
-                "Meta Data": {"6. Time Zone": "Europe/London"},
+                "Meta Data": {"2. Symbol": "VOD.L", "6. Time Zone": "Europe/London"},
                 "Time Series (5min)": {
                     "2026-07-31 08:00:00": {
                         "1. open": "1",

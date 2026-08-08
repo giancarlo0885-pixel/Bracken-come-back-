@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from datetime import datetime, timezone
 
 import pytest
@@ -7,7 +8,10 @@ import pytest
 from advisor_engine import AdvisorProfile, generate_recommendation
 from asset_routing import infer_asset_class
 from broker_interface import DisabledBrokerAdapter
+import database
 from execution_policy import execution_policy
+import model_registry
+import oracle_bot
 from order_proposals import approve_proposal, create_order_proposal
 from portfolio_optimizer import portfolio_fit_score
 from price_consensus import verify_price_consensus
@@ -151,6 +155,31 @@ def test_central_policy_requires_all_entry_switches():
     assert blocked.allowed is False
 
 
+def test_execution_policy_strict_boolean_and_supported_markets():
+    malformed = execution_policy(
+        market="cash",
+        intent="entry",
+        overrides={
+            "GLOBAL_KILL_SWITCH": False,
+            "ENABLE_AUTOTRADE": "false",
+            "ENABLE_STOCK_AUTOTRADE": "true",
+            "ENABLE_NEW_ENTRIES": "true",
+        },
+    )
+    unsupported = execution_policy(
+        market="forex",
+        intent="entry",
+        overrides={
+            "GLOBAL_KILL_SWITCH": False,
+            "ENABLE_AUTOTRADE": "true",
+            "ENABLE_STOCK_AUTOTRADE": "true",
+            "ENABLE_NEW_ENTRIES": "true",
+        },
+    )
+    assert malformed.allowed is False
+    assert unsupported.allowed is False
+
+
 def test_hold_recommendation_does_not_become_entry_action():
     rec = generate_recommendation(
         {
@@ -166,6 +195,16 @@ def test_hold_recommendation_does_not_become_entry_action():
         AdvisorProfile(available_capital=10_000),
     )
     assert rec.action in {"HOLD", "WATCH"}
+
+
+def test_model_registry_governance_preserves_approved_status():
+    if not os.getenv("DATABASE_URL"):
+        assert model_registry.model_status("unknown", "missing") == model_registry.ModelStatus.SHADOW
+        return
+    database.initialize_database()
+    model_registry.update_model_status("unit-model", "v1", "approved", actor="pytest", reason="operator approved")
+    model_registry.register_model("unit-model", "v1", "shadow", "startup seed")
+    assert model_registry.model_status("unit-model", "v1") == model_registry.ModelStatus.APPROVED
 
 
 def test_disabled_broker_adapter_never_submits_real_order():
@@ -271,3 +310,49 @@ def test_secret_redaction_covers_urls_headers_and_exceptions():
     assert "SECRET" not in text
     assert redact_headers({"Authorization": "Bearer SECRET", "ok": "yes"})["Authorization"] == "REDACTED"
     assert "SECRET" not in safe_exception(RuntimeError("token=SECRET"))
+
+
+def test_signal_forecast_linkage_uses_real_signal_id():
+    if not os.getenv("DATABASE_URL"):
+        pytest.skip("PostgreSQL integration test runs in CI service container")
+    database.initialize_database()
+    signal_id = database.save_json_signal(
+        "cash",
+        "SIGLINK",
+        100,
+        90,
+        "BUY",
+        0.9,
+        {"unit": True},
+        created_at=datetime.now(timezone.utc).isoformat(),
+    )
+    assert isinstance(signal_id, int)
+
+
+def test_duplicate_execution_claim_allows_one_decision():
+    if not os.getenv("DATABASE_URL"):
+        pytest.skip("PostgreSQL integration test runs in CI service container")
+    database.initialize_database()
+    quote = _quote("CLAIM", 101)
+    quote["source_identity"] = "unit:CLAIM"
+    with database.connect() as conn:
+        first = oracle_bot._try_execution_claim(
+            conn,
+            market="cash",
+            symbol="CLAIM",
+            side="BUY",
+            price=101,
+            quote=quote,
+            signal={"signal_id": "sig-1", "forecast_id": "fc-1"},
+        )
+        second = oracle_bot._try_execution_claim(
+            conn,
+            market="cash",
+            symbol="CLAIM",
+            side="BUY",
+            price=101,
+            quote=quote,
+            signal={"signal_id": "sig-1", "forecast_id": "fc-1"},
+        )
+    assert first[0] is True
+    assert second[0] is False

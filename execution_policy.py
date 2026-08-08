@@ -10,6 +10,7 @@ ENTRY_INTENTS = {"entry", "buy", "new_entry", "new position"}
 EXIT_INTENTS = {"exit", "sell", "automated_exit", "stop_loss", "take_profit", "trailing_stop"}
 ROTATION_INTENTS = {"rotation", "portfolio_rotation"}
 BROKER_INTENTS = {"broker", "broker_submission", "submission"}
+SUPPORTED_MARKETS = {"cash", "stock", "crypto"}
 
 
 @dataclass(frozen=True)
@@ -21,9 +22,21 @@ class ExecutionPolicyResult:
 
 
 def _flag(name: str, overrides: dict[str, Any] | None = None) -> bool:
-    if overrides and name in overrides:
-        return bool(overrides[name])
-    return bool(getattr(config, name, False))
+    value = overrides[name] if overrides and name in overrides else getattr(config, name, False)
+    if value is True:
+        return True
+    if value is False or value is None:
+        return False
+    if isinstance(value, str):
+        return value.strip().lower() == "true"
+    return False
+
+
+def normalize_market(market: str) -> str:
+    text = str(market or "").strip().lower()
+    if text == "stock":
+        return "cash"
+    return text
 
 
 def normalize_intent(intent: str) -> str:
@@ -45,8 +58,10 @@ def execution_policy(
     intent: str = "entry",
     overrides: dict[str, Any] | None = None,
 ) -> ExecutionPolicyResult:
-    market_name = str(market or "cash").strip().lower()
+    market_name = normalize_market(market)
     normalized_intent = normalize_intent(intent)
+    if market_name not in SUPPORTED_MARKETS:
+        return ExecutionPolicyResult(False, f"unsupported execution market {market_name or 'unknown'}", normalized_intent, market_name or "unknown")
     if _flag("GLOBAL_KILL_SWITCH", overrides):
         return ExecutionPolicyResult(False, "GLOBAL_KILL_SWITCH is enabled", normalized_intent, market_name)
     if not _flag("ENABLE_AUTOTRADE", overrides):

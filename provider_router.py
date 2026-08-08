@@ -130,6 +130,7 @@ def _stamp_frame(
     interval: str,
     adjusted: bool,
     extended_hours: bool,
+    quote_verified: bool = False,
 ) -> pd.DataFrame:
     out = frame.copy(deep=True)
     out.attrs.clear()
@@ -142,7 +143,7 @@ def _stamp_frame(
             "interval": str(interval),
             "adjusted": bool(adjusted),
             "extended_hours": bool(extended_hours),
-            "quote_verified": True,
+            "quote_verified": bool(quote_verified),
         }
     )
     return out
@@ -195,6 +196,7 @@ def _verified_history(
     interval: str,
     adjusted: bool = True,
     extended_hours: bool = True,
+    identity_verified: bool = False,
 ) -> pd.DataFrame:
     if not requested_symbol or not _symbol_matches(requested_symbol, provider_symbol):
         return pd.DataFrame()
@@ -210,6 +212,7 @@ def _verified_history(
         interval,
         adjusted,
         extended_hours,
+        identity_verified,
     )
 
 
@@ -356,11 +359,14 @@ def _polygon(symbol: str, period: str, interval: str, key: str) -> pd.DataFrame:
         symbol,
         period,
         interval,
+        identity_verified=True,
     )
 
 
 def _eodhd(symbol: str, period: str, interval: str, key: str) -> pd.DataFrame:
     if _is_intraday(interval):
+        return pd.DataFrame()
+    if "." in symbol and not symbol.endswith(".US"):
         return pd.DataFrame()
     code = symbol if "." in symbol else f"{symbol}.US"
     start = (pd.Timestamp.utcnow() - pd.Timedelta(days=_period_days(period))).date()
@@ -382,6 +388,7 @@ def _eodhd(symbol: str, period: str, interval: str, key: str) -> pd.DataFrame:
         symbol,
         period,
         interval,
+        identity_verified=True,
     )
 
 
@@ -416,6 +423,10 @@ def _alpha(symbol: str, period: str, interval: str, key: str) -> pd.DataFrame:
         )
         response.raise_for_status()
         data = response.json()
+        metadata = data.get("Meta Data", {}) if isinstance(data, dict) else {}
+        returned_symbol = metadata.get("2. Symbol") or metadata.get("Symbol") or metadata.get("symbol")
+        if not _symbol_matches(symbol, returned_symbol):
+            return pd.DataFrame()
         series = data.get(f"Time Series ({alpha_interval})", {})
         if not series:
             return pd.DataFrame()
@@ -440,6 +451,7 @@ def _alpha(symbol: str, period: str, interval: str, key: str) -> pd.DataFrame:
             symbol,
             period,
             interval,
+            identity_verified=True,
         )
 
     response = requests.get(
@@ -449,6 +461,10 @@ def _alpha(symbol: str, period: str, interval: str, key: str) -> pd.DataFrame:
     )
     response.raise_for_status()
     data = response.json()
+    metadata = data.get("Meta Data", {}) if isinstance(data, dict) else {}
+    returned_symbol = metadata.get("2. Symbol") or metadata.get("Symbol") or metadata.get("symbol")
+    if not _symbol_matches(symbol, returned_symbol):
+        return pd.DataFrame()
     series = data.get("Time Series (Daily)", {})
     if not series:
         return pd.DataFrame()
@@ -461,6 +477,7 @@ def _alpha(symbol: str, period: str, interval: str, key: str) -> pd.DataFrame:
         symbol,
         period,
         interval,
+        identity_verified=True,
     )
 
 
@@ -501,7 +518,7 @@ def _finnhub(symbol: str, period: str, interval: str, key: str) -> pd.DataFrame:
         },
         index=pd.to_datetime(data.get("t", []), unit="s", utc=True),
     )
-    return _verified_history(frame, "Finnhub", symbol, symbol, period, interval)
+    return _verified_history(frame, "Finnhub", symbol, symbol, period, interval, identity_verified=True)
 
 
 def route_history(
@@ -569,7 +586,6 @@ def route_history(
                 frame.attrs.setdefault("source_identity", f"{provider}:{symbol}:{period}:{interval}")
                 frame.attrs["period"] = period
                 frame.attrs["interval"] = interval
-                frame.attrs["quote_verified"] = True
             if not frame.empty and verify_frame_symbol(frame, symbol):
                 frame = frame.copy(deep=True)
                 attempts.append(ProviderAttempt(provider, True, len(frame), "healthy"))
@@ -595,12 +611,11 @@ def route_history(
             _record_failure(provider, status, symbol)
 
     try:
-        frame = _verified_history(yahoo_loader(symbol, period, interval), "Yahoo Finance", symbol, symbol, period, interval)
+        frame = _verified_history(yahoo_loader(symbol, period, interval), "Yahoo Finance", symbol, symbol, period, interval, identity_verified=True)
         if not frame.empty and verify_frame_symbol(frame, symbol):
             frame.attrs["source_identity"] = f"Yahoo Finance:{symbol}:{period}:{interval}"
             frame.attrs["period"] = period
             frame.attrs["interval"] = interval
-            frame.attrs["quote_verified"] = True
             attempts.append(ProviderAttempt("Yahoo Finance", True, len(frame), "fallback"))
             return RoutedHistory(frame, "Yahoo Finance", attempts, datetime.now(timezone.utc).isoformat())
     except Exception as exc:
