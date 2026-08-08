@@ -9,7 +9,7 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-from ai_oracle import answer_market_question, openai_available
+from ai_oracle import answer_market_question, openai_available, test_openai_connection
 from config import (
     ALWAYS_ON_TRADING, APP_NAME, EXECUTION_MODE, LIVE_STATUS_STALE_SECONDS,
     PAPER_BROKER_MODE, UI_AUTO_REFRESH, UI_REFRESH_SECONDS,
@@ -32,7 +32,7 @@ except ImportError:  # deployment installs it; local tests can still import modu
 
 st.set_page_config(
     page_title=f"{APP_NAME} — AI Chief Investment Officer",
-    page_icon="🔮",
+    page_icon="ORCL",
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -267,7 +267,7 @@ def decision_card(item: dict[str, Any], compact: bool = False) -> None:
                 st.markdown(f"✅ {point}")
             st.markdown("**What to watch**")
             for point in cautions:
-                st.markdown(f"⚠️ {point}")
+                st.markdown(f"Warning: {point}")
             reference = format_asset_price(price, symbol, market_key)
             stop_text = format_asset_price(low, symbol, market_key)
             st.caption(f"Entry reference: {reference} · Target: {target_text} · Protective level: {stop_text}")
@@ -289,7 +289,10 @@ def portfolio_table(positions: list[dict[str, Any]]) -> pd.DataFrame:
     return pd.DataFrame(data)
 
 
-bootstrap()
+try:
+    bootstrap()
+except RuntimeError as exc:
+    st.warning(str(exc))
 stock_portfolio, stock_positions, stock_metrics = get_portfolio("cash")
 crypto_portfolio, crypto_positions, crypto_metrics = get_portfolio("crypto")
 all_positions = stock_positions + crypto_positions
@@ -321,11 +324,11 @@ sell_decisions = [d for d in ready_decisions if d["action"] == "SELL"]
 waiting_for_data = [d for d in decisions if not bool(d.get("trade_eligible"))]
 
 with st.sidebar:
-    st.markdown("## 🔮 GARIBALDI ORACLE")
+    st.markdown("## GARIBALDI ORACLE")
     st.caption("The AI Chief Investment Officer")
     page = st.radio(
         "Main navigation",
-        ["🏠 Dashboard", "📈 Markets", "💼 Portfolios", "🤖 Oracle", "🌍 Intelligence", "⚙ Professional"],
+        ["Dashboard", "Markets", "Portfolios", "Oracle", "Intelligence", "Professional"],
         label_visibility="collapsed",
     )
     st.divider()
@@ -393,7 +396,7 @@ status_cols[2].metric(
 error_total = sum(int(as_float(record.get("cycle_errors"))) for record in workers)
 status_cols[3].metric("Auto recovery", "Ready" if error_total == 0 else "Recovering", f"Cycle errors: {error_total}")
 
-if page == "🏠 Dashboard":
+if page == "Dashboard":
     st.subheader("What should I do today?")
     top = buy_decisions[0] if buy_decisions else (decisions[0] if decisions else None)
     market_state = "Constructive" if buy_decisions else "Cautious"
@@ -457,7 +460,65 @@ if page == "🏠 Dashboard":
         else:
             st.success("No unresolved high-priority alerts.")
 
-elif page == "📈 Markets":
+    st.markdown("### Advisor Foundation")
+    advisor_tabs = st.tabs([
+        "Advisor Brief",
+        "Opportunities Now",
+        "Proposed Trades",
+        "Watchlist",
+        "Strategy Scorecards",
+        "Forecast Accuracy",
+        "Provider Health",
+        "Risk Center",
+        "Historical Audit",
+        "Worker Status",
+        "Settings",
+    ])
+    with advisor_tabs[0]:
+        st.info("Advisor mode is active for recommendations and diagnostics. Live brokerage submission remains disabled.")
+    with advisor_tabs[1]:
+        st.caption("Opportunities are filtered by verified price, forecast quality, data quality, liquidity, and risk controls.")
+    with advisor_tabs[2]:
+        proposals = safe_rows("SELECT * FROM order_proposals ORDER BY id DESC LIMIT 25")
+        if proposals:
+            st.dataframe(pd.DataFrame(proposals), width="stretch", hide_index=True)
+            st.warning("Authenticated trade approval is not enabled yet.")
+        else:
+            st.info("No trade proposals are waiting for manual review.")
+    with advisor_tabs[3]:
+        st.caption("Watchlist candidates continue to update from fixed watchlists and dynamic discovery.")
+    with advisor_tabs[4]:
+        scorecards = safe_rows("SELECT * FROM strategy_performance ORDER BY id DESC LIMIT 25")
+        st.dataframe(pd.DataFrame(scorecards), width="stretch", hide_index=True) if scorecards else st.info("Strategy scorecards will appear after enough paper or shadow observations.")
+    with advisor_tabs[5]:
+        validation = safe_rows("SELECT * FROM forecast_validation ORDER BY id DESC LIMIT 25")
+        st.dataframe(pd.DataFrame(validation), width="stretch", hide_index=True) if validation else st.info("Forecast accuracy records will appear as walk-forward outcomes mature.")
+    with advisor_tabs[6]:
+        diagnostics = provider_diagnostics()
+        st.dataframe(pd.DataFrame(diagnostics), width="stretch", hide_index=True)
+    with advisor_tabs[7]:
+        risk_events = safe_rows("SELECT * FROM risk_events ORDER BY id DESC LIMIT 25")
+        st.dataframe(pd.DataFrame(risk_events), width="stretch", hide_index=True) if risk_events else st.success("No advisor risk events are currently recorded.")
+    with advisor_tabs[8]:
+        audits = safe_rows("SELECT * FROM trade_audits ORDER BY id DESC LIMIT 25")
+        st.dataframe(pd.DataFrame(audits), width="stretch", hide_index=True) if audits else st.info("Historical audit records are non-destructive and appear here after review.")
+    with advisor_tabs[9]:
+        st.dataframe(pd.DataFrame(workers), width="stretch", hide_index=True) if workers else st.info("Workers have not reported status yet.")
+    with advisor_tabs[10]:
+        st.caption("Execution switches default to disabled. Railway variables must be intentionally changed before any paper automation can run.")
+        st.write(f"OpenAI enabled: {'Yes' if openai_available() else 'No'}")
+        if st.button("Test OpenAI Connection"):
+            result = test_openai_connection()
+            st.write(f"API key configured: {'Yes' if result.get('api_key_configured') else 'No'}")
+            st.write(f"Configured model: {result.get('model', '')}")
+            st.write(f"Connection status: {result.get('status', 'unavailable')}")
+            message = str(result.get("message") or "")
+            if result.get("available") and message.strip() == "GARIBALDI AI ONLINE":
+                st.success("GARIBALDI AI ONLINE")
+            else:
+                st.warning(message or "OpenAI diagnostic did not complete.")
+
+elif page == "Markets":
     st.subheader("Global Market Opportunity Center")
     tab1, tab2, tab3 = st.tabs(["Top Ranked", "Stocks", "Crypto"])
     for tab, market_filter in ((tab1, None), (tab2, "cash"), (tab3, "crypto")):
@@ -487,7 +548,7 @@ elif page == "📈 Markets":
     except Exception as exc:
         st.warning(f"Price history could not be loaded: {exc}")
 
-elif page == "💼 Portfolios":
+elif page == "Portfolios":
     st.subheader("Portfolio Center")
     portfolio_tabs = st.tabs(["Stock Portfolio", "Crypto Portfolio", "Trade History", "Hypothetical Analyzer"])
     for tab, name, market, positions, metrics, health in (
@@ -598,7 +659,7 @@ elif page == "💼 Portfolios":
             st.markdown("**What changes:** " + "; ".join(result["reasons"]) + ".")
             st.caption("This is a portfolio-structure simulation, not a guarantee of future return. Live market evidence should be checked before acting.")
 
-elif page == "🤖 Oracle":
+elif page == "Oracle":
     st.subheader("Oracle Decisions")
     st.caption("Only four plain decisions: BUY, HOLD, WAIT, or SELL.")
     filter_action = st.segmented_control("Show", ["ALL", "BUY", "HOLD", "WAIT", "SELL"], default="ALL")
@@ -621,7 +682,7 @@ elif page == "🤖 Oracle":
         else:
             st.info("Add an OpenAI API key to enable conversational explanations. The deterministic decision cards remain available without it.")
 
-elif page == "🌍 Intelligence":
+elif page == "Intelligence":
     st.subheader("Financial Intelligence")
     st.caption("Only market-moving information: macroeconomics, policy, earnings, capital flow, insiders, options, and global events.")
     earnings_events = [e for e in events if str(e.get("category") or "") == "Earnings Calendar"]
@@ -715,7 +776,7 @@ elif page == "🌍 Intelligence":
                 unsafe_allow_html=True,
             )
 
-elif page == "⚙ Professional":
+elif page == "Professional":
     st.subheader("Professional Research & System Evidence")
     st.caption("Advanced tools are kept here so everyday investors are not overwhelmed.")
     tabs = st.tabs(["Evidence Ledger", "Backtesting", "Provider Health", "Raw Signals"])

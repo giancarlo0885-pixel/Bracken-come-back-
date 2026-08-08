@@ -361,6 +361,15 @@ def _epoch_timestamp(value: Any) -> str:
 def _current_quote_from_meta(meta: dict[str, Any], now: datetime | None) -> dict[str, Any] | None:
     if meta.get("quote_verified") is not True:
         return None
+    requested = normalize_symbol(meta.get("symbol"))
+    if not requested:
+        return None
+    if (
+        normalize_symbol(meta.get("requested_symbol")) != requested
+        or normalize_symbol(meta.get("provider_symbol")) != requested
+        or normalize_symbol(meta.get("symbol")) != requested
+    ):
+        return None
     price = _first_finite(meta.get("price"), meta.get("current_price"), meta.get("last_price"))
     change = _first_finite(meta.get("change_1d_pct"), meta.get("change_pct"), meta.get("percent_change"))
     volume = _first_finite(meta.get("daily_volume"), meta.get("volume"), meta.get("current_volume"))
@@ -398,6 +407,8 @@ def _current_quote_from_intraday(meta: dict[str, Any], now: datetime | None) -> 
         return None
     if snapshot is None:
         return None
+    if getattr(snapshot, "quote_verified", False) is not True:
+        return None
     requested = normalize_symbol(meta.get("symbol"))
     snapshot_symbol = normalize_symbol(getattr(snapshot, "symbol", requested))
     snapshot_requested = normalize_symbol(getattr(snapshot, "requested_symbol", requested))
@@ -407,6 +418,8 @@ def _current_quote_from_intraday(meta: dict[str, Any], now: datetime | None) -> 
         or snapshot_requested != requested
         or snapshot_provider_symbol != requested
     ):
+        return None
+    if _finite_number(snapshot.price) is None or float(snapshot.price) <= 0:
         return None
     if not quote_is_fresh(
         snapshot.timestamp,

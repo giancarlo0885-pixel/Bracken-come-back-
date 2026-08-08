@@ -17,9 +17,16 @@ from api_manager import get_api_settings
 from cache import cached_call
 from config import (
     API_CACHE_TTL_SECONDS,
+    PROVIDER_PERMISSION_COOLDOWN_SECONDS,
     PROVIDER_RATE_LIMIT_COOLDOWN_SECONDS,
     REALTIME_CACHE_TTL_SECONDS,
     UNAVAILABLE_SYMBOL_COOLDOWN_SECONDS,
+)
+from asset_routing import infer_asset_class
+from provider_capabilities import (
+    capability_available,
+    classify_plan_limited_status,
+    disable_capability,
 )
 
 log = logging.getLogger("provider-router")
@@ -28,6 +35,10 @@ _symbol_cooldowns: dict[str, float] = {}
 _failure_summary: dict[tuple[str, str], set[str]] = defaultdict(set)
 _last_failure_log = 0.0
 FAILURE_LOG_INTERVAL_SECONDS = 300
+EODHD_US_EXCHANGES = {"US", "NYSE", "NASDAQ", "NYSE ARCA", "NYSEARCA", "AMEX", "BATS"}
+EODHD_STOCK_TYPES = {"common stock", "common share", "stock", "preferred stock", "preferred share"}
+EODHD_ETF_TYPES = {"etf", "fund", "mutual fund"}
+EODHD_EQUITY_TYPES = EODHD_STOCK_TYPES | EODHD_ETF_TYPES
 
 
 @dataclass
@@ -123,6 +134,7 @@ def _stamp_frame(
     interval: str,
     adjusted: bool,
     extended_hours: bool,
+    quote_verified: bool = False,
 ) -> pd.DataFrame:
     out = frame.copy(deep=True)
     out.attrs.clear()
@@ -135,7 +147,7 @@ def _stamp_frame(
             "interval": str(interval),
             "adjusted": bool(adjusted),
             "extended_hours": bool(extended_hours),
-            "quote_verified": True,
+            "quote_verified": bool(quote_verified),
         }
     )
     return out
@@ -188,6 +200,7 @@ def _verified_history(
     interval: str,
     adjusted: bool = True,
     extended_hours: bool = True,
+    identity_verified: bool = False,
 ) -> pd.DataFrame:
     if not requested_symbol or not _symbol_matches(requested_symbol, provider_symbol):
         return pd.DataFrame()
@@ -203,6 +216,7 @@ def _verified_history(
         interval,
         adjusted,
         extended_hours,
+        identity_verified,
     )
 
 
@@ -242,6 +256,27 @@ def symbol_is_unavailable(symbol: str) -> bool:
 
 def _mark_provider_limited(provider: str) -> None:
     _provider_cooldowns[provider] = time.time() + PROVIDER_RATE_LIMIT_COOLDOWN_SECONDS
+
+
+def _history_capability(symbol: str, interval: str) -> str:
+    asset = infer_asset_class(symbol)
+    if asset == "crypto":
+        return "crypto"
+    if asset == "international_equity":
+        return "international_history"
+    return "us_history"
+
+
+def _provider_status_from_exception(exc: Exception) -> int | None:
+    response = getattr(exc, "response", None)
+    status_code = getattr(response, "status_code", None)
+    if isinstance(status_code, int):
+        return status_code
+    text = str(exc)
+    for code in (402, 403, 401, 429, 404, 500, 503):
+        if str(code) in text:
+            return code
+    return None
 
 
 def _record_failure(provider: str, status: str, symbol: str) -> None:
@@ -328,13 +363,69 @@ def _polygon(symbol: str, period: str, interval: str, key: str) -> pd.DataFrame:
         symbol,
         period,
         interval,
+        identity_verified=True,
     )
+
+
+def _load_eodhd_exchange_symbols(exchange: str, key: str) -> list[dict[str, Any]]:
+    response = requests.get(
+        f"https://eodhd.com/api/exchange-symbol-list/{exchange}",
+        params={"api_token": key, "fmt": "json"},
+        timeout=15,
+    )
+    response.raise_for_status()
+    data = response.json()
+    return data if isinstance(data, list) else []
+
+
+def _eodhd_symbol_mapping(symbol: str, key: str) -> dict[str, Any] | None:
+    requested = normalize_symbol(symbol)
+    if not requested or "." in requested:
+        return None
+    requested_code = requested
+    records = cached_call(
+        "eodhd_exchange_symbols_US",
+        API_CACHE_TTL_SECONDS * 12,
+        _load_eodhd_exchange_symbols,
+        "US",
+        key,
+    )
+    for record in records:
+        code = normalize_symbol(record.get("Code") or record.get("code") or record.get("symbol"))
+        provider_code = normalize_symbol(record.get("ProviderCode") or record.get("provider_code"))
+        exchange = normalize_symbol(record.get("Exchange") or record.get("exchange") or record.get("ExchangeCode"))
+        instrument_type = str(record.get("Type") or record.get("type") or "").strip().lower()
+        if not code or not provider_code or not exchange or not instrument_type:
+            continue
+        if code != requested_code:
+            continue
+        if provider_code != f"{requested_code}.US":
+            return None
+        if exchange not in EODHD_US_EXCHANGES:
+            return None
+        if instrument_type not in EODHD_EQUITY_TYPES:
+            return None
+        asset_class = infer_asset_class(requested_code)
+        if instrument_type in EODHD_ETF_TYPES and asset_class != "etf":
+            return None
+        if instrument_type in EODHD_STOCK_TYPES and asset_class == "etf":
+            return None
+        return {
+            "requested_symbol": requested_code,
+            "provider_code": provider_code,
+            "exchange": exchange,
+            "instrument_type": instrument_type,
+        }
+    return None
 
 
 def _eodhd(symbol: str, period: str, interval: str, key: str) -> pd.DataFrame:
     if _is_intraday(interval):
         return pd.DataFrame()
-    code = symbol if "." in symbol else f"{symbol}.US"
+    mapping = _eodhd_symbol_mapping(symbol, key)
+    if not mapping:
+        return pd.DataFrame()
+    code = mapping["provider_code"]
     start = (pd.Timestamp.utcnow() - pd.Timedelta(days=_period_days(period))).date()
     response = requests.get(
         f"https://eodhd.com/api/eod/{code}",
@@ -351,9 +442,10 @@ def _eodhd(symbol: str, period: str, interval: str, key: str) -> pd.DataFrame:
         frame.rename(columns={"open": "Open", "high": "High", "low": "Low", "close": "Close", "volume": "Volume"}),
         "EODHD",
         symbol,
-        symbol,
+        mapping["requested_symbol"],
         period,
         interval,
+        identity_verified=True,
     )
 
 
@@ -388,6 +480,10 @@ def _alpha(symbol: str, period: str, interval: str, key: str) -> pd.DataFrame:
         )
         response.raise_for_status()
         data = response.json()
+        metadata = data.get("Meta Data", {}) if isinstance(data, dict) else {}
+        returned_symbol = metadata.get("2. Symbol") or metadata.get("Symbol") or metadata.get("symbol")
+        if not _symbol_matches(symbol, returned_symbol):
+            return pd.DataFrame()
         series = data.get(f"Time Series ({alpha_interval})", {})
         if not series:
             return pd.DataFrame()
@@ -412,6 +508,7 @@ def _alpha(symbol: str, period: str, interval: str, key: str) -> pd.DataFrame:
             symbol,
             period,
             interval,
+            identity_verified=True,
         )
 
     response = requests.get(
@@ -421,6 +518,10 @@ def _alpha(symbol: str, period: str, interval: str, key: str) -> pd.DataFrame:
     )
     response.raise_for_status()
     data = response.json()
+    metadata = data.get("Meta Data", {}) if isinstance(data, dict) else {}
+    returned_symbol = metadata.get("2. Symbol") or metadata.get("Symbol") or metadata.get("symbol")
+    if not _symbol_matches(symbol, returned_symbol):
+        return pd.DataFrame()
     series = data.get("Time Series (Daily)", {})
     if not series:
         return pd.DataFrame()
@@ -433,6 +534,7 @@ def _alpha(symbol: str, period: str, interval: str, key: str) -> pd.DataFrame:
         symbol,
         period,
         interval,
+        identity_verified=True,
     )
 
 
@@ -473,7 +575,7 @@ def _finnhub(symbol: str, period: str, interval: str, key: str) -> pd.DataFrame:
         },
         index=pd.to_datetime(data.get("t", []), unit="s", utc=True),
     )
-    return _verified_history(frame, "Finnhub", symbol, symbol, period, interval)
+    return _verified_history(frame, "Finnhub", symbol, symbol, period, interval, identity_verified=True)
 
 
 def route_history(
@@ -485,6 +587,8 @@ def route_history(
     settings = get_api_settings()
     attempts: list[ProviderAttempt] = []
     intraday = _is_intraday(interval)
+    asset_class = infer_asset_class(symbol)
+    capability = _history_capability(symbol, interval)
     ttl = REALTIME_CACHE_TTL_SECONDS if intraday else API_CACHE_TTL_SECONDS
     symbol = str(symbol or "").upper().strip()
     if symbol_is_unavailable(symbol):
@@ -495,7 +599,14 @@ def route_history(
             datetime.now(timezone.utc).isoformat(),
         )
 
-    if intraday:
+    if asset_class == "crypto":
+        routes = [
+            ("Polygon", "POLYGON_API_KEY", _polygon),
+            ("Finnhub", "FINNHUB_API_KEY", _finnhub),
+            ("EODHD", "EODHD_API_KEY", _eodhd),
+            ("Alpha Vantage", "ALPHA_VANTAGE_API_KEY", _alpha),
+        ]
+    elif intraday:
         routes = [
             ("Polygon", "POLYGON_API_KEY", _polygon),
             ("Finnhub", "FINNHUB_API_KEY", _finnhub),
@@ -510,6 +621,9 @@ def route_history(
         ]
 
     for provider, key_name, function in routes:
+        if not capability_available(provider, capability):
+            attempts.append(ProviderAttempt(provider, False, 0, "capability_cooldown_or_unsupported"))
+            continue
         if _cooldown_active(_provider_cooldowns, provider):
             attempts.append(ProviderAttempt(provider, False, 0, "provider_cooldown"))
             continue
@@ -529,27 +643,36 @@ def route_history(
                 frame.attrs.setdefault("source_identity", f"{provider}:{symbol}:{period}:{interval}")
                 frame.attrs["period"] = period
                 frame.attrs["interval"] = interval
-                frame.attrs["quote_verified"] = True
-            if not frame.empty and verify_frame_symbol(frame, symbol):
+            if not frame.empty and frame.attrs.get("quote_verified") is True and verify_frame_symbol(frame, symbol):
                 frame = frame.copy(deep=True)
                 attempts.append(ProviderAttempt(provider, True, len(frame), "healthy"))
                 return RoutedHistory(frame, provider, attempts, datetime.now(timezone.utc).isoformat())
             attempts.append(ProviderAttempt(provider, False, 0, "symbol_mismatch_or_no_data"))
         except Exception as exc:
             text = _redact_url(str(exc))[:220]
-            status = "rate_limited" if "429" in text or "limit" in text.lower() else "degraded"
+            status_code = _provider_status_from_exception(exc)
+            if classify_plan_limited_status(status_code, text):
+                disable_capability(
+                    provider,
+                    capability,
+                    text,
+                    status_code=status_code,
+                    seconds=PROVIDER_PERMISSION_COOLDOWN_SECONDS,
+                )
+                status = "capability_plan_limited"
+            else:
+                status = "rate_limited" if status_code == 429 or "429" in text or "limit" in text.lower() else "degraded"
             if status == "rate_limited":
                 _mark_provider_limited(provider)
             attempts.append(ProviderAttempt(provider, False, 0, status, text))
             _record_failure(provider, status, symbol)
 
     try:
-        frame = _verified_history(yahoo_loader(symbol, period, interval), "Yahoo Finance", symbol, symbol, period, interval)
-        if not frame.empty and verify_frame_symbol(frame, symbol):
+        frame = _verified_history(yahoo_loader(symbol, period, interval), "Yahoo Finance", symbol, symbol, period, interval, identity_verified=True)
+        if not frame.empty and frame.attrs.get("quote_verified") is True and verify_frame_symbol(frame, symbol):
             frame.attrs["source_identity"] = f"Yahoo Finance:{symbol}:{period}:{interval}"
             frame.attrs["period"] = period
             frame.attrs["interval"] = interval
-            frame.attrs["quote_verified"] = True
             attempts.append(ProviderAttempt("Yahoo Finance", True, len(frame), "fallback"))
             return RoutedHistory(frame, "Yahoo Finance", attempts, datetime.now(timezone.utc).isoformat())
     except Exception as exc:

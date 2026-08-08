@@ -1,0 +1,87 @@
+name: Python Tests
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - "v36-*"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      ENABLE_AUTOTRADE: "false"
+      ENABLE_STOCK_AUTOTRADE: "false"
+      ENABLE_CRYPTO_AUTOTRADE: "false"
+      ENABLE_NEW_ENTRIES: "false"
+      ENABLE_AUTOMATED_EXITS: "false"
+      ENABLE_PORTFOLIO_ROTATION: "false"
+      ENABLE_BROKER_SUBMISSION: "false"
+      DATABASE_URL: ""
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Compile Python
+        run: python -m compileall .
+      - name: Run tests
+        run: python -m pytest
+
+  postgres-integration:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: oracle_test
+          POSTGRES_PASSWORD: oracle_test
+          POSTGRES_DB: garibaldi_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U oracle_test -d garibaldi_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      ENABLE_AUTOTRADE: "false"
+      ENABLE_STOCK_AUTOTRADE: "false"
+      ENABLE_CRYPTO_AUTOTRADE: "false"
+      ENABLE_NEW_ENTRIES: "false"
+      ENABLE_AUTOMATED_EXITS: "false"
+      ENABLE_PORTFOLIO_ROTATION: "false"
+      ENABLE_BROKER_SUBMISSION: "false"
+      DATABASE_URL: "postgresql://oracle_test:oracle_test@localhost:5432/garibaldi_test"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Initialize PostgreSQL database
+        run: python -c "from database import initialize_database; from migrations import run_migrations; initialize_database(); run_migrations(); print('postgres initialized')"
+      - name: Run PostgreSQL integration tests
+        run: >-
+          python -m pytest
+          test_v36_advisor_foundation.py::test_model_registry_governance_preserves_approved_status
+          test_v36_advisor_foundation.py::test_model_governance_failure_does_not_update_memory
+          test_v36_advisor_foundation.py::test_signal_forecast_linkage_uses_real_signal_id
+          test_v36_advisor_foundation.py::test_duplicate_execution_claim_allows_one_decision
+          test_v36_advisor_foundation.py::test_advisory_lock_failure_blocks_execution_claim
+          test_v36_advisor_foundation.py::test_postgres_duplicate_buy_concurrency
+          test_v36_advisor_foundation.py::test_postgres_duplicate_sell_concurrency
+          test_v36_advisor_foundation.py::test_postgres_execution_claim_rollback_allows_retry
+          test_v36_advisor_foundation.py::test_postgres_duplicate_rotation_concurrency
+          test_v36_advisor_foundation.py::test_postgres_rotation_atomic_rollback_then_retry
+          test_v36_advisor_foundation.py::test_postgres_shared_risk_rejection_rolls_no_portfolio_mutation
+          test_v36_advisor_foundation.py::test_forced_risk_reduction_sell_uses_dedicated_policy
+          test_v36_advisor_foundation.py::test_postgres_execution_risk_context_calculates_pnl_and_turnover
+          test_v36_advisor_foundation.py::test_postgres_execution_market_reset_isolates_risk_pnl
+          test_v36_advisor_foundation.py::test_postgres_risk_context_remains_portfolio_wide
+          test_v36_advisor_foundation.py::test_missing_required_entry_metric_blocks_buy
+          test_v36_advisor_foundation.py::test_non_finite_required_entry_metric_blocks_buy

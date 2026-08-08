@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+import hashlib
 import json
 import logging
 import math
@@ -10,11 +11,14 @@ from typing import Any
 
 from config import *
 from database import connect, row, rows, utc_now
+from execution_policy import execution_policy
+from forecast_quality import model_execution_approved
 from quant_trade_standard import assess_trade
 from oracle_intelligence import evaluate_opportunity
 from market_memory import record_closed_trade_memory
 from market_data import MarketSnapshot
 from provider_router import normalize_symbol
+from risk_engine import ExecutionSwitches, pre_trade_risk_checks
 from market_sessions import (
     confirmed_us_listing,
     is_otc_exchange,
@@ -125,7 +129,13 @@ def _parse_utc(value: Any) -> datetime | None:
     return parse_utc(value)
 
 
-def _entry_forecast_gate(market: str, symbol: str, price: float) -> tuple[bool, str]:
+def _entry_forecast_gate(
+    market: str,
+    symbol: str,
+    price: float,
+    signal: Any | None = None,
+    quote: dict[str, Any] | None = None,
+) -> tuple[bool, str]:
     """Require a fresh, actionable forecast before a new paper entry.
 
     The deep worker saves the forecast before calling ``process_signals``. This
@@ -134,22 +144,77 @@ def _entry_forecast_gate(market: str, symbol: str, price: float) -> tuple[bool, 
     """
     if not REQUIRE_TARGET_FOR_BUY:
         return True, "forecast gate disabled"
+    signal_id = signal_value(signal, "signal_id", signal_value(signal, "id", None))
+    if signal_id in (None, ""):
+        return False, "forecast signal_id is missing"
 
     forecast = row(
         """
-        SELECT target_price, low_price, high_price, probability_up, created_at
+        SELECT signal_id, target_price, low_price, high_price, probability_up, created_at,
+               requested_symbol, provider_symbol, source_interval,
+               source_quote_timestamp, scan_type, model, model_version,
+               expected_move_pct, data_quality_score, forecast_id, symbol
         FROM forecasts
-        WHERE market = %s AND symbol = %s
+        WHERE market = %s AND symbol = %s AND signal_id = %s
         ORDER BY id DESC
         LIMIT 1
         """,
-        (market, symbol),
+        (market, symbol, signal_id),
     ) or {}
+    if not forecast:
+        return False, "forecast linked to current signal is missing"
+    required_fields = (
+        "signal_id",
+        "requested_symbol",
+        "provider_symbol",
+        "scan_type",
+        "source_interval",
+        "source_quote_timestamp",
+        "model",
+        "model_version",
+        "data_quality_score",
+        "forecast_id",
+        "created_at",
+    )
+    for field in required_fields:
+        if forecast.get(field) in (None, ""):
+            return False, f"forecast {field} is missing"
     target = safe_float(forecast.get("target_price"))
     if price <= 0:
         return False, "missing live entry price"
     if target <= 0:
         return False, "missing current forecast target"
+
+    quote = quote or {}
+    source_interval = safe_text(forecast.get("source_interval"))
+    quote_interval = safe_text(quote.get("interval") or signal_value(signal, "source_interval", ""))
+    if not quote_interval:
+        return False, "signal interval is missing"
+    if source_interval != quote_interval:
+        return False, f"forecast interval {source_interval} does not match signal interval {quote_interval}"
+    forecast_scan = safe_text(forecast.get("scan_type"))
+    signal_scan = safe_text(signal_value(signal, "scan_type", "") or _signal_route(signal).get("scan_type", ""))
+    if not signal_scan:
+        return False, "signal scan type is missing"
+    if forecast_scan != signal_scan:
+        return False, f"forecast scan type {forecast_scan} does not match signal scan type {signal_scan}"
+    requested = _normalized_symbol(forecast.get("requested_symbol"))
+    provider_symbol = _normalized_symbol(forecast.get("provider_symbol"))
+    if _normalized_symbol(forecast.get("symbol")) != _normalized_symbol(symbol) or requested != _normalized_symbol(symbol) or provider_symbol != _normalized_symbol(symbol):
+        return False, "forecast symbol identity does not match signal"
+    source_quote_time = forecast.get("source_quote_timestamp")
+    quote_time = quote.get("quote_timestamp") or quote.get("timestamp")
+    if not quote_time:
+        return False, "verified execution quote timestamp is missing"
+    forecast_quote = _parse_utc(source_quote_time)
+    signal_quote = _parse_utc(quote_time)
+    if forecast_quote is None or signal_quote is None:
+        return False, "forecast quote timestamp is invalid"
+    if abs((forecast_quote - signal_quote).total_seconds()) > 1:
+        return False, "forecast quote timestamp does not match signal quote"
+    quality = safe_float(forecast.get("data_quality_score"), -1.0)
+    if quality < FORECAST_MIN_DATA_QUALITY_SCORE:
+        return False, f"forecast data quality {quality:.1f} is below {FORECAST_MIN_DATA_QUALITY_SCORE:.1f}"
 
     created = _parse_utc(forecast.get("created_at"))
     max_age = DECISION_CRYPTO_MAX_AGE_MINUTES if market == "crypto" else DECISION_STOCK_MAX_AGE_MINUTES
@@ -163,6 +228,15 @@ def _entry_forecast_gate(market: str, symbol: str, price: float) -> tuple[bool, 
     minimum_move = MIN_ACTIONABLE_MOVE_CRYPTO_PCT if market == "crypto" else MIN_ACTIONABLE_MOVE_STOCK_PCT
     if expected_move_pct < minimum_move:
         return False, f"expected move {expected_move_pct:.2f}% is below {minimum_move:.2f}%"
+    validation_ok, validation_reason = model_execution_approved(
+        symbol,
+        "crypto" if market == "crypto" else "stock",
+        source_interval or quote_interval or "1d",
+        safe_text(forecast.get("model"), "log-return diffusion"),
+        safe_text(forecast.get("model_version")),
+    )
+    if not validation_ok:
+        return False, validation_reason
     return True, f"forecast approved with {expected_move_pct:.2f}% expected move"
 
 
@@ -229,16 +303,34 @@ def _normalized_symbol(value: Any) -> str:
     return normalize_symbol(value)
 
 
-def _autotrade_enabled() -> bool:
-    return bool(globals().get("ENABLE_AUTOTRADE", False))
+def _execution_overrides() -> dict[str, Any]:
+    return {
+        "ENABLE_AUTOTRADE": globals().get("ENABLE_AUTOTRADE", False),
+        "ENABLE_STOCK_AUTOTRADE": globals().get("ENABLE_STOCK_AUTOTRADE", False),
+        "ENABLE_CRYPTO_AUTOTRADE": globals().get("ENABLE_CRYPTO_AUTOTRADE", False),
+        "ENABLE_NEW_ENTRIES": globals().get("ENABLE_NEW_ENTRIES", False),
+        "ENABLE_AUTOMATED_EXITS": globals().get("ENABLE_AUTOMATED_EXITS", False),
+        "ENABLE_PORTFOLIO_ROTATION": globals().get("ENABLE_PORTFOLIO_ROTATION", False),
+        "ENABLE_BROKER_SUBMISSION": globals().get("ENABLE_BROKER_SUBMISSION", False),
+        "GLOBAL_KILL_SWITCH": globals().get("GLOBAL_KILL_SWITCH", False),
+    }
 
 
-def _execution_disabled(reason: str) -> bool:
+def _execution_policy(market: str = "cash", intent: str = "entry"):
+    return execution_policy(market=market, intent=intent, overrides=_execution_overrides())
+
+
+def _autotrade_enabled(market: str = "cash", intent: str = "entry") -> bool:
+    return _execution_policy(market, intent).allowed
+
+
+def _execution_disabled(reason: str, market: str = "cash", intent: str = "entry") -> bool:
     global _AUTOTRADE_DISABLED_LOGGED
-    if _autotrade_enabled():
+    policy = _execution_policy(market, intent)
+    if policy.allowed:
         return False
     if not _AUTOTRADE_DISABLED_LOGGED:
-        log.warning("Execution disabled because ENABLE_AUTOTRADE=false; %s blocked.", reason)
+        log.warning("Execution disabled by central policy (%s); %s blocked.", policy.reason, reason)
         _AUTOTRADE_DISABLED_LOGGED = True
     return True
 
@@ -468,6 +560,325 @@ def execute(
         conn.execute(sql, params)
 
 
+def _claim_field(value: Any) -> str:
+    return safe_text(value, "")
+
+
+def _forecast_id_for_signal(market: str, symbol: str, signal_id: Any) -> str:
+    if signal_id in (None, ""):
+        return ""
+    record = row(
+        "SELECT forecast_id FROM forecasts WHERE market=%s AND symbol=%s AND signal_id=%s ORDER BY id DESC LIMIT 1",
+        (market, symbol, signal_id),
+    ) or {}
+    return safe_text(record.get("forecast_id"))
+
+
+def _execution_key(
+    *,
+    market: str,
+    symbol: str,
+    side: str,
+    price: float,
+    quote: dict[str, Any],
+    signal: Any | None = None,
+    position: dict[str, Any] | None = None,
+) -> tuple[str, str]:
+    signal_id = signal_value(signal, "signal_id", signal_value(signal, "id", ""))
+    forecast_id = signal_value(signal, "forecast_id", "") or _forecast_id_for_signal(market, symbol, signal_id)
+    quote_timestamp = _claim_field(quote.get("quote_timestamp") or quote.get("timestamp"))
+    source_identity = _claim_field(quote.get("source_identity") or quote.get("cache_identity") or quote.get("provider"))
+    parts = [
+        market,
+        _normalized_symbol(symbol),
+        side.upper(),
+        f"{safe_float(price):.8f}",
+        quote_timestamp,
+        source_identity,
+        _claim_field(signal_id),
+        _claim_field(forecast_id),
+    ]
+    if side.upper() == "SELL" and position:
+        parts.extend([_claim_field(position.get("id")), _claim_field(position.get("opened_at"))])
+    decision_id = "|".join(parts)
+    return hashlib.sha256(decision_id.encode("utf-8")).hexdigest(), decision_id
+
+
+def _try_execution_claim(
+    conn: Any,
+    *,
+    market: str,
+    symbol: str,
+    side: str,
+    price: float,
+    quote: dict[str, Any],
+    signal: Any | None = None,
+    position: dict[str, Any] | None = None,
+) -> tuple[bool, str, str]:
+    quote_timestamp = _claim_field(quote.get("quote_timestamp") or quote.get("timestamp"))
+    source_identity = _claim_field(quote.get("source_identity") or quote.get("cache_identity") or quote.get("provider"))
+    if not quote_timestamp or not source_identity:
+        return False, "", "execution claim requires quote timestamp and source identity"
+    execution_key, decision_id = _execution_key(
+        market=market,
+        symbol=symbol,
+        side=side,
+        price=price,
+        quote=quote,
+        signal=signal,
+        position=position,
+    )
+    try:
+        conn.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (execution_key,))
+    except Exception as exc:
+        return False, execution_key, f"execution advisory lock failed: {exc}"
+    record = conn.execute(
+        """
+        INSERT INTO execution_claims
+        (execution_key, decision_id, market, symbol, side, quote_timestamp,
+         verified_price, source_identity, status, created_at)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,'claimed',%s)
+        ON CONFLICT DO NOTHING
+        RETURNING execution_key
+        """,
+        (
+            execution_key,
+            decision_id,
+            market,
+            symbol,
+            side.upper(),
+            quote_timestamp,
+            safe_float(price),
+            source_identity,
+            utc_now(),
+        ),
+    ).fetchone()
+    if not record:
+        return False, execution_key, "duplicate execution claim"
+    return True, execution_key, "execution claimed"
+
+
+def _complete_execution_claim(conn: Any, execution_key: str) -> None:
+    conn.execute(
+        "UPDATE execution_claims SET status='completed', completed_at=%s WHERE execution_key=%s",
+        (utc_now(), execution_key),
+    )
+
+
+def _risk_switches() -> ExecutionSwitches:
+    return ExecutionSwitches(
+        autotrade=globals().get("ENABLE_AUTOTRADE", False),
+        stock_autotrade=globals().get("ENABLE_STOCK_AUTOTRADE", False),
+        crypto_autotrade=globals().get("ENABLE_CRYPTO_AUTOTRADE", False),
+        new_entries=globals().get("ENABLE_NEW_ENTRIES", False),
+        automated_exits=globals().get("ENABLE_AUTOMATED_EXITS", False),
+        portfolio_rotation=globals().get("ENABLE_PORTFOLIO_ROTATION", False),
+        broker_submission=globals().get("ENABLE_BROKER_SUBMISSION", False),
+        global_kill_switch=globals().get("GLOBAL_KILL_SWITCH", False),
+    )
+
+
+def _finite_number(value: Any) -> float | None:
+    if value in (None, ""):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _quote_spread_pct(quote: dict[str, Any]) -> float | None:
+    explicit = _finite_number(quote.get("spread_pct"))
+    if explicit is not None:
+        return explicit
+    bid = _finite_number(quote.get("bid"))
+    ask = _finite_number(quote.get("ask"))
+    if bid is None or ask is None or bid <= 0 or ask <= 0 or ask < bid:
+        return None
+    midpoint = (bid + ask) / 2.0
+    return (ask - bid) / midpoint if midpoint > 0 else None
+
+
+def _quote_slippage_pct(quote: dict[str, Any]) -> float | None:
+    for key in ("slippage_pct", "estimated_slippage_pct"):
+        value = _finite_number(quote.get(key))
+        if value is not None:
+            return value
+    return None
+
+
+def _quote_liquidity_value(quote: dict[str, Any], price: float) -> float | None:
+    for key in ("liquidity_value", "dollar_volume", "avg_dollar_volume", "average_dollar_volume"):
+        value = _finite_number(quote.get(key))
+        if value is not None and value >= 0:
+            return value
+    volume = _finite_number(quote.get("volume"))
+    if volume is not None and volume >= 0 and price > 0:
+        return volume * price
+    return None
+
+
+def _period_start(days: int) -> str:
+    return (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+
+
+def _trade_sum(conn: Any, market: str, sql_expr: str, since: str, sides: tuple[str, ...] = ("BUY", "SELL")) -> float:
+    record = conn.execute(
+        f"""
+        SELECT COALESCE(SUM({sql_expr}), 0) AS total
+        FROM trades
+        WHERE market=%s
+          AND side = ANY(%s)
+          AND created_at >= %s
+        """,
+        (market, list(sides), since),
+    ).fetchone()
+    return safe_float(record.get("total") if record else 0.0)
+
+
+def _unrealized_pnl(positions: list[dict[str, Any]]) -> float:
+    total = 0.0
+    for position in positions:
+        quantity = safe_float(position.get("quantity"))
+        current = safe_float(position.get("current_price"))
+        average = safe_float(position.get("average_price"), safe_float(position.get("entry_price")))
+        if quantity > 0 and current > 0 and average > 0:
+            total += (current - average) * quantity
+    return total
+
+
+def _build_execution_risk_context(
+    conn: Any,
+    *,
+    market: str,
+    symbol: str,
+    side: str,
+    intent: str,
+    order_value: float,
+    portfolio: dict[str, Any],
+    positions: list[dict[str, Any]],
+    quote: dict[str, Any],
+    concentration_pct: float | None = None,
+) -> dict[str, Any]:
+    """Build finite risk inputs from the locked execution transaction."""
+    price = safe_float(quote.get("price"))
+    repriced = [dict(position) for position in positions]
+    quote_symbol = _normalized_symbol(symbol)
+    for position in repriced:
+        if _normalized_symbol(position.get("symbol")) == quote_symbol and price > 0:
+            position["current_price"] = price
+    account = build_account(market, portfolio, repriced)
+    today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+    week_start = _period_start(7)
+    daily_realized = _trade_sum(conn, market, "realized_pnl", today_start, ("SELL",))
+    weekly_realized = _trade_sum(conn, market, "realized_pnl", week_start, ("SELL",))
+    daily_unrealized = _unrealized_pnl(repriced)
+    weekly_unrealized = daily_unrealized
+    equity_basis = max(account.equity, safe_float(portfolio.get("starting_balance")), 0.0)
+    daily_loss_pct = None if equity_basis <= 0 else max(0.0, -(daily_realized + daily_unrealized) / equity_basis)
+    weekly_loss_pct = None if equity_basis <= 0 else max(0.0, -(weekly_realized + weekly_unrealized) / equity_basis)
+    new_entries_record = conn.execute(
+        """
+        SELECT COUNT(*) AS total
+        FROM trades
+        WHERE market=%s AND side='BUY' AND created_at >= %s
+        """,
+        (market, today_start),
+    ).fetchone()
+    new_entries_today = safe_float(new_entries_record.get("total") if new_entries_record else None, -1.0)
+    turnover_value = _trade_sum(conn, market, "value", today_start, ("BUY", "SELL"))
+    turnover_pct_today = None if account.equity <= 0 else turnover_value / account.equity
+    target_concentration = concentration_pct
+    if target_concentration is None:
+        existing_value = 0.0
+        for position in repriced:
+            if _normalized_symbol(position.get("symbol")) == quote_symbol:
+                existing_value += safe_float(position.get("quantity")) * safe_float(position.get("current_price"))
+        target_value = max(0.0, existing_value + (order_value if side.upper() == "BUY" else 0.0))
+        target_concentration = None if account.equity <= 0 else target_value / account.equity
+    return {
+        "account": account,
+        "positions": repriced,
+        "cash": account.cash,
+        "portfolio_equity": account.equity,
+        "buying_power": account.buying_power,
+        "gross_market_exposure": account.gross_exposure,
+        "margin_debt": account.margin_debt,
+        "leverage_used": account.leverage_used,
+        "margin_utilization_pct": account.margin_utilization_pct,
+        "open_position_count": len(repriced),
+        "target_position_concentration": target_concentration,
+        "daily_realized_pnl": daily_realized,
+        "daily_unrealized_pnl": daily_unrealized,
+        "daily_loss_pct": daily_loss_pct,
+        "weekly_realized_pnl": weekly_realized,
+        "weekly_unrealized_pnl": weekly_unrealized,
+        "weekly_loss_pct": weekly_loss_pct,
+        "new_entries_today": new_entries_today if new_entries_today >= 0 else None,
+        "turnover_pct_today": turnover_pct_today,
+        "correlation_exposure_pct": _finite_number(quote.get("correlation_exposure_pct")),
+        "spread_pct": _quote_spread_pct(quote),
+        "slippage_pct": _quote_slippage_pct(quote),
+        "liquidity_value": _quote_liquidity_value(quote, price),
+        "sector_exposure_pct": _finite_number(quote.get("sector_exposure_pct")),
+    }
+
+
+def _shared_risk_gate(
+    *,
+    conn: Any,
+    market: str,
+    symbol: str,
+    side: str,
+    intent: str,
+    order_value: float,
+    portfolio: dict[str, Any],
+    quote: dict[str, Any],
+    positions: list[dict[str, Any]],
+    concentration_pct: float | None = None,
+) -> tuple[bool, str, Any]:
+    risk_context = _build_execution_risk_context(
+        conn,
+        market=market,
+        symbol=symbol,
+        side=side,
+        intent=intent,
+        order_value=order_value,
+        portfolio=portfolio,
+        positions=positions,
+        quote=quote,
+        concentration_pct=concentration_pct,
+    )
+    result = pre_trade_risk_checks(
+        market=market,
+        symbol=symbol,
+        side=side,
+        intent=intent,
+        order_value=order_value,
+        portfolio_equity=risk_context["portfolio_equity"],
+        cash=risk_context["cash"],
+        quote=quote,
+        positions=positions,
+        daily_loss_pct=risk_context["daily_loss_pct"],
+        weekly_loss_pct=risk_context["weekly_loss_pct"],
+        spread_pct=risk_context["spread_pct"],
+        slippage_pct=risk_context["slippage_pct"],
+        liquidity_value=risk_context["liquidity_value"],
+        correlation_exposure_pct=risk_context["correlation_exposure_pct"],
+        concentration_pct=risk_context["target_position_concentration"],
+        new_entries_today=risk_context["new_entries_today"],
+        turnover_pct_today=risk_context["turnover_pct_today"],
+        leverage_used=risk_context["leverage_used"],
+        margin_utilization_pct=risk_context["margin_utilization_pct"],
+        switches=_risk_switches(),
+    )
+    result.metrics.update({key: value for key, value in risk_context.items() if isinstance(value, (int, float))})
+    if not result.allowed:
+        return False, "; ".join(result.reasons) or result.reason, result
+    return True, "shared risk approved", result
+
+
 # =========================================================
 # DATABASE COMPATIBILITY
 # =========================================================
@@ -694,7 +1105,7 @@ def portfolio_equity(
     read_only: bool = False,
 ) -> dict[str, float]:
     market = safe_text(market).lower()
-    execution_enabled = _autotrade_enabled()
+    execution_enabled = _autotrade_enabled(market)
     portfolio = _load_portfolio_read_only(market) if read_only or not execution_enabled else ensure_portfolio(market)
     if not read_only and execution_enabled:
         portfolio = _accrue_paper_margin_interest(market, portfolio)
@@ -779,7 +1190,7 @@ def update_prices(
 ) -> int:
     market = safe_text(market).lower()
     prices = prices or {}
-    if _execution_disabled("price updates"):
+    if _execution_disabled("price updates", market, "exit"):
         return 0
     anomalous_symbols = _duplicate_price_anomaly_symbols(prices)
 
@@ -903,7 +1314,7 @@ def _close_position(
     quote_metadata: dict[str, Any] | None = None,
 ) -> bool:
     market = safe_text(market).lower()
-    if _execution_disabled("position close"):
+    if _execution_disabled("position close", market, "exit"):
         return False
     symbol = safe_text(position.get("symbol")).upper()
     quantity = safe_float(position.get("quantity"))
@@ -925,7 +1336,7 @@ def _close_position(
         log.info("%s | REJECT CLOSE | %s | %s", market.upper(), symbol, quote_reason)
         return False
 
-    return _execute_close_position(market, position, price, reason)
+    return _execute_close_position(market, position, price, reason, quote_metadata=quote_metadata)
 
 
 def _execute_close_position(
@@ -933,6 +1344,7 @@ def _execute_close_position(
     position: dict[str, Any],
     price: float,
     reason: str,
+    quote_metadata: dict[str, Any] | None = None,
 ) -> bool:
     market = safe_text(market).lower()
     symbol = safe_text(position.get("symbol")).upper()
@@ -954,6 +1366,19 @@ def _execute_close_position(
 
     try:
         with connect() as conn:
+            quote_metadata = quote_metadata or {}
+            claimed, execution_key, claim_reason = _try_execution_claim(
+                conn,
+                market=market,
+                symbol=symbol,
+                side="SELL",
+                price=price,
+                quote=quote_metadata,
+                position=position,
+            )
+            if not claimed:
+                log.info("%s | REJECT SELL | %s | %s", market.upper(), symbol, claim_reason)
+                return False
             portfolio = conn.execute(
                 """
                 SELECT *
@@ -965,6 +1390,27 @@ def _execute_close_position(
             ).fetchone()
 
             if not portfolio:
+                return False
+            account = build_account(market, portfolio, [position])
+            risk_intent = (
+                "forced_risk_reduction"
+                if reason in {PAPER_MARGIN_REDUCTION_REASON, "stop_loss", "take_profit", "trailing_stop"}
+                else "exit"
+            )
+            risk_ok, risk_reason, _ = _shared_risk_gate(
+                conn=conn,
+                market=market,
+                symbol=symbol,
+                side="SELL",
+                intent=risk_intent,
+                order_value=value,
+                portfolio=portfolio,
+                quote=quote_metadata or {},
+                positions=[position],
+                concentration_pct=0.0,
+            )
+            if not risk_ok:
+                log.info("%s | REJECT SELL | %s | shared risk: %s", market.upper(), symbol, risk_reason)
                 return False
 
             new_cash, new_margin_debt, margin_repayment = allocate_sale(
@@ -1031,6 +1477,7 @@ def _execute_close_position(
                     now,
                 ),
             )
+            _complete_execution_claim(conn, execution_key)
 
         record_closed_trade_memory(
             market=market,
@@ -1073,7 +1520,7 @@ def risk_exits(
 ) -> list[dict[str, Any]]:
     market = safe_text(market).lower()
     prices = prices or {}
-    if _execution_disabled("risk exits"):
+    if _execution_disabled("risk exits", market, "exit"):
         return []
     anomalous_symbols = _duplicate_price_anomaly_symbols(prices)
 
@@ -1388,6 +1835,8 @@ def _rotate_for_stronger_candidate(
     """
     if not ROTATION_ENABLED:
         return None
+    if _execution_disabled("portfolio rotation", market, "rotation"):
+        return None
     quotes = quotes or {}
     anomalous_symbols = anomalous_symbols or set()
     positions = rows(
@@ -1460,8 +1909,10 @@ def _buy(
 ) -> tuple[bool, str, dict[str, Any] | None]:
     """Execute an institutional paper-broker buy with controlled leverage."""
     market = safe_text(market).lower()
-    if _execution_disabled("buy"):
+    if _execution_disabled("buy", market, "entry"):
         return False, "autotrade disabled", None
+    if rotation_candidate and _execution_disabled("portfolio rotation", market, "rotation"):
+        return False, "portfolio rotation disabled", None
     symbol = safe_text(symbol).upper()
     price = safe_float(price)
     rotation_action = (
@@ -1562,6 +2013,17 @@ def _buy(
             ).fetchone()
             if not portfolio_record:
                 return False, "portfolio row missing", None
+            claimed, execution_key, claim_reason = _try_execution_claim(
+                conn,
+                market=market,
+                symbol=symbol,
+                side="BUY",
+                price=price,
+                quote=verified_quote or {},
+                signal=signal,
+            )
+            if not claimed:
+                return False, claim_reason, None
 
             current_positions = conn.execute(
                 "SELECT * FROM positions WHERE market=%s FOR UPDATE",
@@ -1605,7 +2067,33 @@ def _buy(
                 quantity_to_sell = safe_float(locked_rotation.get("quantity"))
                 if exit_price <= 0 or quantity_to_sell <= 0:
                     return False, "rotation candidate has invalid exit data", None
+                rotation_claimed, rotation_execution_key, rotation_claim_reason = _try_execution_claim(
+                    conn,
+                    market=market,
+                    symbol=rotation_symbol,
+                    side="SELL",
+                    price=exit_price,
+                    quote=outgoing_quote,
+                    signal={"symbol": rotation_symbol},
+                    position=locked_rotation,
+                )
+                if not rotation_claimed:
+                    return False, f"rotation outgoing duplicate rejected: {rotation_claim_reason}", None
                 sale_value = quantity_to_sell * exit_price
+                outgoing_risk_ok, outgoing_risk_reason, _ = _shared_risk_gate(
+                    conn=conn,
+                    market=market,
+                    symbol=rotation_symbol,
+                    side="SELL",
+                    intent="rotation_out",
+                    order_value=sale_value,
+                    portfolio=execution_portfolio,
+                    quote=outgoing_quote,
+                    positions=active_positions,
+                    concentration_pct=0.0,
+                )
+                if not outgoing_risk_ok:
+                    return False, f"rotation outgoing risk rejected: {outgoing_risk_reason}", None
                 new_cash_after_sale, new_debt_after_sale, margin_repayment = allocate_sale(
                     cash=safe_float(execution_portfolio.get("cash")),
                     margin_debt=safe_float(execution_portfolio.get("margin_debt")),
@@ -1647,6 +2135,21 @@ def _buy(
                         ),
                         None,
                     )
+
+            risk_ok, risk_reason, _ = _shared_risk_gate(
+                conn=conn,
+                market=market,
+                symbol=symbol,
+                side="BUY",
+                intent="rotation_in" if rotation_candidate else "entry",
+                order_value=trade_value,
+                portfolio=execution_portfolio,
+                quote=verified_quote or {},
+                positions=active_positions,
+                concentration_pct=(trade_value / account.equity) if account.equity else 1.0,
+            )
+            if not risk_ok:
+                return False, f"shared risk rejected: {risk_reason}", None
 
             cash_reserve = max(0.0, account.equity * MIN_CASH_RESERVE_PCT)
             new_cash, new_margin_debt, cash_used, borrowed = allocate_purchase(
@@ -1704,6 +2207,7 @@ def _buy(
                         now,
                     ),
                 )
+                _complete_execution_claim(conn, rotation_execution_key)
                 closed_memory = (
                     dict(locked_rotation),
                     exit_price,
@@ -1767,6 +2271,7 @@ def _buy(
                 """,
                 (market, symbol, quantity, price, trade_value, score, reason_text, now),
             )
+            _complete_execution_claim(conn, execution_key)
 
         log.info(
             "%s | INSTITUTIONAL PAPER BUY | %s | quantity=%.8f | price=%.6f | "
@@ -1815,8 +2320,6 @@ def process_signals(
     market = safe_text(market).lower()
     signals = list(signals or [])
     prices = prices or {}
-    if _execution_disabled("signal execution"):
-        return []
     actions: list[dict[str, Any]] = []
     anomalous_symbols = _duplicate_price_anomaly_symbols(prices)
 
@@ -1887,6 +2390,8 @@ def process_signals(
             continue
 
         if action in {"SELL", "EXIT", "CLOSE"}:
+            if _execution_disabled("sell signal", market, "exit"):
+                continue
             position = row(
                 """
                 SELECT *
@@ -1941,7 +2446,9 @@ def process_signals(
                 action,
             )
             continue
-        quote_ok, quote_reason = _execution_quote_guard(market, symbol, price, signal, quote)
+        if _execution_disabled("buy signal", market, "entry"):
+            continue
+        quote_ok, quote_reason = _execution_quote_guard(market, symbol, price, signal, quote_metadata=quote)
         if not quote_ok:
             log.info(
                 "%s | REJECT BUY | %s | %s",
@@ -1951,7 +2458,7 @@ def process_signals(
             )
             continue
 
-        forecast_ready, forecast_reason = _entry_forecast_gate(market, symbol, price)
+        forecast_ready, forecast_reason = _entry_forecast_gate(market, symbol, price, signal, quote)
         if not forecast_ready:
             log.info(
                 "%s | REJECT | %s | forecast gate: %s",
@@ -2130,7 +2637,7 @@ def snapshot(
     **__: Any,
 ) -> dict[str, float]:
     market = safe_text(market).lower()
-    execution_enabled = _autotrade_enabled()
+    execution_enabled = _autotrade_enabled(market)
     data = portfolio_equity(market, read_only=not execution_enabled)
 
     equity = safe_float(data.get("equity"))

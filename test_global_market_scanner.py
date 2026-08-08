@@ -173,7 +173,9 @@ def test_provider_discovered_core_stock_keeps_mover_metadata(monkeypatch):
     merged = scanner.merge_candidate_metadata([
         {"symbol": "AAPL", "name": "Apple", "exchange": "NASDAQ", "region": "United States", "sector": "mega_cap_core"},
         {
-            "symbol": "AAPL",
+                "symbol": "AAPL",
+                "requested_symbol": "AAPL",
+                "provider_symbol": "AAPL",
             "mover_type": "major_gainer",
             "discovery_source": "polygon_snapshot",
             "discovery_timestamp": "2026-08-01T12:00:00+00:00",
@@ -294,6 +296,8 @@ def test_provider_without_in_progress_daily_candle_uses_snapshot_during_regular_
     candidate = scanner._candidate_metrics(
         {
             "symbol": "AAPL",
+            "requested_symbol": "AAPL",
+            "provider_symbol": "AAPL",
             "name": "Apple",
             "exchange": "NASDAQ",
             "region": "United States",
@@ -325,9 +329,13 @@ def test_fresh_intraday_quote_plus_previous_session_daily_history(monkeypatch):
             volume=4_000_000,
             timestamp="2026-08-03T14:03:00+00:00",
             interval="1m",
-            provider="polygon_intraday",
-        ),
-    )
+                provider="polygon_intraday",
+                symbol="AAPL",
+                requested_symbol="AAPL",
+                provider_symbol="AAPL",
+                quote_verified=True,
+            ),
+        )
     candidate = scanner._candidate_metrics(
         {"symbol": "AAPL", "name": "Apple", "exchange": "NASDAQ", "region": "United States", "sector": "mega_cap_core"},
         now=datetime(2026, 8, 3, 14, 4, tzinfo=timezone.utc),
@@ -341,7 +349,9 @@ def test_premarket_mover_uses_current_premarket_quote(monkeypatch):
     monkeypatch.setattr(scanner, "get_history", lambda *args, **kwargs: previous_session_history())
     candidate = scanner._candidate_metrics(
         {
-            "symbol": "AAPL",
+                "symbol": "AAPL",
+                "requested_symbol": "AAPL",
+                "provider_symbol": "AAPL",
             "name": "Apple",
             "exchange": "NASDAQ",
             "region": "United States",
@@ -367,6 +377,8 @@ def test_after_hours_mover_uses_current_after_hours_quote(monkeypatch):
     candidate = scanner._candidate_metrics(
         {
             "symbol": "AAPL",
+            "requested_symbol": "AAPL",
+            "provider_symbol": "AAPL",
             "name": "Apple",
             "exchange": "NASDAQ",
             "region": "United States",
@@ -411,7 +423,9 @@ def test_provider_snapshot_values_enter_mover_ranking(monkeypatch):
     monkeypatch.setattr(scanner, "get_history", lambda *args, **kwargs: previous_session_history())
     candidate = scanner._candidate_metrics(
         {
-            "symbol": "GAIN",
+                "symbol": "GAIN",
+                "requested_symbol": "GAIN",
+                "provider_symbol": "GAIN",
             "name": "Gainer",
             "exchange": "NASDAQ",
             "region": "United States",
@@ -440,7 +454,9 @@ def test_foreign_stock_freshness_uses_own_exchange_calendar(monkeypatch):
     monkeypatch.setattr(scanner, "get_history", lambda *args, **kwargs: hist)
     candidate = scanner._candidate_metrics(
         {
-            "symbol": "SAP.DE",
+                "symbol": "SAP.DE",
+                "requested_symbol": "SAP.DE",
+                "provider_symbol": "SAP.DE",
             "name": "SAP",
             "exchange": "XETRA",
             "region": "Europe",
@@ -470,12 +486,18 @@ def test_provider_fallback_when_current_quote_data_is_incomplete(monkeypatch):
             volume=5_000_000,
             timestamp="2026-08-03T14:03:00+00:00",
             interval="1m",
-            provider="fallback_intraday",
-        ),
-    )
+                provider="fallback_intraday",
+                symbol="AAPL",
+                requested_symbol="AAPL",
+                provider_symbol="AAPL",
+                quote_verified=True,
+            ),
+        )
     candidate = scanner._candidate_metrics(
         {
-            "symbol": "AAPL",
+                "symbol": "AAPL",
+                "requested_symbol": "AAPL",
+                "provider_symbol": "AAPL",
             "name": "Apple",
             "exchange": "NASDAQ",
             "region": "United States",
@@ -527,9 +549,13 @@ def test_fresh_live_snapshot_upgrades_discovery_only_mover(monkeypatch):
             volume=6_000_000,
             timestamp="2026-08-03T14:03:00+00:00",
             interval="1m",
-            provider="live_snapshot",
-        ),
-    )
+                provider="live_snapshot",
+                symbol="AAPL",
+                requested_symbol="AAPL",
+                provider_symbol="AAPL",
+                quote_verified=True,
+            ),
+        )
     candidate = scanner._candidate_metrics(
         {
             "symbol": "AAPL",
