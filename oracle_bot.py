@@ -18,6 +18,7 @@ from oracle_intelligence import evaluate_opportunity
 from market_memory import record_closed_trade_memory
 from market_data import MarketSnapshot
 from provider_router import normalize_symbol
+from risk_engine import ExecutionSwitches, pre_trade_risk_checks
 from market_sessions import (
     confirmed_us_listing,
     is_otc_exchange,
@@ -629,8 +630,8 @@ def _try_execution_claim(
     )
     try:
         conn.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (execution_key,))
-    except Exception:
-        pass
+    except Exception as exc:
+        return False, execution_key, f"execution advisory lock failed: {exc}"
     record = conn.execute(
         """
         INSERT INTO execution_claims
@@ -662,6 +663,60 @@ def _complete_execution_claim(conn: Any, execution_key: str) -> None:
         "UPDATE execution_claims SET status='completed', completed_at=%s WHERE execution_key=%s",
         (utc_now(), execution_key),
     )
+
+
+def _risk_switches() -> ExecutionSwitches:
+    return ExecutionSwitches(
+        autotrade=globals().get("ENABLE_AUTOTRADE", False),
+        stock_autotrade=globals().get("ENABLE_STOCK_AUTOTRADE", False),
+        crypto_autotrade=globals().get("ENABLE_CRYPTO_AUTOTRADE", False),
+        new_entries=globals().get("ENABLE_NEW_ENTRIES", False),
+        automated_exits=globals().get("ENABLE_AUTOMATED_EXITS", False),
+        portfolio_rotation=globals().get("ENABLE_PORTFOLIO_ROTATION", False),
+        broker_submission=globals().get("ENABLE_BROKER_SUBMISSION", False),
+        global_kill_switch=globals().get("GLOBAL_KILL_SWITCH", False),
+    )
+
+
+def _shared_risk_gate(
+    *,
+    market: str,
+    symbol: str,
+    side: str,
+    intent: str,
+    order_value: float,
+    account: Any,
+    quote: dict[str, Any],
+    positions: list[dict[str, Any]],
+    liquidity_value: float,
+    concentration_pct: float,
+) -> tuple[bool, str, Any]:
+    result = pre_trade_risk_checks(
+        market=market,
+        symbol=symbol,
+        side=side,
+        intent=intent,
+        order_value=order_value,
+        portfolio_equity=safe_float(getattr(account, "equity", None)),
+        cash=safe_float(getattr(account, "cash", None)),
+        quote=quote,
+        positions=positions,
+        daily_loss_pct=0.0,
+        weekly_loss_pct=0.0,
+        spread_pct=0.0,
+        slippage_pct=0.0,
+        liquidity_value=liquidity_value,
+        correlation_exposure_pct=0.0,
+        concentration_pct=concentration_pct,
+        new_entries_today=0,
+        turnover_pct_today=0.0,
+        leverage_used=safe_float(getattr(account, "leverage_used", 0.0)),
+        margin_utilization_pct=safe_float(getattr(account, "margin_utilization_pct", 0.0)),
+        switches=_risk_switches(),
+    )
+    if not result.allowed:
+        return False, "; ".join(result.reasons) or result.reason, result
+    return True, "shared risk approved", result
 
 
 # =========================================================
@@ -1175,6 +1230,27 @@ def _execute_close_position(
             ).fetchone()
 
             if not portfolio:
+                return False
+            account = build_account(market, portfolio, [position])
+            risk_intent = (
+                "forced_risk_reduction"
+                if reason in {PAPER_MARGIN_REDUCTION_REASON, "stop_loss", "take_profit", "trailing_stop"}
+                else "exit"
+            )
+            risk_ok, risk_reason, _ = _shared_risk_gate(
+                market=market,
+                symbol=symbol,
+                side="SELL",
+                intent=risk_intent,
+                order_value=value,
+                account=account,
+                quote=quote_metadata or {},
+                positions=[position],
+                liquidity_value=max(value * 100.0, 1.0),
+                concentration_pct=0.0,
+            )
+            if not risk_ok:
+                log.info("%s | REJECT SELL | %s | shared risk: %s", market.upper(), symbol, risk_reason)
                 return False
 
             new_cash, new_margin_debt, margin_repayment = allocate_sale(
@@ -1844,6 +1920,21 @@ def _buy(
                 if not rotation_claimed:
                     return False, f"rotation outgoing duplicate rejected: {rotation_claim_reason}", None
                 sale_value = quantity_to_sell * exit_price
+                outgoing_account = build_account(market, execution_portfolio, active_positions)
+                outgoing_risk_ok, outgoing_risk_reason, _ = _shared_risk_gate(
+                    market=market,
+                    symbol=rotation_symbol,
+                    side="SELL",
+                    intent="rotation",
+                    order_value=sale_value,
+                    account=outgoing_account,
+                    quote=outgoing_quote,
+                    positions=active_positions,
+                    liquidity_value=max(sale_value * 100.0, 1.0),
+                    concentration_pct=0.0,
+                )
+                if not outgoing_risk_ok:
+                    return False, f"rotation outgoing risk rejected: {outgoing_risk_reason}", None
                 new_cash_after_sale, new_debt_after_sale, margin_repayment = allocate_sale(
                     cash=safe_float(execution_portfolio.get("cash")),
                     margin_debt=safe_float(execution_portfolio.get("margin_debt")),
@@ -1885,6 +1976,25 @@ def _buy(
                         ),
                         None,
                     )
+
+            quote_liquidity = safe_float((verified_quote or {}).get("liquidity_value"))
+            if quote_liquidity <= 0:
+                quote_volume = safe_float((verified_quote or {}).get("volume"))
+                quote_liquidity = quote_volume * price if quote_volume > 0 else average_dollar_volume
+            risk_ok, risk_reason, _ = _shared_risk_gate(
+                market=market,
+                symbol=symbol,
+                side="BUY",
+                intent="rotation" if rotation_candidate else "entry",
+                order_value=trade_value,
+                account=account,
+                quote=verified_quote or {},
+                positions=active_positions,
+                liquidity_value=quote_liquidity,
+                concentration_pct=(trade_value / account.equity) if account.equity else 1.0,
+            )
+            if not risk_ok:
+                return False, f"shared risk rejected: {risk_reason}", None
 
             cash_reserve = max(0.0, account.equity * MIN_CASH_RESERVE_PCT)
             new_cash, new_margin_debt, cash_used, borrowed = allocate_purchase(

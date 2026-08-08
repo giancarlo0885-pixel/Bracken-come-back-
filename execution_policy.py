@@ -8,6 +8,7 @@ import config
 
 ENTRY_INTENTS = {"entry", "buy", "new_entry", "new position"}
 EXIT_INTENTS = {"exit", "sell", "automated_exit", "stop_loss", "take_profit", "trailing_stop"}
+FORCED_EXIT_INTENTS = {"forced_risk_reduction", "margin_reduction", "risk_reduction"}
 ROTATION_INTENTS = {"rotation", "portfolio_rotation"}
 BROKER_INTENTS = {"broker", "broker_submission", "submission"}
 SUPPORTED_MARKETS = {"cash", "stock", "crypto"}
@@ -45,6 +46,8 @@ def normalize_intent(intent: str) -> str:
         return "entry"
     if text in EXIT_INTENTS:
         return "exit"
+    if text in FORCED_EXIT_INTENTS:
+        return "forced_risk_reduction"
     if text in ROTATION_INTENTS:
         return "rotation"
     if text in BROKER_INTENTS:
@@ -72,6 +75,7 @@ def execution_policy(
     intent_flag = {
         "entry": "ENABLE_NEW_ENTRIES",
         "exit": "ENABLE_AUTOMATED_EXITS",
+        "forced_risk_reduction": "ENABLE_AUTOMATED_EXITS",
         "rotation": "ENABLE_PORTFOLIO_ROTATION",
         "broker": "ENABLE_BROKER_SUBMISSION",
     }.get(normalized_intent)

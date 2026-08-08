@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import os
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 import pytest
 
@@ -207,6 +209,36 @@ def test_model_registry_governance_preserves_approved_status():
     assert model_registry.model_status("unit-model", "v1") == model_registry.ModelStatus.APPROVED
 
 
+def test_model_governance_failure_does_not_update_memory(monkeypatch):
+    original = dict(model_registry._REGISTRY)
+    model_registry._REGISTRY.pop(("fail-model", "v1"), None)
+
+    class FakeConn:
+        def execute(self, sql, params=()):
+            if "SELECT status" in sql:
+                return type("Result", (), {"fetchone": lambda self: None})()
+            raise RuntimeError("audit insert failed")
+
+    class FakeContext:
+        def __enter__(self):
+            return FakeConn()
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr(database, "connect", lambda: FakeContext())
+    monkeypatch.setattr(database, "utc_now", lambda: datetime.now(timezone.utc).isoformat())
+    with pytest.raises(RuntimeError):
+        model_registry.update_model_status("fail-model", "v1", "approved", actor="pytest", reason="should fail")
+    assert ("fail-model", "v1") not in model_registry._REGISTRY
+    model_registry._REGISTRY.clear()
+    model_registry._REGISTRY.update(original)
+
+
+def test_invalid_model_status_cannot_approve_execution():
+    assert model_registry._coerce_status("not-a-real-status") == model_registry.ModelStatus.SHADOW
+
+
 def test_disabled_broker_adapter_never_submits_real_order():
     broker = DisabledBrokerAdapter()
     response = broker.order_submission({"symbol": "AAPL"})
@@ -356,3 +388,193 @@ def test_duplicate_execution_claim_allows_one_decision():
         )
     assert first[0] is True
     assert second[0] is False
+
+
+def _pg_execution_setup(monkeypatch, symbols: list[str]) -> None:
+    if not os.getenv("DATABASE_URL"):
+        pytest.skip("PostgreSQL integration test runs in CI service container")
+    database.initialize_database()
+    monkeypatch.setattr(oracle_bot, "ENABLE_AUTOTRADE", True)
+    monkeypatch.setattr(oracle_bot, "ENABLE_STOCK_AUTOTRADE", True)
+    monkeypatch.setattr(oracle_bot, "ENABLE_NEW_ENTRIES", True)
+    monkeypatch.setattr(oracle_bot, "ENABLE_AUTOMATED_EXITS", True)
+    monkeypatch.setattr(oracle_bot, "ENABLE_PORTFOLIO_ROTATION", True)
+    monkeypatch.setattr(oracle_bot, "ENABLE_QUANT_TRADE_STANDARD", False)
+    monkeypatch.setattr(oracle_bot, "PENNY_STOCK_ENABLED", False)
+    monkeypatch.setattr(oracle_bot, "MIN_TRADE_VALUE", 1.0)
+    with database.connect() as conn:
+        conn.execute("DELETE FROM trades WHERE symbol = ANY(%s)", (symbols,))
+        conn.execute("DELETE FROM positions WHERE symbol = ANY(%s)", (symbols,))
+        conn.execute("DELETE FROM execution_claims WHERE symbol = ANY(%s)", (symbols,))
+        conn.execute(
+            """
+            INSERT INTO portfolios (market,cash,starting_balance,leverage_limit,margin_debt,margin_interest_accrued,margin_interest_updated_at,broker_profile,updated_at)
+            VALUES ('cash',1000000,1000000,4,0,0,%s,'test',%s)
+            ON CONFLICT (market) DO UPDATE SET cash=1000000, margin_debt=0, updated_at=EXCLUDED.updated_at
+            """,
+            (datetime.now(timezone.utc).isoformat(), datetime.now(timezone.utc).isoformat()),
+        )
+
+
+def _execution_signal(symbol: str, price: float = 100.0, *, signal_id: str = "sig", forecast_id: str = "fc"):
+    return SimpleNamespace(
+        symbol=symbol,
+        price=price,
+        score=90,
+        confidence=0.9,
+        action="BUY",
+        signal_id=signal_id,
+        forecast_id=forecast_id,
+        avg_dollar_volume=1_000_000_000,
+    )
+
+
+def _execution_quote(symbol: str, price: float = 100.0) -> dict:
+    quote = _quote(symbol, price)
+    quote.update({"source_identity": f"unit:{symbol}:quote", "liquidity_value": 1_000_000_000})
+    return quote
+
+
+def test_postgres_duplicate_buy_concurrency(monkeypatch):
+    symbol = "PGBUY"
+    _pg_execution_setup(monkeypatch, [symbol])
+    signal = _execution_signal(symbol, 100, signal_id="buy-sig", forecast_id="buy-fc")
+    quote = _execution_quote(symbol, 100)
+
+    def attempt():
+        return oracle_bot._buy("cash", symbol, 100, signal, verified_quote=quote)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(lambda _: attempt(), range(2)))
+    with database.connect() as conn:
+        trades = conn.execute("SELECT * FROM trades WHERE symbol=%s AND side='BUY'", (symbol,)).fetchall()
+        claims = conn.execute("SELECT * FROM execution_claims WHERE symbol=%s AND side='BUY' AND status='completed'", (symbol,)).fetchall()
+        position = conn.execute("SELECT * FROM positions WHERE symbol=%s", (symbol,)).fetchone()
+    assert sum(1 for result in results if result[0]) == 1
+    assert len(trades) == 1
+    assert len(claims) == 1
+    assert position and float(position["quantity"]) > 0
+
+
+def test_postgres_duplicate_sell_concurrency(monkeypatch):
+    symbol = "PGSELL"
+    _pg_execution_setup(monkeypatch, [symbol])
+    now = datetime.now(timezone.utc).isoformat()
+    with database.connect() as conn:
+        conn.execute(
+            "INSERT INTO positions (market,symbol,quantity,entry_price,average_price,current_price,highest_price,opened_at,updated_at) VALUES ('cash',%s,2,90,90,100,100,%s,%s)",
+            (symbol, now, now),
+        )
+        position = conn.execute("SELECT * FROM positions WHERE symbol=%s", (symbol,)).fetchone()
+    quote = _execution_quote(symbol, 100)
+
+    def attempt():
+        return oracle_bot._close_position("cash", dict(position), 100, "sell_signal", quote_metadata=quote)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(lambda _: attempt(), range(2)))
+    with database.connect() as conn:
+        trades = conn.execute("SELECT * FROM trades WHERE symbol=%s AND side='SELL'", (symbol,)).fetchall()
+        claims = conn.execute("SELECT * FROM execution_claims WHERE symbol=%s AND side='SELL' AND status='completed'", (symbol,)).fetchall()
+        remaining = conn.execute("SELECT * FROM positions WHERE symbol=%s", (symbol,)).fetchall()
+    assert sum(1 for result in results if result) == 1
+    assert len(trades) == 1
+    assert len(claims) == 1
+    assert remaining == []
+
+
+def test_postgres_execution_claim_rollback_allows_retry():
+    if not os.getenv("DATABASE_URL"):
+        pytest.skip("PostgreSQL integration test runs in CI service container")
+    database.initialize_database()
+    symbol = "PGROLL"
+    quote = _execution_quote(symbol, 100)
+    with pytest.raises(RuntimeError):
+        with database.connect() as conn:
+            ok, _, _ = oracle_bot._try_execution_claim(
+                conn,
+                market="cash",
+                symbol=symbol,
+                side="BUY",
+                price=100,
+                quote=quote,
+                signal={"signal_id": "rollback", "forecast_id": "rollback"},
+            )
+            assert ok is True
+            raise RuntimeError("force rollback")
+    with database.connect() as conn:
+        claims = conn.execute("SELECT * FROM execution_claims WHERE symbol=%s", (symbol,)).fetchall()
+        ok, _, _ = oracle_bot._try_execution_claim(
+            conn,
+            market="cash",
+            symbol=symbol,
+            side="BUY",
+            price=100,
+            quote=quote,
+            signal={"signal_id": "rollback", "forecast_id": "rollback"},
+        )
+    assert claims == []
+    assert ok is True
+
+
+def test_advisory_lock_failure_blocks_execution_claim():
+    class FakeConn:
+        def __init__(self):
+            self.calls = []
+
+        def execute(self, sql, params=()):
+            self.calls.append(sql)
+            if "pg_advisory_xact_lock" in sql:
+                raise RuntimeError("lock unavailable")
+            raise AssertionError("claim insert should not run after lock failure")
+
+    conn = FakeConn()
+    ok, _, reason = oracle_bot._try_execution_claim(
+        conn,
+        market="cash",
+        symbol="AAPL",
+        side="BUY",
+        price=100,
+        quote={**_quote("AAPL", 100), "source_identity": "unit:AAPL"},
+        signal={"signal_id": "sig", "forecast_id": "fc"},
+    )
+    assert ok is False
+    assert "advisory lock" in reason
+    assert len(conn.calls) == 1
+
+
+def test_missing_or_nan_risk_metric_blocks_entry():
+    switches = ExecutionSwitches(autotrade=True, stock_autotrade=True, new_entries=True)
+    missing = pre_trade_risk_checks(
+        market="cash",
+        symbol="AAPL",
+        side="BUY",
+        intent="entry",
+        order_value=100,
+        portfolio_equity=10_000,
+        cash=10_000,
+        quote=_quote(),
+        liquidity_value=float("nan"),
+        switches=switches,
+    )
+    assert missing.allowed is False
+    assert any("non-finite" in reason for reason in missing.reasons)
+
+
+def test_forced_risk_reduction_sell_uses_dedicated_policy():
+    switches = ExecutionSwitches(autotrade=True, stock_autotrade=True, automated_exits=True)
+    result = pre_trade_risk_checks(
+        market="cash",
+        symbol="AAPL",
+        side="SELL",
+        intent="forced_risk_reduction",
+        order_value=5_000,
+        portfolio_equity=10_000,
+        cash=100,
+        quote=_quote(),
+        positions=[{"symbol": "AAPL"}],
+        liquidity_value=1,
+        concentration_pct=0.99,
+        switches=switches,
+    )
+    assert result.allowed is True

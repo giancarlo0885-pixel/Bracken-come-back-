@@ -275,10 +275,49 @@ def test_eodhd_daily_dates_retain_original_session_date(monkeypatch):
         def json(self):
             return [{"date": "2026-07-31", "open": 1, "high": 2, "low": 1, "close": 2, "volume": 100}]
 
+    monkeypatch.setattr(provider_router, "_eodhd_symbol_mapping", lambda symbol, key: {"requested_symbol": "AAPL", "provider_code": "AAPL.US", "exchange": "NASDAQ", "instrument_type": "common stock"})
     monkeypatch.setattr(provider_router.requests, "get", lambda *args, **kwargs: Response())
     frame = _eodhd("AAPL", "5d", "1d", "key")
     assert str(frame.index[-1].date()) == "2026-07-31"
     assert frame.index.tz is None
+    assert frame.attrs["quote_verified"] is True
+
+
+def test_eodhd_verified_us_mapping(monkeypatch):
+    records = [{"Code": "AAPL", "Exchange": "NASDAQ", "Type": "Common Stock"}]
+    monkeypatch.setattr(provider_router, "cached_call", lambda *args, **kwargs: records)
+    mapping = provider_router._eodhd_symbol_mapping("AAPL", "key")
+    assert mapping["provider_code"] == "AAPL.US"
+    assert mapping["exchange"] == "NASDAQ"
+
+
+def test_eodhd_missing_mapping_rejected(monkeypatch):
+    monkeypatch.setattr(provider_router, "cached_call", lambda *args, **kwargs: [])
+    assert provider_router._eodhd_symbol_mapping("AAPL", "key") is None
+
+
+def test_eodhd_mismatched_provider_code_rejected(monkeypatch):
+    records = [{"Code": "AAPL", "ProviderCode": "MSFT.US", "Exchange": "NASDAQ", "Type": "Common Stock"}]
+    monkeypatch.setattr(provider_router, "cached_call", lambda *args, **kwargs: records)
+    assert provider_router._eodhd_symbol_mapping("AAPL", "key") is None
+
+
+def test_eodhd_mismatched_exchange_rejected(monkeypatch):
+    records = [{"Code": "AAPL", "ProviderCode": "AAPL.US", "Exchange": "LSE", "Type": "Common Stock"}]
+    monkeypatch.setattr(provider_router, "cached_call", lambda *args, **kwargs: records)
+    assert provider_router._eodhd_symbol_mapping("AAPL", "key") is None
+
+
+def test_eodhd_unsupported_foreign_suffix_rejected(monkeypatch):
+    monkeypatch.setattr(provider_router, "cached_call", lambda *args, **kwargs: [{"Code": "SHEL"}])
+    assert provider_router._eodhd_symbol_mapping("SHEL.L", "key") is None
+
+
+def test_nonempty_eodhd_data_without_verified_identity_remains_unverified():
+    frame = pd.DataFrame({"Close": [100.0], "Volume": [1000]}, index=pd.DatetimeIndex(["2026-07-31"]))
+    result = provider_router._verified_history(frame, "EODHD", "AAPL", "AAPL", "5d", "1d")
+    assert result.empty is False
+    assert result.attrs["quote_verified"] is False
 
 
 def test_alpha_vantage_daily_dates_retain_original_session_date(monkeypatch):

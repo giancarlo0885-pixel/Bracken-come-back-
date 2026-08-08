@@ -69,5 +69,10 @@ jobs:
         run: >-
           python -m pytest
           test_v36_advisor_foundation.py::test_model_registry_governance_preserves_approved_status
+          test_v36_advisor_foundation.py::test_model_governance_failure_does_not_update_memory
           test_v36_advisor_foundation.py::test_signal_forecast_linkage_uses_real_signal_id
           test_v36_advisor_foundation.py::test_duplicate_execution_claim_allows_one_decision
+          test_v36_advisor_foundation.py::test_advisory_lock_failure_blocks_execution_claim
+          test_v36_advisor_foundation.py::test_postgres_duplicate_buy_concurrency
+          test_v36_advisor_foundation.py::test_postgres_duplicate_sell_concurrency
+          test_v36_advisor_foundation.py::test_postgres_execution_claim_rollback_allows_retry

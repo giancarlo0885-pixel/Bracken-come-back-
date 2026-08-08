@@ -89,34 +89,42 @@ def update_model_status(
     if not actor:
         raise ValueError("model status governance requires a non-empty actor")
     status = _coerce_status(new_status)
-    old_status = model_status(model, model_version)
-    _REGISTRY[(model, model_version)] = ModelRecord(model, model_version, status, reason)
-    try:
-        from database import connect, utc_now
+    if status == ModelStatus.SHADOW and str(new_status) not in {ModelStatus.SHADOW.value, "shadow"}:
+        raise ValueError("invalid model status")
+    from database import connect, utc_now
 
-        now = utc_now()
-        with connect() as conn:
-            conn.execute(
-                """
-                INSERT INTO model_registry (model, model_version, status, reason, created_at, updated_at)
-                VALUES (%s,%s,%s,%s,%s,%s)
-                ON CONFLICT (model, model_version) DO UPDATE SET
-                    status=EXCLUDED.status,
-                    reason=EXCLUDED.reason,
-                    updated_at=EXCLUDED.updated_at
-                """,
-                (model, model_version, status.value, reason, now, now),
-            )
-            conn.execute(
-                """
-                INSERT INTO model_registry_events
-                (model, model_version, old_status, new_status, actor, reason, created_at)
-                VALUES (%s,%s,%s,%s,%s,%s,%s)
-                """,
-                (model, model_version, old_status.value, status.value, actor, reason, now),
-            )
-    except Exception:
-        pass
+    now = utc_now()
+    with connect() as conn:
+        existing = conn.execute(
+            """
+            SELECT status
+            FROM model_registry
+            WHERE model=%s AND model_version=%s
+            FOR UPDATE
+            """,
+            (model, model_version),
+        ).fetchone()
+        old_status = _coerce_status(existing.get("status")) if existing else ModelStatus.SHADOW
+        conn.execute(
+            """
+            INSERT INTO model_registry (model, model_version, status, reason, created_at, updated_at)
+            VALUES (%s,%s,%s,%s,%s,%s)
+            ON CONFLICT (model, model_version) DO UPDATE SET
+                status=EXCLUDED.status,
+                reason=EXCLUDED.reason,
+                updated_at=EXCLUDED.updated_at
+            """,
+            (model, model_version, status.value, reason, now, now),
+        )
+        conn.execute(
+            """
+            INSERT INTO model_registry_events
+            (model, model_version, old_status, new_status, actor, reason, created_at)
+            VALUES (%s,%s,%s,%s,%s,%s,%s)
+            """,
+            (model, model_version, old_status.value, status.value, actor, reason, now),
+        )
+    _REGISTRY[(model, model_version)] = ModelRecord(model, model_version, status, reason)
     return _REGISTRY[(model, model_version)]
 
 

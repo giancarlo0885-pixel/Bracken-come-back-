@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
+import math
 from typing import Any
 
 from config import (
@@ -71,12 +72,29 @@ class RiskCheckResult:
     state: RiskState
     checks: list[dict[str, Any]] = field(default_factory=list)
     reason: str = ""
+    metrics: dict[str, float] = field(default_factory=dict)
 
     def add(self, name: str, passed: bool, detail: str) -> None:
         self.checks.append({"name": name, "passed": bool(passed), "detail": detail})
         if not passed and self.approved:
             self.approved = False
             self.reason = detail
+
+    @property
+    def allowed(self) -> bool:
+        return self.approved
+
+    @property
+    def reasons(self) -> list[str]:
+        return [item["detail"] for item in self.checks if not item.get("passed")]
+
+
+def _finite(value: Any) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
 
 
 def _quote_identity_ok(symbol: str, quote: dict[str, Any]) -> bool:
@@ -109,22 +127,51 @@ def pre_trade_risk_checks(
     new_entries_today: int = 0,
     turnover_pct_today: float = 0.0,
     switches: ExecutionSwitches | None = None,
+    intent: str | None = None,
+    leverage_used: float | None = 0.0,
+    margin_utilization_pct: float | None = 0.0,
 ) -> RiskCheckResult:
     switches = switches or ExecutionSwitches()
-    intent = "exit" if str(side).upper() == "SELL" else "entry"
+    intent = intent or ("exit" if str(side).upper() == "SELL" else "entry")
     result = RiskCheckResult(True, RiskState.NORMAL)
     result.add("execution_switch", switches.execution_allowed(market, intent), f"{intent} execution is disabled")
     result.add("quote_identity", _quote_identity_ok(symbol, quote), "quote identity is not verified")
     result.add("quote_freshness", quote_is_fresh(quote.get("quote_timestamp"), str(quote.get("interval") or "1d"), symbol=symbol), "quote is stale")
+    required = {
+        "price": quote.get("price"),
+        "order_value": order_value,
+        "cash": cash,
+        "equity": portfolio_equity,
+        "daily_loss_pct": daily_loss_pct,
+        "weekly_loss_pct": weekly_loss_pct,
+        "spread_pct": spread_pct,
+        "slippage_pct": slippage_pct,
+        "liquidity_value": liquidity_value,
+        "correlation_exposure_pct": correlation_exposure_pct,
+        "concentration_pct": concentration_pct,
+        "turnover_pct_today": turnover_pct_today,
+        "leverage_used": leverage_used,
+        "margin_utilization_pct": margin_utilization_pct,
+    }
+    for name, value in required.items():
+        finite = _finite(value)
+        if finite is None:
+            result.add(f"finite_{name}", False, f"{name} is missing or non-finite")
+        else:
+            result.metrics[name] = finite
+    if not result.approved:
+        result.state = RiskState.MANUAL_REVIEW
+        return result
+    forced_exit = intent == "forced_risk_reduction"
     result.add("daily_loss", daily_loss_pct <= MAX_DAILY_DRAWDOWN_PCT, "daily loss limit reached")
     result.add("weekly_loss", weekly_loss_pct <= MAX_WEEKLY_LOSS_PCT, "weekly loss limit reached")
-    result.add("order_value", portfolio_equity > 0 and order_value / portfolio_equity <= MAX_POSITION_FRACTION, "order value exceeds maximum position size")
-    result.add("cash_reserve", side.upper() == "SELL" or cash - order_value >= portfolio_equity * MIN_CASH_RESERVE_PCT, "minimum cash reserve would be breached")
+    result.add("order_value", forced_exit or portfolio_equity > 0 and order_value / portfolio_equity <= MAX_POSITION_FRACTION, "order value exceeds maximum position size")
+    result.add("cash_reserve", forced_exit or side.upper() == "SELL" or cash - order_value >= portfolio_equity * MIN_CASH_RESERVE_PCT, "minimum cash reserve would be breached")
     result.add("spread", spread_pct <= QUANT_MAX_SPREAD_PCT, "spread exceeds maximum")
     result.add("slippage", slippage_pct <= QUANT_MAX_SLIPPAGE_PCT, "slippage exceeds maximum")
-    result.add("liquidity", liquidity_value <= 0 or order_value <= liquidity_value * 0.01, "order exceeds liquidity limit")
-    result.add("concentration", concentration_pct <= MAX_POSITION_FRACTION, "concentration limit exceeded")
-    result.add("correlation", correlation_exposure_pct <= 0.35, "correlation exposure limit exceeded")
+    result.add("liquidity", forced_exit or order_value <= liquidity_value * 0.01, "order exceeds liquidity limit")
+    result.add("concentration", forced_exit or concentration_pct <= MAX_POSITION_FRACTION, "concentration limit exceeded")
+    result.add("correlation", forced_exit or correlation_exposure_pct <= 0.35, "correlation exposure limit exceeded")
     result.add("new_entries", intent != "entry" or new_entries_today < MAX_NEW_ENTRIES_PER_DAY, "maximum new entries reached")
     result.add("turnover", turnover_pct_today <= MAX_DAILY_TURNOVER_PCT, "maximum daily turnover reached")
     if positions is not None:

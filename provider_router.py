@@ -35,6 +35,8 @@ _symbol_cooldowns: dict[str, float] = {}
 _failure_summary: dict[tuple[str, str], set[str]] = defaultdict(set)
 _last_failure_log = 0.0
 FAILURE_LOG_INTERVAL_SECONDS = 300
+EODHD_US_EXCHANGES = {"US", "NYSE", "NASDAQ", "NYSE ARCA", "AMEX", "BATS"}
+EODHD_EQUITY_TYPES = {"common stock", "stock", "preferred stock", "etf", "fund"}
 
 
 @dataclass
@@ -363,12 +365,58 @@ def _polygon(symbol: str, period: str, interval: str, key: str) -> pd.DataFrame:
     )
 
 
+def _load_eodhd_exchange_symbols(exchange: str, key: str) -> list[dict[str, Any]]:
+    response = requests.get(
+        f"https://eodhd.com/api/exchange-symbol-list/{exchange}",
+        params={"api_token": key, "fmt": "json"},
+        timeout=15,
+    )
+    response.raise_for_status()
+    data = response.json()
+    return data if isinstance(data, list) else []
+
+
+def _eodhd_symbol_mapping(symbol: str, key: str) -> dict[str, Any] | None:
+    requested = normalize_symbol(symbol)
+    if not requested or ("." in requested and not requested.endswith(".US")):
+        return None
+    requested_code = requested[:-3] if requested.endswith(".US") else requested
+    records = cached_call(
+        "eodhd_exchange_symbols_US",
+        API_CACHE_TTL_SECONDS * 12,
+        _load_eodhd_exchange_symbols,
+        "US",
+        key,
+    )
+    for record in records:
+        code = normalize_symbol(record.get("Code") or record.get("code") or record.get("symbol"))
+        provider_code = normalize_symbol(record.get("ProviderCode") or record.get("provider_code") or f"{code}.US")
+        exchange = normalize_symbol(record.get("Exchange") or record.get("exchange") or record.get("ExchangeCode") or "US")
+        instrument_type = str(record.get("Type") or record.get("type") or "").strip().lower()
+        if code != requested_code:
+            continue
+        if provider_code not in {requested_code, f"{requested_code}.US"}:
+            return None
+        if exchange not in EODHD_US_EXCHANGES:
+            return None
+        if instrument_type and instrument_type not in EODHD_EQUITY_TYPES:
+            return None
+        return {
+            "requested_symbol": requested_code,
+            "provider_code": provider_code if provider_code.endswith(".US") else f"{provider_code}.US",
+            "exchange": exchange,
+            "instrument_type": instrument_type,
+        }
+    return None
+
+
 def _eodhd(symbol: str, period: str, interval: str, key: str) -> pd.DataFrame:
     if _is_intraday(interval):
         return pd.DataFrame()
-    if "." in symbol and not symbol.endswith(".US"):
+    mapping = _eodhd_symbol_mapping(symbol, key)
+    if not mapping:
         return pd.DataFrame()
-    code = symbol if "." in symbol else f"{symbol}.US"
+    code = mapping["provider_code"]
     start = (pd.Timestamp.utcnow() - pd.Timedelta(days=_period_days(period))).date()
     response = requests.get(
         f"https://eodhd.com/api/eod/{code}",
@@ -385,7 +433,7 @@ def _eodhd(symbol: str, period: str, interval: str, key: str) -> pd.DataFrame:
         frame.rename(columns={"open": "Open", "high": "High", "low": "Low", "close": "Close", "volume": "Volume"}),
         "EODHD",
         symbol,
-        symbol,
+        mapping["requested_symbol"],
         period,
         interval,
         identity_verified=True,
@@ -586,7 +634,7 @@ def route_history(
                 frame.attrs.setdefault("source_identity", f"{provider}:{symbol}:{period}:{interval}")
                 frame.attrs["period"] = period
                 frame.attrs["interval"] = interval
-            if not frame.empty and verify_frame_symbol(frame, symbol):
+            if not frame.empty and frame.attrs.get("quote_verified") is True and verify_frame_symbol(frame, symbol):
                 frame = frame.copy(deep=True)
                 attempts.append(ProviderAttempt(provider, True, len(frame), "healthy"))
                 return RoutedHistory(frame, provider, attempts, datetime.now(timezone.utc).isoformat())
@@ -612,7 +660,7 @@ def route_history(
 
     try:
         frame = _verified_history(yahoo_loader(symbol, period, interval), "Yahoo Finance", symbol, symbol, period, interval, identity_verified=True)
-        if not frame.empty and verify_frame_symbol(frame, symbol):
+        if not frame.empty and frame.attrs.get("quote_verified") is True and verify_frame_symbol(frame, symbol):
             frame.attrs["source_identity"] = f"Yahoo Finance:{symbol}:{period}:{interval}"
             frame.attrs["period"] = period
             frame.attrs["interval"] = interval
