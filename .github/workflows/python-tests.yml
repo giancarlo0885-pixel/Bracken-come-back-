@@ -81,5 +81,7 @@ jobs:
           test_v36_advisor_foundation.py::test_postgres_shared_risk_rejection_rolls_no_portfolio_mutation
           test_v36_advisor_foundation.py::test_forced_risk_reduction_sell_uses_dedicated_policy
           test_v36_advisor_foundation.py::test_postgres_execution_risk_context_calculates_pnl_and_turnover
+          test_v36_advisor_foundation.py::test_postgres_execution_market_reset_isolates_risk_pnl
+          test_v36_advisor_foundation.py::test_postgres_risk_context_remains_portfolio_wide
           test_v36_advisor_foundation.py::test_missing_required_entry_metric_blocks_buy
           test_v36_advisor_foundation.py::test_non_finite_required_entry_metric_blocks_buy

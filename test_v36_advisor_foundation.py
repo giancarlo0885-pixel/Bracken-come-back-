@@ -409,6 +409,32 @@ def test_duplicate_execution_claim_allows_one_decision():
     assert second[0] is False
 
 
+def _reset_pg_execution_market(conn, market: str = "cash") -> None:
+    now = datetime.now(timezone.utc).isoformat()
+    conn.execute("DELETE FROM execution_claims WHERE market=%s", (market,))
+    conn.execute("DELETE FROM trades WHERE market=%s", (market,))
+    conn.execute("DELETE FROM positions WHERE market=%s", (market,))
+    conn.execute(
+        """
+        INSERT INTO portfolios (
+            market,cash,starting_balance,leverage_limit,margin_debt,
+            margin_interest_accrued,margin_interest_updated_at,broker_profile,updated_at
+        )
+        VALUES (%s,1000000,1000000,4,0,0,%s,'test',%s)
+        ON CONFLICT (market) DO UPDATE SET
+            cash=1000000,
+            starting_balance=1000000,
+            leverage_limit=4,
+            margin_debt=0,
+            margin_interest_accrued=0,
+            margin_interest_updated_at=EXCLUDED.margin_interest_updated_at,
+            broker_profile='test',
+            updated_at=EXCLUDED.updated_at
+        """,
+        (market, now, now),
+    )
+
+
 def _pg_execution_setup(monkeypatch, symbols: list[str]) -> None:
     if not os.getenv("DATABASE_URL"):
         pytest.skip("PostgreSQL integration test runs in CI service container")
@@ -422,17 +448,7 @@ def _pg_execution_setup(monkeypatch, symbols: list[str]) -> None:
     monkeypatch.setattr(oracle_bot, "PENNY_STOCK_ENABLED", False)
     monkeypatch.setattr(oracle_bot, "MIN_TRADE_VALUE", 1.0)
     with database.connect() as conn:
-        conn.execute("DELETE FROM trades WHERE symbol = ANY(%s)", (symbols,))
-        conn.execute("DELETE FROM positions WHERE symbol = ANY(%s)", (symbols,))
-        conn.execute("DELETE FROM execution_claims WHERE symbol = ANY(%s)", (symbols,))
-        conn.execute(
-            """
-            INSERT INTO portfolios (market,cash,starting_balance,leverage_limit,margin_debt,margin_interest_accrued,margin_interest_updated_at,broker_profile,updated_at)
-            VALUES ('cash',1000000,1000000,4,0,0,%s,'test',%s)
-            ON CONFLICT (market) DO UPDATE SET cash=1000000, margin_debt=0, updated_at=EXCLUDED.updated_at
-            """,
-            (datetime.now(timezone.utc).isoformat(), datetime.now(timezone.utc).isoformat()),
-        )
+        _reset_pg_execution_market(conn, "cash")
 
 
 def _execution_signal(symbol: str, price: float = 100.0, *, signal_id: str = "sig", forecast_id: str = "fc"):
@@ -560,6 +576,22 @@ def _insert_position(conn, symbol: str, quantity: float = 10, price: float = 100
             updated_at=EXCLUDED.updated_at
         """,
         (market, symbol, quantity, price, price, price, price, now, now),
+    )
+
+
+def _build_pg_risk_context(conn, symbol: str, price: float = 100.0):
+    portfolio = conn.execute("SELECT * FROM portfolios WHERE market='cash' FOR UPDATE").fetchone()
+    positions = conn.execute("SELECT * FROM positions WHERE market='cash' FOR UPDATE").fetchall()
+    return oracle_bot._build_execution_risk_context(
+        conn,
+        market="cash",
+        symbol=symbol,
+        side="BUY",
+        intent="entry",
+        order_value=100,
+        portfolio=portfolio,
+        positions=list(positions),
+        quote=_execution_quote(symbol, price),
     )
 
 
@@ -701,23 +733,54 @@ def test_postgres_execution_risk_context_calculates_pnl_and_turnover(monkeypatch
             "INSERT INTO trades (market,symbol,side,quantity,price,value,realized_pnl,score,reason,created_at) VALUES ('cash',%s,'SELL',1,110,110,30,NULL,'exit',%s)",
             (symbol, now),
         )
-        portfolio = conn.execute("SELECT * FROM portfolios WHERE market='cash' FOR UPDATE").fetchone()
-        positions = conn.execute("SELECT * FROM positions WHERE market='cash' FOR UPDATE").fetchall()
-        ctx = oracle_bot._build_execution_risk_context(
-            conn,
-            market="cash",
-            symbol=symbol,
-            side="BUY",
-            intent="entry",
-            order_value=100,
-            portfolio=portfolio,
-            positions=list(positions),
-            quote=_execution_quote(symbol, 100),
-        )
+        ctx = _build_pg_risk_context(conn, symbol, 100)
     assert ctx["daily_realized_pnl"] == pytest.approx(30)
     assert ctx["weekly_realized_pnl"] == pytest.approx(30)
     assert ctx["daily_unrealized_pnl"] == pytest.approx(20)
     assert ctx["turnover_pct_today"] > 0
+
+
+def test_postgres_execution_market_reset_isolates_risk_pnl(monkeypatch):
+    _pg_execution_setup(monkeypatch, ["LEAKOLD", "LEAKNEW"])
+    now = datetime.now(timezone.utc).isoformat()
+    with database.connect() as conn:
+        conn.execute(
+            "INSERT INTO trades (market,symbol,side,quantity,price,value,realized_pnl,score,reason,created_at) VALUES ('cash','LEAKOLD','SELL',1,75,75,75,NULL,'old-fixture',%s)",
+            (now,),
+        )
+        first = _build_pg_risk_context(conn, "LEAKOLD", 75)
+        assert first["daily_realized_pnl"] == pytest.approx(75)
+        _reset_pg_execution_market(conn, "cash")
+        conn.execute(
+            "INSERT INTO trades (market,symbol,side,quantity,price,value,realized_pnl,score,reason,created_at) VALUES ('cash','LEAKNEW','BUY',1,80,80,0,NULL,'entry',%s)",
+            (now,),
+        )
+        conn.execute(
+            "INSERT INTO trades (market,symbol,side,quantity,price,value,realized_pnl,score,reason,created_at) VALUES ('cash','LEAKNEW','SELL',1,110,110,30,NULL,'exit',%s)",
+            (now,),
+        )
+        second = _build_pg_risk_context(conn, "LEAKNEW", 100)
+    assert second["daily_realized_pnl"] == pytest.approx(30)
+    assert second["weekly_realized_pnl"] == pytest.approx(30)
+    assert second["turnover_pct_today"] == pytest.approx(190 / second["portfolio_equity"])
+
+
+def test_postgres_risk_context_remains_portfolio_wide(monkeypatch):
+    _pg_execution_setup(monkeypatch, ["WIDEA", "WIDEB"])
+    now = datetime.now(timezone.utc).isoformat()
+    with database.connect() as conn:
+        conn.execute(
+            "INSERT INTO trades (market,symbol,side,quantity,price,value,realized_pnl,score,reason,created_at) VALUES ('cash','WIDEA','SELL',1,120,120,20,NULL,'exit-a',%s)",
+            (now,),
+        )
+        conn.execute(
+            "INSERT INTO trades (market,symbol,side,quantity,price,value,realized_pnl,score,reason,created_at) VALUES ('cash','WIDEB','SELL',1,130,130,30,NULL,'exit-b',%s)",
+            (now,),
+        )
+        ctx = _build_pg_risk_context(conn, "WIDEB", 130)
+    assert ctx["daily_realized_pnl"] == pytest.approx(50)
+    assert ctx["weekly_realized_pnl"] == pytest.approx(50)
+    assert ctx["turnover_pct_today"] == pytest.approx(250 / ctx["portfolio_equity"])
 
 
 def test_advisory_lock_failure_blocks_execution_claim():
