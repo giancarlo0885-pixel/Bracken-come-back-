@@ -40,6 +40,24 @@ def _quote(symbol: str = "AAPL", price: float = 100.0) -> dict:
     }
 
 
+def _complete_entry_risk_metrics(**overrides):
+    values = {
+        "daily_loss_pct": 0.0,
+        "weekly_loss_pct": 0.0,
+        "spread_pct": 0.001,
+        "slippage_pct": 0.001,
+        "liquidity_value": 1_000_000,
+        "correlation_exposure_pct": 0.1,
+        "concentration_pct": 0.1,
+        "new_entries_today": 0,
+        "turnover_pct_today": 0.0,
+        "leverage_used": 0.0,
+        "margin_utilization_pct": 0.0,
+    }
+    values.update(overrides)
+    return values
+
+
 def test_advisor_recommendation_has_required_structure_and_warnings():
     rec = generate_recommendation(
         {
@@ -127,6 +145,7 @@ def test_enabled_switches_still_require_risk_checks():
         cash=10_000,
         quote=_quote(),
         switches=switches,
+        **_complete_entry_risk_metrics(concentration_pct=0.1),
     )
     assert result.approved is False
     assert "position size" in result.reason
@@ -431,7 +450,16 @@ def _execution_signal(symbol: str, price: float = 100.0, *, signal_id: str = "si
 
 def _execution_quote(symbol: str, price: float = 100.0) -> dict:
     quote = _quote(symbol, price)
-    quote.update({"source_identity": f"unit:{symbol}:quote", "liquidity_value": 1_000_000_000})
+    quote.update(
+        {
+            "source_identity": f"unit:{symbol}:quote",
+            "bid": price - 0.01,
+            "ask": price + 0.01,
+            "estimated_slippage_pct": 0.001,
+            "liquidity_value": 1_000_000_000,
+            "correlation_exposure_pct": 0.1,
+        }
+    )
     return quote
 
 
@@ -517,6 +545,181 @@ def test_postgres_execution_claim_rollback_allows_retry():
     assert ok is True
 
 
+def _insert_position(conn, symbol: str, quantity: float = 10, price: float = 100, market: str = "cash") -> None:
+    now = datetime.now(timezone.utc).isoformat()
+    conn.execute(
+        """
+        INSERT INTO positions (market,symbol,quantity,entry_price,average_price,current_price,highest_price,opened_at,updated_at)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+        ON CONFLICT (market, symbol) DO UPDATE
+        SET quantity=EXCLUDED.quantity,
+            entry_price=EXCLUDED.entry_price,
+            average_price=EXCLUDED.average_price,
+            current_price=EXCLUDED.current_price,
+            highest_price=EXCLUDED.highest_price,
+            updated_at=EXCLUDED.updated_at
+        """,
+        (market, symbol, quantity, price, price, price, price, now, now),
+    )
+
+
+def test_postgres_duplicate_rotation_concurrency(monkeypatch):
+    symbols = ["ROTATEOUT", "ROTATEIN"]
+    _pg_execution_setup(monkeypatch, symbols)
+    with database.connect() as conn:
+        _insert_position(conn, "ROTATEOUT", quantity=5, price=80)
+    outgoing_quote = _execution_quote("ROTATEOUT", 90)
+    incoming_quote = _execution_quote("ROTATEIN", 100)
+    rotation = {
+        "symbol": "ROTATEOUT",
+        "_verified_rotation_quote": outgoing_quote,
+        "_rotation_action": {
+            "symbol": "ROTATEOUT",
+            "reason": "continuous_rotation_to_ROTATEIN",
+        },
+    }
+    signal = _execution_signal("ROTATEIN", 100, signal_id="rotation-sig", forecast_id="rotation-fc")
+
+    def attempt():
+        return oracle_bot._buy(
+            "cash",
+            "ROTATEIN",
+            100,
+            signal,
+            rotation_candidate=rotation,
+            verified_quote=incoming_quote,
+            rotation_verified_quote=outgoing_quote,
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(lambda _: attempt(), range(2)))
+    with database.connect() as conn:
+        sells = conn.execute("SELECT * FROM trades WHERE symbol='ROTATEOUT' AND side='SELL'").fetchall()
+        buys = conn.execute("SELECT * FROM trades WHERE symbol='ROTATEIN' AND side='BUY'").fetchall()
+        out_position = conn.execute("SELECT * FROM positions WHERE symbol='ROTATEOUT'").fetchone()
+        in_position = conn.execute("SELECT * FROM positions WHERE symbol='ROTATEIN'").fetchone()
+    assert sum(1 for result in results if result[0]) == 1
+    assert len(sells) == 1
+    assert len(buys) == 1
+    assert out_position is None
+    assert in_position is not None
+
+
+def test_postgres_rotation_atomic_rollback_then_retry(monkeypatch):
+    symbols = ["ROLLROTOUT", "ROLLROTIN"]
+    _pg_execution_setup(monkeypatch, symbols)
+    with database.connect() as conn:
+        _insert_position(conn, "ROLLROTOUT", quantity=5, price=80)
+    outgoing_quote = _execution_quote("ROLLROTOUT", 90)
+    incoming_quote = _execution_quote("ROLLROTIN", 100)
+    rotation = {
+        "symbol": "ROLLROTOUT",
+        "_verified_rotation_quote": outgoing_quote,
+        "_rotation_action": {
+            "symbol": "ROLLROTOUT",
+            "reason": "continuous_rotation_to_ROLLROTIN",
+        },
+    }
+    signal = _execution_signal("ROLLROTIN", 100, signal_id="roll-rotation-sig", forecast_id="roll-rotation-fc")
+    original_complete = oracle_bot._complete_execution_claim
+    calls = {"count": 0}
+
+    def fail_after_rotation_sell(conn, execution_key):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise RuntimeError("simulate failure after outgoing sell")
+        return original_complete(conn, execution_key)
+
+    monkeypatch.setattr(oracle_bot, "_complete_execution_claim", fail_after_rotation_sell)
+    failed = oracle_bot._buy(
+        "cash",
+        "ROLLROTIN",
+        100,
+        signal,
+        rotation_candidate=rotation,
+        verified_quote=incoming_quote,
+        rotation_verified_quote=outgoing_quote,
+    )
+    with database.connect() as conn:
+        assert conn.execute("SELECT * FROM positions WHERE symbol='ROLLROTOUT'").fetchone() is not None
+        assert conn.execute("SELECT * FROM positions WHERE symbol='ROLLROTIN'").fetchone() is None
+        assert conn.execute("SELECT * FROM trades WHERE symbol IN ('ROLLROTOUT','ROLLROTIN')").fetchall() == []
+        assert conn.execute("SELECT * FROM execution_claims WHERE symbol IN ('ROLLROTOUT','ROLLROTIN') AND status='completed'").fetchall() == []
+    assert failed[0] is False
+
+    retry = oracle_bot._buy(
+        "cash",
+        "ROLLROTIN",
+        100,
+        signal,
+        rotation_candidate=rotation,
+        verified_quote=incoming_quote,
+        rotation_verified_quote=outgoing_quote,
+    )
+    with database.connect() as conn:
+        sells = conn.execute("SELECT * FROM trades WHERE symbol='ROLLROTOUT' AND side='SELL'").fetchall()
+        buys = conn.execute("SELECT * FROM trades WHERE symbol='ROLLROTIN' AND side='BUY'").fetchall()
+    assert retry[0] is True
+    assert len(sells) == 1
+    assert len(buys) == 1
+
+
+def test_postgres_shared_risk_rejection_rolls_no_portfolio_mutation(monkeypatch):
+    symbol = "RISKREJECT"
+    _pg_execution_setup(monkeypatch, [symbol])
+    signal = _execution_signal(symbol, 100, signal_id="risk-reject-sig", forecast_id="risk-reject-fc")
+    quote = _execution_quote(symbol, 100)
+    quote.pop("liquidity_value")
+    quote.pop("volume", None)
+    with database.connect() as conn:
+        before = conn.execute("SELECT cash, margin_debt FROM portfolios WHERE market='cash'").fetchone()
+    ok, reason, _ = oracle_bot._buy("cash", symbol, 100, signal, verified_quote=quote)
+    with database.connect() as conn:
+        after = conn.execute("SELECT cash, margin_debt FROM portfolios WHERE market='cash'").fetchone()
+        trades = conn.execute("SELECT * FROM trades WHERE symbol=%s", (symbol,)).fetchall()
+        position = conn.execute("SELECT * FROM positions WHERE symbol=%s", (symbol,)).fetchone()
+        completed = conn.execute("SELECT * FROM execution_claims WHERE symbol=%s AND status='completed'", (symbol,)).fetchall()
+    assert ok is False
+    assert "liquidity" in reason
+    assert dict(before) == dict(after)
+    assert trades == []
+    assert position is None
+    assert completed == []
+
+
+def test_postgres_execution_risk_context_calculates_pnl_and_turnover(monkeypatch):
+    symbol = "RISKCTX"
+    _pg_execution_setup(monkeypatch, [symbol])
+    now = datetime.now(timezone.utc).isoformat()
+    with database.connect() as conn:
+        _insert_position(conn, symbol, quantity=2, price=90)
+        conn.execute(
+            "INSERT INTO trades (market,symbol,side,quantity,price,value,realized_pnl,score,reason,created_at) VALUES ('cash',%s,'BUY',1,80,80,0,NULL,'entry',%s)",
+            (symbol, now),
+        )
+        conn.execute(
+            "INSERT INTO trades (market,symbol,side,quantity,price,value,realized_pnl,score,reason,created_at) VALUES ('cash',%s,'SELL',1,110,110,30,NULL,'exit',%s)",
+            (symbol, now),
+        )
+        portfolio = conn.execute("SELECT * FROM portfolios WHERE market='cash' FOR UPDATE").fetchone()
+        positions = conn.execute("SELECT * FROM positions WHERE market='cash' FOR UPDATE").fetchall()
+        ctx = oracle_bot._build_execution_risk_context(
+            conn,
+            market="cash",
+            symbol=symbol,
+            side="BUY",
+            intent="entry",
+            order_value=100,
+            portfolio=portfolio,
+            positions=list(positions),
+            quote=_execution_quote(symbol, 100),
+        )
+    assert ctx["daily_realized_pnl"] == pytest.approx(30)
+    assert ctx["weekly_realized_pnl"] == pytest.approx(30)
+    assert ctx["daily_unrealized_pnl"] == pytest.approx(20)
+    assert ctx["turnover_pct_today"] > 0
+
+
 def test_advisory_lock_failure_blocks_execution_claim():
     class FakeConn:
         def __init__(self):
@@ -554,11 +757,58 @@ def test_missing_or_nan_risk_metric_blocks_entry():
         portfolio_equity=10_000,
         cash=10_000,
         quote=_quote(),
-        liquidity_value=float("nan"),
         switches=switches,
+        **_complete_entry_risk_metrics(liquidity_value=float("nan")),
     )
     assert missing.allowed is False
     assert any("non-finite" in reason for reason in missing.reasons)
+
+
+@pytest.mark.parametrize(
+    ("metric", "reason"),
+    [
+        ("daily_loss_pct", "daily loss metric unavailable"),
+        ("spread_pct", "spread metric unavailable"),
+        ("liquidity_value", "liquidity value metric unavailable"),
+    ],
+)
+def test_missing_required_entry_metric_blocks_buy(metric, reason):
+    switches = ExecutionSwitches(autotrade=True, stock_autotrade=True, new_entries=True)
+    metrics = _complete_entry_risk_metrics()
+    metrics[metric] = None
+    result = pre_trade_risk_checks(
+        market="cash",
+        symbol="AAPL",
+        side="BUY",
+        intent="entry",
+        order_value=100,
+        portfolio_equity=10_000,
+        cash=10_000,
+        quote=_quote(),
+        switches=switches,
+        **metrics,
+    )
+    assert result.allowed is False
+    assert any(reason in item for item in result.reasons)
+
+
+@pytest.mark.parametrize("bad_value", [float("nan"), float("inf"), float("-inf"), ""])
+def test_non_finite_required_entry_metric_blocks_buy(bad_value):
+    switches = ExecutionSwitches(autotrade=True, stock_autotrade=True, new_entries=True)
+    result = pre_trade_risk_checks(
+        market="cash",
+        symbol="AAPL",
+        side="BUY",
+        intent="entry",
+        order_value=100,
+        portfolio_equity=10_000,
+        cash=10_000,
+        quote=_quote(),
+        switches=switches,
+        **_complete_entry_risk_metrics(spread_pct=bad_value),
+    )
+    assert result.allowed is False
+    assert any("spread metric unavailable or non-finite" in item for item in result.reasons)
 
 
 def test_forced_risk_reduction_sell_uses_dedicated_policy():
@@ -573,8 +823,39 @@ def test_forced_risk_reduction_sell_uses_dedicated_policy():
         cash=100,
         quote=_quote(),
         positions=[{"symbol": "AAPL"}],
+        daily_loss_pct=0.99,
+        weekly_loss_pct=0.99,
+        turnover_pct_today=9.0,
+        spread_pct=0.99,
+        slippage_pct=0.99,
         liquidity_value=1,
         concentration_pct=0.99,
+        correlation_exposure_pct=0.99,
+        leverage_used=1.0,
+        margin_utilization_pct=25.0,
         switches=switches,
     )
     assert result.allowed is True
+    assert result.warnings
+
+
+def test_normal_entry_blocked_under_forced_exit_risk_conditions():
+    switches = ExecutionSwitches(autotrade=True, stock_autotrade=True, new_entries=True)
+    result = pre_trade_risk_checks(
+        market="cash",
+        symbol="AAPL",
+        side="BUY",
+        intent="entry",
+        order_value=100,
+        portfolio_equity=10_000,
+        cash=10_000,
+        quote=_quote(),
+        switches=switches,
+        **_complete_entry_risk_metrics(
+            daily_loss_pct=0.99,
+            turnover_pct_today=9.0,
+            concentration_pct=0.99,
+        ),
+    )
+    assert result.allowed is False
+    assert "daily loss limit reached" in result.reasons

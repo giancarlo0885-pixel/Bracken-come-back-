@@ -678,42 +678,202 @@ def _risk_switches() -> ExecutionSwitches:
     )
 
 
-def _shared_risk_gate(
+def _finite_number(value: Any) -> float | None:
+    if value in (None, ""):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _quote_spread_pct(quote: dict[str, Any]) -> float | None:
+    explicit = _finite_number(quote.get("spread_pct"))
+    if explicit is not None:
+        return explicit
+    bid = _finite_number(quote.get("bid"))
+    ask = _finite_number(quote.get("ask"))
+    if bid is None or ask is None or bid <= 0 or ask <= 0 or ask < bid:
+        return None
+    midpoint = (bid + ask) / 2.0
+    return (ask - bid) / midpoint if midpoint > 0 else None
+
+
+def _quote_slippage_pct(quote: dict[str, Any]) -> float | None:
+    for key in ("slippage_pct", "estimated_slippage_pct"):
+        value = _finite_number(quote.get(key))
+        if value is not None:
+            return value
+    return None
+
+
+def _quote_liquidity_value(quote: dict[str, Any], price: float) -> float | None:
+    for key in ("liquidity_value", "dollar_volume", "avg_dollar_volume", "average_dollar_volume"):
+        value = _finite_number(quote.get(key))
+        if value is not None and value >= 0:
+            return value
+    volume = _finite_number(quote.get("volume"))
+    if volume is not None and volume >= 0 and price > 0:
+        return volume * price
+    return None
+
+
+def _period_start(days: int) -> str:
+    return (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+
+
+def _trade_sum(conn: Any, market: str, sql_expr: str, since: str, sides: tuple[str, ...] = ("BUY", "SELL")) -> float:
+    record = conn.execute(
+        f"""
+        SELECT COALESCE(SUM({sql_expr}), 0) AS total
+        FROM trades
+        WHERE market=%s
+          AND side = ANY(%s)
+          AND created_at >= %s
+        """,
+        (market, list(sides), since),
+    ).fetchone()
+    return safe_float(record.get("total") if record else 0.0)
+
+
+def _unrealized_pnl(positions: list[dict[str, Any]]) -> float:
+    total = 0.0
+    for position in positions:
+        quantity = safe_float(position.get("quantity"))
+        current = safe_float(position.get("current_price"))
+        average = safe_float(position.get("average_price"), safe_float(position.get("entry_price")))
+        if quantity > 0 and current > 0 and average > 0:
+            total += (current - average) * quantity
+    return total
+
+
+def _build_execution_risk_context(
+    conn: Any,
     *,
     market: str,
     symbol: str,
     side: str,
     intent: str,
     order_value: float,
-    account: Any,
+    portfolio: dict[str, Any],
+    positions: list[dict[str, Any]],
+    quote: dict[str, Any],
+    concentration_pct: float | None = None,
+) -> dict[str, Any]:
+    """Build finite risk inputs from the locked execution transaction."""
+    price = safe_float(quote.get("price"))
+    repriced = [dict(position) for position in positions]
+    quote_symbol = _normalized_symbol(symbol)
+    for position in repriced:
+        if _normalized_symbol(position.get("symbol")) == quote_symbol and price > 0:
+            position["current_price"] = price
+    account = build_account(market, portfolio, repriced)
+    today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+    week_start = _period_start(7)
+    daily_realized = _trade_sum(conn, market, "realized_pnl", today_start, ("SELL",))
+    weekly_realized = _trade_sum(conn, market, "realized_pnl", week_start, ("SELL",))
+    daily_unrealized = _unrealized_pnl(repriced)
+    weekly_unrealized = daily_unrealized
+    equity_basis = max(account.equity, safe_float(portfolio.get("starting_balance")), 0.0)
+    daily_loss_pct = None if equity_basis <= 0 else max(0.0, -(daily_realized + daily_unrealized) / equity_basis)
+    weekly_loss_pct = None if equity_basis <= 0 else max(0.0, -(weekly_realized + weekly_unrealized) / equity_basis)
+    new_entries_record = conn.execute(
+        """
+        SELECT COUNT(*) AS total
+        FROM trades
+        WHERE market=%s AND side='BUY' AND created_at >= %s
+        """,
+        (market, today_start),
+    ).fetchone()
+    new_entries_today = safe_float(new_entries_record.get("total") if new_entries_record else None, -1.0)
+    turnover_value = _trade_sum(conn, market, "value", today_start, ("BUY", "SELL"))
+    turnover_pct_today = None if account.equity <= 0 else turnover_value / account.equity
+    target_concentration = concentration_pct
+    if target_concentration is None:
+        existing_value = 0.0
+        for position in repriced:
+            if _normalized_symbol(position.get("symbol")) == quote_symbol:
+                existing_value += safe_float(position.get("quantity")) * safe_float(position.get("current_price"))
+        target_value = max(0.0, existing_value + (order_value if side.upper() == "BUY" else 0.0))
+        target_concentration = None if account.equity <= 0 else target_value / account.equity
+    return {
+        "account": account,
+        "positions": repriced,
+        "cash": account.cash,
+        "portfolio_equity": account.equity,
+        "buying_power": account.buying_power,
+        "gross_market_exposure": account.gross_exposure,
+        "margin_debt": account.margin_debt,
+        "leverage_used": account.leverage_used,
+        "margin_utilization_pct": account.margin_utilization_pct,
+        "open_position_count": len(repriced),
+        "target_position_concentration": target_concentration,
+        "daily_realized_pnl": daily_realized,
+        "daily_unrealized_pnl": daily_unrealized,
+        "daily_loss_pct": daily_loss_pct,
+        "weekly_realized_pnl": weekly_realized,
+        "weekly_unrealized_pnl": weekly_unrealized,
+        "weekly_loss_pct": weekly_loss_pct,
+        "new_entries_today": new_entries_today if new_entries_today >= 0 else None,
+        "turnover_pct_today": turnover_pct_today,
+        "correlation_exposure_pct": _finite_number(quote.get("correlation_exposure_pct")),
+        "spread_pct": _quote_spread_pct(quote),
+        "slippage_pct": _quote_slippage_pct(quote),
+        "liquidity_value": _quote_liquidity_value(quote, price),
+        "sector_exposure_pct": _finite_number(quote.get("sector_exposure_pct")),
+    }
+
+
+def _shared_risk_gate(
+    *,
+    conn: Any,
+    market: str,
+    symbol: str,
+    side: str,
+    intent: str,
+    order_value: float,
+    portfolio: dict[str, Any],
     quote: dict[str, Any],
     positions: list[dict[str, Any]],
-    liquidity_value: float,
-    concentration_pct: float,
+    concentration_pct: float | None = None,
 ) -> tuple[bool, str, Any]:
+    risk_context = _build_execution_risk_context(
+        conn,
+        market=market,
+        symbol=symbol,
+        side=side,
+        intent=intent,
+        order_value=order_value,
+        portfolio=portfolio,
+        positions=positions,
+        quote=quote,
+        concentration_pct=concentration_pct,
+    )
     result = pre_trade_risk_checks(
         market=market,
         symbol=symbol,
         side=side,
         intent=intent,
         order_value=order_value,
-        portfolio_equity=safe_float(getattr(account, "equity", None)),
-        cash=safe_float(getattr(account, "cash", None)),
+        portfolio_equity=risk_context["portfolio_equity"],
+        cash=risk_context["cash"],
         quote=quote,
         positions=positions,
-        daily_loss_pct=0.0,
-        weekly_loss_pct=0.0,
-        spread_pct=0.0,
-        slippage_pct=0.0,
-        liquidity_value=liquidity_value,
-        correlation_exposure_pct=0.0,
-        concentration_pct=concentration_pct,
-        new_entries_today=0,
-        turnover_pct_today=0.0,
-        leverage_used=safe_float(getattr(account, "leverage_used", 0.0)),
-        margin_utilization_pct=safe_float(getattr(account, "margin_utilization_pct", 0.0)),
+        daily_loss_pct=risk_context["daily_loss_pct"],
+        weekly_loss_pct=risk_context["weekly_loss_pct"],
+        spread_pct=risk_context["spread_pct"],
+        slippage_pct=risk_context["slippage_pct"],
+        liquidity_value=risk_context["liquidity_value"],
+        correlation_exposure_pct=risk_context["correlation_exposure_pct"],
+        concentration_pct=risk_context["target_position_concentration"],
+        new_entries_today=risk_context["new_entries_today"],
+        turnover_pct_today=risk_context["turnover_pct_today"],
+        leverage_used=risk_context["leverage_used"],
+        margin_utilization_pct=risk_context["margin_utilization_pct"],
         switches=_risk_switches(),
     )
+    result.metrics.update({key: value for key, value in risk_context.items() if isinstance(value, (int, float))})
     if not result.allowed:
         return False, "; ".join(result.reasons) or result.reason, result
     return True, "shared risk approved", result
@@ -1238,15 +1398,15 @@ def _execute_close_position(
                 else "exit"
             )
             risk_ok, risk_reason, _ = _shared_risk_gate(
+                conn=conn,
                 market=market,
                 symbol=symbol,
                 side="SELL",
                 intent=risk_intent,
                 order_value=value,
-                account=account,
+                portfolio=portfolio,
                 quote=quote_metadata or {},
                 positions=[position],
-                liquidity_value=max(value * 100.0, 1.0),
                 concentration_pct=0.0,
             )
             if not risk_ok:
@@ -1920,17 +2080,16 @@ def _buy(
                 if not rotation_claimed:
                     return False, f"rotation outgoing duplicate rejected: {rotation_claim_reason}", None
                 sale_value = quantity_to_sell * exit_price
-                outgoing_account = build_account(market, execution_portfolio, active_positions)
                 outgoing_risk_ok, outgoing_risk_reason, _ = _shared_risk_gate(
+                    conn=conn,
                     market=market,
                     symbol=rotation_symbol,
                     side="SELL",
-                    intent="rotation",
+                    intent="rotation_out",
                     order_value=sale_value,
-                    account=outgoing_account,
+                    portfolio=execution_portfolio,
                     quote=outgoing_quote,
                     positions=active_positions,
-                    liquidity_value=max(sale_value * 100.0, 1.0),
                     concentration_pct=0.0,
                 )
                 if not outgoing_risk_ok:
@@ -1977,20 +2136,16 @@ def _buy(
                         None,
                     )
 
-            quote_liquidity = safe_float((verified_quote or {}).get("liquidity_value"))
-            if quote_liquidity <= 0:
-                quote_volume = safe_float((verified_quote or {}).get("volume"))
-                quote_liquidity = quote_volume * price if quote_volume > 0 else average_dollar_volume
             risk_ok, risk_reason, _ = _shared_risk_gate(
+                conn=conn,
                 market=market,
                 symbol=symbol,
                 side="BUY",
-                intent="rotation" if rotation_candidate else "entry",
+                intent="rotation_in" if rotation_candidate else "entry",
                 order_value=trade_value,
-                account=account,
+                portfolio=execution_portfolio,
                 quote=verified_quote or {},
                 positions=active_positions,
-                liquidity_value=quote_liquidity,
                 concentration_pct=(trade_value / account.equity) if account.equity else 1.0,
             )
             if not risk_ok:

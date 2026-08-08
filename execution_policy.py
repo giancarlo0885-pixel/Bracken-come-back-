@@ -9,7 +9,7 @@ import config
 ENTRY_INTENTS = {"entry", "buy", "new_entry", "new position"}
 EXIT_INTENTS = {"exit", "sell", "automated_exit", "stop_loss", "take_profit", "trailing_stop"}
 FORCED_EXIT_INTENTS = {"forced_risk_reduction", "margin_reduction", "risk_reduction"}
-ROTATION_INTENTS = {"rotation", "portfolio_rotation"}
+ROTATION_INTENTS = {"rotation", "portfolio_rotation", "rotation_in", "rotation_out"}
 BROKER_INTENTS = {"broker", "broker_submission", "submission"}
 SUPPORTED_MARKETS = {"cash", "stock", "crypto"}
 

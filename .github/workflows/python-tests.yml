@@ -76,3 +76,10 @@ jobs:
           test_v36_advisor_foundation.py::test_postgres_duplicate_buy_concurrency
           test_v36_advisor_foundation.py::test_postgres_duplicate_sell_concurrency
           test_v36_advisor_foundation.py::test_postgres_execution_claim_rollback_allows_retry
+          test_v36_advisor_foundation.py::test_postgres_duplicate_rotation_concurrency
+          test_v36_advisor_foundation.py::test_postgres_rotation_atomic_rollback_then_retry
+          test_v36_advisor_foundation.py::test_postgres_shared_risk_rejection_rolls_no_portfolio_mutation
+          test_v36_advisor_foundation.py::test_forced_risk_reduction_sell_uses_dedicated_policy
+          test_v36_advisor_foundation.py::test_postgres_execution_risk_context_calculates_pnl_and_turnover
+          test_v36_advisor_foundation.py::test_missing_required_entry_metric_blocks_buy
+          test_v36_advisor_foundation.py::test_non_finite_required_entry_metric_blocks_buy

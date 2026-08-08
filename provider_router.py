@@ -35,8 +35,10 @@ _symbol_cooldowns: dict[str, float] = {}
 _failure_summary: dict[tuple[str, str], set[str]] = defaultdict(set)
 _last_failure_log = 0.0
 FAILURE_LOG_INTERVAL_SECONDS = 300
-EODHD_US_EXCHANGES = {"US", "NYSE", "NASDAQ", "NYSE ARCA", "AMEX", "BATS"}
-EODHD_EQUITY_TYPES = {"common stock", "stock", "preferred stock", "etf", "fund"}
+EODHD_US_EXCHANGES = {"US", "NYSE", "NASDAQ", "NYSE ARCA", "NYSEARCA", "AMEX", "BATS"}
+EODHD_STOCK_TYPES = {"common stock", "common share", "stock", "preferred stock", "preferred share"}
+EODHD_ETF_TYPES = {"etf", "fund", "mutual fund"}
+EODHD_EQUITY_TYPES = EODHD_STOCK_TYPES | EODHD_ETF_TYPES
 
 
 @dataclass
@@ -378,9 +380,9 @@ def _load_eodhd_exchange_symbols(exchange: str, key: str) -> list[dict[str, Any]
 
 def _eodhd_symbol_mapping(symbol: str, key: str) -> dict[str, Any] | None:
     requested = normalize_symbol(symbol)
-    if not requested or ("." in requested and not requested.endswith(".US")):
+    if not requested or "." in requested:
         return None
-    requested_code = requested[:-3] if requested.endswith(".US") else requested
+    requested_code = requested
     records = cached_call(
         "eodhd_exchange_symbols_US",
         API_CACHE_TTL_SECONDS * 12,
@@ -390,20 +392,27 @@ def _eodhd_symbol_mapping(symbol: str, key: str) -> dict[str, Any] | None:
     )
     for record in records:
         code = normalize_symbol(record.get("Code") or record.get("code") or record.get("symbol"))
-        provider_code = normalize_symbol(record.get("ProviderCode") or record.get("provider_code") or f"{code}.US")
-        exchange = normalize_symbol(record.get("Exchange") or record.get("exchange") or record.get("ExchangeCode") or "US")
+        provider_code = normalize_symbol(record.get("ProviderCode") or record.get("provider_code"))
+        exchange = normalize_symbol(record.get("Exchange") or record.get("exchange") or record.get("ExchangeCode"))
         instrument_type = str(record.get("Type") or record.get("type") or "").strip().lower()
+        if not code or not provider_code or not exchange or not instrument_type:
+            continue
         if code != requested_code:
             continue
-        if provider_code not in {requested_code, f"{requested_code}.US"}:
+        if provider_code != f"{requested_code}.US":
             return None
         if exchange not in EODHD_US_EXCHANGES:
             return None
-        if instrument_type and instrument_type not in EODHD_EQUITY_TYPES:
+        if instrument_type not in EODHD_EQUITY_TYPES:
+            return None
+        asset_class = infer_asset_class(requested_code)
+        if instrument_type in EODHD_ETF_TYPES and asset_class != "etf":
+            return None
+        if instrument_type in EODHD_STOCK_TYPES and asset_class == "etf":
             return None
         return {
             "requested_symbol": requested_code,
-            "provider_code": provider_code if provider_code.endswith(".US") else f"{provider_code}.US",
+            "provider_code": provider_code,
             "exchange": exchange,
             "instrument_type": instrument_type,
         }

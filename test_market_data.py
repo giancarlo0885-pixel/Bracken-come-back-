@@ -284,11 +284,31 @@ def test_eodhd_daily_dates_retain_original_session_date(monkeypatch):
 
 
 def test_eodhd_verified_us_mapping(monkeypatch):
-    records = [{"Code": "AAPL", "Exchange": "NASDAQ", "Type": "Common Stock"}]
+    records = [{"Code": "AAPL", "ProviderCode": "AAPL.US", "Exchange": "NASDAQ", "Type": "Common Stock"}]
     monkeypatch.setattr(provider_router, "cached_call", lambda *args, **kwargs: records)
     mapping = provider_router._eodhd_symbol_mapping("AAPL", "key")
     assert mapping["provider_code"] == "AAPL.US"
     assert mapping["exchange"] == "NASDAQ"
+
+
+def test_eodhd_verified_etf_mapping(monkeypatch):
+    records = [{"Code": "SPY", "ProviderCode": "SPY.US", "Exchange": "NYSE ARCA", "Type": "ETF"}]
+    monkeypatch.setattr(provider_router, "cached_call", lambda *args, **kwargs: records)
+    mapping = provider_router._eodhd_symbol_mapping("SPY", "key")
+    assert mapping["provider_code"] == "SPY.US"
+    assert mapping["instrument_type"] == "etf"
+
+
+def test_eodhd_missing_exchange_rejected(monkeypatch):
+    records = [{"Code": "AAPL", "ProviderCode": "AAPL.US", "Type": "Common Stock"}]
+    monkeypatch.setattr(provider_router, "cached_call", lambda *args, **kwargs: records)
+    assert provider_router._eodhd_symbol_mapping("AAPL", "key") is None
+
+
+def test_eodhd_missing_type_rejected(monkeypatch):
+    records = [{"Code": "AAPL", "ProviderCode": "AAPL.US", "Exchange": "NASDAQ"}]
+    monkeypatch.setattr(provider_router, "cached_call", lambda *args, **kwargs: records)
+    assert provider_router._eodhd_symbol_mapping("AAPL", "key") is None
 
 
 def test_eodhd_missing_mapping_rejected(monkeypatch):
@@ -304,6 +324,12 @@ def test_eodhd_mismatched_provider_code_rejected(monkeypatch):
 
 def test_eodhd_mismatched_exchange_rejected(monkeypatch):
     records = [{"Code": "AAPL", "ProviderCode": "AAPL.US", "Exchange": "LSE", "Type": "Common Stock"}]
+    monkeypatch.setattr(provider_router, "cached_call", lambda *args, **kwargs: records)
+    assert provider_router._eodhd_symbol_mapping("AAPL", "key") is None
+
+
+def test_eodhd_unsupported_type_rejected(monkeypatch):
+    records = [{"Code": "AAPL", "ProviderCode": "AAPL.US", "Exchange": "NASDAQ", "Type": "Bond"}]
     monkeypatch.setattr(provider_router, "cached_call", lambda *args, **kwargs: records)
     assert provider_router._eodhd_symbol_mapping("AAPL", "key") is None
 
