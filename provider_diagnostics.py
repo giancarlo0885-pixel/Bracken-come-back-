@@ -8,6 +8,7 @@ from typing import Any
 
 import requests
 
+from alpha_vantage_provider import health_probe as alpha_vantage_health_probe
 from api_manager import KEY_NAMES, resolve_api_key
 from provider_capabilities import diagnostics as capability_diagnostics
 
@@ -21,6 +22,11 @@ class ProviderDiagnostic:
     capability: str
     message: str
     checked_at: str
+    last_success: str | None = None
+    last_error: str | None = None
+    cooldown: str | None = None
+    mode: str | None = None
+    requests: int | None = None
 
 
 _CACHE_LOCK = threading.Lock()
@@ -33,7 +39,20 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _result(name: str, configured: bool, status: str, message: str, *, latency: float | None = None, capability: str = "unknown") -> ProviderDiagnostic:
+def _result(
+    name: str,
+    configured: bool,
+    status: str,
+    message: str,
+    *,
+    latency: float | None = None,
+    capability: str = "unknown",
+    last_success: str | None = None,
+    last_error: str | None = None,
+    cooldown: str | None = None,
+    mode: str | None = None,
+    requests: int | None = None,
+) -> ProviderDiagnostic:
     return ProviderDiagnostic(
         provider=name,
         configured=configured,
@@ -42,6 +61,11 @@ def _result(name: str, configured: bool, status: str, message: str, *, latency: 
         capability=capability,
         message=message[:260],
         checked_at=_now(),
+        last_success=last_success,
+        last_error=last_error,
+        cooldown=cooldown,
+        mode=mode,
+        requests=requests,
     )
 
 
@@ -102,7 +126,21 @@ def _probe(name: str, key: str) -> ProviderDiagnostic:
     if name == "EODHD_API_KEY":
         return _request(name, "https://eodhd.com/api/real-time/AAPL.US", params={"api_token": key, "fmt": "json"})
     if name == "ALPHA_VANTAGE_API_KEY":
-        return _request(name, "https://www.alphavantage.co/query", params={"function": "GLOBAL_QUOTE", "symbol": "IBM", "apikey": key})
+        health = alpha_vantage_health_probe()
+        status = "healthy" if health.status == "connected" else health.status
+        capability = "delayed" if health.status == "connected" else "limited" if health.status in {"cooldown", "rate_limited"} else "degraded"
+        return _result(
+            "Alpha Vantage",
+            True,
+            status,
+            "Alpha Vantage connected. Entitlement is treated as Historical / EOD / Delayed unless a verified realtime quote is supplied.",
+            capability=capability,
+            last_success=health.last_success,
+            last_error=health.last_error,
+            cooldown=health.cooldown,
+            mode=health.mode,
+            requests=health.requests,
+        )
     if name == "FRED_API_KEY":
         return _request(name, "https://api.stlouisfed.org/fred/series", params={"series_id": "GDP", "api_key": key, "file_type": "json"})
     if name == "NASDAQ_DATA_LINK_API_KEY":

@@ -17,6 +17,7 @@ from typing import Any
 import pandas as pd
 import requests
 
+from alpha_vantage_provider import symbol_search as alpha_symbol_search
 from cache import cached_call
 from config import API_CACHE_TTL_SECONDS
 from config import (
@@ -51,6 +52,7 @@ from market_sessions import (
 )
 
 log = logging.getLogger("global-market-scanner")
+_ORIGINAL_GET_LIVE_SNAPSHOT = get_live_snapshot
 
 EODHD_API_KEY = os.getenv("EODHD_API_KEY", "").strip()
 GLOBAL_SCANNER_ENABLED = os.getenv("GLOBAL_SCANNER_ENABLED", "true").lower() == "true"
@@ -59,6 +61,11 @@ GLOBAL_ACTIVE_CANDIDATES = max(5, int(os.getenv("GLOBAL_ACTIVE_CANDIDATES", "20"
 GLOBAL_MIN_PRICE = float(os.getenv("GLOBAL_MIN_PRICE", "1.00"))
 GLOBAL_MIN_AVG_DOLLAR_VOLUME = float(os.getenv("GLOBAL_MIN_AVG_DOLLAR_VOLUME", "5000000"))
 GLOBAL_UNIVERSE_TTL_SECONDS = max(3600, int(os.getenv("GLOBAL_UNIVERSE_TTL_SECONDS", "86400")))
+ALPHA_VANTAGE_DISCOVERY_KEYWORDS = [
+    item.strip()
+    for item in os.getenv("ALPHA_VANTAGE_DISCOVERY_KEYWORDS", "Apple,Microsoft,Nvidia,Shell,Toyota,ETF").split(",")
+    if item.strip()
+][:12]
 CORE_STOCKS = {
     "GOOGL": ("Alphabet Class A", "United States", "mega_cap_core"),
     "GOOG": ("Alphabet Class C", "United States", "mega_cap_core"),
@@ -285,6 +292,31 @@ def _load_universe() -> list[dict[str, str]]:
                     "exchange": QUALIFIED_PENNY_EXCHANGES.get(symbol, "US"),
                     "region": "United States",
                     "sector": category,
+                })
+        for keyword in ALPHA_VANTAGE_DISCOVERY_KEYWORDS:
+            try:
+                matches = cached_call(
+                    f"alpha_vantage_symbol_search_{keyword.lower()}",
+                    GLOBAL_UNIVERSE_TTL_SECONDS,
+                    alpha_symbol_search,
+                    keyword,
+                )
+            except Exception as exc:
+                log.debug("Alpha Vantage symbol search unavailable for %s: %s", keyword, _redact_url(str(exc)))
+                continue
+            for item in matches[:15]:
+                symbol = normalize_symbol(item.get("symbol"))
+                if not symbol or len(symbol) > 24:
+                    continue
+                universe.setdefault(symbol, {
+                    "symbol": symbol,
+                    "name": str(item.get("name") or symbol),
+                    "exchange": str(item.get("region") or "Unknown"),
+                    "region": str(item.get("region") or "Unknown"),
+                    "sector": str(item.get("type") or "Alpha Vantage discovery"),
+                    "currency": str(item.get("currency") or ""),
+                    "timezone": str(item.get("timezone") or ""),
+                    "discovery_source": "alpha_vantage_symbol_search",
                 })
     # Pull a bounded, liquid-looking common-stock universe from each configured exchange.
     for exchange, meta in EXCHANGES.items():
@@ -607,6 +639,8 @@ def _alpha_vantage_movers(key: str) -> list[dict[str, str]]:
     response.raise_for_status()
     payload = response.json()
     out: list[dict[str, str]] = []
+    if not isinstance(payload, dict) or "Note" in payload or "Information" in payload:
+        raise RuntimeError("Alpha Vantage mover capability limited")
     for field, mover_type in (("top_gainers", "major_gainer"), ("top_losers", "major_loser"), ("most_actively_traded", "unusual_volume")):
         for item in payload.get(field, [])[:25]:
             symbol = item.get("ticker")
@@ -623,6 +657,7 @@ def _alpha_vantage_movers(key: str) -> list[dict[str, str]]:
                     quote_provider="alpha_vantage_top_gainers_losers",
                     provider_fetched_at=_now_iso(),
                     quote_verified=False,
+                    provider_metadata={"alpha_vantage": item},
                 ))
     return out
 
@@ -766,11 +801,8 @@ def _candidate_metrics(meta: dict[str, str], now: datetime | None = None) -> Glo
     )
     historical_bar_timestamp = history_bar.timestamp.isoformat() if history_bar else ""
     historical_bar_date = history_bar.session_date.isoformat() if history_bar else ""
-    current_quote = (
-        _current_quote_from_meta(meta, now)
-        or _current_quote_from_intraday(meta, now)
-        or _current_quote_from_history(meta, hist, now)
-    )
+    intraday_quote = _current_quote_from_intraday(meta, now) if route or get_live_snapshot is not _ORIGINAL_GET_LIVE_SNAPSHOT else None
+    current_quote = _current_quote_from_meta(meta, now) or intraday_quote or _current_quote_from_history(meta, hist, now)
     if current_quote is None:
         return None
     history_is_current = completed_daily_bar_is_fresh(

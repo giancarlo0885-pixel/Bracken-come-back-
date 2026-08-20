@@ -604,7 +604,6 @@ def route_history(
             ("Polygon", "POLYGON_API_KEY", _polygon),
             ("Finnhub", "FINNHUB_API_KEY", _finnhub),
             ("EODHD", "EODHD_API_KEY", _eodhd),
-            ("Alpha Vantage", "ALPHA_VANTAGE_API_KEY", _alpha),
         ]
     elif intraday:
         routes = [
