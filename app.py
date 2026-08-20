@@ -15,7 +15,7 @@ from config import (
     PAPER_BROKER_MODE, UI_AUTO_REFRESH, UI_REFRESH_SECONDS,
 )
 from dashboard_helpers import as_float, format_asset_price, worker_is_online
-from database import initialize_database, row, rows
+from database import bootstrap_database_with_lock, database_ready, database_storage_report, row, rows
 from earnings_calendar import mobile_card_lines, prepare_events, table_rows
 from market_data import get_history
 from migrations import run_migrations
@@ -62,8 +62,7 @@ html{font-size:17px}.stApp{background:var(--bg);color:var(--text)}.block-contain
 
 @st.cache_resource
 def bootstrap() -> list[str]:
-    initialize_database()
-    return run_migrations()
+    return bootstrap_database_with_lock(run_migrations)
 
 
 def safe_rows(query: str, params: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
@@ -289,10 +288,30 @@ def portfolio_table(positions: list[dict[str, Any]]) -> pd.DataFrame:
     return pd.DataFrame(data)
 
 
+bootstrap_failed = False
 try:
     bootstrap()
 except RuntimeError as exc:
-    st.warning(str(exc))
+    bootstrap_failed = True
+    st.error("Database temporarily unavailable")
+    st.info("GARIBALDI MARKET ORACLE is waiting for PostgreSQL to recover. Trading execution remains disabled.")
+    st.caption(str(exc).replace("postgresql://", "[database-url-redacted]"))
+    if st.button("Retry database connection"):
+        bootstrap.clear()
+        st.rerun()
+    st.stop()
+except Exception as exc:
+    health = database_ready()
+    if not health.get("ok"):
+        bootstrap_failed = True
+        st.error("Database temporarily unavailable")
+        st.info("GARIBALDI MARKET ORACLE is waiting for PostgreSQL to recover. Trading execution remains disabled.")
+        st.caption(str(health.get("message") or "Database connection failed"))
+        if st.button("Retry database connection"):
+            bootstrap.clear()
+            st.rerun()
+        st.stop()
+    raise
 stock_portfolio, stock_positions, stock_metrics = get_portfolio("cash")
 crypto_portfolio, crypto_positions, crypto_metrics = get_portfolio("crypto")
 all_positions = stock_positions + crypto_positions
@@ -507,6 +526,32 @@ if page == "Dashboard":
     with advisor_tabs[10]:
         st.caption("Execution switches default to disabled. Railway variables must be intentionally changed before any paper automation can run.")
         st.write(f"OpenAI enabled: {'Yes' if openai_available() else 'No'}")
+
+        try:
+            storage = database_storage_report()
+            st.markdown("### Database storage status")
+            st.write(f"Database size: {storage.get('database_size')} ? status: {storage.get('status')}")
+            if storage.get("used_pct") is not None:
+                st.progress(min(1.0, float(storage["used_pct"]) / 100.0), text=f"{storage['used_pct']:.1f}% of configured database volume")
+            else:
+                st.caption("Database volume capacity is not configured; set DATABASE_VOLUME_CAPACITY_GB later to enable percentage warnings.")
+            table_rows_view = [
+                {
+                    "Table": item.get("table"),
+                    "Total": item.get("total_size"),
+                    "Data": item.get("table_size"),
+                    "Indexes": item.get("index_size"),
+                    "Live rows": item.get("live_rows"),
+                    "Dead rows": item.get("dead_rows"),
+                    "Last autovacuum": item.get("last_autovacuum"),
+                    "Last autoanalyze": item.get("last_autoanalyze"),
+                }
+                for item in storage.get("largest_tables", [])
+            ]
+            st.dataframe(pd.DataFrame(table_rows_view), width="stretch", hide_index=True) if table_rows_view else st.info("No table size records are available yet.")
+            st.caption("Retention is conservative and never auto-deletes canonical financial, governance, migration, or execution history.")
+        except Exception as exc:
+            st.warning(f"Database storage diagnostics unavailable: {exc}")
         if st.button("Test OpenAI Connection"):
             result = test_openai_connection()
             st.write(f"API key configured: {'Yes' if result.get('api_key_configured') else 'No'}")
