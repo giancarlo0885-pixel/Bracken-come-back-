@@ -6,6 +6,7 @@ on:
     branches:
       - main
       - "v36-*"
+      - "v37-*"
 
 jobs:
   test:
@@ -85,3 +86,6 @@ jobs:
           test_v36_advisor_foundation.py::test_postgres_risk_context_remains_portfolio_wide
           test_v36_advisor_foundation.py::test_missing_required_entry_metric_blocks_buy
           test_v36_advisor_foundation.py::test_non_finite_required_entry_metric_blocks_buy
+          test_v37_db_resilience_storage.py::test_postgres_storage_report_and_retention_protects_canonical_tables
+          test_v37_db_resilience_storage.py::test_postgres_maintenance_advisory_lock_allows_one_runner
+          test_v37_db_resilience_storage.py::test_postgres_bootstrap_advisory_lock_runs_migrations_once

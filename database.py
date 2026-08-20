@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import json
 import os
+import random
+import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 
 try:
     import psycopg
@@ -18,6 +20,8 @@ except ImportError:  # Allows analysis/test imports before deployment dependenci
 from config import (
     CRYPTO_PAPER_LEVERAGE,
     CRYPTO_STARTING_BALANCE,
+    DATABASE_RETENTION_BATCH_SIZE,
+    DATABASE_VOLUME_CAPACITY_GB,
     PAPER_BROKER_PROFILE,
     STOCK_PAPER_LEVERAGE,
     STOCK_STARTING_BALANCE,
@@ -68,6 +72,155 @@ def connect() -> Iterator[Connection]:
 
     finally:
         conn.close()
+
+
+TRANSIENT_DATABASE_ERROR_TEXT = (
+    "database system is in recovery mode",
+    "database system is not yet accepting connections",
+    "connection reset",
+    "server closed the connection unexpectedly",
+    "unexpected eof",
+    "connection refused",
+    "could not connect",
+    "temporary failure in name resolution",
+    "name or service not known",
+    "no route to host",
+    "timeout expired",
+    "operation timed out",
+)
+DATABASE_BOOTSTRAP_LOCK_NAME = "garibaldi_database_bootstrap_v37"
+DATABASE_MAINTENANCE_LOCK_NAME = "garibaldi_database_maintenance_v37"
+CANONICAL_PROTECTED_TABLES = {
+    "portfolios",
+    "positions",
+    "trades",
+    "execution_claims",
+    "schema_migrations",
+    "model_registry",
+    "model_registry_events",
+    "paper_data_audit",
+}
+DATABASE_RETENTION_POLICIES = {
+    "signals": {"keep_rows": 6000, "batch_size": DATABASE_RETENTION_BATCH_SIZE, "classification": "append-only analytical/ephemeral"},
+    "forecasts": {"keep_rows": 3000, "batch_size": DATABASE_RETENTION_BATCH_SIZE, "classification": "append-only analytical/ephemeral"},
+    "equity_snapshots": {"keep_rows": 15000, "batch_size": DATABASE_RETENTION_BATCH_SIZE, "classification": "append-only analytical/ephemeral"},
+    "alerts": {"keep_rows": 3000, "batch_size": DATABASE_RETENTION_BATCH_SIZE, "classification": "append-only analytical/ephemeral"},
+    "intelligence_events": {"keep_rows": 5000, "batch_size": DATABASE_RETENTION_BATCH_SIZE, "classification": "append-only analytical/ephemeral"},
+}
+DATABASE_TABLE_GROWTH_AUDIT = {
+    "portfolios": {"class": "canonical financial records", "inserted_by": "initialize_database/portfolio bootstrap", "frequency": "one row per market", "retention": "never auto-delete"},
+    "positions": {"class": "canonical financial records", "inserted_by": "oracle_bot buy execution", "frequency": "one row per open position", "retention": "never auto-delete"},
+    "trades": {"class": "canonical financial records", "inserted_by": "oracle_bot buy/sell execution", "frequency": "one row per completed paper trade", "retention": "never auto-delete"},
+    "execution_claims": {"class": "governance/audit records", "inserted_by": "oracle_bot execution idempotency", "frequency": "one per execution attempt", "retention": "never auto-delete"},
+    "signals": {"class": "append-only analytical/ephemeral records", "inserted_by": "market_worker save_json_signal", "frequency": "scan candidates", "retention": "keep newest 6000 rows"},
+    "forecasts": {"class": "append-only analytical/ephemeral records", "inserted_by": "market_worker save_forecast", "frequency": "scan candidates", "retention": "keep newest 3000 rows"},
+    "equity_snapshots": {"class": "append-only analytical/ephemeral records", "inserted_by": "oracle_bot snapshot", "frequency": "worker pulse/scan", "retention": "keep newest 15000 rows"},
+    "alerts": {"class": "append-only analytical/ephemeral records", "inserted_by": "database save_alert", "frequency": "notable system/market events", "retention": "keep newest 3000 rows"},
+    "intelligence_events": {"class": "append-only analytical/ephemeral records", "inserted_by": "market intelligence collection", "frequency": "stock intelligence refresh", "retention": "keep newest 5000 rows"},
+    "opportunity_rankings": {"class": "append-only analytical/ephemeral records", "inserted_by": "market_worker rank persistence", "frequency": "scan candidates", "retention": "recommended conservative row/age policy after usage review"},
+    "forecast_validation": {"class": "governance/audit records", "inserted_by": "forecast quality validation", "frequency": "realized forecast outcomes", "retention": "preserve until archive strategy exists"},
+    "recommendations": {"class": "append-only analytical/ephemeral records", "inserted_by": "advisor recommendations", "frequency": "advisor generation", "retention": "recommended conservative row/age policy after usage review"},
+    "recommendation_evidence": {"class": "append-only analytical/ephemeral records", "inserted_by": "advisor evidence persistence", "frequency": "per recommendation", "retention": "recommended conservative row/age policy after usage review"},
+    "strategy_signals": {"class": "append-only analytical/ephemeral records", "inserted_by": "strategy engine", "frequency": "strategy evaluation", "retention": "recommended conservative row/age policy after usage review"},
+    "forecast_results": {"class": "append-only analytical/ephemeral records", "inserted_by": "forecasting registry", "frequency": "forecast generation", "retention": "recommended conservative row/age policy after usage review"},
+    "model_performance": {"class": "governance/audit records", "inserted_by": "model performance tracking", "frequency": "validation rollups", "retention": "preserve until archive strategy exists"},
+    "quote_verifications": {"class": "append-only analytical/ephemeral records", "inserted_by": "provider quote verification", "frequency": "quote validation", "retention": "recommended conservative row/age policy after usage review"},
+    "order_events": {"class": "governance/audit records", "inserted_by": "order proposal lifecycle", "frequency": "operator/order events", "retention": "preserve until archive strategy exists"},
+    "shadow_orders": {"class": "append-only analytical/ephemeral records", "inserted_by": "shadow trading", "frequency": "shadow proposals", "retention": "recommended conservative row/age policy after usage review"},
+    "shadow_fills": {"class": "append-only analytical/ephemeral records", "inserted_by": "shadow trading", "frequency": "shadow fills", "retention": "recommended conservative row/age policy after usage review"},
+    "strategy_performance": {"class": "append-only analytical/ephemeral records", "inserted_by": "strategy scoring", "frequency": "performance rollups", "retention": "recommended conservative row/age policy after usage review"},
+    "trade_audits": {"class": "governance/audit records", "inserted_by": "trade audit", "frequency": "audit events", "retention": "preserve until archive strategy exists"},
+    "position_audits": {"class": "governance/audit records", "inserted_by": "position audit", "frequency": "audit events", "retention": "preserve until archive strategy exists"},
+    "risk_events": {"class": "governance/audit records", "inserted_by": "risk engine", "frequency": "risk checks/events", "retention": "preserve until archive strategy exists"},
+}
+
+
+def _safe_error_message(exc: BaseException) -> str:
+    text = str(exc) or exc.__class__.__name__
+    if DATABASE_URL:
+        text = text.replace(DATABASE_URL, "[DATABASE_URL_REDACTED]")
+    password = os.getenv("PGPASSWORD", "")
+    if password:
+        text = text.replace(password, "[PASSWORD_REDACTED]")
+    for marker in ("password=", "passwd=", "api_token=", "apikey=", "token="):
+        lower = text.lower()
+        idx = lower.find(marker)
+        if idx >= 0:
+            end = text.find(" ", idx)
+            end = len(text) if end < 0 else end
+            text = text[: idx + len(marker)] + "REDACTED" + text[end:]
+    return text
+
+
+def is_transient_database_error(exc: BaseException) -> bool:
+    if psycopg is not None and isinstance(exc, getattr(psycopg, "OperationalError", ())):
+        return True
+    text = _safe_error_message(exc).lower()
+    return any(fragment in text for fragment in TRANSIENT_DATABASE_ERROR_TEXT)
+
+
+def database_ready(connect_timeout: int = 5) -> dict[str, Any]:
+    if not DATABASE_URL:
+        return {"ok": False, "transient": False, "configuration_error": True, "message": "DATABASE_URL is missing"}
+    if psycopg is None:
+        return {"ok": False, "transient": False, "configuration_error": True, "message": "psycopg is not installed"}
+    try:
+        conn = psycopg.connect(DATABASE_URL, row_factory=dict_row, connect_timeout=connect_timeout)
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute("SELECT 1 AS ok")
+                cursor.fetchone()
+            return {"ok": True, "transient": False, "configuration_error": False, "message": "database ready"}
+        finally:
+            conn.close()
+    except Exception as exc:
+        return {"ok": False, "transient": is_transient_database_error(exc), "configuration_error": False, "message": _safe_error_message(exc), "error_type": exc.__class__.__name__}
+
+
+def database_health() -> dict[str, Any]:
+    return database_ready()
+
+
+def wait_for_database_ready(*, stop_event: Any | None = None, initial_delay: float = 2.0, max_delay: float = 30.0, log_callback: Callable[[str], None] | None = None, label: str = "PostgreSQL") -> dict[str, Any]:
+    delay = max(0.1, initial_delay)
+    while True:
+        result = database_ready()
+        if result.get("ok"):
+            if log_callback:
+                log_callback(f"{label} connection restored; worker bootstrap continuing")
+            return result
+        if not result.get("transient"):
+            raise RuntimeError(str(result.get("message") or "Database configuration failure"))
+        if stop_event is not None and stop_event.is_set():
+            return {**result, "stopped": True}
+        sleep_for = min(max_delay, delay) + random.uniform(0, min(1.0, delay * 0.2))
+        if log_callback:
+            log_callback(f"{label} waiting for PostgreSQL; retry in {sleep_for:.0f}s")
+        if stop_event is not None:
+            if stop_event.wait(sleep_for):
+                return {**result, "stopped": True}
+        else:
+            time.sleep(sleep_for)
+        delay = min(max_delay, delay * 2)
+
+
+@contextmanager
+def database_advisory_lock(lock_name: str, wait: bool = True) -> Iterator[bool]:
+    with connect() as conn:
+        function = "pg_advisory_lock" if wait else "pg_try_advisory_lock"
+        record = conn.execute(f"SELECT {function}(hashtext(%s)) AS locked", (lock_name,)).fetchone()
+        locked = True if wait else bool(record and record.get("locked"))
+        try:
+            yield locked
+        finally:
+            if locked:
+                conn.execute("SELECT pg_advisory_unlock(hashtext(%s))", (lock_name,))
+
+
+def bootstrap_database_with_lock(run_migrations_func: Callable[[], Any]) -> Any:
+    with database_advisory_lock(DATABASE_BOOTSTRAP_LOCK_NAME, wait=True):
+        initialize_database()
+        return run_migrations_func()
 
 
 # =========================================================
@@ -1133,40 +1286,110 @@ def save_intelligence_event(
 # DATABASE CLEANUP
 # =========================================================
 
-def trim_old_records() -> None:
-    limits = [
-        ("signals", 6000),
-        ("forecasts", 3000),
-        ("equity_snapshots", 15000),
-        ("alerts", 3000),
-        ("intelligence_events", 5000),
-    ]
+def _apply_retention_policy(conn: Any, table: str, policy: dict[str, Any]) -> int:
+    if table in CANONICAL_PROTECTED_TABLES:
+        raise ValueError(f"Refusing retention cleanup for protected table: {table}")
+    if table not in DATABASE_RETENTION_POLICIES:
+        raise ValueError(f"Invalid database cleanup table: {table}")
+    keep_rows = int(policy.get("keep_rows") or 0)
+    batch_size = max(1, int(policy.get("batch_size") or DATABASE_RETENTION_BATCH_SIZE))
+    if keep_rows <= 0:
+        return 0
+    deleted_total = 0
+    while True:
+        deleted = conn.execute(
+            f"""
+            WITH doomed AS (
+                SELECT id
+                FROM {table}
+                WHERE id NOT IN (
+                    SELECT id FROM {table} ORDER BY id DESC LIMIT %s
+                )
+                ORDER BY id
+                LIMIT %s
+            )
+            DELETE FROM {table}
+            WHERE id IN (SELECT id FROM doomed)
+            """,
+            (keep_rows, batch_size),
+        ).rowcount or 0
+        deleted_total += deleted
+        if deleted < batch_size:
+            break
+    return deleted_total
 
-    allowed_tables = {
-        "signals",
-        "forecasts",
-        "equity_snapshots",
-        "alerts",
-        "intelligence_events",
+
+def trim_old_records() -> dict[str, int]:
+    deleted_by_table: dict[str, int] = {}
+    with connect() as conn:
+        for table, policy in DATABASE_RETENTION_POLICIES.items():
+            deleted_by_table[table] = _apply_retention_policy(conn, table, policy)
+    return deleted_by_table
+
+
+def _human_bytes(value: int | float) -> str:
+    size = float(value or 0)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if size < 1024 or unit == "TB":
+            return f"{size:.1f}{unit}" if unit != "B" else f"{int(size)}B"
+        size /= 1024
+    return f"{size:.1f}TB"
+
+
+def database_storage_report(limit: int = 12) -> dict[str, Any]:
+    with connect() as conn:
+        db = conn.execute("SELECT current_database() AS name, pg_database_size(current_database()) AS bytes").fetchone() or {}
+        records = conn.execute(
+            """
+            SELECT c.relname AS table,
+                   pg_total_relation_size(c.oid) AS total_bytes,
+                   pg_relation_size(c.oid) AS table_bytes,
+                   pg_indexes_size(c.oid) AS index_bytes,
+                   COALESCE(s.n_live_tup, 0) AS live_rows,
+                   COALESCE(s.n_dead_tup, 0) AS dead_rows,
+                   s.last_autovacuum,
+                   s.last_autoanalyze
+            FROM pg_class c
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            LEFT JOIN pg_stat_user_tables s ON s.relid = c.oid
+            WHERE c.relkind = 'r' AND n.nspname = 'public'
+            ORDER BY pg_total_relation_size(c.oid) DESC
+            LIMIT %s
+            """,
+            (limit,),
+        ).fetchall()
+    database_bytes = int(db.get("bytes") or 0)
+    capacity_bytes = int(float(DATABASE_VOLUME_CAPACITY_GB) * 1024**3) if DATABASE_VOLUME_CAPACITY_GB else None
+    used_pct = (database_bytes / capacity_bytes * 100.0) if capacity_bytes else None
+    status = "unknown"
+    if used_pct is not None:
+        status = "critical" if used_pct >= 92 else "high" if used_pct >= 85 else "warning" if used_pct >= 75 else "ok"
+    tables = []
+    for record in records:
+        item = dict(record)
+        for key in ("total_bytes", "table_bytes", "index_bytes", "live_rows", "dead_rows"):
+            item[key] = int(item.get(key) or 0)
+        item["total_size"] = _human_bytes(item["total_bytes"])
+        item["table_size"] = _human_bytes(item["table_bytes"])
+        item["index_size"] = _human_bytes(item["index_bytes"])
+        tables.append(item)
+    return {
+        "database": db.get("name"),
+        "database_bytes": database_bytes,
+        "database_size": _human_bytes(database_bytes),
+        "capacity_bytes": capacity_bytes,
+        "used_pct": used_pct,
+        "status": status,
+        "largest_tables": tables,
+        "retention_policies": DATABASE_RETENTION_POLICIES,
+        "table_growth_audit": DATABASE_TABLE_GROWTH_AUDIT,
     }
 
-    with connect() as conn:
-        with conn.cursor() as cursor:
-            for table, limit in limits:
-                if table not in allowed_tables:
-                    raise ValueError(
-                        f"Invalid database cleanup table: {table}"
-                    )
 
-                cursor.execute(
-                    f"""
-                    DELETE FROM {table}
-                    WHERE id NOT IN (
-                        SELECT id
-                        FROM {table}
-                        ORDER BY id DESC
-                        LIMIT %s
-                    )
-                    """,
-                    (limit,),
-                )
+def run_database_maintenance() -> dict[str, Any]:
+    with database_advisory_lock(DATABASE_MAINTENANCE_LOCK_NAME, wait=False) as locked:
+        if not locked:
+            return {"ok": True, "skipped": True, "reason": "maintenance already running"}
+        deleted = trim_old_records()
+        report = database_storage_report()
+        return {"ok": True, "skipped": False, "deleted": deleted, "storage": report}

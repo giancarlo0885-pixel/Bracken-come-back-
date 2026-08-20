@@ -33,15 +33,20 @@ from config import (
     REALTIME_MODE,
     WATCHLISTS,
     WORKER_CYCLE_ERROR_BACKOFF_SECONDS,
+    WORKER_DB_READY_INITIAL_DELAY_SECONDS,
+    WORKER_DB_READY_MAX_DELAY_SECONDS,
+    DATABASE_MAINTENANCE_INTERVAL_SECONDS,
 )
 from database import (
+    bootstrap_database_with_lock,
     connect,
-    initialize_database,
+    is_transient_database_error,
+    run_database_maintenance,
     save_forecast,
     save_intelligence_event,
     save_json_signal,
-    trim_old_records,
     utc_now,
+    wait_for_database_ready,
 )
 from execution_policy import execution_policy
 from engine import analyze_market
@@ -119,6 +124,46 @@ def _normalize_starter_action(signal: Any) -> Any:
 
 signal.signal(signal.SIGTERM, _request_stop)
 signal.signal(signal.SIGINT, _request_stop)
+
+
+def _wait_for_worker_database(label: str) -> bool:
+    result = wait_for_database_ready(
+        stop_event=stop_event,
+        initial_delay=WORKER_DB_READY_INITIAL_DELAY_SECONDS,
+        max_delay=WORKER_DB_READY_MAX_DELAY_SECONDS,
+        label=label,
+        log_callback=log.warning,
+    )
+    return not bool(result.get("stopped"))
+
+
+def _bootstrap_worker_database(label: str) -> bool:
+    while not stop_event.is_set():
+        if not _wait_for_worker_database(label):
+            return False
+        try:
+            from migrations import run_migrations
+
+            bootstrap_database_with_lock(run_migrations)
+            _ensure_status_table()
+            return True
+        except Exception as exc:
+            if is_transient_database_error(exc):
+                log.warning("%s PostgreSQL bootstrap interrupted by transient outage: %s", label, exc.__class__.__name__)
+                continue
+            raise
+    return False
+
+
+def _run_scheduled_database_maintenance(label: str) -> None:
+    try:
+        result = run_database_maintenance()
+        if result.get("skipped"):
+            log.info("%s database maintenance skipped: %s", label, result.get("reason"))
+        else:
+            log.info("%s database maintenance complete: %s", label, result.get("deleted", {}))
+    except Exception as exc:
+        log.warning("%s database maintenance failed; worker will retry later: %s", label, exc)
 
 
 def _ensure_status_table() -> None:
@@ -747,7 +792,6 @@ def _collect_stock_intelligence() -> None:
                 if stop_event.is_set():
                     break
                 save_intelligence_event(category, result.provider, record.get("title", category), record)
-        trim_old_records()
     except Exception as exc:
         log.exception("Stock intelligence collection failed: %s", exc)
 
@@ -768,12 +812,10 @@ def run_worker(market: str) -> None:
     if market not in WATCHLISTS:
         raise ValueError(f"Unknown market: {market}. Available markets: {list(WATCHLISTS)}")
 
-    initialize_database()
-    from migrations import run_migrations
-
-    run_migrations()
-    _ensure_status_table()
     label = "Stock Market" if market == "cash" else "Crypto Market"
+    if not _bootstrap_worker_database(label):
+        log.info("%s worker stopped before database bootstrap completed.", label)
+        return
     initial = cadence_for(market)
     log.info(
         "Starting %s always-on worker | pulse=%ss fast=%ss deep=%ss session=%s mode=%s",
@@ -804,6 +846,7 @@ def run_worker(market: str) -> None:
     next_deep_due = time.monotonic()
     next_fast_due = time.monotonic()
     next_intelligence_due = time.monotonic()
+    next_maintenance_due = time.monotonic()
     last_deep_actions = 0
     last_fast_actions = 0
     consecutive_errors = 0
@@ -813,6 +856,9 @@ def run_worker(market: str) -> None:
             try:
                 cadence = cadence_for(market)
                 now_monotonic = time.monotonic()
+                if now_monotonic >= next_maintenance_due:
+                    _run_scheduled_database_maintenance(label)
+                    next_maintenance_due = now_monotonic + DATABASE_MAINTENANCE_INTERVAL_SECONDS
 
                 completed_actions, deep_error = _future_result(deep_future, label)
                 if completed_actions is not None:

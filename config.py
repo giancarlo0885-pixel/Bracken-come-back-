@@ -64,6 +64,12 @@ CRYPTO_FAST_SCAN_SECONDS = max(5, int(os.getenv("CRYPTO_FAST_SCAN_SECONDS", "10"
 FAST_SCAN_BATCH_SIZE = max(3, min(30, int(os.getenv("FAST_SCAN_BATCH_SIZE", "10"))))
 FAST_SCAN_TOP_RANKED = max(3, min(50, int(os.getenv("FAST_SCAN_TOP_RANKED", "20"))))
 WORKER_CYCLE_ERROR_BACKOFF_SECONDS = max(1, int(os.getenv("WORKER_CYCLE_ERROR_BACKOFF_SECONDS", "5")))
+WORKER_DB_READY_INITIAL_DELAY_SECONDS = max(1, int(os.getenv("WORKER_DB_READY_INITIAL_DELAY_SECONDS", "2")))
+WORKER_DB_READY_MAX_DELAY_SECONDS = max(WORKER_DB_READY_INITIAL_DELAY_SECONDS, int(os.getenv("WORKER_DB_READY_MAX_DELAY_SECONDS", "30")))
+DATABASE_MAINTENANCE_INTERVAL_SECONDS = max(300, int(os.getenv("DATABASE_MAINTENANCE_INTERVAL_SECONDS", "21600")))
+DATABASE_RETENTION_BATCH_SIZE = max(100, int(os.getenv("DATABASE_RETENTION_BATCH_SIZE", "1000")))
+_database_volume_capacity_raw = os.getenv("DATABASE_VOLUME_CAPACITY_GB", "").strip()
+DATABASE_VOLUME_CAPACITY_GB = float(_database_volume_capacity_raw) if _database_volume_capacity_raw else 0.0
 ENABLE_AUTOTRADE = os.getenv("ENABLE_AUTOTRADE", "false").lower() == "true"
 # V36 separates stock and crypto execution switches. Missing environment
 # variables default to false so Railway can continue scanning/advising without
