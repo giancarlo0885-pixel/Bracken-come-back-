@@ -136,6 +136,12 @@ def money_text(value: Any, whole: bool = False) -> str:
     return f"${number:,.{decimals}f}"
 
 
+def signed_money_text(value: Any, whole: bool = False) -> str:
+    number = as_float(value, 0.0)
+    sign = "+" if number >= 0 else "-"
+    return f"{sign}{money_text(abs(number), whole=whole)}"
+
+
 def parse_timestamp(value: Any) -> datetime | None:
     if value in (None, ""):
         return None
@@ -321,6 +327,127 @@ def live_data_status(record: dict[str, Any], now: datetime | None = None) -> dic
         blocks_execution = False
 
     return {"label": label, "detail": detail, "blocks_execution": blocks_execution}
+
+
+def data_age_label(record: dict[str, Any], now: datetime | None = None) -> str:
+    status = live_data_status(record, now=now)
+    if status["label"] == "FRESHNESS UNKNOWN":
+        return "Unknown"
+    if status["label"] == "OLD DATA":
+        return "Old"
+    age = record.get("quote_age_seconds")
+    if age is None:
+        age = record.get("data_freshness_seconds")
+    timestamp = parse_timestamp(record.get("quote_timestamp") or record.get("timestamp"))
+    seconds = as_float(age, -1.0)
+    if seconds < 0 and timestamp is not None:
+        reference = now or datetime.now(timezone.utc)
+        seconds = max(0.0, (reference - timestamp).total_seconds())
+    if seconds < 0:
+        return "Unknown"
+    if seconds < 60:
+        return f"{int(seconds)} sec"
+    if seconds < 3600:
+        return f"{max(1, int(round(seconds / 60)))} min"
+    return f"{max(1, int(round(seconds / 3600)))} hr"
+
+
+def _clean_action(value: Any) -> str:
+    action = str(value or "WAIT").upper()
+    if action in {"STRONG_BUY", "ACCUMULATE", "LONG"}:
+        return "BUY"
+    if action in {"BUY", "SELL", "HOLD", "WAIT"}:
+        return action
+    return "WAIT"
+
+
+def balanced_money_bar(metrics: dict[str, Any], trades: list[dict[str, Any]], now: datetime | None = None) -> list[dict[str, str]]:
+    reference = now or datetime.now(timezone.utc)
+    today = reference.date()
+    equity = as_float(metrics.get("equity"))
+    starting = as_float(metrics.get("starting_balance"))
+    cash = as_float(metrics.get("cash"))
+    invested = as_float(metrics.get("invested") or metrics.get("positions_value") or metrics.get("gross_exposure"))
+    today_pnl = 0.0
+    for trade in trades:
+        created = parse_timestamp(trade.get("created_at"))
+        if created is not None and created.date() == today:
+            today_pnl += as_float(trade.get("realized_pnl"))
+    return [
+        {"label": "PORTFOLIO VALUE", "value": money_text(equity, whole=True)},
+        {"label": "CASH", "value": money_text(cash, whole=True)},
+        {"label": "INVESTED", "value": money_text(invested, whole=True)},
+        {"label": "TOTAL PROFIT / LOSS", "value": signed_money_text(equity - starting, whole=True)},
+        {"label": "TODAY", "value": signed_money_text(today_pnl, whole=True)},
+    ]
+
+
+def balanced_opportunity_rows(decisions: list[dict[str, Any]], limit: int = 10) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for item in decisions[: max(0, int(limit))]:
+        price = as_float(item.get("price"))
+        target = as_float(item.get("target"))
+        expected = as_float(item.get("expected_return"))
+        if expected == 0 and price > 0 and target > 0:
+            expected = ((target / price) - 1.0) * 100.0
+        action = _clean_action(item.get("action"))
+        action_label = {"BUY": "GREEN BUY", "SELL": "RED SELL", "HOLD": "YELLOW HOLD", "WAIT": "YELLOW WAIT"}.get(action, "YELLOW WAIT")
+        rows.append(
+            {
+                "Action": action_label,
+                "Symbol": str(item.get("symbol") or "").upper(),
+                "Price": money_text(price),
+                "Target": money_text(target),
+                "Possible Gain %": f"{expected:+.1f}%",
+                "Confidence": f"{normalized_confidence(item.get('confidence')):.0f}%",
+                "Risk": str(item.get("risk") or "Medium").title(),
+                "Data Age": data_age_label(item),
+            }
+        )
+    return rows
+
+
+def balanced_portfolio_rows(positions: list[dict[str, Any]], equity: Any) -> list[dict[str, Any]]:
+    equity_value = max(0.0, as_float(equity))
+    rows: list[dict[str, Any]] = []
+    for position in positions:
+        symbol = str(position.get("symbol") or "").upper()
+        quantity = as_float(position.get("quantity"))
+        average = as_float(position.get("average_price") or position.get("entry_price"))
+        current = as_float(position.get("current_price") or position.get("price"))
+        value = max(0.0, quantity * current)
+        allocation = (value / equity_value * 100.0) if equity_value else 0.0
+        pnl = (current - average) * quantity if current > 0 and average > 0 else 0.0
+        pnl_pct = ((current / average) - 1.0) * 100.0 if average > 0 and current > 0 else 0.0
+        if allocation >= 20 or pnl_pct <= -12:
+            status = "HIGH RISK"
+        elif allocation >= 10 or pnl_pct <= -5:
+            status = "WATCH"
+        else:
+            status = "GOOD"
+        rows.append(
+            {
+                "Symbol": symbol,
+                "Value": money_text(value),
+                "Allocation %": f"{allocation:.1f}%",
+                "Avg Price": money_text(average),
+                "Current Price": money_text(current),
+                "Profit/Loss": signed_money_text(pnl),
+                "Status": status,
+            }
+        )
+    return rows
+
+
+def balanced_data_status(stocks_online: bool, crypto_online: bool, provider_rows: list[dict[str, Any]] | None = None) -> list[dict[str, str]]:
+    provider_rows = provider_rows or []
+    limited = any(str(row.get("status") or row.get("severity") or "").lower() in {"limited", "degraded", "cooldown", "warning"} for row in provider_rows)
+    return [
+        {"Area": "STOCKS", "Status": "GREEN" if stocks_online else "RED"},
+        {"Area": "CRYPTO", "Status": "GREEN" if crypto_online else "RED"},
+        {"Area": "NEWS", "Status": "YELLOW" if limited else "GREEN"},
+        {"Area": "GLOBAL", "Status": "YELLOW" if limited else "GREEN"},
+    ]
 
 
 def simple_opportunity_summary(record: dict[str, Any]) -> dict[str, Any]:
