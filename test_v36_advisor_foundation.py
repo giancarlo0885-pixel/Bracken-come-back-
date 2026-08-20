@@ -416,6 +416,17 @@ def _reset_pg_execution_market(conn, market: str = "cash") -> None:
     conn.execute("DELETE FROM positions WHERE market=%s", (market,))
     conn.execute(
         """
+        DELETE FROM global_market_candidates
+        WHERE symbol = ANY(%s)
+        """,
+        ([
+            "PGBUY", "PGSELL", "PGROLL",
+            "ROTATEOUT", "ROTATEIN", "ROLLROTOUT", "ROLLROTIN",
+            "RISKREJECT", "NOSECTOR",
+        ],),
+    )
+    conn.execute(
+        """
         INSERT INTO portfolios (
             market,cash,starting_balance,leverage_limit,margin_debt,
             margin_interest_accrued,margin_interest_updated_at,broker_profile,updated_at
@@ -435,6 +446,26 @@ def _reset_pg_execution_market(conn, market: str = "cash") -> None:
     )
 
 
+def _insert_pg_candidate_sectors(conn, symbols: list[str], sector: str = "Technology") -> None:
+    now = datetime.now(timezone.utc).isoformat()
+    for symbol in symbols:
+        conn.execute(
+            """
+            INSERT INTO global_market_candidates
+            (symbol, name, exchange, region, sector, payload, scanned_at)
+            VALUES (%s, %s, 'NASDAQ', 'United States', %s, '{}'::jsonb, %s)
+            ON CONFLICT (symbol) DO UPDATE SET
+                name=EXCLUDED.name,
+                exchange=EXCLUDED.exchange,
+                region=EXCLUDED.region,
+                sector=EXCLUDED.sector,
+                payload=EXCLUDED.payload,
+                scanned_at=EXCLUDED.scanned_at
+            """,
+            (symbol, f"{symbol} Test Equity", sector, now),
+        )
+
+
 def _pg_execution_setup(monkeypatch, symbols: list[str]) -> None:
     if not os.getenv("DATABASE_URL"):
         pytest.skip("PostgreSQL integration test runs in CI service container")
@@ -449,6 +480,7 @@ def _pg_execution_setup(monkeypatch, symbols: list[str]) -> None:
     monkeypatch.setattr(oracle_bot, "MIN_TRADE_VALUE", 1.0)
     with database.connect() as conn:
         _reset_pg_execution_market(conn, "cash")
+        _insert_pg_candidate_sectors(conn, symbols)
 
 
 def _execution_signal(symbol: str, price: float = 100.0, *, signal_id: str = "sig", forecast_id: str = "fc"):
@@ -717,6 +749,23 @@ def test_postgres_shared_risk_rejection_rolls_no_portfolio_mutation(monkeypatch)
     assert trades == []
     assert position is None
     assert completed == []
+
+
+def test_postgres_stock_buy_without_sector_metadata_fails_closed(monkeypatch):
+    symbol = "NOSECTOR"
+    _pg_execution_setup(monkeypatch, [])
+    signal = _execution_signal(symbol, 100, signal_id="no-sector-sig", forecast_id="no-sector-fc")
+    quote = _execution_quote(symbol, 100)
+
+    ok, reason, _ = oracle_bot._buy("cash", symbol, 100, signal, verified_quote=quote)
+
+    with database.connect() as conn:
+        trades = conn.execute("SELECT * FROM trades WHERE symbol=%s", (symbol,)).fetchall()
+        position = conn.execute("SELECT * FROM positions WHERE symbol=%s", (symbol,)).fetchone()
+    assert ok is False
+    assert "paper buy safeguard requires verified stock sector metadata" in reason
+    assert trades == []
+    assert position is None
 
 
 def test_postgres_execution_risk_context_calculates_pnl_and_turnover(monkeypatch):
