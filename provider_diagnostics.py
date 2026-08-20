@@ -9,6 +9,8 @@ from typing import Any
 import requests
 
 from alpha_vantage_provider import health_probe as alpha_vantage_health_probe
+from alpha_vantage_provider import sanitize_error as alpha_sanitize_error
+from alpha_vantage_provider import usage_snapshot as alpha_usage_snapshot
 from api_manager import KEY_NAMES, resolve_api_key
 from provider_capabilities import diagnostics as capability_diagnostics
 
@@ -27,6 +29,8 @@ class ProviderDiagnostic:
     cooldown: str | None = None
     mode: str | None = None
     requests: int | None = None
+    daily_budget: int | None = None
+    daily_remaining: int | None = None
 
 
 _CACHE_LOCK = threading.Lock()
@@ -52,6 +56,8 @@ def _result(
     cooldown: str | None = None,
     mode: str | None = None,
     requests: int | None = None,
+    daily_budget: int | None = None,
+    daily_remaining: int | None = None,
 ) -> ProviderDiagnostic:
     return ProviderDiagnostic(
         provider=name,
@@ -66,6 +72,8 @@ def _result(
         cooldown=cooldown,
         mode=mode,
         requests=requests,
+        daily_budget=daily_budget,
+        daily_remaining=daily_remaining,
     )
 
 
@@ -126,9 +134,10 @@ def _probe(name: str, key: str) -> ProviderDiagnostic:
     if name == "EODHD_API_KEY":
         return _request(name, "https://eodhd.com/api/real-time/AAPL.US", params={"api_token": key, "fmt": "json"})
     if name == "ALPHA_VANTAGE_API_KEY":
-        health = alpha_vantage_health_probe()
+        health = alpha_vantage_health_probe(probe=False)
+        usage = alpha_usage_snapshot()
         status = "healthy" if health.status == "connected" else health.status
-        capability = "delayed" if health.status == "connected" else "limited" if health.status in {"cooldown", "rate_limited"} else "degraded"
+        capability = "delayed" if health.status in {"connected", "configured"} else "limited" if health.status in {"cooldown", "rate_limited", "quota_exhausted"} else "degraded"
         return _result(
             "Alpha Vantage",
             True,
@@ -136,10 +145,12 @@ def _probe(name: str, key: str) -> ProviderDiagnostic:
             "Alpha Vantage connected. Entitlement is treated as Historical / EOD / Delayed unless a verified realtime quote is supplied.",
             capability=capability,
             last_success=health.last_success,
-            last_error=health.last_error,
+            last_error=alpha_sanitize_error(health.last_error or ""),
             cooldown=health.cooldown,
             mode=health.mode,
-            requests=health.requests,
+            requests=int(usage.get("requests_used") or health.requests),
+            daily_budget=int(usage.get("daily_budget") or 0),
+            daily_remaining=int(usage.get("daily_remaining") or 0),
         )
     if name == "FRED_API_KEY":
         return _request(name, "https://api.stlouisfed.org/fred/series", params={"series_id": "GDP", "api_key": key, "file_type": "json"})

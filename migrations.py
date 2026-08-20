@@ -33,6 +33,12 @@ REPAIR_STATEMENTS = [
         provider TEXT PRIMARY KEY, configured BOOLEAN NOT NULL,
         status TEXT NOT NULL, latency_ms DOUBLE PRECISION, message TEXT,
         checked_at TEXT NOT NULL)""",
+    """CREATE TABLE IF NOT EXISTS provider_daily_usage (
+        provider TEXT NOT NULL, usage_date TEXT NOT NULL,
+        requests_used INTEGER NOT NULL DEFAULT 0,
+        daily_budget INTEGER NOT NULL DEFAULT 0,
+        last_request_at TEXT, last_success TEXT, last_error TEXT,
+        PRIMARY KEY(provider, usage_date))""",
     """CREATE TABLE IF NOT EXISTS backtest_runs (
         id BIGSERIAL PRIMARY KEY, market TEXT, symbol TEXT NOT NULL,
         strategy TEXT NOT NULL, parameters JSONB, metrics JSONB NOT NULL,

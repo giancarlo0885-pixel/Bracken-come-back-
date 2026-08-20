@@ -13,10 +13,12 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import pandas as pd
 import requests
 
+from alpha_vantage_provider import daily_history as alpha_daily_history
 from api_manager import get_api_settings
 from cache import cached_call
 from config import (
     API_CACHE_TTL_SECONDS,
+    ALPHA_VANTAGE_PREMIUM,
     PROVIDER_PERMISSION_COOLDOWN_SECONDS,
     PROVIDER_RATE_LIMIT_COOLDOWN_SECONDS,
     REALTIME_CACHE_TTL_SECONDS,
@@ -465,6 +467,19 @@ def _alpha_interval(interval: str) -> str:
 
 
 def _alpha(symbol: str, period: str, interval: str, key: str) -> pd.DataFrame:
+    if not ALPHA_VANTAGE_PREMIUM:
+        if _is_intraday(interval):
+            return pd.DataFrame()
+        frame = alpha_daily_history(symbol, outputsize="full" if _period_days(period) > 100 else "compact", key_override=key)
+        return _verified_history(
+            frame,
+            "Alpha Vantage",
+            symbol,
+            symbol,
+            period,
+            interval,
+            identity_verified=True,
+        )
     if _is_intraday(interval):
         alpha_interval = _alpha_interval(interval)
         response = requests.get(

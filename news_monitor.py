@@ -8,6 +8,7 @@ from typing import Any
 import requests
 
 from alpha_vantage_provider import news_sentiment as alpha_news_sentiment
+from alpha_vantage_provider import sanitize_error as sanitize_alpha_error
 from cache import cached_call
 from config import MARKET_NEWS_CACHE_TTL_SECONDS
 
@@ -167,7 +168,7 @@ def _fetch_uncached() -> ProviderResult:
                 records.append(item)
                 existing_urls.add(str(item.get("url") or ""))
         except Exception as exc:
-            log.debug("Alpha Vantage NEWS_SENTIMENT fallback unavailable: %s", exc)
+            log.debug("Alpha Vantage NEWS_SENTIMENT fallback unavailable: %s", sanitize_alpha_error(exc))
 
         log.info(
             "NewsAPI returned %d market news records",

@@ -726,9 +726,10 @@ if page == "Dashboard":
             alpha = alpha_rows[0]
             c1, c2, c3, c4 = st.columns(4)
             c1.metric("Alpha Vantage", str(alpha.get("status") or "Unknown").upper())
-            c2.metric("Last Success", str(alpha.get("last_success") or "Waiting"))
-            c3.metric("Mode", str(alpha.get("mode") or "Historical / EOD / Delayed"))
-            c4.metric("Requests", int(as_float(alpha.get("requests"))))
+            c2.metric("Requests Today", f"{int(as_float(alpha.get('requests')))} / {int(as_float(alpha.get('daily_budget')))}")
+            c3.metric("Daily Remaining", int(as_float(alpha.get("daily_remaining"))))
+            c4.metric("Mode", str(alpha.get("mode") or "Historical / EOD / Delayed"))
+            st.caption(f"Last Success: {alpha.get('last_success') or 'Waiting'}")
         st.dataframe(pd.DataFrame(diagnostics), width="stretch", hide_index=True) if diagnostics else st.info("No provider limitations are currently reported.")
 
     if alerts:
