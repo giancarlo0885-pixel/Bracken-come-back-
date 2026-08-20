@@ -1,6 +1,13 @@
+from datetime import datetime, timezone
+
 from dashboard_helpers import (
     action_class,
+    balanced_data_status,
+    balanced_money_bar,
+    balanced_opportunity_rows,
+    balanced_portfolio_rows,
     clean_market,
+    data_age_label,
     live_data_status,
     normalized_confidence,
     parse_json,
@@ -150,6 +157,11 @@ def test_unknown_freshness_never_displays_live():
     assert status["blocks_execution"] is True
 
 
+def test_balanced_data_age_never_calls_unknown_live():
+    assert data_age_label({"trade_eligible": True, "quote_verified": True}) == "Unknown"
+    assert data_age_label({"trade_eligible": True, "quote_verified": True, "quote_age_seconds": 8}) == "8 sec"
+
+
 def test_planner_rejects_unverified_or_stale_opportunities():
     plan = simple_portfolio_builder_plan(
         cash=500_000,
@@ -195,6 +207,65 @@ def test_readable_trade_history_hides_giant_decimal_quantities_from_main_rows():
     assert rows[0]["Asset"] == "ADA-USD"
     assert rows[0]["Quantity"] == "10,472,445"
     assert rows[0]["Money Used"] == "$2,000,000.00"
+
+
+def test_balanced_money_bar_has_professional_top_cards():
+    items = balanced_money_bar(
+        {"starting_balance": 1_000_000, "equity": 1_000_030, "cash": 750_000, "invested": 250_030},
+        [{"created_at": "2026-08-20T12:00:00+00:00", "realized_pnl": 30}],
+        now=datetime(2026, 8, 20, tzinfo=timezone.utc),
+    )
+
+    assert [item["label"] for item in items] == ["PORTFOLIO VALUE", "CASH", "INVESTED", "TOTAL PROFIT / LOSS", "TODAY"]
+    assert items[-1]["value"] == "+$30"
+
+
+def test_balanced_top_opportunity_table_output_is_compact():
+    rows = balanced_opportunity_rows(
+        [
+            {"symbol": "SEA", "action": "BUY", "price": 19.79, "target": 20.72, "expected_return": 4.7, "confidence": 82, "risk": "medium", "trade_eligible": True, "quote_verified": True, "quote_age_seconds": 8},
+            {"symbol": "WAIT", "action": "HOLD", "price": 10, "target": 10, "confidence": 55, "risk": "low", "trade_eligible": False, "data_status": "stale"},
+        ],
+        limit=2,
+    )
+
+    assert rows[0] == {
+        "Action": "GREEN BUY",
+        "Symbol": "SEA",
+        "Price": "$19.79",
+        "Target": "$20.72",
+        "Possible Gain %": "+4.7%",
+        "Confidence": "82%",
+        "Risk": "Medium",
+        "Data Age": "8 sec",
+    }
+    assert rows[1]["Action"] == "YELLOW HOLD"
+    assert rows[1]["Data Age"] == "Old"
+
+
+def test_balanced_portfolio_table_rows_show_status_without_raw_quantity():
+    rows = balanced_portfolio_rows(
+        [
+            {"symbol": "AAPL", "quantity": 10, "average_price": 100, "current_price": 110},
+            {"symbol": "RISKY", "quantity": 1_000, "average_price": 100, "current_price": 80},
+        ],
+        equity=100_000,
+    )
+
+    assert set(rows[0]) == {"Symbol", "Value", "Allocation %", "Avg Price", "Current Price", "Profit/Loss", "Status"}
+    assert rows[0]["Status"] == "GOOD"
+    assert rows[1]["Status"] == "HIGH RISK"
+
+
+def test_balanced_data_status_is_compact_provider_bar():
+    rows = balanced_data_status(True, True, [{"provider": "EODHD", "status": "cooldown"}])
+
+    assert rows == [
+        {"Area": "STOCKS", "Status": "GREEN"},
+        {"Area": "CRYPTO", "Status": "GREEN"},
+        {"Area": "NEWS", "Status": "YELLOW"},
+        {"Area": "GLOBAL", "Status": "YELLOW"},
+    ]
 
 
 def test_trade_summary_counts_and_formats_business_values():
