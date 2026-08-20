@@ -136,6 +136,19 @@ def money_text(value: Any, whole: bool = False) -> str:
     return f"${number:,.{decimals}f}"
 
 
+def parse_timestamp(value: Any) -> datetime | None:
+    if value in (None, ""):
+        return None
+    try:
+        text = str(value).strip().replace("Z", "+00:00")
+        parsed = datetime.fromisoformat(text)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+    except (TypeError, ValueError):
+        return None
+
+
 def _position_value(position: dict[str, Any]) -> float:
     quantity = as_float(position.get("quantity"))
     price = as_float(position.get("current_price") or position.get("price"))
@@ -272,20 +285,33 @@ def live_data_status(record: dict[str, Any], now: datetime | None = None) -> dic
     age = record.get("quote_age_seconds")
     if age is None:
         age = record.get("data_freshness_seconds")
+    timestamp = parse_timestamp(record.get("quote_timestamp") or record.get("timestamp"))
     age_seconds = as_float(age, -1.0)
+    if age_seconds < 0 and timestamp is not None:
+        age_seconds = max(0.0, (now - timestamp).total_seconds())
     status_text = str(record.get("data_status") or "").lower()
-    eligible = bool(record.get("trade_eligible"))
+    quote_verified_value = record.get("quote_verified")
+    verified = bool(quote_verified_value is True or (quote_verified_value is None and record.get("trade_eligible") is True))
+    has_freshness_evidence = age_seconds >= 0 or timestamp is not None
 
-    if eligible and (age_seconds < 0 or age_seconds <= 90):
+    if "stale" in status_text or "old" in status_text:
+        label = "OLD DATA"
+        detail = "Oracle will not trade using this price."
+        blocks_execution = True
+    elif not has_freshness_evidence:
+        label = "FRESHNESS UNKNOWN"
+        detail = "Oracle cannot verify when this price was checked."
+        blocks_execution = True
+    elif verified and age_seconds <= 90:
         label = "LIVE DATA"
-        detail = f"Price checked {int(age_seconds)} seconds ago" if age_seconds >= 0 else "Price was checked recently"
+        detail = f"Price checked {int(age_seconds)} seconds ago"
         blocks_execution = False
-    elif eligible and age_seconds <= 900:
+    elif verified and age_seconds <= 900:
         label = "DELAYED DATA"
         minutes = max(1, int(round(age_seconds / 60)))
         detail = f"Price checked {minutes} minutes ago"
         blocks_execution = False
-    elif "stale" in status_text or "old" in status_text or not eligible:
+    elif not verified:
         label = "OLD DATA"
         detail = "Oracle will not trade using this price."
         blocks_execution = True
@@ -375,6 +401,7 @@ def simple_portfolio_builder_plan(
     approved_actions = {"BUY", "STRONG_BUY", "ACCUMULATE", "LONG"}
     seen: set[str] = set()
     ranked: list[dict[str, Any]] = []
+    risk_weights = {"LOW": 1.0, "MEDIUM": 0.72, "HIGH": 0.38}
     for item in opportunities:
         symbol = str(item.get("symbol") or "").upper()
         if not symbol or symbol in seen:
@@ -383,6 +410,9 @@ def simple_portfolio_builder_plan(
         if str(item.get("action") or "").upper() not in approved_actions:
             continue
         if item.get("trade_eligible") is False:
+            continue
+        data = live_data_status(item)
+        if data["blocks_execution"] or data["label"] == "FRESHNESS UNKNOWN":
             continue
         ranked.append(item)
 
@@ -395,9 +425,15 @@ def simple_portfolio_builder_plan(
         room = max(0.0, max_position_value - existing_value)
         if room <= 0 or remaining <= 0:
             continue
+        data = live_data_status(item)
         score = normalized_score(item.get("score") or item.get("opportunity_score"))
         confidence = normalized_confidence(item.get("confidence"))
-        weight = max(0.10, min(0.35, (score + confidence) / 600.0))
+        expected_return = max(0.0, as_float(item.get("expected_return") or item.get("expected_move_pct")))
+        risk = str(item.get("risk") or "MEDIUM").upper()
+        risk_weight = risk_weights.get(risk, 0.72)
+        freshness_weight = 1.0 if data["label"] == "LIVE DATA" else 0.55
+        raw_weight = ((score / 100.0) * 0.35 + (confidence / 100.0) * 0.30 + min(expected_return / 12.0, 1.0) * 0.20 + risk_weight * 0.15)
+        weight = max(0.05, min(0.35, raw_weight * freshness_weight))
         amount = min(room, remaining, cash_value * weight)
         if amount <= 0:
             continue
@@ -412,3 +448,55 @@ def simple_portfolio_builder_plan(
 def simple_mode_visible_text(samples: list[str]) -> str:
     """Normalize simple-mode copy for tests that guard against technical leakage."""
     return "\n".join(str(item) for item in samples)
+
+
+def format_quantity(value: Any) -> str:
+    quantity = as_float(value)
+    if quantity == 0:
+        return "0"
+    if abs(quantity) >= 1_000_000:
+        return f"{quantity:,.0f}"
+    if abs(quantity) >= 1_000:
+        return f"{quantity:,.2f}".rstrip("0").rstrip(".")
+    if abs(quantity) >= 1:
+        return f"{quantity:,.4f}".rstrip("0").rstrip(".")
+    return f"{quantity:.8f}".rstrip("0").rstrip(".")
+
+
+def trade_value_matches_quantity_price(trade: dict[str, Any], tolerance: float = 0.01) -> bool:
+    quantity = as_float(trade.get("quantity"))
+    price = as_float(trade.get("price"))
+    value = as_float(trade.get("value"))
+    return abs(quantity * price - value) <= max(tolerance, abs(value) * 0.000001)
+
+
+def readable_trade_rows(trades: list[dict[str, Any]], limit: int = 50) -> list[dict[str, Any]]:
+    output: list[dict[str, Any]] = []
+    for trade in trades[: max(0, int(limit))]:
+        side = str(trade.get("side") or "").upper()
+        output.append(
+            {
+                "Date": str(trade.get("created_at") or ""),
+                "Bought / Sold": "Bought" if side == "BUY" else "Sold" if side == "SELL" else side.title(),
+                "Asset": str(trade.get("symbol") or "").upper(),
+                "Price": money_text(trade.get("price")),
+                "Money Used": money_text(trade.get("value")),
+                "Profit / Loss": f"{'+' if as_float(trade.get('realized_pnl')) >= 0 else '-'}{money_text(abs(as_float(trade.get('realized_pnl'))))}",
+                "Quantity": format_quantity(trade.get("quantity")),
+                "Reason": str(trade.get("reason") or ""),
+                "Trade Value Arithmetic": "OK" if trade_value_matches_quantity_price(trade) else "Check",
+            }
+        )
+    return output
+
+
+def trade_summary(trades: list[dict[str, Any]]) -> dict[str, Any]:
+    buys = [trade for trade in trades if str(trade.get("side") or "").upper() == "BUY"]
+    sells = [trade for trade in trades if str(trade.get("side") or "").upper() == "SELL"]
+    return {
+        "Total Trades": len(trades),
+        "Buys": len(buys),
+        "Sells": len(sells),
+        "Realized P/L": sum(as_float(trade.get("realized_pnl")) for trade in trades),
+        "Trade Volume": sum(as_float(trade.get("value")) for trade in trades),
+    }

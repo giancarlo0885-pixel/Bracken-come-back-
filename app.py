@@ -19,11 +19,13 @@ from dashboard_helpers import (
     format_asset_price,
     live_data_status,
     money_text,
+    readable_trade_rows,
     simple_money_summary,
     simple_opportunity_summary,
     simple_oracle_summary,
     simple_portfolio_builder_plan,
     simple_portfolio_scores,
+    trade_summary,
     worker_is_online,
 )
 from database import bootstrap_database_with_lock, database_ready, database_storage_report, row, rows
@@ -856,14 +858,36 @@ elif page == "Portfolios":
 
     with portfolio_tabs[2]:
         st.markdown("### Bought and sold")
+        f1, f2, f3 = st.columns(3)
+        with f1:
+            trade_market_filter = st.selectbox("Portfolio", ["All", "Stock", "Crypto"], key="trade-history-market")
+        with f2:
+            trade_side_filter = st.selectbox("Bought / Sold", ["All", "Buy", "Sell"], key="trade-history-side")
+        with f3:
+            trade_symbol_filter = st.text_input("Symbol", key="trade-history-symbol").upper().strip()
         trades = safe_rows("SELECT * FROM trades ORDER BY id DESC LIMIT 500")
+        if trade_market_filter != "All":
+            wanted_market = "cash" if trade_market_filter == "Stock" else "crypto"
+            trades = [trade for trade in trades if str(trade.get("market") or "").lower() == wanted_market]
+        if trade_side_filter != "All":
+            trades = [trade for trade in trades if str(trade.get("side") or "").upper() == trade_side_filter.upper()]
+        if trade_symbol_filter:
+            trades = [trade for trade in trades if trade_symbol_filter in str(trade.get("symbol") or "").upper()]
+        trades = trades[:50]
         if trades:
-            view = clean_trade_frame(trades)
-            st.dataframe(
-                view.style.format({"Price": "${:,.4f}", "Trade Value": "${:,.2f}", "Profit / Loss": "${:+,.2f}"}, na_rep="—"),
-                width="stretch",
-                hide_index=True,
-            )
+            summary = trade_summary(trades)
+            s1, s2, s3, s4, s5 = st.columns(5)
+            s1.metric("Total Trades", summary["Total Trades"])
+            s2.metric("Buys", summary["Buys"])
+            s3.metric("Sells", summary["Sells"])
+            s4.metric("Realized P/L", money(summary["Realized P/L"]))
+            s5.metric("Trade Volume", money(summary["Trade Volume"]))
+            readable = pd.DataFrame(readable_trade_rows(trades))
+            simple_columns = ["Date", "Bought / Sold", "Asset", "Price", "Money Used", "Profit / Loss"]
+            st.dataframe(readable[simple_columns], width="stretch", hide_index=True)
+            with st.expander("Show Trade Details"):
+                detail_columns = ["Date", "Bought / Sold", "Asset", "Quantity", "Price", "Money Used", "Profit / Loss", "Reason", "Trade Value Arithmetic"]
+                st.dataframe(readable[detail_columns], width="stretch", hide_index=True)
         else:
             st.info("No trade history has been recorded.")
 

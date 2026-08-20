@@ -40,6 +40,7 @@ log = logging.getLogger("oracle-bot")
 _AUTOTRADE_DISABLED_LOGGED = False
 PAPER_MARGIN_REDUCTION_REASON = "paper_margin_reduction"
 QUOTE_PRICE_TOLERANCE_PCT = 0.001
+MAX_SECTOR_EXPOSURE_PCT = float(globals().get("MAX_SECTOR_EXPOSURE_PCT", 0.35))
 
 
 # =========================================================
@@ -877,6 +878,75 @@ def _shared_risk_gate(
     if not result.allowed:
         return False, "; ".join(result.reasons) or result.reason, result
     return True, "shared risk approved", result
+
+
+def _position_market_value(position: dict[str, Any]) -> float:
+    quantity = safe_float(position.get("quantity"))
+    price = safe_float(position.get("current_price"))
+    return max(0.0, quantity * price)
+
+
+def _paper_buy_safeguard(
+    *,
+    market: str,
+    symbol: str,
+    trade_value: float,
+    account: Any,
+    positions: list[dict[str, Any]],
+    quote: dict[str, Any],
+) -> tuple[bool, str]:
+    symbol = _normalized_symbol(symbol)
+    trade_value = safe_float(trade_value)
+    equity = safe_float(getattr(account, "equity", 0.0))
+    if trade_value <= 0 or equity <= 0:
+        return False, "paper buy safeguard requires positive trade value and equity"
+    price = safe_float(quote.get("price"))
+    if price <= 0 or quote.get("quote_verified") is not True:
+        return False, "paper buy safeguard requires a verified fresh price"
+    if not quote_is_fresh(quote.get("quote_timestamp"), safe_text(quote.get("interval"), "1d"), symbol=symbol):
+        return False, "paper buy safeguard rejected stale price"
+    if safe_float(getattr(account, "buying_power", 0.0)) < trade_value:
+        return False, "paper buy safeguard rejected insufficient buying power"
+    if bool(getattr(account, "margin_call", False)):
+        return False, "paper buy safeguard rejected margin-call account"
+    if safe_float(getattr(account, "cash", 0.0)) - trade_value < equity * MIN_CASH_RESERVE_PCT:
+        return False, "paper buy safeguard rejected cash reserve breach"
+
+    existing_value = sum(
+        _position_market_value(position)
+        for position in positions
+        if _normalized_symbol(position.get("symbol")) == symbol
+    )
+    resulting_position_value = existing_value + trade_value
+    max_position_value = equity * MAX_POSITION_FRACTION
+    if resulting_position_value > max_position_value:
+        reason = "duplicate buy accumulation" if existing_value > 0 else "maximum position"
+        return (
+            False,
+            f"paper buy safeguard rejected {reason} exposure "
+            f"({resulting_position_value / equity:.2%}/{MAX_POSITION_FRACTION:.2%})",
+        )
+
+    leverage_limit = max(1.0, safe_float(getattr(account, "leverage_limit", market_leverage_limit(market))))
+    max_gross_exposure = equity * leverage_limit * PAPER_MAX_MARGIN_UTILIZATION_PCT
+    gross_after = safe_float(getattr(account, "gross_exposure", 0.0)) + trade_value
+    if gross_after > max_gross_exposure:
+        return False, "paper buy safeguard rejected maximum portfolio exposure"
+
+    margin_utilization = safe_float(getattr(account, "margin_utilization_pct", 0.0))
+    if margin_utilization >= PAPER_MAX_MARGIN_UTILIZATION_PCT * 100:
+        return False, "paper buy safeguard rejected high margin utilization"
+
+    sector_exposure = _finite_number(quote.get("sector_exposure_pct"))
+    if sector_exposure is not None:
+        sector_after = sector_exposure + (trade_value / equity)
+        if sector_after > MAX_SECTOR_EXPOSURE_PCT:
+            return (
+                False,
+                f"paper buy safeguard rejected sector concentration "
+                f"({sector_after:.2%}/{MAX_SECTOR_EXPOSURE_PCT:.2%})",
+            )
+    return True, "paper buy safeguard approved"
 
 
 # =========================================================
@@ -2119,6 +2189,16 @@ def _buy(
             trade_value = min(trade_value, current_available)
             if trade_value < MIN_TRADE_VALUE:
                 return False, f"buying power changed during execution; available={current_available:.2f}", None
+            safeguard_ok, safeguard_reason = _paper_buy_safeguard(
+                market=market,
+                symbol=symbol,
+                trade_value=trade_value,
+                account=account,
+                positions=[dict(position) for position in active_positions],
+                quote=verified_quote or {},
+            )
+            if not safeguard_ok:
+                return False, safeguard_reason, None
 
             if PENNY_STOCK_MIN_PRICE <= price <= PENNY_STOCK_MAX_PRICE:
                 _, penny_pct = _penny_portfolio_exposure_after(
@@ -2146,7 +2226,7 @@ def _buy(
                 portfolio=execution_portfolio,
                 quote=verified_quote or {},
                 positions=active_positions,
-                concentration_pct=(trade_value / account.equity) if account.equity else 1.0,
+                concentration_pct=None,
             )
             if not risk_ok:
                 return False, f"shared risk rejected: {risk_reason}", None
