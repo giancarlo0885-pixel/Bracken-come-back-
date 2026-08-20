@@ -1107,7 +1107,7 @@ def test_actual_paper_buy_safeguard_enforces_stock_and_crypto_concentration(stoc
     assert "maximum position" in crypto_reason
 
 
-def test_actual_paper_buy_safeguard_enforces_sector_concentration(stock_execution_enabled):
+def test_actual_paper_buy_safeguard_requires_stock_sector_metadata(stock_execution_enabled):
     import oracle_bot
 
     ok, reason = oracle_bot._paper_buy_safeguard(
@@ -1116,8 +1116,37 @@ def test_actual_paper_buy_safeguard_enforces_sector_concentration(stock_executio
         trade_value=1_000,
         account=_paper_account(),
         positions=[],
-        quote=_verified_quote("MSFT", 100, sector_exposure_pct=0.345),
+        quote=_verified_quote("MSFT", 100),
+    )
+
+    assert ok is False
+    assert "sector metadata" in reason
+
+
+def test_actual_paper_buy_safeguard_calculates_sector_from_realistic_positions(monkeypatch, stock_execution_enabled):
+    import oracle_bot
+
+    sectors = {"MSFT": "Technology", "AAPL": "Technology", "NVDA": "Technology", "JNJ": "Healthcare"}
+
+    def fake_row(query, params=()):
+        symbol = params[0]
+        sector = sectors.get(symbol)
+        return {"sector": sector} if sector else {}
+
+    monkeypatch.setattr(oracle_bot, "row", fake_row)
+    ok, reason = oracle_bot._paper_buy_safeguard(
+        market="cash",
+        symbol="MSFT",
+        trade_value=1_000,
+        account=_paper_account(),
+        positions=[
+            {"symbol": "AAPL", "quantity": 200, "current_price": 100},
+            {"symbol": "NVDA", "quantity": 145, "current_price": 100},
+            {"symbol": "JNJ", "quantity": 50, "current_price": 100},
+        ],
+        quote=_verified_quote("MSFT", 100),
     )
 
     assert ok is False
     assert "sector concentration" in reason
+    assert "TECHNOLOGY" in reason

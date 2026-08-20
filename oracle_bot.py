@@ -40,7 +40,6 @@ log = logging.getLogger("oracle-bot")
 _AUTOTRADE_DISABLED_LOGGED = False
 PAPER_MARGIN_REDUCTION_REASON = "paper_margin_reduction"
 QUOTE_PRICE_TOLERANCE_PCT = 0.001
-MAX_SECTOR_EXPOSURE_PCT = float(globals().get("MAX_SECTOR_EXPOSURE_PCT", 0.35))
 
 
 # =========================================================
@@ -73,6 +72,10 @@ MIN_TRADE_VALUE = float(
 
 MAX_TRADE_VALUE_PCT = float(
     globals().get("MAX_TRADE_VALUE_PCT", 0.35)
+)
+
+MAX_SECTOR_EXPOSURE_PCT = float(
+    globals().get("MAX_SECTOR_EXPOSURE_PCT", 0.35)
 )
 
 DEFAULT_STOP_LOSS_PCT = float(
@@ -886,6 +889,68 @@ def _position_market_value(position: dict[str, Any]) -> float:
     return max(0.0, quantity * price)
 
 
+def _clean_sector(value: Any) -> str:
+    text = safe_text(value).strip()
+    if not text or text.lower() in {"unknown", "none", "null", "n/a"}:
+        return ""
+    return text.upper()
+
+
+def _sector_from_candidate(symbol: str) -> str:
+    symbol = _normalized_symbol(symbol)
+    if not symbol:
+        return ""
+    try:
+        record = row(
+            """
+            SELECT sector
+            FROM global_market_candidates
+            WHERE symbol = %s
+            ORDER BY scanned_at DESC
+            LIMIT 1
+            """,
+            (symbol,),
+        ) or {}
+    except Exception:
+        return ""
+    return _clean_sector(record.get("sector"))
+
+
+def _sector_for_symbol(symbol: str, metadata: dict[str, Any] | None = None) -> str:
+    metadata = metadata or {}
+    for key in ("sector", "stock_sector", "gics_sector"):
+        sector = _clean_sector(metadata.get(key))
+        if sector:
+            return sector
+    return _sector_from_candidate(symbol)
+
+
+def _sector_exposure_after(
+    *,
+    market: str,
+    symbol: str,
+    trade_value: float,
+    equity: float,
+    positions: list[dict[str, Any]],
+    quote: dict[str, Any],
+) -> tuple[float | None, str, float]:
+    if market != "cash":
+        return None, "", 0.0
+    sector = _sector_for_symbol(symbol, quote)
+    if not sector:
+        return None, "", 0.0
+    existing_sector_value = 0.0
+    for position in positions:
+        position_symbol = _normalized_symbol(position.get("symbol"))
+        if not position_symbol:
+            continue
+        position_sector = _sector_for_symbol(position_symbol, position)
+        if position_sector == sector:
+            existing_sector_value += _position_market_value(position)
+    sector_after = (existing_sector_value + max(0.0, trade_value)) / equity if equity > 0 else 1.0
+    return sector_after, sector, existing_sector_value
+
+
 def _paper_buy_safeguard(
     *,
     market: str,
@@ -937,15 +1002,22 @@ def _paper_buy_safeguard(
     if margin_utilization >= PAPER_MAX_MARGIN_UTILIZATION_PCT * 100:
         return False, "paper buy safeguard rejected high margin utilization"
 
-    sector_exposure = _finite_number(quote.get("sector_exposure_pct"))
-    if sector_exposure is not None:
-        sector_after = sector_exposure + (trade_value / equity)
-        if sector_after > MAX_SECTOR_EXPOSURE_PCT:
-            return (
-                False,
-                f"paper buy safeguard rejected sector concentration "
-                f"({sector_after:.2%}/{MAX_SECTOR_EXPOSURE_PCT:.2%})",
-            )
+    sector_after, sector, _ = _sector_exposure_after(
+        market=market,
+        symbol=symbol,
+        trade_value=trade_value,
+        equity=equity,
+        positions=positions,
+        quote=quote,
+    )
+    if market == "cash" and not sector:
+        return False, "paper buy safeguard requires verified stock sector metadata"
+    if sector_after is not None and sector_after > MAX_SECTOR_EXPOSURE_PCT:
+        return (
+            False,
+            f"paper buy safeguard rejected sector concentration "
+            f"{sector} ({sector_after:.2%}/{MAX_SECTOR_EXPOSURE_PCT:.2%})",
+        )
     return True, "paper buy safeguard approved"
 
 
