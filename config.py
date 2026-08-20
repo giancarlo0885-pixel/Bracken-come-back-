@@ -272,6 +272,7 @@ HIGH_SCORE_THRESHOLD = float(os.getenv("HIGH_SCORE_THRESHOLD", "52.0"))
 EXTRA_OPEN_POSITIONS = int(os.getenv("EXTRA_OPEN_POSITIONS", "6"))
 MIN_CASH_RESERVE_PCT = float(os.getenv("MIN_CASH_RESERVE_PCT", "0.05"))
 MAX_TRADE_VALUE_PCT = float(os.getenv("MAX_TRADE_VALUE_PCT", "0.08"))
+MAX_SECTOR_EXPOSURE_PCT = float(os.getenv("MAX_SECTOR_EXPOSURE_PCT", "0.35"))
 
 # Oracle Quantitative Trade Standard (institutional-style, retail-executable)
 ENABLE_QUANT_TRADE_STANDARD = os.getenv("ENABLE_QUANT_TRADE_STANDARD", "true").lower() == "true"

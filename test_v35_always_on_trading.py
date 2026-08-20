@@ -996,3 +996,157 @@ def test_crypto_freshness_uses_crypto_setting(monkeypatch):
     monkeypatch.setattr(oracle_bot, "quote_is_fresh", fake_fresh)
     assert oracle_bot._verified_quote_for("BTC-USD", {"BTC-USD": quote}, "crypto") is not None
     assert captured["max_age"] == oracle_bot.DECISION_CRYPTO_MAX_AGE_MINUTES * 60
+
+
+def _paper_account(**overrides):
+    data = {
+        "equity": 100_000.0,
+        "cash": 100_000.0,
+        "buying_power": 100_000.0,
+        "gross_exposure": 0.0,
+        "leverage_limit": 1.0,
+        "margin_call": False,
+        "margin_utilization_pct": 0.0,
+    }
+    data.update(overrides)
+    return SimpleNamespace(**data)
+
+
+def test_stale_data_cannot_enter_paper_order(stock_execution_enabled):
+    import oracle_bot
+
+    stale_quote = _verified_quote(
+        "AAPL",
+        100,
+        quote_timestamp=(datetime.now(timezone.utc) - timedelta(days=7)).isoformat(),
+    )
+    ok, reason = oracle_bot._paper_buy_safeguard(
+        market="cash",
+        symbol="AAPL",
+        trade_value=1_000,
+        account=_paper_account(),
+        positions=[],
+        quote=stale_quote,
+    )
+
+    assert ok is False
+    assert "stale" in reason
+
+
+def test_actual_paper_buy_safeguard_enforces_max_position(stock_execution_enabled):
+    import oracle_bot
+
+    ok, reason = oracle_bot._paper_buy_safeguard(
+        market="cash",
+        symbol="AAPL",
+        trade_value=11_000,
+        account=_paper_account(),
+        positions=[],
+        quote=_verified_quote("AAPL", 100),
+    )
+
+    assert ok is False
+    assert "maximum position" in reason
+
+
+def test_duplicate_buy_accumulation_protection(stock_execution_enabled):
+    import oracle_bot
+
+    ok, reason = oracle_bot._paper_buy_safeguard(
+        market="cash",
+        symbol="AAPL",
+        trade_value=2_000,
+        account=_paper_account(),
+        positions=[{"symbol": "AAPL", "quantity": 95, "current_price": 100}],
+        quote=_verified_quote("AAPL", 100),
+    )
+
+    assert ok is False
+    assert "duplicate buy accumulation" in reason
+
+
+def test_actual_paper_buy_safeguard_enforces_cash_reserve(stock_execution_enabled):
+    import oracle_bot
+
+    ok, reason = oracle_bot._paper_buy_safeguard(
+        market="cash",
+        symbol="MSFT",
+        trade_value=96_000,
+        account=_paper_account(),
+        positions=[],
+        quote=_verified_quote("MSFT", 100),
+    )
+
+    assert ok is False
+    assert "cash reserve" in reason
+
+
+def test_actual_paper_buy_safeguard_enforces_stock_and_crypto_concentration(stock_execution_enabled):
+    import oracle_bot
+
+    stock_ok, stock_reason = oracle_bot._paper_buy_safeguard(
+        market="cash",
+        symbol="MSFT",
+        trade_value=1_000,
+        account=_paper_account(gross_exposure=82_000, leverage_limit=1.0),
+        positions=[],
+        quote=_verified_quote("MSFT", 100),
+    )
+    crypto_ok, crypto_reason = oracle_bot._paper_buy_safeguard(
+        market="crypto",
+        symbol="BTC-USD",
+        trade_value=11_000,
+        account=_paper_account(),
+        positions=[],
+        quote=_verified_quote("BTC-USD", 100),
+    )
+
+    assert stock_ok is False
+    assert "maximum portfolio exposure" in stock_reason
+    assert crypto_ok is False
+    assert "maximum position" in crypto_reason
+
+
+def test_actual_paper_buy_safeguard_requires_stock_sector_metadata(stock_execution_enabled):
+    import oracle_bot
+
+    ok, reason = oracle_bot._paper_buy_safeguard(
+        market="cash",
+        symbol="MSFT",
+        trade_value=1_000,
+        account=_paper_account(),
+        positions=[],
+        quote=_verified_quote("MSFT", 100),
+    )
+
+    assert ok is False
+    assert "sector metadata" in reason
+
+
+def test_actual_paper_buy_safeguard_calculates_sector_from_realistic_positions(monkeypatch, stock_execution_enabled):
+    import oracle_bot
+
+    sectors = {"MSFT": "Technology", "AAPL": "Technology", "NVDA": "Technology", "JNJ": "Healthcare"}
+
+    def fake_row(query, params=()):
+        symbol = params[0]
+        sector = sectors.get(symbol)
+        return {"sector": sector} if sector else {}
+
+    monkeypatch.setattr(oracle_bot, "row", fake_row)
+    ok, reason = oracle_bot._paper_buy_safeguard(
+        market="cash",
+        symbol="MSFT",
+        trade_value=1_000,
+        account=_paper_account(),
+        positions=[
+            {"symbol": "AAPL", "quantity": 200, "current_price": 100},
+            {"symbol": "NVDA", "quantity": 145, "current_price": 100},
+            {"symbol": "JNJ", "quantity": 50, "current_price": 100},
+        ],
+        quote=_verified_quote("MSFT", 100),
+    )
+
+    assert ok is False
+    assert "sector concentration" in reason
+    assert "TECHNOLOGY" in reason

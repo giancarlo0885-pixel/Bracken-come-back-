@@ -74,6 +74,10 @@ MAX_TRADE_VALUE_PCT = float(
     globals().get("MAX_TRADE_VALUE_PCT", 0.35)
 )
 
+MAX_SECTOR_EXPOSURE_PCT = float(
+    globals().get("MAX_SECTOR_EXPOSURE_PCT", 0.35)
+)
+
 DEFAULT_STOP_LOSS_PCT = float(
     globals().get("STOP_LOSS_PCT", 0.06)
 )
@@ -877,6 +881,144 @@ def _shared_risk_gate(
     if not result.allowed:
         return False, "; ".join(result.reasons) or result.reason, result
     return True, "shared risk approved", result
+
+
+def _position_market_value(position: dict[str, Any]) -> float:
+    quantity = safe_float(position.get("quantity"))
+    price = safe_float(position.get("current_price"))
+    return max(0.0, quantity * price)
+
+
+def _clean_sector(value: Any) -> str:
+    text = safe_text(value).strip()
+    if not text or text.lower() in {"unknown", "none", "null", "n/a"}:
+        return ""
+    return text.upper()
+
+
+def _sector_from_candidate(symbol: str) -> str:
+    symbol = _normalized_symbol(symbol)
+    if not symbol:
+        return ""
+    try:
+        record = row(
+            """
+            SELECT sector
+            FROM global_market_candidates
+            WHERE symbol = %s
+            ORDER BY scanned_at DESC
+            LIMIT 1
+            """,
+            (symbol,),
+        ) or {}
+    except Exception:
+        return ""
+    return _clean_sector(record.get("sector"))
+
+
+def _sector_for_symbol(symbol: str, metadata: dict[str, Any] | None = None) -> str:
+    metadata = metadata or {}
+    for key in ("sector", "stock_sector", "gics_sector"):
+        sector = _clean_sector(metadata.get(key))
+        if sector:
+            return sector
+    return _sector_from_candidate(symbol)
+
+
+def _sector_exposure_after(
+    *,
+    market: str,
+    symbol: str,
+    trade_value: float,
+    equity: float,
+    positions: list[dict[str, Any]],
+    quote: dict[str, Any],
+) -> tuple[float | None, str, float]:
+    if market != "cash":
+        return None, "", 0.0
+    sector = _sector_for_symbol(symbol, quote)
+    if not sector:
+        return None, "", 0.0
+    existing_sector_value = 0.0
+    for position in positions:
+        position_symbol = _normalized_symbol(position.get("symbol"))
+        if not position_symbol:
+            continue
+        position_sector = _sector_for_symbol(position_symbol, position)
+        if position_sector == sector:
+            existing_sector_value += _position_market_value(position)
+    sector_after = (existing_sector_value + max(0.0, trade_value)) / equity if equity > 0 else 1.0
+    return sector_after, sector, existing_sector_value
+
+
+def _paper_buy_safeguard(
+    *,
+    market: str,
+    symbol: str,
+    trade_value: float,
+    account: Any,
+    positions: list[dict[str, Any]],
+    quote: dict[str, Any],
+) -> tuple[bool, str]:
+    symbol = _normalized_symbol(symbol)
+    trade_value = safe_float(trade_value)
+    equity = safe_float(getattr(account, "equity", 0.0))
+    if trade_value <= 0 or equity <= 0:
+        return False, "paper buy safeguard requires positive trade value and equity"
+    price = safe_float(quote.get("price"))
+    if price <= 0 or quote.get("quote_verified") is not True:
+        return False, "paper buy safeguard requires a verified fresh price"
+    if not quote_is_fresh(quote.get("quote_timestamp"), safe_text(quote.get("interval"), "1d"), symbol=symbol):
+        return False, "paper buy safeguard rejected stale price"
+    if safe_float(getattr(account, "buying_power", 0.0)) < trade_value:
+        return False, "paper buy safeguard rejected insufficient buying power"
+    if bool(getattr(account, "margin_call", False)):
+        return False, "paper buy safeguard rejected margin-call account"
+    if safe_float(getattr(account, "cash", 0.0)) - trade_value < equity * MIN_CASH_RESERVE_PCT:
+        return False, "paper buy safeguard rejected cash reserve breach"
+
+    existing_value = sum(
+        _position_market_value(position)
+        for position in positions
+        if _normalized_symbol(position.get("symbol")) == symbol
+    )
+    resulting_position_value = existing_value + trade_value
+    max_position_value = equity * MAX_POSITION_FRACTION
+    if resulting_position_value > max_position_value:
+        reason = "duplicate buy accumulation" if existing_value > 0 else "maximum position"
+        return (
+            False,
+            f"paper buy safeguard rejected {reason} exposure "
+            f"({resulting_position_value / equity:.2%}/{MAX_POSITION_FRACTION:.2%})",
+        )
+
+    leverage_limit = max(1.0, safe_float(getattr(account, "leverage_limit", market_leverage_limit(market))))
+    max_gross_exposure = equity * leverage_limit * PAPER_MAX_MARGIN_UTILIZATION_PCT
+    gross_after = safe_float(getattr(account, "gross_exposure", 0.0)) + trade_value
+    if gross_after > max_gross_exposure:
+        return False, "paper buy safeguard rejected maximum portfolio exposure"
+
+    margin_utilization = safe_float(getattr(account, "margin_utilization_pct", 0.0))
+    if margin_utilization >= PAPER_MAX_MARGIN_UTILIZATION_PCT * 100:
+        return False, "paper buy safeguard rejected high margin utilization"
+
+    sector_after, sector, _ = _sector_exposure_after(
+        market=market,
+        symbol=symbol,
+        trade_value=trade_value,
+        equity=equity,
+        positions=positions,
+        quote=quote,
+    )
+    if market == "cash" and not sector:
+        return False, "paper buy safeguard requires verified stock sector metadata"
+    if sector_after is not None and sector_after > MAX_SECTOR_EXPOSURE_PCT:
+        return (
+            False,
+            f"paper buy safeguard rejected sector concentration "
+            f"{sector} ({sector_after:.2%}/{MAX_SECTOR_EXPOSURE_PCT:.2%})",
+        )
+    return True, "paper buy safeguard approved"
 
 
 # =========================================================
@@ -2119,6 +2261,16 @@ def _buy(
             trade_value = min(trade_value, current_available)
             if trade_value < MIN_TRADE_VALUE:
                 return False, f"buying power changed during execution; available={current_available:.2f}", None
+            safeguard_ok, safeguard_reason = _paper_buy_safeguard(
+                market=market,
+                symbol=symbol,
+                trade_value=trade_value,
+                account=account,
+                positions=[dict(position) for position in active_positions],
+                quote=verified_quote or {},
+            )
+            if not safeguard_ok:
+                return False, safeguard_reason, None
 
             if PENNY_STOCK_MIN_PRICE <= price <= PENNY_STOCK_MAX_PRICE:
                 _, penny_pct = _penny_portfolio_exposure_after(
@@ -2146,7 +2298,7 @@ def _buy(
                 portfolio=execution_portfolio,
                 quote=verified_quote or {},
                 positions=active_positions,
-                concentration_pct=(trade_value / account.equity) if account.equity else 1.0,
+                concentration_pct=None,
             )
             if not risk_ok:
                 return False, f"shared risk rejected: {risk_reason}", None

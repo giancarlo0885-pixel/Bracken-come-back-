@@ -14,7 +14,20 @@ from config import (
     ALWAYS_ON_TRADING, APP_NAME, EXECUTION_MODE, LIVE_STATUS_STALE_SECONDS,
     PAPER_BROKER_MODE, UI_AUTO_REFRESH, UI_REFRESH_SECONDS,
 )
-from dashboard_helpers import as_float, format_asset_price, worker_is_online
+from dashboard_helpers import (
+    as_float,
+    format_asset_price,
+    live_data_status,
+    money_text,
+    readable_trade_rows,
+    simple_money_summary,
+    simple_opportunity_summary,
+    simple_oracle_summary,
+    simple_portfolio_builder_plan,
+    simple_portfolio_scores,
+    trade_summary,
+    worker_is_online,
+)
 from database import bootstrap_database_with_lock, database_ready, database_storage_report, row, rows
 from earnings_calendar import mobile_card_lines, prepare_events, table_rows
 from market_data import get_history
@@ -49,11 +62,11 @@ html{font-size:17px}.stApp{background:var(--bg);color:var(--text)}.block-contain
 .card{border:2px solid var(--line);background:var(--panel);border-radius:18px;padding:18px;margin-bottom:14px}.card h3{margin-top:0}.muted{color:var(--muted)}
 .decision{border:2px solid var(--line);border-left:8px solid var(--yellow);background:var(--panel);border-radius:16px;padding:17px;margin:12px 0}.decision.buy{border-left-color:var(--green)}.decision.sell{border-left-color:var(--red)}.decision.wait{border-left-color:var(--yellow)}.decision.hold{border-left-color:var(--blue)}
 .action{font-size:1.32rem;font-weight:950}.buy-text{color:var(--green)}.sell-text{color:var(--red)}.wait-text{color:var(--yellow)}.hold-text{color:var(--blue)}
-.grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}.tile{border:2px solid var(--line);background:var(--panel);border-radius:15px;padding:14px}.tile small{color:var(--muted)}.tile b{display:block;font-size:1.55rem;margin-top:.25rem}.reason{line-height:1.6;color:#eef6fc}.pill{display:inline-block;border:1px solid var(--line);border-radius:999px;padding:.35rem .65rem;margin:.2rem .25rem .1rem 0;background:#09131d;font-weight:700}
+.grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}.tile{border:2px solid var(--line);background:var(--panel);border-radius:15px;padding:14px}.tile small{color:var(--muted)}.tile b{display:block;font-size:1.55rem;margin-top:.25rem}.money-grid{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:12px}.money-tile{border:2px solid var(--line);background:var(--panel);border-radius:15px;padding:18px}.money-tile small{color:var(--muted);font-weight:800;text-transform:uppercase}.money-tile b{display:block;font-size:clamp(1.55rem,2.8vw,2.35rem);margin-top:.3rem}.simple-status{font-size:1.45rem;font-weight:950}.reason{line-height:1.6;color:#eef6fc}.pill{display:inline-block;border:1px solid var(--line);border-radius:999px;padding:.35rem .65rem;margin:.2rem .25rem .1rem 0;background:#09131d;font-weight:700}
 [data-testid="stSidebar"]{border-right:2px solid var(--line)}[data-testid="stMetric"]{border:2px solid var(--line);border-radius:16px;padding:14px;background:var(--panel)}
 .stTabs [data-baseweb="tab-list"]{gap:.3rem;overflow-x:auto}.stTabs [data-baseweb="tab"]{min-height:48px;font-weight:800;white-space:nowrap}.stTabs [aria-selected="true"]{border-bottom:4px solid var(--green)!important}
 [data-testid="stDataFrame"]{border:2px solid var(--line);border-radius:15px;overflow:hidden}button,input,textarea,select{min-height:44px}
-@media(max-width:900px){.grid{grid-template-columns:repeat(2,minmax(0,1fr))}}@media(max-width:650px){html{font-size:16px}.block-container{padding-left:.7rem;padding-right:.7rem}.hero{padding:18px}.grid{grid-template-columns:1fr}}
+@media(max-width:900px){.grid,.money-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}@media(max-width:650px){html{font-size:16px}.block-container{padding-left:.7rem;padding-right:.7rem}.hero{padding:18px}.grid,.money-grid{grid-template-columns:1fr}}
 </style>
 """,
     unsafe_allow_html=True,
@@ -227,7 +240,7 @@ def clean_trade_frame(trades: list[dict[str, Any]]) -> pd.DataFrame:
     return view
 
 
-def decision_card(item: dict[str, Any], compact: bool = False) -> None:
+def decision_card(item: dict[str, Any], compact: bool = False, simple: bool = False) -> None:
     action = str(item.get("action", "WAIT")).upper()
     expected = as_float(item.get("expected_return"))
     target = as_float(item.get("target"))
@@ -245,6 +258,44 @@ def decision_card(item: dict[str, Any], compact: bool = False) -> None:
     data_status = str(item.get("data_status") or "Data status unavailable")
 
     with st.container(border=True):
+        if simple:
+            summary = simple_opportunity_summary(item)
+            data = summary["data"]
+            st.markdown(f"### {html.escape(summary['symbol'])}")
+            st.markdown(
+                f"<div class='simple-status'>ORACLE SAYS: {html.escape(summary['action'])}</div>",
+                unsafe_allow_html=True,
+            )
+            m1, m2 = st.columns(2)
+            m1.metric("Price now", summary["price_now"])
+            m2.metric("Oracle target", summary["target"])
+            st.markdown("**Why?**")
+            st.write(summary["why"])
+            g1, g2 = st.columns(2)
+            g1.metric("Possible gain", summary["possible_gain"])
+            g2.metric("Risk", summary["risk"])
+            if data["label"] == "LIVE DATA":
+                st.success(f"{data['label']} - {data['detail']}")
+            elif data["label"] == "DELAYED DATA":
+                st.warning(f"{data['label']} - {data['detail']}")
+            else:
+                st.error(f"{data['label']} - {data['detail']}")
+            with st.expander("Why does Oracle like this?"):
+                left, right = st.columns(2)
+                with left:
+                    st.metric("Confidence", f"{confidence:.0f}%")
+                    st.metric("Expected move", f"{expected:+.1f}%")
+                with right:
+                    st.metric("Trade quality", f"{score:.0f}/100")
+                    st.metric("Market", market)
+                st.markdown("**Supporting details**")
+                for point in supports:
+                    st.markdown(f"- {point}")
+                st.markdown("**Cautions**")
+                for point in cautions:
+                    st.markdown(f"- {point}")
+                st.caption(f"Technical data status: {data_status}")
+            return
         st.markdown(f"### :{color}[{action} · {symbol}]")
         current_text = format_asset_price(price, symbol, market_key)
         target_text = format_asset_price(target, symbol, market_key)
@@ -270,6 +321,66 @@ def decision_card(item: dict[str, Any], compact: bool = False) -> None:
             reference = format_asset_price(price, symbol, market_key)
             stop_text = format_asset_price(low, symbol, market_key)
             st.caption(f"Entry reference: {reference} · Target: {target_text} · Protective level: {stop_text}")
+
+
+def money_tiles(summary: dict[str, str]) -> None:
+    st.markdown(
+        "<div class='money-grid'>"
+        + "".join(
+            f"<div class='money-tile'><small>{html.escape(label)}</small><b>{html.escape(value)}</b></div>"
+            for label, value in summary.items()
+            if label != "sentence"
+        )
+        + "</div>",
+        unsafe_allow_html=True,
+    )
+    st.markdown(f"### {html.escape(summary['sentence'])}")
+
+
+def simple_portfolio_card(
+    name: str,
+    metrics: dict[str, Any],
+    positions: list[dict[str, Any]],
+    health: Any,
+    scores: dict[str, Any],
+) -> None:
+    with st.container(border=True):
+        st.markdown(f"### {name.upper()} PORTFOLIO")
+        st.markdown("**How am I doing?**")
+        st.markdown(f"<div class='simple-status'>{html.escape(str(scores['status']))}</div>", unsafe_allow_html=True)
+        a, b = st.columns(2)
+        a.metric("Money invested", money_text(scores["money_invested"], whole=True))
+        b.metric("Cash waiting", money_text(scores["cash_waiting"], whole=True))
+        c, d = st.columns(2)
+        c.metric("How many investments", int(scores["position_count"]))
+        pnl = as_float(scores["profit_loss"])
+        d.metric("Profit/Loss", f"{'+' if pnl >= 0 else '-'}{money_text(abs(pnl), whole=True)}")
+        st.write(scores["explanation"])
+        s1, s2 = st.columns(2)
+        s1.metric("Safety", scores["safety"])
+        s2.metric("Diversification", scores["diversification"])
+        s3, s4 = st.columns(2)
+        s3.metric("Money Use", scores["capital_use"])
+        s4.metric("Opportunity", scores["opportunity"])
+        with st.expander("Show Advanced Details"):
+            p1, p2 = st.columns(2)
+            p1.metric("Health score", f"{health.health_score}/100")
+            p2.metric("Original risk label", health.risk_label)
+            p3, p4 = st.columns(2)
+            p3.metric("Leverage", f"{health.leverage_used:.2f}x")
+            p4.metric("Holdings", health.position_count)
+            st.write(health.plain_summary)
+            st.write(
+                f"Margin debt: {money(metrics['margin_debt'])} · Gross exposure: {money(metrics['gross_exposure'])} · "
+                f"Maintenance requirement: {money(metrics['maintenance_requirement'])}."
+            )
+            st.write(
+                f"Safety Score {scores['safety_score']}/100 · Diversification Score {scores['diversification_score']}/100 · "
+                f"Opportunity Score {scores['opportunity_score']}/100 · Data Quality Score {scores['data_quality_score']}/100 · "
+                f"Overall Portfolio Score {scores['overall_score']}/100."
+            )
+            st.caption(scores["overall_explanation"])
+
 
 def portfolio_table(positions: list[dict[str, Any]]) -> pd.DataFrame:
     data = []
@@ -350,6 +461,12 @@ with st.sidebar:
         ["Dashboard", "Markets", "Portfolios", "Oracle", "Intelligence", "Professional"],
         label_visibility="collapsed",
     )
+    display_mode = st.radio(
+        "Dashboard mode",
+        ["Simple Mode", "Advanced Mode"],
+        index=0,
+        help="Simple Mode keeps the first screen plain. Advanced Mode shows institutional analytics.",
+    )
     st.divider()
     st.caption("Live worker status")
     for market in ("cash", "crypto"):
@@ -370,12 +487,19 @@ with st.sidebar:
         st.cache_data.clear()
         st.rerun()
 
+if page == "Dashboard" and display_mode == "Simple Mode":
+    hero_eyebrow = "Plain-English Dashboard"
+    hero_text = "The Oracle watches the market, protects cash, and waits for strong investment chances. It is paper-only and does not place real-money trades."
+else:
+    hero_eyebrow = "Always-On Institutional Paper Broker - AI Chief Investment Officer"
+    hero_text = "Large simulated capital, controlled paper leverage, rolling fast scans, deeper global research, continuous position monitoring, automatic rotation, live risk exits, and clear decisions. The broker account is paper-only and does not submit real-money orders."
+
 st.markdown(
     f"""
 <div class='hero'>
-  <div class='eyebrow'>Always-On Institutional Paper Broker · AI Chief Investment Officer</div>
+  <div class='eyebrow'>{html.escape(hero_eyebrow)}</div>
   <h1>{html.escape(APP_NAME)}</h1>
-  <p>Large simulated capital, controlled paper leverage, rolling fast scans, deeper global research, continuous position monitoring, automatic rotation, live risk exits, and clear decisions. The broker account is paper-only and does not submit real-money orders.</p>
+  <p>{html.escape(hero_text)}</p>
 </div>
 """,
     unsafe_allow_html=True,
@@ -383,185 +507,260 @@ st.markdown(
 
 live_records = [record for record in workers if worker_live(record)]
 mode_label = "LIVE INSTITUTIONAL PAPER BROKER" if EXECUTION_MODE == "paper" and PAPER_BROKER_MODE else ("LIVE PAPER TRADING" if EXECUTION_MODE == "paper" else f"LIVE {EXECUTION_MODE.upper()} EXECUTION")
-if len(live_records) == 2:
+show_advanced_chrome = display_mode == "Advanced Mode" or page != "Dashboard"
+if len(live_records) == 2 and show_advanced_chrome:
     always_text = "ALWAYS-ON" if ALWAYS_ON_TRADING else "CONTINUOUS MONITORING"
     st.success(
         f"🟢 {mode_label} · {always_text} · rolling fast scans, deep research, "
         "position monitoring, qualified entries, rotations, and risk exits are active."
     )
-elif live_records:
+elif live_records and show_advanced_chrome:
     st.warning(f"🟠 {mode_label} · only {len(live_records)} of 2 workers currently has a fresh heartbeat.")
-else:
+elif show_advanced_chrome:
     st.error("🔴 Live workers are not reporting fresh heartbeats. Check both Railway worker services.")
 
-status_cols = st.columns(4)
-for index, market in enumerate(("cash", "crypto")):
-    record = next((r for r in workers if r.get("market") == market), {})
-    label = "Stock engine" if market == "cash" else "Crypto engine"
-    age = status_age_seconds(record.get("last_fast_scan"))
-    value = f"{int(age)}s ago" if age is not None else "Starting"
-    status_cols[index].metric(
-        label,
-        value,
-        f"Fast {record.get('fast_scan_seconds') or '—'}s · Deep {record.get('deep_scan_seconds') or '—'}s",
-    )
 latest_trade = recent_trades[0] if recent_trades else {}
-trade_label = f"{str(latest_trade.get('side','')).upper()} {latest_trade.get('symbol','')}".strip() or "No trade yet"
-status_cols[2].metric(
-    "Latest execution",
-    trade_label,
-    clean_trade_reason(latest_trade.get("reason")) if latest_trade else "Scanning for a qualified trade",
-)
 error_total = sum(int(as_float(record.get("cycle_errors"))) for record in workers)
-status_cols[3].metric("Auto recovery", "Ready" if error_total == 0 else "Recovering", f"Cycle errors: {error_total}")
+if show_advanced_chrome:
+    status_cols = st.columns(4)
+    for index, market in enumerate(("cash", "crypto")):
+        record = next((r for r in workers if r.get("market") == market), {})
+        label = "Stock engine" if market == "cash" else "Crypto engine"
+        age = status_age_seconds(record.get("last_fast_scan"))
+        value = f"{int(age)}s ago" if age is not None else "Starting"
+        status_cols[index].metric(
+            label,
+            value,
+            f"Fast {record.get('fast_scan_seconds') or '—'}s · Deep {record.get('deep_scan_seconds') or '—'}s",
+        )
+    trade_label = f"{str(latest_trade.get('side','')).upper()} {latest_trade.get('symbol','')}".strip() or "No trade yet"
+    status_cols[2].metric(
+        "Latest execution",
+        trade_label,
+        clean_trade_reason(latest_trade.get("reason")) if latest_trade else "Scanning for a qualified trade",
+    )
+    status_cols[3].metric("Auto recovery", "Ready" if error_total == 0 else "Recovering", f"Cycle errors: {error_total}")
 
 if page == "Dashboard":
-    st.subheader("What should I do today?")
     top = buy_decisions[0] if buy_decisions else (decisions[0] if decisions else None)
-    market_state = "Constructive" if buy_decisions else "Cautious"
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Broker Equity", money(combined_equity), pct(combined_return))
-    c2.metric("Available Buying Power", money(combined_buying_power))
-    c3.metric("Trade-ready Buys", len(buy_decisions), f"{len(waiting_for_data)} waiting on data")
-    c4.metric("Active Risks", len(alerts))
-    b1, b2, b3, b4 = st.columns(4)
-    b1.metric("Stock Leverage", f"{stock_metrics['leverage_used']:.2f}x", f"Limit {stock_metrics['leverage_limit']:.1f}x")
-    b2.metric("Crypto Leverage", f"{crypto_metrics['leverage_used']:.2f}x", f"Limit {crypto_metrics['leverage_limit']:.1f}x")
-    b3.metric("Margin Debt", money(combined_margin_debt))
-    b4.metric("Market Condition", market_state)
+    stock_scores = simple_portfolio_scores(stock_metrics, stock_positions, len([d for d in buy_decisions if d.get("market") == "cash"]))
+    crypto_scores = simple_portfolio_scores(crypto_metrics, crypto_positions, len([d for d in buy_decisions if d.get("market") == "crypto"]))
 
-    if top:
-        st.markdown("### Today's strongest decision")
-        decision_card(top)
-    else:
-        st.info("The Oracle has not produced a qualified opportunity yet. The disciplined decision is to wait for stronger evidence.")
+    if display_mode == "Simple Mode":
+        combined_metrics = {
+            "starting_balance": combined_start,
+            "equity": combined_equity,
+            "cash": stock_metrics["cash"] + crypto_metrics["cash"],
+            "invested": stock_metrics["invested"] + crypto_metrics["invested"],
+        }
+        st.markdown("## TODAY'S ORACLE SUMMARY")
+        for item in simple_oracle_summary(len(live_records) == 2, stock_scores, crypto_scores, top):
+            if item["tone"] == "good":
+                st.success(f"**{item['title']}**\n\n{item['body']}")
+            elif item["tone"] == "warn":
+                st.warning(f"**{item['title']}**\n\n{item['body']}")
+            else:
+                st.error(f"**{item['title']}**\n\n{item['body']}")
 
-    left, right = st.columns([1.2, 1])
-    with left:
-        st.markdown("### Today's action plan")
-        plan = []
-        if buy_decisions:
-            plan.append(f"Review **{buy_decisions[0]['symbol']}** as the highest-ranked current opportunity.")
-        if sell_decisions:
-            plan.append(f"Review **{sell_decisions[0]['symbol']}** for reduction or exit.")
-        if stock_health.cash_pct < 8:
-            plan.append("Increase stock-portfolio cash before adding several new positions.")
-        if crypto_health.cash_pct < 8:
-            plan.append("Protect crypto liquidity; cash is below the preferred operating range.")
-        if not plan:
-            plan.append("Hold current positions and wait for stronger confirmation.")
-        for item in plan:
-            st.markdown(f"- {item}")
+        st.markdown("## MY MONEY")
+        money_tiles(simple_money_summary(combined_metrics))
 
-        st.markdown("### Top live opportunities")
-        if buy_decisions:
-            for item in buy_decisions[:5]:
-                decision_card(item, compact=True)
+        if top:
+            st.markdown("## BEST OPPORTUNITY RIGHT NOW")
+            decision_card(top, simple=True)
         else:
-            st.info("No BUY has passed the live-price, forecast, freshness, and minimum-edge gates yet.")
+            st.info("Oracle says: WAIT. No investment has passed every safety check yet.")
 
-    with right:
-        st.markdown("### Portfolio health")
-        for name, health in (("Stock", stock_health), ("Crypto", crypto_health)):
-            with st.container(border=True):
-                st.markdown(f"### {name} Portfolio · {portfolio_status_label(health.health_score)}")
-                p1, p2 = st.columns(2)
-                p1.metric("Health", f"{health.health_score}/100")
-                p2.metric("Risk", health.risk_label)
-                p3, p4 = st.columns(2)
-                p3.metric("Leverage", f"{health.leverage_used:.2f}x")
-                p4.metric("Holdings", health.position_count)
-                st.caption(health.plain_summary)
-        st.markdown("### Important alerts")
+        st.markdown("## STOCK AND CRYPTO PORTFOLIOS")
+        p_left, p_right = st.columns(2)
+        with p_left:
+            simple_portfolio_card("Stock", stock_metrics, stock_positions, stock_health, stock_scores)
+        with p_right:
+            simple_portfolio_card("Crypto", crypto_metrics, crypto_positions, crypto_health, crypto_scores)
+
+        st.markdown("## HOW THE ORACLE WOULD USE MY MONEY")
+        stock_plan = simple_portfolio_builder_plan(stock_metrics["cash"], stock_metrics["equity"], [d for d in buy_decisions if d.get("market") == "cash"], stock_positions)
+        for item in stock_plan:
+            st.markdown(f"**{money_text(item['amount'], whole=True)}** - {item['label']} ({item['symbol']})")
+            st.caption(item["reason"])
+        with st.expander("Show Details"):
+            st.caption("This is a planning view only. It does not place trades.")
+            st.write("The plan uses confidence, expected move, risk, existing positions, cash reserves, and maximum position size limits.")
+            st.dataframe(pd.DataFrame(stock_plan), width="stretch", hide_index=True)
+
+        st.markdown("## WHAT NEEDS ATTENTION")
         if alerts:
             for a in alerts[:5]:
-                st.warning(f"**{a.get('title','Alert')}** — {a.get('message','')}")
+                st.warning(f"{a.get('title','Alert')}: {a.get('message','')}")
         else:
-            st.success("No unresolved high-priority alerts.")
+            st.success("Nothing urgent needs attention right now.")
 
-    st.markdown("### Advisor Foundation")
-    advisor_tabs = st.tabs([
-        "Advisor Brief",
-        "Opportunities Now",
-        "Proposed Trades",
-        "Watchlist",
-        "Strategy Scorecards",
-        "Forecast Accuracy",
-        "Provider Health",
-        "Risk Center",
-        "Historical Audit",
-        "Worker Status",
-        "Settings",
-    ])
-    with advisor_tabs[0]:
-        st.info("Advisor mode is active for recommendations and diagnostics. Live brokerage submission remains disabled.")
-    with advisor_tabs[1]:
-        st.caption("Opportunities are filtered by verified price, forecast quality, data quality, liquidity, and risk controls.")
-    with advisor_tabs[2]:
-        proposals = safe_rows("SELECT * FROM order_proposals ORDER BY id DESC LIMIT 25")
-        if proposals:
-            st.dataframe(pd.DataFrame(proposals), width="stretch", hide_index=True)
-            st.warning("Authenticated trade approval is not enabled yet.")
+        with st.expander("Show Details"):
+            st.markdown("### Advanced dashboard")
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Broker Equity", money(combined_equity), pct(combined_return))
+            c2.metric("Available Buying Power", money(combined_buying_power))
+            c3.metric("Trade-ready Buys", len(buy_decisions), f"{len(waiting_for_data)} waiting on data")
+            c4.metric("Active Risks", len(alerts))
+            b1, b2, b3, b4 = st.columns(4)
+            b1.metric("Stock Leverage", f"{stock_metrics['leverage_used']:.2f}x", f"Limit {stock_metrics['leverage_limit']:.1f}x")
+            b2.metric("Crypto Leverage", f"{crypto_metrics['leverage_used']:.2f}x", f"Limit {crypto_metrics['leverage_limit']:.1f}x")
+            b3.metric("Margin Debt", money(combined_margin_debt))
+            b4.metric("Market Condition", "Constructive" if buy_decisions else "Cautious")
+            if top:
+                decision_card(top)
+    else:
+        st.subheader("What should I do today?")
+        market_state = "Constructive" if buy_decisions else "Cautious"
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Broker Equity", money(combined_equity), pct(combined_return))
+        c2.metric("Available Buying Power", money(combined_buying_power))
+        c3.metric("Trade-ready Buys", len(buy_decisions), f"{len(waiting_for_data)} waiting on data")
+        c4.metric("Active Risks", len(alerts))
+        b1, b2, b3, b4 = st.columns(4)
+        b1.metric("Stock Leverage", f"{stock_metrics['leverage_used']:.2f}x", f"Limit {stock_metrics['leverage_limit']:.1f}x")
+        b2.metric("Crypto Leverage", f"{crypto_metrics['leverage_used']:.2f}x", f"Limit {crypto_metrics['leverage_limit']:.1f}x")
+        b3.metric("Margin Debt", money(combined_margin_debt))
+        b4.metric("Market Condition", market_state)
+
+        if top:
+            st.markdown("### Today's strongest decision")
+            decision_card(top)
         else:
-            st.info("No trade proposals are waiting for manual review.")
-    with advisor_tabs[3]:
-        st.caption("Watchlist candidates continue to update from fixed watchlists and dynamic discovery.")
-    with advisor_tabs[4]:
-        scorecards = safe_rows("SELECT * FROM strategy_performance ORDER BY id DESC LIMIT 25")
-        st.dataframe(pd.DataFrame(scorecards), width="stretch", hide_index=True) if scorecards else st.info("Strategy scorecards will appear after enough paper or shadow observations.")
-    with advisor_tabs[5]:
-        validation = safe_rows("SELECT * FROM forecast_validation ORDER BY id DESC LIMIT 25")
-        st.dataframe(pd.DataFrame(validation), width="stretch", hide_index=True) if validation else st.info("Forecast accuracy records will appear as walk-forward outcomes mature.")
-    with advisor_tabs[6]:
-        diagnostics = provider_diagnostics()
-        st.dataframe(pd.DataFrame(diagnostics), width="stretch", hide_index=True)
-    with advisor_tabs[7]:
-        risk_events = safe_rows("SELECT * FROM risk_events ORDER BY id DESC LIMIT 25")
-        st.dataframe(pd.DataFrame(risk_events), width="stretch", hide_index=True) if risk_events else st.success("No advisor risk events are currently recorded.")
-    with advisor_tabs[8]:
-        audits = safe_rows("SELECT * FROM trade_audits ORDER BY id DESC LIMIT 25")
-        st.dataframe(pd.DataFrame(audits), width="stretch", hide_index=True) if audits else st.info("Historical audit records are non-destructive and appear here after review.")
-    with advisor_tabs[9]:
-        st.dataframe(pd.DataFrame(workers), width="stretch", hide_index=True) if workers else st.info("Workers have not reported status yet.")
-    with advisor_tabs[10]:
-        st.caption("Execution switches default to disabled. Railway variables must be intentionally changed before any paper automation can run.")
-        st.write(f"OpenAI enabled: {'Yes' if openai_available() else 'No'}")
+            st.info("The Oracle has not produced a qualified opportunity yet. The disciplined decision is to wait for stronger evidence.")
 
-        try:
-            storage = database_storage_report()
-            st.markdown("### Database storage status")
-            st.write(f"Database size: {storage.get('database_size')} ? status: {storage.get('status')}")
-            if storage.get("used_pct") is not None:
-                st.progress(min(1.0, float(storage["used_pct"]) / 100.0), text=f"{storage['used_pct']:.1f}% of configured database volume")
+        left, right = st.columns([1.2, 1])
+        with left:
+            st.markdown("### Today's action plan")
+            plan = []
+            if buy_decisions:
+                plan.append(f"Review **{buy_decisions[0]['symbol']}** as the highest-ranked current opportunity.")
+            if sell_decisions:
+                plan.append(f"Review **{sell_decisions[0]['symbol']}** for reduction or exit.")
+            if stock_health.cash_pct < 8:
+                plan.append("Increase stock-portfolio cash before adding several new positions.")
+            if crypto_health.cash_pct < 8:
+                plan.append("Protect crypto liquidity; cash is below the preferred operating range.")
+            if not plan:
+                plan.append("Hold current positions and wait for stronger confirmation.")
+            for item in plan:
+                st.markdown(f"- {item}")
+
+            st.markdown("### Top live opportunities")
+            if buy_decisions:
+                for item in buy_decisions[:5]:
+                    decision_card(item, compact=True)
             else:
-                st.caption("Database volume capacity is not configured; set DATABASE_VOLUME_CAPACITY_GB later to enable percentage warnings.")
-            table_rows_view = [
-                {
-                    "Table": item.get("table"),
-                    "Total": item.get("total_size"),
-                    "Data": item.get("table_size"),
-                    "Indexes": item.get("index_size"),
-                    "Live rows": item.get("live_rows"),
-                    "Dead rows": item.get("dead_rows"),
-                    "Last autovacuum": item.get("last_autovacuum"),
-                    "Last autoanalyze": item.get("last_autoanalyze"),
-                }
-                for item in storage.get("largest_tables", [])
-            ]
-            st.dataframe(pd.DataFrame(table_rows_view), width="stretch", hide_index=True) if table_rows_view else st.info("No table size records are available yet.")
-            st.caption("Retention is conservative and never auto-deletes canonical financial, governance, migration, or execution history.")
-        except Exception as exc:
-            st.warning(f"Database storage diagnostics unavailable: {exc}")
-        if st.button("Test OpenAI Connection"):
-            result = test_openai_connection()
-            st.write(f"API key configured: {'Yes' if result.get('api_key_configured') else 'No'}")
-            st.write(f"Configured model: {result.get('model', '')}")
-            st.write(f"Connection status: {result.get('status', 'unavailable')}")
-            message = str(result.get("message") or "")
-            if result.get("available") and message.strip() == "GARIBALDI AI ONLINE":
-                st.success("GARIBALDI AI ONLINE")
+                st.info("No BUY has passed the live-price, forecast, freshness, and minimum-edge gates yet.")
+
+        with right:
+            st.markdown("### Portfolio health")
+            for name, health in (("Stock", stock_health), ("Crypto", crypto_health)):
+                with st.container(border=True):
+                    st.markdown(f"### {name} Portfolio · {portfolio_status_label(health.health_score)}")
+                    p1, p2 = st.columns(2)
+                    p1.metric("Health", f"{health.health_score}/100")
+                    p2.metric("Risk", health.risk_label)
+                    p3, p4 = st.columns(2)
+                    p3.metric("Leverage", f"{health.leverage_used:.2f}x")
+                    p4.metric("Holdings", health.position_count)
+                    st.caption(health.plain_summary)
+            st.markdown("### Important alerts")
+            if alerts:
+                for a in alerts[:5]:
+                    st.warning(f"**{a.get('title','Alert')}** — {a.get('message','')}")
             else:
-                st.warning(message or "OpenAI diagnostic did not complete.")
+                st.success("No unresolved high-priority alerts.")
+
+    if display_mode == "Simple Mode":
+        advisor_wrapper = st.expander("Show Details")
+        advisor_context = advisor_wrapper
+    else:
+        st.markdown("### Advisor Foundation")
+        advisor_context = st.container()
+    with advisor_context:
+        advisor_tabs = st.tabs([
+            "Advisor Brief",
+            "Opportunities Now",
+            "Proposed Trades",
+            "Watchlist",
+            "Strategy Scorecards",
+            "Forecast Accuracy",
+            "Provider Health",
+            "Risk Center",
+            "Historical Audit",
+            "Worker Status",
+            "Settings",
+        ])
+        with advisor_tabs[0]:
+            st.info("Advisor mode is active for recommendations and diagnostics. Live brokerage submission remains disabled.")
+        with advisor_tabs[1]:
+            st.caption("Opportunities are filtered by verified price, forecast quality, data quality, liquidity, and risk controls.")
+        with advisor_tabs[2]:
+            proposals = safe_rows("SELECT * FROM order_proposals ORDER BY id DESC LIMIT 25")
+            if proposals:
+                st.dataframe(pd.DataFrame(proposals), width="stretch", hide_index=True)
+                st.warning("Authenticated trade approval is not enabled yet.")
+            else:
+                st.info("No trade proposals are waiting for manual review.")
+        with advisor_tabs[3]:
+            st.caption("Watchlist candidates continue to update from fixed watchlists and dynamic discovery.")
+        with advisor_tabs[4]:
+            scorecards = safe_rows("SELECT * FROM strategy_performance ORDER BY id DESC LIMIT 25")
+            st.dataframe(pd.DataFrame(scorecards), width="stretch", hide_index=True) if scorecards else st.info("Strategy scorecards will appear after enough paper or shadow observations.")
+        with advisor_tabs[5]:
+            validation = safe_rows("SELECT * FROM forecast_validation ORDER BY id DESC LIMIT 25")
+            st.dataframe(pd.DataFrame(validation), width="stretch", hide_index=True) if validation else st.info("Forecast accuracy records will appear as walk-forward outcomes mature.")
+        with advisor_tabs[6]:
+            diagnostics = provider_diagnostics()
+            st.dataframe(pd.DataFrame(diagnostics), width="stretch", hide_index=True)
+        with advisor_tabs[7]:
+            risk_events = safe_rows("SELECT * FROM risk_events ORDER BY id DESC LIMIT 25")
+            st.dataframe(pd.DataFrame(risk_events), width="stretch", hide_index=True) if risk_events else st.success("No advisor risk events are currently recorded.")
+        with advisor_tabs[8]:
+            audits = safe_rows("SELECT * FROM trade_audits ORDER BY id DESC LIMIT 25")
+            st.dataframe(pd.DataFrame(audits), width="stretch", hide_index=True) if audits else st.info("Historical audit records are non-destructive and appear here after review.")
+        with advisor_tabs[9]:
+            st.dataframe(pd.DataFrame(workers), width="stretch", hide_index=True) if workers else st.info("Workers have not reported status yet.")
+        with advisor_tabs[10]:
+            st.caption("Execution switches default to disabled. Railway variables must be intentionally changed before any paper automation can run.")
+            st.write(f"OpenAI enabled: {'Yes' if openai_available() else 'No'}")
+
+            try:
+                storage = database_storage_report()
+                st.markdown("### Database storage status")
+                st.write(f"Database size: {storage.get('database_size')} ? status: {storage.get('status')}")
+                if storage.get("used_pct") is not None:
+                    st.progress(min(1.0, float(storage["used_pct"]) / 100.0), text=f"{storage['used_pct']:.1f}% of configured database volume")
+                else:
+                    st.caption("Database volume capacity is not configured; set DATABASE_VOLUME_CAPACITY_GB later to enable percentage warnings.")
+                table_rows_view = [
+                    {
+                        "Table": item.get("table"),
+                        "Total": item.get("total_size"),
+                        "Data": item.get("table_size"),
+                        "Indexes": item.get("index_size"),
+                        "Live rows": item.get("live_rows"),
+                        "Dead rows": item.get("dead_rows"),
+                        "Last autovacuum": item.get("last_autovacuum"),
+                        "Last autoanalyze": item.get("last_autoanalyze"),
+                    }
+                    for item in storage.get("largest_tables", [])
+                ]
+                st.dataframe(pd.DataFrame(table_rows_view), width="stretch", hide_index=True) if table_rows_view else st.info("No table size records are available yet.")
+                st.caption("Retention is conservative and never auto-deletes canonical financial, governance, migration, or execution history.")
+            except Exception as exc:
+                st.warning(f"Database storage diagnostics unavailable: {exc}")
+            if st.button("Test OpenAI Connection"):
+                result = test_openai_connection()
+                st.write(f"API key configured: {'Yes' if result.get('api_key_configured') else 'No'}")
+                st.write(f"Configured model: {result.get('model', '')}")
+                st.write(f"Connection status: {result.get('status', 'unavailable')}")
+                message = str(result.get("message") or "")
+                if result.get("available") and message.strip() == "GARIBALDI AI ONLINE":
+                    st.success("GARIBALDI AI ONLINE")
+                else:
+                    st.warning(message or "OpenAI diagnostic did not complete.")
 
 elif page == "Markets":
     st.subheader("Global Market Opportunity Center")
@@ -659,14 +858,36 @@ elif page == "Portfolios":
 
     with portfolio_tabs[2]:
         st.markdown("### Bought and sold")
+        f1, f2, f3 = st.columns(3)
+        with f1:
+            trade_market_filter = st.selectbox("Portfolio", ["All", "Stock", "Crypto"], key="trade-history-market")
+        with f2:
+            trade_side_filter = st.selectbox("Bought / Sold", ["All", "Buy", "Sell"], key="trade-history-side")
+        with f3:
+            trade_symbol_filter = st.text_input("Symbol", key="trade-history-symbol").upper().strip()
         trades = safe_rows("SELECT * FROM trades ORDER BY id DESC LIMIT 500")
+        if trade_market_filter != "All":
+            wanted_market = "cash" if trade_market_filter == "Stock" else "crypto"
+            trades = [trade for trade in trades if str(trade.get("market") or "").lower() == wanted_market]
+        if trade_side_filter != "All":
+            trades = [trade for trade in trades if str(trade.get("side") or "").upper() == trade_side_filter.upper()]
+        if trade_symbol_filter:
+            trades = [trade for trade in trades if trade_symbol_filter in str(trade.get("symbol") or "").upper()]
+        trades = trades[:50]
         if trades:
-            view = clean_trade_frame(trades)
-            st.dataframe(
-                view.style.format({"Price": "${:,.4f}", "Trade Value": "${:,.2f}", "Profit / Loss": "${:+,.2f}"}, na_rep="—"),
-                width="stretch",
-                hide_index=True,
-            )
+            summary = trade_summary(trades)
+            s1, s2, s3, s4, s5 = st.columns(5)
+            s1.metric("Total Trades", summary["Total Trades"])
+            s2.metric("Buys", summary["Buys"])
+            s3.metric("Sells", summary["Sells"])
+            s4.metric("Realized P/L", money(summary["Realized P/L"]))
+            s5.metric("Trade Volume", money(summary["Trade Volume"]))
+            readable = pd.DataFrame(readable_trade_rows(trades))
+            simple_columns = ["Date", "Bought / Sold", "Asset", "Price", "Money Used", "Profit / Loss"]
+            st.dataframe(readable[simple_columns], width="stretch", hide_index=True)
+            with st.expander("Show Trade Details"):
+                detail_columns = ["Date", "Bought / Sold", "Asset", "Quantity", "Price", "Money Used", "Profit / Loss", "Reason", "Trade Value Arithmetic"]
+                st.dataframe(readable[detail_columns], width="stretch", hide_index=True)
         else:
             st.info("No trade history has been recorded.")
 
