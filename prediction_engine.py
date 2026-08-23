@@ -133,8 +133,26 @@ def build_decisions(
     latest_signal: dict[tuple[str, str], dict[str, Any]] = {}
     latest_forecasts: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for item in signals:
-        key = (str(item.get("market", "cash")), str(item.get("symbol", "")).upper())
-        latest_signal.setdefault(key, item)
+        enriched = dict(item)
+        details = _payload(enriched.get("details"))
+        route = _payload(details.get("market_data_route"))
+        for field in (
+            "scan_type",
+            "source_interval",
+            "source_quote_timestamp",
+            "quote_timestamp",
+            "quote_age_seconds",
+            "requested_symbol",
+            "provider_symbol",
+            "provider",
+            "quote_verified",
+        ):
+            if enriched.get(field) in (None, ""):
+                enriched[field] = details.get(field, route.get(field))
+        if enriched.get("source_interval") in (None, ""):
+            enriched["source_interval"] = route.get("interval")
+        key = (str(enriched.get("market", "cash")), str(enriched.get("symbol", "")).upper())
+        latest_signal.setdefault(key, enriched)
     for item in forecasts:
         key = (str(item.get("market", "cash")), str(item.get("symbol", "")).upper())
         latest_forecasts.setdefault(key, []).append(item)
@@ -183,10 +201,11 @@ def build_decisions(
         sig = latest_signal.get((market, symbol), {})
         fc = matching_forecast((market, symbol), sig)
         payload = _payload(op.get("payload"))
+        payload_route = _payload(payload.get("market_data_route"))
         confidence = _f(sig.get("confidence"), _f(payload.get("confidence"), score))
         if confidence <= 1:
             confidence *= 100
-        price = _f(sig.get("price"), _f(payload.get("price")))
+        price = _f(sig.get("price"), _f(payload.get("price"), _f(payload_route.get("price"))))
         target = _f(fc.get("target_price"), _f(payload.get("target_price")))
         low = _f(fc.get("low_price"), _f(payload.get("low_price")))
         high = _f(fc.get("high_price"), _f(payload.get("high_price")))
@@ -231,6 +250,15 @@ def build_decisions(
             "risk": risk,
             "reason": reason,
             "created_at": signal_time,
+            "scan_type": sig.get("scan_type") or payload.get("scan_type"),
+            "source_interval": sig.get("source_interval") or payload.get("source_interval") or payload_route.get("interval"),
+            "source_quote_timestamp": sig.get("source_quote_timestamp") or payload.get("source_quote_timestamp") or payload_route.get("quote_timestamp"),
+            "quote_timestamp": sig.get("quote_timestamp") or payload.get("quote_timestamp") or payload_route.get("quote_timestamp"),
+            "quote_age_seconds": sig.get("quote_age_seconds") if sig.get("quote_age_seconds") is not None else payload.get("quote_age_seconds"),
+            "requested_symbol": sig.get("requested_symbol") or payload.get("requested_symbol") or payload_route.get("requested_symbol"),
+            "provider_symbol": sig.get("provider_symbol") or payload.get("provider_symbol") or payload_route.get("provider_symbol"),
+            "provider": sig.get("provider") or payload.get("provider") or payload_route.get("provider"),
+            "quote_verified": bool(sig.get("quote_verified") or payload.get("quote_verified") or payload_route.get("quote_verified") is True),
         })
 
     # Trade-ready BUYs first, then other current decisions, with incomplete/stale

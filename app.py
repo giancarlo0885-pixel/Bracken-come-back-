@@ -20,6 +20,7 @@ from dashboard_helpers import (
     balanced_money_bar,
     balanced_opportunity_rows,
     balanced_portfolio_rows,
+    capital_deployment_status,
     format_asset_price,
     live_data_status,
     money_text,
@@ -977,6 +978,19 @@ elif page == "Portfolios":
                 st.markdown(f"### {name} Portfolio Doctor")
                 st.write(f"**Status:** {portfolio_status_label(health.health_score)} · **Health:** {health.health_score}/100 · **Risk:** {health.risk_label}")
                 st.write(health.plain_summary)
+                worker_record = next((r for r in workers if r.get("market") == market), {})
+                deployment = capital_deployment_status(
+                    metrics,
+                    decisions,
+                    market=market,
+                    session_label=str(worker_record.get("session_label") or ""),
+                )
+                if deployment["status"].startswith("blocked") or deployment["status"] == "paused_market_closed":
+                    st.warning(deployment["message"])
+                elif deployment["status"] == "deployable_cash_available":
+                    st.info(deployment["message"])
+                else:
+                    st.caption(deployment["message"])
                 st.write(
                     f"**Broker capacity:** {money(metrics['buying_power'])} buying power · "
                     f"{metrics['leverage_used']:.2f}x used of {metrics['leverage_limit']:.1f}x · "

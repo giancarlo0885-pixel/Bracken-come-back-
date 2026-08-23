@@ -33,6 +33,21 @@ def rank_opportunities(signals: list[Any], limit: int = 12, market: str | None =
             signal, market=signal_market, portfolio=portfolio_context, positions=position_rows
         )
         payload = decision.to_dict()
+        route = _value(signal, "market_data_route", {}) or {}
+        payload.update(
+            {
+                "scan_type": _value(signal, "scan_type", "") or route.get("scan_type"),
+                "source_interval": _value(signal, "source_interval", "") or route.get("interval"),
+                "source_quote_timestamp": _value(signal, "source_quote_timestamp", "") or route.get("quote_timestamp"),
+                "quote_timestamp": _value(signal, "quote_timestamp", "") or route.get("quote_timestamp"),
+                "quote_age_seconds": _value(signal, "quote_age_seconds", None) if _value(signal, "quote_age_seconds", None) is not None else route.get("quote_age_seconds"),
+                "requested_symbol": _value(signal, "requested_symbol", "") or route.get("requested_symbol"),
+                "provider_symbol": _value(signal, "provider_symbol", "") or route.get("provider_symbol"),
+                "provider": _value(signal, "provider", "") or route.get("provider"),
+                "quote_verified": bool(_value(signal, "quote_verified", False) or route.get("quote_verified") is True),
+                "market_data_route": route,
+            }
+        )
         payload["features"] = feature_vector(signal)
         payload["council_score"] = round(float(_value(signal, "score", 0.0)) * (100 if float(_value(signal, "score", 0.0)) <= 1 else 1), 2)
         payload["confidence"] = round(float(_value(signal, "confidence", 0.0)) * (100 if float(_value(signal, "confidence", 0.0)) <= 1 else 1), 2)
