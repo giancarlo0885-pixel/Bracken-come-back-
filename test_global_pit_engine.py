@@ -6,6 +6,8 @@ import global_pit_engine as pit
 def fresh_asset(symbol="AAPL", **overrides):
     data = {
         "symbol": symbol,
+        "requested_symbol": symbol,
+        "provider_symbol": symbol,
         "asset_class": "stock",
         "country": "United States",
         "exchange": "NASDAQ",
@@ -100,6 +102,45 @@ def test_delayed_or_eod_data_cannot_masquerade_as_live():
     unknown = fresh_asset("MSFT", quote_timestamp="", quote_verified=True)
     assert pit.quote_freshness_label(eod)["label"] == "DELAYED DATA"
     assert pit.quote_freshness_label(unknown)["label"] == "FRESHNESS UNKNOWN"
+
+def test_missing_quote_identity_never_qualifies_for_capital():
+    asset = fresh_asset("AAPL", provider_symbol="MSFT")
+    ranked = pit.rank_global_opportunities([asset])
+    assert ranked[0]["qualified_for_capital"] is False
+    gate = pit.hard_risk_gate(ranked[0])
+    assert gate["allowed"] is False
+    assert "quote symbol identity must match" in gate["reasons"]
+
+
+def test_missing_tradeable_flag_does_not_default_to_executable():
+    asset = fresh_asset("AAPL")
+    asset.pop("tradeable")
+    ranked = pit.rank_global_opportunities([asset])
+    assert ranked[0]["paper_execution_supported"] is False
+    assert ranked[0]["qualified_for_capital"] is False
+
+
+def test_missing_liquidity_never_qualifies_for_capital():
+    ranked = pit.rank_global_opportunities([fresh_asset("AAPL", liquidity=0)])
+    assert ranked[0]["qualified_for_capital"] is False
+    gate = pit.hard_risk_gate(ranked[0])
+    assert gate["allowed"] is False
+    assert "verified liquidity required" in gate["reasons"]
+
+
+
+def test_global_pit_liquidity_normalizes_to_percent_scale():
+    base = fresh_asset("BASE", liquidity=0, avg_dollar_volume=0)
+    liquid = fresh_asset("LIQ", liquidity=1_000_000, avg_dollar_volume=1_000_000)
+    assert pit._ranking_score(liquid) > pit._ranking_score(base) + 8
+
+
+def test_missing_risk_information_is_not_treated_as_low_risk():
+    missing = fresh_asset("MISS")
+    missing.pop("risk_score")
+    missing.pop("risk_level_score", None)
+    low_risk = fresh_asset("LOW", risk_score=10)
+    assert pit._ranking_score(low_risk) > pit._ranking_score(missing)
 
 
 def test_portfolio_reaches_deployment_target_only_through_qualified_assets():

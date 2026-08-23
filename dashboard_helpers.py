@@ -4,6 +4,9 @@ import json
 from datetime import datetime, timezone
 from typing import Any
 
+from config import DECISION_CRYPTO_MAX_AGE_MINUTES, DECISION_STOCK_MAX_AGE_MINUTES
+from market_sessions import quote_is_fresh
+
 
 def as_float(value: Any, default: float = 0.0) -> float:
     try:
@@ -295,10 +298,35 @@ def live_data_status(record: dict[str, Any], now: datetime | None = None) -> dic
     age_seconds = as_float(age, -1.0)
     if age_seconds < 0 and timestamp is not None:
         age_seconds = max(0.0, (now - timestamp).total_seconds())
+
     status_text = str(record.get("data_status") or "").lower()
-    quote_verified_value = record.get("quote_verified")
-    verified = bool(quote_verified_value is True or (quote_verified_value is None and record.get("trade_eligible") is True))
+    verified = record.get("quote_verified") is True
     has_freshness_evidence = age_seconds >= 0 or timestamp is not None
+    symbol = str(record.get("symbol") or "").upper().strip()
+    market = str(record.get("market") or "").lower().strip()
+    interval = str(record.get("source_interval") or record.get("interval") or "").lower().strip()
+    provider_mode = str(
+        record.get("provider_mode") or record.get("source_mode") or record.get("mode") or ""
+    ).lower()
+    is_eod = "eod" in provider_mode or interval in {"1d", "daily", "day"}
+    is_crypto = market == "crypto" or symbol.endswith("-USD")
+    max_age_seconds = (
+        DECISION_CRYPTO_MAX_AGE_MINUTES if is_crypto else DECISION_STOCK_MAX_AGE_MINUTES
+    ) * 60
+
+    execution_fresh = False
+    if verified and timestamp is not None and interval:
+        execution_fresh = quote_is_fresh(
+            timestamp,
+            interval or "1d",
+            now=now,
+            max_intraday_age_seconds=max_age_seconds,
+            exchange=record.get("exchange") or "",
+            region=record.get("region") or record.get("country") or "",
+            symbol=symbol,
+        )
+    elif verified and age_seconds >= 0 and not is_eod:
+        execution_fresh = age_seconds <= max_age_seconds
 
     if "stale" in status_text or "old" in status_text:
         label = "OLD DATA"
@@ -308,22 +336,25 @@ def live_data_status(record: dict[str, Any], now: datetime | None = None) -> dic
         label = "FRESHNESS UNKNOWN"
         detail = "Oracle cannot verify when this price was checked."
         blocks_execution = True
-    elif verified and age_seconds <= 90:
-        label = "LIVE DATA"
-        detail = f"Price checked {int(age_seconds)} seconds ago"
-        blocks_execution = False
-    elif verified and age_seconds <= 900:
-        label = "DELAYED DATA"
-        minutes = max(1, int(round(age_seconds / 60)))
-        detail = f"Price checked {minutes} minutes ago"
-        blocks_execution = False
     elif not verified:
+        label = "OLD DATA"
+        detail = "Oracle has not verified this price for execution."
+        blocks_execution = True
+    elif not execution_fresh:
         label = "OLD DATA"
         detail = "Oracle will not trade using this price."
         blocks_execution = True
+    elif not is_eod and 0 <= age_seconds <= 90:
+        label = "LIVE DATA"
+        detail = f"Price checked {int(age_seconds)} seconds ago"
+        blocks_execution = False
     else:
         label = "DELAYED DATA"
-        detail = "Price timing is being checked."
+        if age_seconds >= 0:
+            minutes = max(1, int(round(age_seconds / 60)))
+            detail = f"Verified execution-eligible price checked {minutes} minutes ago"
+        else:
+            detail = "Verified completed-market price is eligible under the execution freshness rules."
         blocks_execution = False
 
     return {"label": label, "detail": detail, "blocks_execution": blocks_execution}

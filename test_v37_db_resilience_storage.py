@@ -119,7 +119,7 @@ def test_central_execution_policy_remains_disabled():
 
 def test_retention_policies_do_not_include_canonical_tables():
     assert database.CANONICAL_PROTECTED_TABLES.isdisjoint(database.DATABASE_RETENTION_POLICIES)
-    assert {"signals", "forecasts", "equity_snapshots", "alerts", "intelligence_events"} <= set(database.DATABASE_RETENTION_POLICIES)
+    assert {"signals", "forecasts", "equity_snapshots", "alerts", "intelligence_events", "opportunity_rankings", "oracle_decision_audit", "opportunity_radar_assessments"} <= set(database.DATABASE_RETENTION_POLICIES)
 
 
 def test_storage_report_capacity_status(monkeypatch):

@@ -156,6 +156,43 @@ def test_unknown_freshness_never_displays_live():
     assert status["label"] == "FRESHNESS UNKNOWN"
     assert status["blocks_execution"] is True
 
+def test_trade_eligible_never_substitutes_for_quote_verification():
+    status = live_data_status({"trade_eligible": True, "quote_age_seconds": 5})
+
+    assert status["label"] == "OLD DATA"
+    assert status["blocks_execution"] is True
+
+
+def test_delayed_data_matches_execution_freshness_gate():
+    status = live_data_status(
+        {
+            "symbol": "AAPL",
+            "market": "cash",
+            "quote_verified": True,
+            "quote_age_seconds": 180,
+            "interval": "5m",
+        }
+    )
+
+    assert status["label"] == "DELAYED DATA"
+    assert status["blocks_execution"] is False
+
+
+def test_expired_intraday_data_blocks_execution():
+    status = live_data_status(
+        {
+            "symbol": "BTC-USD",
+            "market": "crypto",
+            "quote_verified": True,
+            "quote_age_seconds": 60 * 60,
+            "interval": "5m",
+        }
+    )
+
+    assert status["label"] == "OLD DATA"
+    assert status["blocks_execution"] is True
+
+
 
 def test_balanced_data_age_never_calls_unknown_live():
     assert data_age_label({"trade_eligible": True, "quote_verified": True}) == "Unknown"
