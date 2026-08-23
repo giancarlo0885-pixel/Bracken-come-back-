@@ -365,7 +365,8 @@ def test_alpha_vantage_daily_dates_retain_original_session_date(monkeypatch):
                 }
             }
 
-    monkeypatch.setattr(provider_router.requests, "get", lambda *args, **kwargs: Response())
+    import alpha_vantage_provider
+    monkeypatch.setattr(alpha_vantage_provider.requests, "get", lambda *args, **kwargs: Response())
     frame = _alpha("AAPL", "5d", "1d", "key")
     assert str(frame.index[-1].date()) == "2026-07-31"
     assert frame.index.tz is None
@@ -390,6 +391,7 @@ def test_foreign_alpha_vantage_intraday_uses_provider_timezone(monkeypatch):
                 },
             }
 
+    monkeypatch.setattr(provider_router, "ALPHA_VANTAGE_PREMIUM", True)
     monkeypatch.setattr(provider_router.requests, "get", lambda *args, **kwargs: Response())
     frame = _alpha("VOD.L", "1d", "5m", "key")
     assert frame.index[-1].isoformat() == "2026-07-31T07:00:00+00:00"

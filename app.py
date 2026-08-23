@@ -721,6 +721,15 @@ if page == "Dashboard":
     )
     with st.expander("Details"):
         st.caption("Provider limitations are diagnostics only and do not override quote freshness or execution safeguards.")
+        alpha_rows = [row for row in diagnostics if str(row.get("provider") or "").lower() in {"alpha vantage", "alpha_vantage_api_key"}]
+        if alpha_rows:
+            alpha = alpha_rows[0]
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Alpha Vantage", str(alpha.get("status") or "Unknown").upper())
+            c2.metric("Requests Today", f"{int(as_float(alpha.get('requests')))} / {int(as_float(alpha.get('daily_budget')))}")
+            c3.metric("Daily Remaining", int(as_float(alpha.get("daily_remaining"))))
+            c4.metric("Mode", str(alpha.get("mode") or "Historical / EOD / Delayed"))
+            st.caption(f"Last Success: {alpha.get('last_success') or 'Waiting'}")
         st.dataframe(pd.DataFrame(diagnostics), width="stretch", hide_index=True) if diagnostics else st.info("No provider limitations are currently reported.")
 
     if alerts:

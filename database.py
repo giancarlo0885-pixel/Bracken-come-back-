@@ -726,6 +726,18 @@ def initialize_database() -> None:
         )
         """,
         """
+        CREATE TABLE IF NOT EXISTS provider_daily_usage (
+            provider TEXT NOT NULL,
+            usage_date TEXT NOT NULL,
+            requests_used INTEGER NOT NULL DEFAULT 0,
+            daily_budget INTEGER NOT NULL DEFAULT 0,
+            last_request_at TEXT,
+            last_success TEXT,
+            last_error TEXT,
+            PRIMARY KEY(provider, usage_date)
+        )
+        """,
+        """
         CREATE TABLE IF NOT EXISTS quote_verifications (
             id BIGSERIAL PRIMARY KEY,
             symbol TEXT NOT NULL,

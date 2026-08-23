@@ -7,6 +7,8 @@ from typing import Any
 
 import requests
 
+from alpha_vantage_provider import news_sentiment as alpha_news_sentiment
+from alpha_vantage_provider import sanitize_error as sanitize_alpha_error
 from cache import cached_call
 from config import MARKET_NEWS_CACHE_TTL_SECONDS
 
@@ -72,6 +74,17 @@ def _fetch_uncached() -> ProviderResult:
     api_key = _get_api_key()
 
     if not api_key:
+        try:
+            alpha_records = alpha_news_sentiment()
+        except Exception:
+            alpha_records = []
+        if alpha_records:
+            return ProviderResult(
+                available=True,
+                provider="Alpha Vantage",
+                records=alpha_records,
+                message=f"Loaded {len(alpha_records)} Alpha Vantage financial news records.",
+            )
         return ProviderResult(
             available=False,
             provider="Not configured",
@@ -146,6 +159,16 @@ def _fetch_uncached() -> ProviderResult:
             and article.get("title")
             and article.get("title") != "[Removed]"
         ]
+        try:
+            alpha_records = alpha_news_sentiment()
+            existing_urls = {str(item.get("url") or "") for item in records}
+            for item in alpha_records:
+                if item.get("url") and item.get("url") in existing_urls:
+                    continue
+                records.append(item)
+                existing_urls.add(str(item.get("url") or ""))
+        except Exception as exc:
+            log.debug("Alpha Vantage NEWS_SENTIMENT fallback unavailable: %s", sanitize_alpha_error(exc))
 
         log.info(
             "NewsAPI returned %d market news records",
@@ -184,6 +207,25 @@ def _fetch_uncached() -> ProviderResult:
             provider="NewsAPI",
             records=[],
             message=f"NewsAPI connection failed: {exc}",
+        )
+
+    except Exception as exc:
+        try:
+            alpha_records = alpha_news_sentiment()
+        except Exception:
+            alpha_records = []
+        if alpha_records:
+            return ProviderResult(
+                available=True,
+                provider="Alpha Vantage",
+                records=alpha_records,
+                message=f"Loaded {len(alpha_records)} Alpha Vantage financial news records.",
+            )
+        return ProviderResult(
+            available=False,
+            provider="NewsAPI",
+            records=[],
+            message=f"Market news providers unavailable: {exc}",
         )
 
 def fetch() -> ProviderResult:

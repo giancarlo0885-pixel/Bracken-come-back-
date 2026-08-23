@@ -5,6 +5,8 @@ from datetime import datetime, timezone
 import time
 from typing import Any
 
+from config import ALPHA_VANTAGE_PREMIUM
+
 
 PLAN_LIMIT_COOLDOWN_SECONDS = 24 * 60 * 60
 
@@ -62,18 +64,19 @@ CAPABILITY_MATRIX: dict[str, dict[str, bool]] = {
         "options_activity": False,
     },
     "Alpha Vantage": {
-        "live_quotes": True,
-        "intraday_history": True,
+        "live_quotes": False,
+        "intraday_history": ALPHA_VANTAGE_PREMIUM,
         "daily_history": True,
         "us_quotes": True,
         "us_history": True,
         "international_history": True,
-        "crypto": True,
+        "crypto": False,
         "movers": True,
         "exchange_symbol_lists": False,
+        "symbol_search": True,
         "earnings": True,
         "news": True,
-        "etf_holdings": False,
+        "etf_holdings": True,
         "insider_activity": False,
         "congressional_activity": False,
         "options_activity": False,

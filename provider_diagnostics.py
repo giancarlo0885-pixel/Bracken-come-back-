@@ -8,6 +8,9 @@ from typing import Any
 
 import requests
 
+from alpha_vantage_provider import health_probe as alpha_vantage_health_probe
+from alpha_vantage_provider import sanitize_error as alpha_sanitize_error
+from alpha_vantage_provider import usage_snapshot as alpha_usage_snapshot
 from api_manager import KEY_NAMES, resolve_api_key
 from provider_capabilities import diagnostics as capability_diagnostics
 
@@ -21,6 +24,13 @@ class ProviderDiagnostic:
     capability: str
     message: str
     checked_at: str
+    last_success: str | None = None
+    last_error: str | None = None
+    cooldown: str | None = None
+    mode: str | None = None
+    requests: int | None = None
+    daily_budget: int | None = None
+    daily_remaining: int | None = None
 
 
 _CACHE_LOCK = threading.Lock()
@@ -33,7 +43,22 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _result(name: str, configured: bool, status: str, message: str, *, latency: float | None = None, capability: str = "unknown") -> ProviderDiagnostic:
+def _result(
+    name: str,
+    configured: bool,
+    status: str,
+    message: str,
+    *,
+    latency: float | None = None,
+    capability: str = "unknown",
+    last_success: str | None = None,
+    last_error: str | None = None,
+    cooldown: str | None = None,
+    mode: str | None = None,
+    requests: int | None = None,
+    daily_budget: int | None = None,
+    daily_remaining: int | None = None,
+) -> ProviderDiagnostic:
     return ProviderDiagnostic(
         provider=name,
         configured=configured,
@@ -42,6 +67,13 @@ def _result(name: str, configured: bool, status: str, message: str, *, latency: 
         capability=capability,
         message=message[:260],
         checked_at=_now(),
+        last_success=last_success,
+        last_error=last_error,
+        cooldown=cooldown,
+        mode=mode,
+        requests=requests,
+        daily_budget=daily_budget,
+        daily_remaining=daily_remaining,
     )
 
 
@@ -102,7 +134,24 @@ def _probe(name: str, key: str) -> ProviderDiagnostic:
     if name == "EODHD_API_KEY":
         return _request(name, "https://eodhd.com/api/real-time/AAPL.US", params={"api_token": key, "fmt": "json"})
     if name == "ALPHA_VANTAGE_API_KEY":
-        return _request(name, "https://www.alphavantage.co/query", params={"function": "GLOBAL_QUOTE", "symbol": "IBM", "apikey": key})
+        health = alpha_vantage_health_probe(probe=False)
+        usage = alpha_usage_snapshot()
+        status = "healthy" if health.status == "connected" else health.status
+        capability = "delayed" if health.status in {"connected", "configured"} else "limited" if health.status in {"cooldown", "rate_limited", "quota_exhausted"} else "degraded"
+        return _result(
+            "Alpha Vantage",
+            True,
+            status,
+            "Alpha Vantage connected. Entitlement is treated as Historical / EOD / Delayed unless a verified realtime quote is supplied.",
+            capability=capability,
+            last_success=health.last_success,
+            last_error=alpha_sanitize_error(health.last_error or ""),
+            cooldown=health.cooldown,
+            mode=health.mode,
+            requests=int(usage.get("requests_used") or health.requests),
+            daily_budget=int(usage.get("daily_budget") or 0),
+            daily_remaining=int(usage.get("daily_remaining") or 0),
+        )
     if name == "FRED_API_KEY":
         return _request(name, "https://api.stlouisfed.org/fred/series", params={"series_id": "GDP", "api_key": key, "file_type": "json"})
     if name == "NASDAQ_DATA_LINK_API_KEY":

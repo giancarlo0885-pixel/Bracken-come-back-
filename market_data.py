@@ -10,6 +10,8 @@ from typing import Iterable
 import pandas as pd
 import yfinance as yf
 
+from alpha_vantage_provider import global_quote as alpha_global_quote
+from asset_routing import infer_asset_class
 from config import LIVE_POSITION_PRICE_WORKERS
 from provider_router import normalize_symbol, route_history, verify_frame_symbol
 from market_sessions import latest_valid_bar_timestamp, quote_is_fresh
@@ -271,6 +273,38 @@ def _snapshot_from_history(symbol: str, history: pd.DataFrame, interval: str) ->
     )
 
 
+def _alpha_vantage_delayed_snapshot(symbol: str) -> MarketSnapshot | None:
+    if infer_asset_class(symbol) == "crypto":
+        return None
+    quote = alpha_global_quote(symbol)
+    if not quote:
+        return None
+    requested = normalize_symbol(symbol)
+    provider_symbol = normalize_symbol(quote.get("provider_symbol"))
+    if requested != provider_symbol:
+        return None
+    price = finite_scalar(quote.get("price"))
+    if price is None or price <= 0:
+        return None
+    fetched_at = str(quote.get("provider_fetched_at") or datetime.now(timezone.utc).isoformat())
+    latest_day = str(quote.get("latest_trading_day") or fetched_at)
+    return MarketSnapshot(
+        symbol=requested,
+        price=price,
+        change_pct=float(quote.get("change_pct") or 0.0),
+        volume=float(quote.get("volume") or 0.0),
+        timestamp=latest_day,
+        provider="Alpha Vantage",
+        interval="1d",
+        fetched_at=fetched_at,
+        requested_symbol=requested,
+        provider_symbol=provider_symbol,
+        quote_verified=False,
+        source_identity=f"Alpha Vantage:{requested}:GLOBAL_QUOTE:delayed",
+        cache_identity=f"alpha_vantage_global_quote:{requested}",
+    )
+
+
 def get_live_snapshot(symbol: str) -> MarketSnapshot | None:
     """Get the freshest practical quote, with graceful fallbacks.
 
@@ -287,6 +321,10 @@ def get_live_snapshot(symbol: str) -> MarketSnapshot | None:
                 return snapshot
         except Exception:
             continue
+    try:
+        return _alpha_vantage_delayed_snapshot(symbol)
+    except Exception:
+        return None
     return None
 
 
