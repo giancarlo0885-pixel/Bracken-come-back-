@@ -20,6 +20,7 @@ from config import (
     ENABLE_PORTFOLIO_ROTATION,
     ENABLE_STOCK_AUTOTRADE,
     GLOBAL_KILL_SWITCH,
+    GLOBAL_PIT_MODE,
     EXECUTION_MODE,
     FAST_SCAN_BATCH_SIZE,
     FAST_SCAN_TOP_RANKED,
@@ -52,6 +53,7 @@ from execution_policy import execution_policy
 from engine import analyze_market
 from forecasting import forecast_price
 from global_market_scanner import active_global_watchlist
+from global_pit_engine import build_global_universe, capital_deployment_plan, persist_global_pit_state, rank_global_opportunities
 from intelligence_hub import collect_all
 from market_data import get_history, get_many_snapshots
 from news_intelligence import get_news_sentiment
@@ -309,6 +311,39 @@ def _build_completion_message(label: str, actions: list[Any]) -> str:
     if not actions:
         return f"{label} deep scan completed. No new trade met every rule."
     return f"{label} deep scan completed. Actions: " + ", ".join(_format_action(action) for action in actions)
+
+
+def _persist_global_pit_rankings(market: str, ranked: list[dict[str, Any]], prices: dict[str, Any]) -> None:
+    if not GLOBAL_PIT_MODE or market != "cash" or not ranked:
+        return
+    try:
+        universe = []
+        for item in ranked:
+            symbol = str(item.get("symbol") or "").upper()
+            quote = dict(prices.get(symbol) or {})
+            universe.append({
+                "symbol": symbol,
+                "name": item.get("symbol"),
+                "asset_class": "stock",
+                "market": market,
+                "sector": item.get("sector") or (item.get("features") or {}).get("sector") or "Unknown",
+                "expected_move_pct": item.get("expected_return") or item.get("expected_move_pct"),
+                "confidence": item.get("confidence"),
+                "opportunity_score": item.get("opportunity_score"),
+                "data_quality_score": item.get("data_quality_score") or 75,
+                "liquidity": item.get("liquidity") or item.get("avg_dollar_volume") or 1_000_000,
+                "quote_verified": quote.get("quote_verified") is True,
+                "quote_timestamp": quote.get("quote_timestamp"),
+                "quote_age_seconds": quote.get("quote_age_seconds"),
+                "provider_support": [quote.get("provider")] if quote.get("provider") else [],
+                "discovery_source": "oracle_opportunity_rankings",
+                "tradeable": True,
+            })
+        queue = rank_global_opportunities(build_global_universe({}, universe))
+        with connect() as conn:
+            persist_global_pit_state(conn, universe, queue)
+    except Exception as exc:
+        log.debug("Global Pit persistence skipped | market=%s | error=%s", market, exc)
 
 
 def _discover_symbol(market: str, symbol: str, name: str) -> tuple[Any, str, Any] | None:
@@ -685,6 +720,7 @@ def scan_market(market: str) -> list[Any]:
         except Exception as exc:
             log.exception("%s ranking persistence failed: %s", market, exc)
 
+        _persist_global_pit_rankings(market, ranked, prices)
         by_symbol = {item["symbol"]: item for item in ranked}
         signals.sort(
             key=lambda signal: by_symbol.get(str(getattr(signal, "symbol", "")), {}).get("opportunity_score", 0),
