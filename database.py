@@ -106,6 +106,9 @@ DATABASE_RETENTION_POLICIES = {
     "equity_snapshots": {"keep_rows": 15000, "batch_size": DATABASE_RETENTION_BATCH_SIZE, "classification": "append-only analytical/ephemeral"},
     "alerts": {"keep_rows": 3000, "batch_size": DATABASE_RETENTION_BATCH_SIZE, "classification": "append-only analytical/ephemeral"},
     "intelligence_events": {"keep_rows": 5000, "batch_size": DATABASE_RETENTION_BATCH_SIZE, "classification": "append-only analytical/ephemeral"},
+    "opportunity_rankings": {"keep_rows": 12000, "batch_size": DATABASE_RETENTION_BATCH_SIZE, "classification": "append-only analytical/ephemeral"},
+    "oracle_decision_audit": {"keep_rows": 12000, "batch_size": DATABASE_RETENTION_BATCH_SIZE, "classification": "append-only analytical/ephemeral"},
+    "opportunity_radar_assessments": {"keep_rows": 12000, "batch_size": DATABASE_RETENTION_BATCH_SIZE, "classification": "append-only analytical/ephemeral"},
 }
 DATABASE_TABLE_GROWTH_AUDIT = {
     "portfolios": {"class": "canonical financial records", "inserted_by": "initialize_database/portfolio bootstrap", "frequency": "one row per market", "retention": "never auto-delete"},
@@ -117,7 +120,9 @@ DATABASE_TABLE_GROWTH_AUDIT = {
     "equity_snapshots": {"class": "append-only analytical/ephemeral records", "inserted_by": "oracle_bot snapshot", "frequency": "worker pulse/scan", "retention": "keep newest 15000 rows"},
     "alerts": {"class": "append-only analytical/ephemeral records", "inserted_by": "database save_alert", "frequency": "notable system/market events", "retention": "keep newest 3000 rows"},
     "intelligence_events": {"class": "append-only analytical/ephemeral records", "inserted_by": "market intelligence collection", "frequency": "stock intelligence refresh", "retention": "keep newest 5000 rows"},
-    "opportunity_rankings": {"class": "append-only analytical/ephemeral records", "inserted_by": "market_worker rank persistence", "frequency": "scan candidates", "retention": "recommended conservative row/age policy after usage review"},
+    "opportunity_rankings": {"class": "append-only analytical/ephemeral records", "inserted_by": "market_worker rank persistence", "frequency": "scan candidates", "retention": "keep newest 12000 rows"},
+    "oracle_decision_audit": {"class": "append-only analytical/ephemeral records", "inserted_by": "market_worker decision persistence", "frequency": "ranked scan candidates", "retention": "keep newest 12000 rows"},
+    "opportunity_radar_assessments": {"class": "append-only analytical/ephemeral records", "inserted_by": "market_worker radar persistence", "frequency": "ranked scan candidates", "retention": "keep newest 12000 rows"},
     "forecast_validation": {"class": "governance/audit records", "inserted_by": "forecast quality validation", "frequency": "realized forecast outcomes", "retention": "preserve until archive strategy exists"},
     "recommendations": {"class": "append-only analytical/ephemeral records", "inserted_by": "advisor recommendations", "frequency": "advisor generation", "retention": "recommended conservative row/age policy after usage review"},
     "recommendation_evidence": {"class": "append-only analytical/ephemeral records", "inserted_by": "advisor evidence persistence", "frequency": "per recommendation", "retention": "recommended conservative row/age policy after usage review"},
@@ -1331,10 +1336,18 @@ def _apply_retention_policy(conn: Any, table: str, policy: dict[str, Any]) -> in
     return deleted_total
 
 
+def _retention_table_exists(conn: Any, table: str) -> bool:
+    record = conn.execute("SELECT to_regclass(%s) AS table_name", (f"public.{table}",)).fetchone()
+    return bool(record and record.get("table_name"))
+
+
 def trim_old_records() -> dict[str, int]:
     deleted_by_table: dict[str, int] = {}
     with connect() as conn:
         for table, policy in DATABASE_RETENTION_POLICIES.items():
+            if not _retention_table_exists(conn, table):
+                deleted_by_table[table] = 0
+                continue
             deleted_by_table[table] = _apply_retention_policy(conn, table, policy)
     return deleted_by_table
 

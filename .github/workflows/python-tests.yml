@@ -5,9 +5,9 @@ on:
   push:
     branches:
       - main
-      - "v36-*"
-      - "v37-*"
-      - "v38-*"
+      - "v36*"
+      - "v37*"
+      - "v38*"
 
 jobs:
   test:
@@ -25,7 +25,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: "3.11"
       - name: Install dependencies
         run: python -m pip install -r requirements.txt
       - name: Compile Python
@@ -62,7 +62,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: "3.11"
       - name: Install dependencies
         run: python -m pip install -r requirements.txt
       - name: Initialize PostgreSQL database

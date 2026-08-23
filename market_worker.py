@@ -141,6 +141,35 @@ def _latest_history_price(history: Any) -> float | None:
     except Exception:
         return None
 
+def _average_dollar_volume(history: Any, lookback: int = 20) -> float | None:
+    try:
+        import pandas as pd
+
+        if (
+            history is None
+            or getattr(history, "empty", True)
+            or "Close" not in history.columns
+            or "Volume" not in history.columns
+        ):
+            return None
+        close = history["Close"]
+        volume = history["Volume"]
+        if isinstance(close, pd.DataFrame):
+            close = close.iloc[:, -1]
+        if isinstance(volume, pd.DataFrame):
+            volume = volume.iloc[:, -1]
+        close = pd.to_numeric(close, errors="coerce")
+        volume = pd.to_numeric(volume, errors="coerce")
+        values = (close * volume).dropna()
+        values = values[values.map(lambda item: math.isfinite(float(item)) and float(item) > 0)]
+        if values.empty:
+            return None
+        average = float(values.tail(max(1, int(lookback))).mean())
+        return average if math.isfinite(average) and average > 0 else None
+    except Exception:
+        return None
+
+
 
 def _execution_price_from_history(symbol: str, history: Any, signal_price: Any = None) -> float | None:
     route = dict(getattr(history, "attrs", {}).get("provider_route", {}) or {})
@@ -156,10 +185,20 @@ def _quote_payload_from_history(symbol: str, history: Any, price: Any = None, *,
     execution_price = _execution_price_from_history(symbol, history, price)
     quote_timestamp = route.get("quote_timestamp")
     interval = route.get("interval", "1d")
+    normalized_symbol = str(symbol or "").upper().strip()
+    requested_symbol = str(route.get("requested_symbol") or "").upper().strip()
+    provider_symbol = str(route.get("provider_symbol") or "").upper().strip()
+    quote_verified = route.get("quote_verified") is True
+    identity_verified = bool(
+        normalized_symbol
+        and requested_symbol == normalized_symbol
+        and provider_symbol == normalized_symbol
+    )
+    avg_dollar_volume = _average_dollar_volume(history)
     return {
-        "symbol": str(symbol).upper(),
-        "requested_symbol": route.get("requested_symbol"),
-        "provider_symbol": route.get("provider_symbol"),
+        "symbol": normalized_symbol,
+        "requested_symbol": requested_symbol,
+        "provider_symbol": provider_symbol,
         "provider": route.get("provider"),
         "price": execution_price,
         "quote_timestamp": quote_timestamp,
@@ -168,7 +207,10 @@ def _quote_payload_from_history(symbol: str, history: Any, price: Any = None, *,
         "source_interval": interval,
         "source_mode": route.get("source_mode") or route.get("mode"),
         "scan_type": scan_type or route.get("scan_type"),
-        "quote_verified": route.get("quote_verified") is True,
+        "quote_verified": quote_verified,
+        "avg_dollar_volume": avg_dollar_volume,
+        "data_quality_score": route.get("data_quality_score"),
+        "tradeable": bool(quote_verified and identity_verified and avg_dollar_volume),
         "source_identity": route.get("source_identity"),
         "cache_identity": route.get("cache_identity"),
         "ohlcv_fingerprint": route.get("ohlcv_fingerprint"),
@@ -421,10 +463,34 @@ def _persist_global_pit_rankings(market: str, ranked: list[dict[str, Any]], pric
     try:
         universe = []
         for item in ranked:
-            symbol = str(item.get("symbol") or "").upper()
+            symbol = str(item.get("symbol") or "").upper().strip()
+            if not symbol:
+                continue
             quote = dict(prices.get(symbol) or {})
+            requested_symbol = str(quote.get("requested_symbol") or "").upper().strip()
+            provider_symbol = str(quote.get("provider_symbol") or "").upper().strip()
+            quote_verified = quote.get("quote_verified") is True
+            identity_verified = requested_symbol == symbol and provider_symbol == symbol
+            liquidity = (
+                _finite_positive(item.get("liquidity"))
+                or _finite_positive(item.get("avg_dollar_volume"))
+                or _finite_positive(quote.get("avg_dollar_volume"))
+                or 0.0
+            )
+            raw_quality = item.get("data_quality_score")
+            if raw_quality is None:
+                raw_quality = quote.get("data_quality_score")
+            try:
+                data_quality_score = float(raw_quality) if raw_quality is not None else 0.0
+            except (TypeError, ValueError):
+                data_quality_score = 0.0
+            if not math.isfinite(data_quality_score):
+                data_quality_score = 0.0
+
             universe.append({
                 "symbol": symbol,
+                "requested_symbol": requested_symbol,
+                "provider_symbol": provider_symbol,
                 "name": item.get("symbol"),
                 "asset_class": "stock",
                 "market": market,
@@ -432,14 +498,18 @@ def _persist_global_pit_rankings(market: str, ranked: list[dict[str, Any]], pric
                 "expected_move_pct": item.get("expected_return") or item.get("expected_move_pct"),
                 "confidence": item.get("confidence"),
                 "opportunity_score": item.get("opportunity_score"),
-                "data_quality_score": item.get("data_quality_score") or 75,
-                "liquidity": item.get("liquidity") or item.get("avg_dollar_volume") or 1_000_000,
-                "quote_verified": quote.get("quote_verified") is True,
+                "data_quality_score": max(0.0, data_quality_score),
+                "liquidity": liquidity,
+                "avg_dollar_volume": liquidity,
+                "quote_verified": quote_verified,
                 "quote_timestamp": quote.get("quote_timestamp"),
                 "quote_age_seconds": quote.get("quote_age_seconds"),
+                "interval": quote.get("interval"),
+                "source_interval": quote.get("source_interval") or quote.get("interval"),
+                "provider_mode": quote.get("source_mode"),
                 "provider_support": [quote.get("provider")] if quote.get("provider") else [],
                 "discovery_source": "oracle_opportunity_rankings",
-                "tradeable": True,
+                "tradeable": bool(quote_verified and identity_verified and liquidity > 0),
             })
         queue = rank_global_opportunities(build_global_universe({}, universe))
         with connect() as conn:

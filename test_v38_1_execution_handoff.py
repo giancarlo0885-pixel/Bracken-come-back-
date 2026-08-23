@@ -133,6 +133,18 @@ def test_price_never_silently_becomes_zero_and_missing_price_rejects(monkeypatch
     missing = _quote("AAPL", price=None)
     assert oracle_bot.process_signals("cash", [_signal("AAPL", 0.0)], {"AAPL": missing}) == []
 
+def test_quote_payload_uses_observed_liquidity_and_verified_identity():
+    import market_worker
+
+    history = _history("AAPL", 100.0)
+    quote = market_worker._quote_payload_from_history("AAPL", history, 100.0, scan_type="fast")
+
+    assert quote["requested_symbol"] == "AAPL"
+    assert quote["provider_symbol"] == "AAPL"
+    assert quote["avg_dollar_volume"] > 0
+    assert quote["tradeable"] is True
+
+
 
 def test_unverified_and_stale_quotes_reject_before_execution(monkeypatch):
     import oracle_bot

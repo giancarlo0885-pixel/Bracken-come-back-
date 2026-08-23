@@ -7,6 +7,8 @@ import math
 from typing import Any, Iterable
 
 from config import (
+    DECISION_CRYPTO_MAX_AGE_MINUTES,
+    DECISION_STOCK_MAX_AGE_MINUTES,
     ENABLE_BROKER_SUBMISSION,
     GLOBAL_PIT_CRITICAL_ATTENTION_SCORE,
     GLOBAL_PIT_DEEP_RESEARCH_SECONDS,
@@ -20,7 +22,7 @@ from config import (
     GLOBAL_PIT_ROTATION_MIN_ADVANTAGE_PCT,
     GLOBAL_PIT_TARGET_INVESTED_PCT,
 )
-from market_sessions import market_session_state, quote_freshness_seconds
+from market_sessions import market_session_state, quote_freshness_seconds, quote_is_fresh
 
 SUPPORTED_EXECUTION_ASSETS = {"stock", "equity", "etf", "crypto"}
 INTELLIGENCE_ONLY_ASSETS = {
@@ -80,6 +82,42 @@ def _finite(value: Any, default: float = 0.0) -> float:
 
 def _clamp(value: float, low: float = 0.0, high: float = 100.0) -> float:
     return max(low, min(high, value))
+
+def _percent_score(value: Any, default: float = 0.0) -> float:
+    number = _finite(value, default)
+    if 0.0 <= number <= 1.0:
+        number *= 100.0
+    return _clamp(number)
+
+
+def _quote_identity_matches(asset: dict[str, Any]) -> bool:
+    symbol = _upper(asset.get("symbol"))
+    requested = _upper(asset.get("requested_symbol"))
+    provider = _upper(asset.get("provider_symbol"))
+    return bool(symbol and requested and provider and symbol == requested == provider)
+
+
+def _execution_quote_eligible(asset: dict[str, Any], now: datetime | None = None) -> bool:
+    if asset.get("quote_verified") is not True or not _quote_identity_matches(asset):
+        return False
+    symbol = _upper(asset.get("symbol"))
+    interval = str(asset.get("source_interval") or asset.get("interval") or "").strip()
+    if not interval or not asset.get("quote_timestamp"):
+        return False
+    cls = _asset_class(asset.get("asset_class"))
+    max_age_seconds = (
+        DECISION_CRYPTO_MAX_AGE_MINUTES if cls == "crypto" else DECISION_STOCK_MAX_AGE_MINUTES
+    ) * 60
+    return quote_is_fresh(
+        asset.get("quote_timestamp"),
+        interval,
+        now=now,
+        max_intraday_age_seconds=max_age_seconds,
+        exchange=asset.get("exchange") or "",
+        region=asset.get("region") or asset.get("country") or "",
+        symbol=symbol,
+    )
+
 
 
 def _list(value: Any) -> list[str]:
@@ -176,11 +214,7 @@ def build_global_universe(seed_watchlists: dict[str, Any] | None = None, provide
 
 def supported_for_paper_execution(asset: dict[str, Any]) -> bool:
     cls = _asset_class(asset.get("asset_class"))
-    if cls == "crypto":
-        return bool(asset.get("tradeable", True))
-    if cls in {"stock", "equity", "etf"}:
-        return bool(asset.get("tradeable", True))
-    return False
+    return cls in SUPPORTED_EXECUTION_ASSETS and asset.get("tradeable") is True
 
 
 def session_for_asset(asset: dict[str, Any], now: datetime | None = None) -> str:
@@ -298,16 +332,16 @@ def _ranking_score(asset: dict[str, Any], learning_weights: dict[str, float] | N
             weights[key] = max(0.0, min(0.40, float(value)))
     total = sum(weights.values()) or 1.0
     weights = {key: value / total for key, value in weights.items()}
-    risk_penalty = 100.0 - _finite(asset.get("risk_score") or asset.get("risk_level_score"), 50.0)
+    risk_score = _clamp(_finite(asset.get("risk_score") or asset.get("risk_level_score"), 100.0))
     values = {
         "edge": _finite(asset.get("expected_edge") or asset.get("expected_move_pct") or asset.get("change_1d_pct")) * 10.0,
-        "probability": _finite(asset.get("probability_up"), 0.5) * 100.0,
-        "confidence": _finite(asset.get("confidence"), 0.5) * (100.0 if _finite(asset.get("confidence"), 0.5) <= 1 else 1),
-        "data": _finite(asset.get("data_quality_score"), 50.0),
+        "probability": _percent_score(asset.get("probability_up")),
+        "confidence": _percent_score(asset.get("confidence")),
+        "data": _percent_score(asset.get("data_quality_score")),
         "liquidity": min(100.0, _finite(asset.get("liquidity") or asset.get("avg_dollar_volume")) / 1_000_000.0),
-        "risk": risk_penalty,
-        "regime": _finite(asset.get("regime_score"), 50.0),
-        "portfolio_fit": _finite(asset.get("portfolio_fit"), 50.0),
+        "risk": 100.0 - risk_score,
+        "regime": _percent_score(asset.get("regime_score")),
+        "portfolio_fit": _percent_score(asset.get("portfolio_fit")),
     }
     return _clamp(sum(_clamp(values[key]) * weights[key] for key in weights))
 
@@ -318,7 +352,8 @@ def rank_global_opportunities(assets: list[dict[str, Any]], learning_weights: di
         attention = attention_for_asset(asset, now)
         freshness = quote_freshness_label(asset)
         supported = supported_for_paper_execution(asset)
-        data_ok = asset.get("quote_verified") is True and freshness["label"] in {"LIVE DATA", "DELAYED DATA"}
+        data_ok = _execution_quote_eligible(asset, now)
+        liquidity = _finite(asset.get("liquidity") or asset.get("avg_dollar_volume"))
         score = _ranking_score(asset, learning_weights) + min(12.0, attention["attention_score"] * 0.12)
         if not data_ok:
             score *= 0.60
@@ -328,7 +363,7 @@ def rank_global_opportunities(assets: list[dict[str, Any]], learning_weights: di
             "opportunity_score": round(_clamp(score), 2),
             "data_label": freshness["label"],
             "paper_execution_supported": supported,
-            "qualified_for_capital": bool(supported and data_ok and _finite(asset.get("liquidity") or asset.get("avg_dollar_volume")) > 0),
+            "qualified_for_capital": bool(supported and data_ok and liquidity > 0),
             "execution_mode": "paper_only" if supported else "intelligence_only",
         }
         ranked.append(payload)
@@ -399,13 +434,17 @@ def learning_weights_from_observations(observations: list[dict[str, Any]]) -> di
     return weights
 
 
-def hard_risk_gate(signal: dict[str, Any]) -> dict[str, Any]:
+def hard_risk_gate(signal: dict[str, Any], now: datetime | None = None) -> dict[str, Any]:
     freshness = quote_freshness_label(signal)
     reasons = []
     if signal.get("quote_verified") is not True:
         reasons.append("verified quote required")
-    if freshness["label"] not in {"LIVE DATA", "DELAYED DATA"}:
-        reasons.append("fresh or verified delayed data required")
+    if not _quote_identity_matches(signal):
+        reasons.append("quote symbol identity must match")
+    if not _execution_quote_eligible(signal, now):
+        reasons.append("execution-fresh quote required")
+    if _finite(signal.get("liquidity") or signal.get("avg_dollar_volume")) <= 0:
+        reasons.append("verified liquidity required")
     if not supported_for_paper_execution(signal):
         reasons.append("unsupported asset class cannot execute")
     if ENABLE_BROKER_SUBMISSION:
