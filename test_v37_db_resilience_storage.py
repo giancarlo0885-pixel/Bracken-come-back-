@@ -119,7 +119,10 @@ def test_central_execution_policy_remains_disabled():
 
 def test_retention_policies_do_not_include_canonical_tables():
     assert database.CANONICAL_PROTECTED_TABLES.isdisjoint(database.DATABASE_RETENTION_POLICIES)
-    assert {"signals", "forecasts", "equity_snapshots", "alerts", "intelligence_events", "opportunity_rankings", "oracle_decision_audit", "opportunity_radar_assessments"} <= set(database.DATABASE_RETENTION_POLICIES)
+    assert {"signals", "forecasts", "equity_snapshots", "alerts", "intelligence_events", "opportunity_rankings", "oracle_decision_audit", "opportunity_radar_assessments", "global_decision_events"} <= set(database.DATABASE_RETENTION_POLICIES)
+    assert database.DATABASE_TABLE_GROWTH_AUDIT["global_asset_identities"]["retention"] == "never auto-delete"
+    assert database.DATABASE_TABLE_GROWTH_AUDIT["global_model_governance"]["retention"] == "never auto-delete"
+    assert "keep newest" in database.DATABASE_TABLE_GROWTH_AUDIT["global_decision_events"]["retention"]
 
 
 def test_storage_report_capacity_status(monkeypatch):

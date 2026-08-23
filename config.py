@@ -29,6 +29,40 @@ ALPHA_VANTAGE_RATE_LIMIT_COOLDOWN_SECONDS = max(60, int(os.getenv("ALPHA_VANTAGE
 ALPHA_VANTAGE_MIN_REQUEST_INTERVAL_SECONDS = max(0.0, float(os.getenv("ALPHA_VANTAGE_MIN_REQUEST_INTERVAL_SECONDS", "12")))
 ALPHA_VANTAGE_DAILY_REQUEST_BUDGET = max(0, int(os.getenv("ALPHA_VANTAGE_DAILY_REQUEST_BUDGET", "20")))
 ALPHA_VANTAGE_PREMIUM = os.getenv("ALPHA_VANTAGE_PREMIUM", "false").lower() == "true"
+POLYGON_DAILY_REQUEST_BUDGET = max(0, int(os.getenv("POLYGON_DAILY_REQUEST_BUDGET", "1000")))
+FINNHUB_DAILY_REQUEST_BUDGET = max(0, int(os.getenv("FINNHUB_DAILY_REQUEST_BUDGET", "200")))
+EODHD_DAILY_REQUEST_BUDGET = max(0, int(os.getenv("EODHD_DAILY_REQUEST_BUDGET", "200")))
+NEWSAPI_DAILY_REQUEST_BUDGET = max(0, int(os.getenv("NEWSAPI_DAILY_REQUEST_BUDGET", "40")))
+YAHOO_DAILY_REQUEST_BUDGET = max(0, int(os.getenv("YAHOO_DAILY_REQUEST_BUDGET", "0")))
+PROVIDER_CAPABILITY_DAILY_BUDGETS = {
+    ("alpha vantage", "history"): ALPHA_VANTAGE_DAILY_REQUEST_BUDGET,
+    ("alpha vantage", "us_history"): ALPHA_VANTAGE_DAILY_REQUEST_BUDGET,
+    ("alpha vantage", "international_history"): ALPHA_VANTAGE_DAILY_REQUEST_BUDGET,
+    ("alpha vantage", "crypto"): 0,
+    ("alpha vantage", "quote"): ALPHA_VANTAGE_DAILY_REQUEST_BUDGET,
+    ("alpha vantage", "symbol_search"): ALPHA_VANTAGE_DAILY_REQUEST_BUDGET,
+    ("alpha vantage", "news"): ALPHA_VANTAGE_DAILY_REQUEST_BUDGET,
+    ("polygon", "history"): POLYGON_DAILY_REQUEST_BUDGET,
+    ("polygon", "us_history"): POLYGON_DAILY_REQUEST_BUDGET,
+    ("polygon", "international_history"): POLYGON_DAILY_REQUEST_BUDGET,
+    ("polygon", "crypto"): POLYGON_DAILY_REQUEST_BUDGET,
+    ("polygon", "quote"): POLYGON_DAILY_REQUEST_BUDGET,
+    ("polygon", "movers"): POLYGON_DAILY_REQUEST_BUDGET,
+    ("finnhub", "history"): FINNHUB_DAILY_REQUEST_BUDGET,
+    ("finnhub", "us_history"): FINNHUB_DAILY_REQUEST_BUDGET,
+    ("finnhub", "international_history"): FINNHUB_DAILY_REQUEST_BUDGET,
+    ("finnhub", "crypto"): 0,
+    ("finnhub", "quote"): FINNHUB_DAILY_REQUEST_BUDGET,
+    ("finnhub", "earnings"): FINNHUB_DAILY_REQUEST_BUDGET,
+    ("eodhd", "history"): EODHD_DAILY_REQUEST_BUDGET,
+    ("eodhd", "us_history"): EODHD_DAILY_REQUEST_BUDGET,
+    ("eodhd", "international_history"): EODHD_DAILY_REQUEST_BUDGET,
+    ("eodhd", "crypto"): 0,
+    ("eodhd", "quote"): EODHD_DAILY_REQUEST_BUDGET,
+    ("newsapi", "news"): NEWSAPI_DAILY_REQUEST_BUDGET,
+    ("yahoo", "history"): YAHOO_DAILY_REQUEST_BUDGET,
+    ("yahoo", "quote"): YAHOO_DAILY_REQUEST_BUDGET,
+}
 PROVIDER_RATE_LIMIT_COOLDOWN_SECONDS = max(60, int(os.getenv("PROVIDER_RATE_LIMIT_COOLDOWN_SECONDS", "900")))
 UNAVAILABLE_SYMBOL_COOLDOWN_SECONDS = max(60, int(os.getenv("UNAVAILABLE_SYMBOL_COOLDOWN_SECONDS", "1800")))
 ROTATION_ENABLED = os.getenv("ROTATION_ENABLED", "true").lower() == "true"

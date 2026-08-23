@@ -19,6 +19,7 @@ from cache import cached_call
 from config import (
     API_CACHE_TTL_SECONDS,
     ALPHA_VANTAGE_PREMIUM,
+    PROVIDER_CAPABILITY_DAILY_BUDGETS,
     PROVIDER_PERMISSION_COOLDOWN_SECONDS,
     PROVIDER_RATE_LIMIT_COOLDOWN_SECONDS,
     REALTIME_CACHE_TTL_SECONDS,
@@ -646,7 +647,12 @@ def route_history(
         if not key:
             attempts.append(ProviderAttempt(provider, False, status="not_configured"))
             continue
-        budget = reserve_provider_budget_live(provider, capability, daily_budget=500, entitlement="configured", data_mode="intraday" if intraday else "historical")
+        budget_key = (provider.lower(), capability)
+        daily_budget = PROVIDER_CAPABILITY_DAILY_BUDGETS.get(budget_key)
+        if daily_budget is None:
+            attempts.append(ProviderAttempt(provider, False, 0, "provider_budget_unknown", "provider capability budget is not configured"))
+            continue
+        budget = reserve_provider_budget_live(provider, capability, daily_budget=daily_budget, entitlement="configured", data_mode="intraday" if intraday else "historical")
         if not budget.get("reserved"):
             attempts.append(ProviderAttempt(provider, False, 0, "provider_budget_blocked", str(budget.get("reason") or "budget unavailable")))
             continue
