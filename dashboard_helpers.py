@@ -139,10 +139,29 @@ def money_text(value: Any, whole: bool = False) -> str:
     return f"${number:,.{decimals}f}"
 
 
+def compact_money_text(value: Any, *, signed: bool = False) -> str:
+    number = as_float(value, 0.0)
+    sign = ""
+    if signed:
+        sign = "+" if number >= 0 else "-"
+    absolute = abs(number)
+    for threshold, suffix in ((1_000_000_000, "B"), (1_000_000, "M"), (1_000, "K")):
+        if absolute >= threshold:
+            scaled = absolute / threshold
+            decimals = 0 if scaled >= 100 else 1
+            return f"{sign}${scaled:,.{decimals}f}{suffix}"
+    decimals = 0 if absolute >= 10 or absolute == round(absolute) else 2
+    return f"{sign}${absolute:,.{decimals}f}"
+
+
 def signed_money_text(value: Any, whole: bool = False) -> str:
     number = as_float(value, 0.0)
     sign = "+" if number >= 0 else "-"
     return f"{sign}{money_text(abs(number), whole=whole)}"
+
+
+def signed_compact_money_text(value: Any) -> str:
+    return compact_money_text(value, signed=True)
 
 
 def parse_timestamp(value: Any) -> datetime | None:
@@ -405,11 +424,11 @@ def balanced_money_bar(metrics: dict[str, Any], trades: list[dict[str, Any]], no
         if created is not None and created.date() == today:
             today_pnl += as_float(trade.get("realized_pnl"))
     return [
-        {"label": "PORTFOLIO VALUE", "value": money_text(equity, whole=True)},
-        {"label": "CASH", "value": money_text(cash, whole=True)},
-        {"label": "INVESTED", "value": money_text(invested, whole=True)},
-        {"label": "TOTAL PROFIT / LOSS", "value": signed_money_text(equity - starting, whole=True)},
-        {"label": "TODAY", "value": signed_money_text(today_pnl, whole=True)},
+        {"label": "PORTFOLIO VALUE", "value": compact_money_text(equity)},
+        {"label": "CASH", "value": compact_money_text(cash)},
+        {"label": "INVESTED", "value": compact_money_text(invested)},
+        {"label": "TOTAL PROFIT / LOSS", "value": signed_compact_money_text(equity - starting)},
+        {"label": "TODAY", "value": signed_compact_money_text(today_pnl)},
     ]
 
 
@@ -422,7 +441,12 @@ def balanced_opportunity_rows(decisions: list[dict[str, Any]], limit: int = 10) 
         if expected == 0 and price > 0 and target > 0:
             expected = ((target / price) - 1.0) * 100.0
         action = _clean_action(item.get("action"))
-        action_label = {"BUY": "GREEN BUY", "SELL": "RED SELL", "HOLD": "YELLOW HOLD", "WAIT": "YELLOW WAIT"}.get(action, "YELLOW WAIT")
+        data_status = live_data_status(item)
+        execution_blocked = bool(item.get("trade_eligible") is False or data_status["blocks_execution"])
+        if action == "BUY" and execution_blocked:
+            action_label = "YELLOW WATCH"
+        else:
+            action_label = {"BUY": "GREEN BUY", "SELL": "RED SELL", "HOLD": "YELLOW HOLD", "WAIT": "YELLOW WAIT"}.get(action, "YELLOW WAIT")
         rows.append(
             {
                 "Action": action_label,
@@ -490,7 +514,13 @@ def simple_opportunity_summary(record: dict[str, Any]) -> dict[str, Any]:
     risk = str(record.get("risk") or "MEDIUM").upper()
     if risk not in {"LOW", "MEDIUM", "HIGH"}:
         risk = "MEDIUM"
-    if action in {"BUY", "STRONG_BUY", "ACCUMULATE", "LONG"}:
+    data = live_data_status(record)
+    entry_action = action in {"BUY", "STRONG_BUY", "ACCUMULATE", "LONG"}
+    display_action = action
+    if entry_action and data["blocks_execution"]:
+        display_action = "WATCH"
+        why = "The setup is interesting, but Oracle is waiting for verified fresh price data before treating it as tradable."
+    elif entry_action:
         why = "The price and market signals look strong."
     elif action == "SELL":
         why = "The Oracle thinks this investment may need to be reduced."
@@ -500,13 +530,13 @@ def simple_opportunity_summary(record: dict[str, Any]) -> dict[str, Any]:
         why = "The Oracle is waiting for stronger evidence."
     return {
         "symbol": symbol,
-        "action": action,
+        "action": display_action,
         "price_now": money_text(price),
         "target": money_text(target),
         "why": why,
         "possible_gain": f"{'+' if possible_gain >= 0 else '-'}{money_text(abs(possible_gain))} per share",
         "risk": risk,
-        "data": live_data_status(record),
+        "data": data,
     }
 
 
@@ -572,31 +602,31 @@ def capital_deployment_status(
     if market == "cash" and "closed" in session and not qualified:
         return {
             "status": "paused_market_closed",
-            "message": "Stock capital deployment paused ? market closed and waiting for verified execution quotes.",
+            "message": "Stock capital deployment paused - market closed and waiting for verified execution quotes.",
         }
     if quote_blocked and not qualified:
         return {
             "status": "blocked_quote",
-            "message": "Capital deployment blocked ? candidate quote failed execution verification.",
+            "message": "Capital deployment blocked - candidate quote failed execution verification.",
         }
     if metadata_blocked and not qualified:
         return {
             "status": "blocked_metadata",
-            "message": "Capital deployment blocked ? signal metadata incomplete.",
+            "message": "Capital deployment blocked - signal metadata incomplete.",
         }
     if not qualified:
         return {
             "status": "waiting_for_opportunity",
-            "message": "Capital available ? waiting for qualified opportunities.",
+            "message": "Capital available - waiting for qualified opportunities.",
         }
     if deployable_cash > 0:
         return {
             "status": "deployable_cash_available",
-            "message": "Too much capital is sitting in cash ? qualified opportunities are available and will still pass hard execution checks before any paper order.",
+            "message": "Too much capital is sitting in cash - qualified opportunities are available and will still pass hard execution checks before any paper order.",
         }
     return {
         "status": "reserve_protected",
-        "message": "Final 5% reserve protected ? no extra capital is available without breaking the cash reserve.",
+        "message": "Final 5% reserve protected - no extra capital is available without breaking the cash reserve.",
     }
 
 

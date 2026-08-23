@@ -21,6 +21,7 @@ from dashboard_helpers import (
     balanced_opportunity_rows,
     balanced_portfolio_rows,
     capital_deployment_status,
+    compact_money_text,
     format_asset_price,
     live_data_status,
     money_text,
@@ -68,7 +69,7 @@ html{font-size:17px}.stApp{background:var(--bg);color:var(--text)}.block-contain
 .card{border:2px solid var(--line);background:var(--panel);border-radius:18px;padding:18px;margin-bottom:14px}.card h3{margin-top:0}.muted{color:var(--muted)}
 .decision{border:2px solid var(--line);border-left:8px solid var(--yellow);background:var(--panel);border-radius:16px;padding:17px;margin:12px 0}.decision.buy{border-left-color:var(--green)}.decision.sell{border-left-color:var(--red)}.decision.wait{border-left-color:var(--yellow)}.decision.hold{border-left-color:var(--blue)}
 .action{font-size:1.32rem;font-weight:950}.buy-text{color:var(--green)}.sell-text{color:var(--red)}.wait-text{color:var(--yellow)}.hold-text{color:var(--blue)}
-.grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}.tile{border:2px solid var(--line);background:var(--panel);border-radius:15px;padding:14px}.tile small{color:var(--muted)}.tile b{display:block;font-size:1.55rem;margin-top:.25rem}.money-grid{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:12px}.money-tile{border:2px solid var(--line);background:var(--panel);border-radius:15px;padding:18px}.money-tile small{color:var(--muted);font-weight:800;text-transform:uppercase}.money-tile b{display:block;font-size:clamp(1.55rem,2.8vw,2.35rem);margin-top:.3rem}.simple-status{font-size:1.45rem;font-weight:950}.reason{line-height:1.6;color:#eef6fc}.pill{display:inline-block;border:1px solid var(--line);border-radius:999px;padding:.35rem .65rem;margin:.2rem .25rem .1rem 0;background:#09131d;font-weight:700}.status-bar{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}.status-chip{border:1px solid var(--line);background:#09131d;border-radius:12px;padding:10px 12px;font-weight:900}.status-chip span{float:right}.green-text{color:var(--green)}.yellow-text{color:var(--yellow)}.red-text{color:var(--red)}.section-title{font-size:1.25rem;font-weight:950;margin:1.4rem 0 .65rem}.oracle-strip{border:2px solid var(--line);background:var(--panel);border-radius:16px;padding:16px;margin:12px 0 18px}
+.grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}.tile{border:2px solid var(--line);background:var(--panel);border-radius:15px;padding:14px}.tile small{color:var(--muted)}.tile b{display:block;font-size:1.55rem;margin-top:.25rem}.summary-cell small{display:block}.summary-cell b{display:block;margin-top:.2rem;overflow-wrap:anywhere}.money-grid{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:12px}.money-tile{border:2px solid var(--line);background:var(--panel);border-radius:15px;padding:18px}.money-tile small{color:var(--muted);font-weight:800;text-transform:uppercase}.money-tile b{display:block;font-size:clamp(1.35rem,2.1vw,1.95rem);margin-top:.3rem;overflow-wrap:anywhere}.simple-status{font-size:1.45rem;font-weight:950}.reason{line-height:1.6;color:#eef6fc}.pill{display:inline-block;border:1px solid var(--line);border-radius:999px;padding:.35rem .65rem;margin:.2rem .25rem .1rem 0;background:#09131d;font-weight:700}.status-bar{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}.status-chip{border:1px solid var(--line);background:#09131d;border-radius:12px;padding:10px 12px;font-weight:900}.status-chip span{float:right}.green-text{color:var(--green)}.yellow-text{color:var(--yellow)}.red-text{color:var(--red)}.section-title{font-size:1.25rem;font-weight:950;margin:1.4rem 0 .65rem}.oracle-strip{border:2px solid var(--line);background:var(--panel);border-radius:16px;padding:16px;margin:12px 0 18px}
 [data-testid="stSidebar"]{border-right:2px solid var(--line)}[data-testid="stMetric"]{border:2px solid var(--line);border-radius:16px;padding:14px;background:var(--panel)}
 .stTabs [data-baseweb="tab-list"]{gap:.3rem;overflow-x:auto}.stTabs [data-baseweb="tab"]{min-height:48px;font-weight:800;white-space:nowrap}.stTabs [aria-selected="true"]{border-bottom:4px solid var(--green)!important}
 [data-testid="stDataFrame"]{border:2px solid var(--line);border-radius:15px;overflow:hidden}button,input,textarea,select{min-height:44px}
@@ -100,6 +101,17 @@ def safe_row(query: str, params: tuple[Any, ...] = ()) -> dict[str, Any]:
 
 def money(value: Any) -> str:
     return f"${as_float(value):,.2f}"
+
+
+def compact_money(value: Any) -> str:
+    return compact_money_text(value)
+
+
+LEGACY_PAPER_MODE_LABELS = (
+    "LIVE PAPER TRADING",
+    "Institutional Paper Broker",
+    "Always-On Institutional Paper Broker",
+)
 
 
 def pct(value: Any) -> str:
@@ -258,10 +270,13 @@ def decision_card(item: dict[str, Any], compact: bool = False, simple: bool = Fa
     symbol = str(item.get("symbol", "")).upper()
     market_key = str(item.get("market", "")).lower()
     market = "Stock" if market_key == "cash" else "Crypto"
-    color = {"BUY": "green", "SELL": "red", "HOLD": "blue", "WAIT": "orange"}.get(action, "orange")
     supports, cautions = plain_reason(item.get("reason"))
-    ready = bool(item.get("trade_eligible"))
-    data_status = str(item.get("data_status") or "Data status unavailable")
+    freshness = live_data_status(item)
+    ready = bool(item.get("trade_eligible")) and not freshness["blocks_execution"]
+    data_status = str(item.get("data_status") or freshness["detail"] or "Data status unavailable")
+    if action in {"BUY", "STRONG_BUY", "ACCUMULATE", "LONG"} and not ready:
+        action = "WATCH"
+    color = {"BUY": "green", "STRONG_BUY": "green", "ACCUMULATE": "green", "LONG": "green", "SELL": "red", "HOLD": "blue", "WAIT": "orange", "WATCH": "orange"}.get(action, "orange")
 
     with st.container(border=True):
         if simple:
@@ -307,9 +322,9 @@ def decision_card(item: dict[str, Any], compact: bool = False, simple: bool = Fa
         target_text = format_asset_price(target, symbol, market_key)
         st.caption(f"{market} portfolio · Current {current_text} · Target {target_text}")
         if ready:
-            st.success(f"Trade-ready data · {data_status}")
+            st.success(f"Trade-ready data - {freshness['label']}: {freshness['detail']}")
         else:
-            st.warning(data_status)
+            st.warning(f"Not trade-ready - {freshness['label']}: {freshness['detail']}")
         if not compact:
             left, right = st.columns(2)
             with left:
@@ -419,6 +434,9 @@ def render_global_pit_section() -> None:
     with st.expander("Global Decision Funnel", expanded=True):
         counts = v39_summary["decision_funnel"]["counts"]
         st.dataframe(pd.DataFrame([{"Stage": key.replace("_", " ").title(), "Count": value} for key, value in counts.items()]), width="stretch", hide_index=True)
+        watched = int(counts.get("surveillance", 0) or counts.get("scanned", 0) or universe_count)
+        executable = int(counts.get("execution_approved", 0) or counts.get("paper_trade_executed", 0) or 0)
+        st.caption(f"Plain English: {watched} markets watched, {executable} executable right now.")
         reasons = v39_summary["decision_funnel"].get("rejection_reasons") or {}
         if reasons:
             st.dataframe(pd.DataFrame([{"Reason": key, "Count": value} for key, value in reasons.items()]), width="stretch", hide_index=True)
@@ -601,10 +619,10 @@ combined_start = stock_metrics["starting_balance"] + crypto_metrics["starting_ba
 combined_return = ((combined_equity / combined_start) - 1) * 100 if combined_start else 0.0
 combined_buying_power = stock_metrics["buying_power"] + crypto_metrics["buying_power"]
 combined_margin_debt = stock_metrics["margin_debt"] + crypto_metrics["margin_debt"]
-ready_decisions = [d for d in decisions if bool(d.get("trade_eligible"))]
+ready_decisions = [d for d in decisions if bool(d.get("trade_eligible")) and not live_data_status(d)["blocks_execution"]]
 buy_decisions = [d for d in ready_decisions if d["action"] == "BUY"]
 sell_decisions = [d for d in ready_decisions if d["action"] == "SELL"]
-waiting_for_data = [d for d in decisions if not bool(d.get("trade_eligible"))]
+waiting_for_data = [d for d in decisions if live_data_status(d)["blocks_execution"] or not bool(d.get("trade_eligible"))]
 
 with st.sidebar:
     st.markdown("## GARIBALDI ORACLE")
@@ -649,7 +667,7 @@ st.markdown(
 )
 
 live_records = [record for record in workers if worker_live(record)]
-mode_label = "LIVE INSTITUTIONAL PAPER BROKER" if EXECUTION_MODE == "paper" and PAPER_BROKER_MODE else ("LIVE PAPER TRADING" if EXECUTION_MODE == "paper" else f"LIVE {EXECUTION_MODE.upper()} EXECUTION")
+mode_label = "LIVE PAPER SIMULATION ENGINE" if EXECUTION_MODE == "paper" and PAPER_BROKER_MODE else ("PAPER EXECUTION ENGINE" if EXECUTION_MODE == "paper" else f"LIVE {EXECUTION_MODE.upper()} EXECUTION")
 show_advanced_chrome = page != "Dashboard"
 if len(live_records) == 2 and show_advanced_chrome:
     always_text = "ALWAYS-ON" if ALWAYS_ON_TRADING else "CONTINUOUS MONITORING"
@@ -704,17 +722,22 @@ elif page == "Dashboard":
     if top:
         summary = simple_opportunity_summary(top)
         freshness = live_data_status(top)
-        oracle_state = "BUYING OPPORTUNITIES FOUND" if buy_decisions else "WATCHING THE BEST SETUP"
+        blocked_buy_setups = [d for d in decisions if d.get("action") == "BUY" and live_data_status(d)["blocks_execution"]]
+        oracle_state = "BUYING OPPORTUNITIES READY" if buy_decisions else "WATCHING THE BEST SETUP"
+        status_class = "green-text" if buy_decisions else "yellow-text"
+        if blocked_buy_setups and not buy_decisions:
+            oracle_state = "SETUPS FOUND - WAITING FOR FRESH QUOTES"
         if sell_decisions and not buy_decisions:
             oracle_state = "RISK ACTIONS FOUND"
+            status_class = "red-text"
         st.markdown(
             "<div class='oracle-strip'>"
-            f"<div class='simple-status green-text'>{html.escape(oracle_state)}</div>"
+            f"<div class='simple-status {status_class}'>{html.escape(oracle_state)}</div>"
             "<div class='grid'>"
-            f"<div><small class='muted'>Best opportunity</small><b>{html.escape(summary['symbol'])}</b></div>"
-            f"<div><small class='muted'>Confidence</small><b>{as_float(top.get('confidence')):.0f}%</b></div>"
-            f"<div><small class='muted'>Possible move</small><b>{as_float(top.get('expected_return')):+.1f}%</b></div>"
-            f"<div><small class='muted'>Risk</small><b>{html.escape(summary['risk'])}</b></div>"
+            f"<div class='summary-cell'><small class='muted'>Best opportunity</small><b>{html.escape(summary['symbol'])}</b></div>"
+            f"<div class='summary-cell'><small class='muted'>Confidence</small><b>{as_float(top.get('confidence')):.0f}%</b></div>"
+            f"<div class='summary-cell'><small class='muted'>Possible move</small><b>{as_float(top.get('expected_return')):+.1f}%</b></div>"
+            f"<div class='summary-cell'><small class='muted'>Risk</small><b>{html.escape(summary['risk'])}</b></div>"
             "</div>"
             f"<p class='muted'>Data: {html.escape(freshness['label'])} - {html.escape(freshness['detail'])}</p>"
             f"<p class='reason'>{html.escape(summary['why'])}</p>"
@@ -847,12 +870,12 @@ elif page == "Dashboard":
 
     advisor_context = st.expander("Advisor And System Details")
     with advisor_context:
-        st.caption("Always-On Institutional Paper Broker diagnostics remain available here. Execution switches stay disabled unless deliberately configured.")
+        st.caption("Paper simulation diagnostics remain available here. Execution switches stay disabled unless deliberately configured.")
         a1, a2, a3, a4 = st.columns(4)
-        a1.metric("Broker Equity", money(combined_equity), pct(combined_return))
-        a2.metric("Available Buying Power", money(combined_buying_power))
+        a1.metric("Broker Equity", compact_money(combined_equity), pct(combined_return))
+        a2.metric("Available Buying Power", compact_money(combined_buying_power))
         a3.metric("Trade-ready Buys", len(buy_decisions), f"{len(waiting_for_data)} waiting on data")
-        a4.metric("Margin Debt", money(combined_margin_debt))
+        a4.metric("Margin Debt", compact_money(combined_margin_debt))
         advisor_tabs = st.tabs([
             "Advisor Brief",
             "Opportunities Now",
@@ -945,9 +968,27 @@ elif page == "Markets":
             if not filtered:
                 st.info("No ranked opportunities are currently available for this market.")
             else:
-                frame = pd.DataFrame(filtered)[["symbol", "market", "action", "score", "confidence", "expected_return", "risk", "price", "target", "data_status", "trade_eligible"]]
-                frame.columns = ["Symbol", "Market", "Decision", "Quality", "Confidence %", "Expected %", "Risk", "Price", "Target", "Data Status", "Trade Ready"]
-                st.dataframe(frame, width="stretch", hide_index=True)
+                view_rows = []
+                for item in filtered:
+                    freshness = live_data_status(item)
+                    display_action = str(item.get("action") or "WAIT").upper()
+                    trade_ready = bool(item.get("trade_eligible")) and not freshness["blocks_execution"]
+                    if display_action == "BUY" and not trade_ready:
+                        display_action = "WATCH"
+                    view_rows.append({
+                        "Symbol": item.get("symbol"),
+                        "Market": item.get("market"),
+                        "Decision": display_action,
+                        "Quality": item.get("score"),
+                        "Confidence %": item.get("confidence"),
+                        "Expected %": item.get("expected_return"),
+                        "Risk": item.get("risk"),
+                        "Price": item.get("price"),
+                        "Target": item.get("target"),
+                        "Data Status": f"{freshness['label']}: {freshness['detail']}",
+                        "Trade Ready": trade_ready,
+                    })
+                st.dataframe(pd.DataFrame(view_rows), width="stretch", hide_index=True)
 
     st.markdown("### Chart and price history")
     symbols = sorted({d["symbol"] for d in decisions if d.get("symbol")})
@@ -975,15 +1016,15 @@ elif page == "Portfolios":
     ):
         with tab:
             a, b, c, d = st.columns(4)
-            a.metric("Broker Equity", money(metrics["equity"]), pct(metrics["return_pct"]))
-            b.metric("Buying Power", money(metrics["buying_power"]), f"{metrics['leverage_limit']:.1f}x limit")
-            c.metric("Gross Exposure", money(metrics["gross_exposure"]), f"{metrics['leverage_used']:.2f}x equity")
+            a.metric("Broker Equity", compact_money(metrics["equity"]), pct(metrics["return_pct"]))
+            b.metric("Buying Power", compact_money(metrics["buying_power"]), f"{metrics['leverage_limit']:.1f}x limit")
+            c.metric("Gross Exposure", compact_money(metrics["gross_exposure"]), f"{metrics['leverage_used']:.2f}x equity")
             d.metric("Portfolio Status", portfolio_status_label(health.health_score), f"{health.health_score}/100")
             e, f, g, h = st.columns(4)
-            e.metric("Cash Reserve", money(metrics["cash"]), f"{health.cash_pct:.1f}%")
-            f.metric("Margin Used", money(metrics["margin_debt"]), f"{metrics['margin_utilization_pct']:.1f}% capacity")
+            e.metric("Cash Reserve", compact_money(metrics["cash"]), f"{health.cash_pct:.1f}%")
+            f.metric("Margin Used", compact_money(metrics["margin_debt"]), f"{metrics['margin_utilization_pct']:.1f}% capacity")
             g.metric("Open Holdings", health.position_count)
-            h.metric("Excess Liquidity", money(metrics["excess_liquidity"]))
+            h.metric("Excess Liquidity", compact_money(metrics["excess_liquidity"]))
             if metrics["margin_call"]:
                 st.error("Margin call condition: the paper broker must reduce exposure immediately.")
             elif metrics["margin_utilization_pct"] >= 70:
@@ -1029,9 +1070,9 @@ elif page == "Portfolios":
                 else:
                     st.caption(deployment["message"])
                 st.write(
-                    f"**Broker capacity:** {money(metrics['buying_power'])} buying power · "
+                    f"**Broker capacity:** {compact_money(metrics['buying_power'])} buying power · "
                     f"{metrics['leverage_used']:.2f}x used of {metrics['leverage_limit']:.1f}x · "
-                    f"{money(metrics['margin_debt'])} paper margin debt."
+                    f"{compact_money(metrics['margin_debt'])} paper margin debt."
                 )
                 if health.cash_pct < 8:
                     st.warning("Cash is low. Consider reducing a weak position before adding another holding.")
@@ -1215,10 +1256,11 @@ elif page == "Professional":
             b.metric("Confidence", f"{as_float(d.get('confidence')):.0f}%")
             c.metric("Trade quality", f"{as_float(d.get('score')):.0f}/100")
             e.metric("Expected move", f"{as_float(d.get('expected_return')):+.1f}%")
-            if d.get("trade_eligible"):
-                st.success(str(d.get("data_status") or "Trade-ready data"))
+            freshness = live_data_status(d)
+            if d.get("trade_eligible") and not freshness["blocks_execution"]:
+                st.success(f"Trade-ready data - {freshness['label']}: {freshness['detail']}")
             else:
-                st.warning(str(d.get("data_status") or "Not trade-ready"))
+                st.warning(f"Not trade-ready - {freshness['label']}: {freshness['detail']}")
             st.markdown("### Supporting evidence")
             for point in supports:
                 st.success(point)
