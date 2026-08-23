@@ -2467,11 +2467,12 @@ def process_signals(
     signals: list[Any] | tuple[Any, ...] | None,
     prices: dict[str, Any] | None = None,
     *_: Any,
-    **__: Any,
+    **kwargs: Any,
 ) -> list[dict[str, Any]]:
     market = safe_text(market).lower()
     signals = list(signals or [])
     prices = prices or {}
+    optimizer_allocations = kwargs.get("optimizer_allocations") or {}
     actions: list[dict[str, Any]] = []
     anomalous_symbols = _duplicate_price_anomaly_symbols(prices)
 
@@ -2652,7 +2653,14 @@ def process_signals(
             continue
 
         quant_assessment = None
-        target_trade_value = None
+        optimizer_target = safe_float(
+            signal_value(
+                signal,
+                "planned_trade_value",
+                signal_value(signal, "v39_optimizer_approved_amount", optimizer_allocations.get(symbol)),
+            )
+        )
+        target_trade_value = optimizer_target if optimizer_target > 0 else None
         if ENABLE_QUANT_TRADE_STANDARD:
             allocation_equity = portfolio_equity(market)
             allocation_positions = rows(
@@ -2682,7 +2690,11 @@ def process_signals(
             capital_multiplier = float(oracle_decision.capital.get("final_multiplier", 1.0))
             radar_multiplier = float(oracle_decision.radar.get("position_multiplier", 1.0))
             portfolio_multiplier = float(oracle_decision.portfolio_supercomputer.get("position_multiplier", 1.0))
-            target_trade_value = float(oracle_decision.portfolio_supercomputer.get("recommended_trade_value", 0.0))
+            oracle_target_trade_value = float(oracle_decision.portfolio_supercomputer.get("recommended_trade_value", 0.0))
+            if oracle_target_trade_value > 0 and target_trade_value is not None:
+                target_trade_value = min(target_trade_value, oracle_target_trade_value)
+            elif oracle_target_trade_value > 0:
+                target_trade_value = oracle_target_trade_value
             quant_assessment = replace(
                 quant_assessment,
                 position_multiplier=max(0.0, min(1.15, quant_assessment.position_multiplier * global_multiplier * radar_multiplier * scenario_multiplier * capital_multiplier * portfolio_multiplier)),
@@ -2768,6 +2780,11 @@ def process_signals(
                 "confidence": confidence,
                 "reason": reason,
                 "quant": quant_assessment.to_dict() if quant_assessment else None,
+                "planned_trade_value": target_trade_value,
+                "optimizer_approved_amount": optimizer_target if optimizer_target > 0 else None,
+                "signal_id": signal_value(signal, "signal_id", signal_value(signal, "id", None)),
+                "forecast_id": signal_value(signal, "forecast_id", None),
+                "created_at": signal_value(signal, "created_at", None),
             }
         )
 

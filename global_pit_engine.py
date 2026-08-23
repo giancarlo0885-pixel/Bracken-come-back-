@@ -356,6 +356,15 @@ def rank_global_opportunities(assets: list[dict[str, Any]], learning_weights: di
         supported = supported_for_paper_execution(asset)
         data_ok = _execution_quote_eligible(asset, now)
         liquidity = _finite(asset.get("liquidity") or asset.get("avg_dollar_volume"))
+        requested_symbol = _upper(asset.get("requested_symbol") or asset.get("symbol"))
+        provider_symbol = _upper(asset.get("provider_symbol") or asset.get("symbol"))
+        symbol_identity_ok = bool(requested_symbol and provider_symbol and requested_symbol == provider_symbol == _upper(asset.get("symbol")))
+        required_known = all(
+            asset.get(field) not in (None, "")
+            for field in ("spread_pct", "risk_score", "quote_timestamp", "interval")
+        )
+        buy_type = _upper(asset.get("action") or asset.get("recommendation")) in {"BUY", "STRONG_BUY", "ACCUMULATE", "LONG"}
+        explicitly_tradeable = asset.get("tradeable") is True
         score = _ranking_score(asset, learning_weights) + min(12.0, attention["attention_score"] * 0.12)
         if not data_ok:
             score *= 0.60
@@ -365,7 +374,15 @@ def rank_global_opportunities(assets: list[dict[str, Any]], learning_weights: di
             "opportunity_score": round(_clamp(score), 2),
             "data_label": freshness["label"],
             "paper_execution_supported": supported,
-            "qualified_for_capital": bool(supported and data_ok and liquidity > 0),
+            "qualified_for_capital": bool(
+                supported
+                and buy_type
+                and data_ok
+                and symbol_identity_ok
+                and explicitly_tradeable
+                and required_known
+                and liquidity > 0
+            ),
             "execution_mode": "paper_only" if supported else "intelligence_only",
         }
         ranked.append(payload)

@@ -104,7 +104,7 @@ class GlobalAssetIdentity:
 
 
 def canonical_identity(asset: dict[str, Any]) -> dict[str, Any]:
-    native = asset.get("native_symbol") or asset.get("provider_symbol") or asset.get("symbol")
+    native = asset.get("native_symbol") or asset.get("symbol")
     identity = GlobalAssetIdentity(
         asset_class=_asset_class(asset.get("asset_class")),
         exchange=str(asset.get("exchange") or "UNKNOWN").strip().upper(),
@@ -117,6 +117,10 @@ def canonical_identity(asset: dict[str, Any]) -> dict[str, Any]:
             aliases = json.loads(aliases)
         except Exception:
             aliases = {"raw": aliases}
+    provider = asset.get("provider")
+    provider_symbol = asset.get("provider_symbol")
+    if provider and provider_symbol:
+        aliases = {**(aliases or {}), str(provider): str(provider_symbol)}
     return {**asdict(identity), "canonical_id": identity.canonical_id, "provider_aliases": aliases or {}}
 
 
@@ -539,6 +543,16 @@ def ensure_v39_tables(conn: Any) -> None:
             symbol TEXT NOT NULL, provider TEXT NOT NULL, failure_type TEXT NOT NULL,
             failure_count INTEGER NOT NULL DEFAULT 1, last_failure TEXT NOT NULL, retry_after TEXT NOT NULL,
             PRIMARY KEY(symbol, provider, failure_type))""",
+        "CREATE INDEX IF NOT EXISTS idx_global_decision_symbol_created ON global_decision_ledger (symbol, created_at DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_global_outcomes_decision ON global_forecast_outcomes (decision_id)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_global_outcomes_decision_horizon ON global_forecast_outcomes (decision_id, horizon)",
+        "CREATE INDEX IF NOT EXISTS idx_global_outcomes_forecast_horizon ON global_forecast_outcomes (forecast_id, horizon)",
+        "CREATE INDEX IF NOT EXISTS idx_provider_budget_capability ON provider_budget_ledger (provider, capability, utc_date)",
+        "CREATE INDEX IF NOT EXISTS idx_global_decision_events_created ON global_decision_events (created_at DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_global_decision_events_decision ON global_decision_events (decision_id, stage)",
+        "CREATE INDEX IF NOT EXISTS idx_global_decision_events_market_symbol_stage ON global_decision_events (market, symbol, stage, created_at DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_invalid_symbol_retry ON invalid_symbol_quarantine (retry_after)",
+        "CREATE INDEX IF NOT EXISTS idx_invalid_symbol_provider_retry ON invalid_symbol_quarantine (provider, retry_after)",
     ]
     for statement in statements:
         conn.execute(statement)

@@ -109,6 +109,7 @@ DATABASE_RETENTION_POLICIES = {
     "opportunity_rankings": {"keep_rows": 12000, "batch_size": DATABASE_RETENTION_BATCH_SIZE, "classification": "append-only analytical/ephemeral"},
     "oracle_decision_audit": {"keep_rows": 12000, "batch_size": DATABASE_RETENTION_BATCH_SIZE, "classification": "append-only analytical/ephemeral"},
     "opportunity_radar_assessments": {"keep_rows": 12000, "batch_size": DATABASE_RETENTION_BATCH_SIZE, "classification": "append-only analytical/ephemeral"},
+    "global_decision_events": {"keep_rows": 20000, "batch_size": DATABASE_RETENTION_BATCH_SIZE, "classification": "append-only analytical/ephemeral"},
 }
 DATABASE_TABLE_GROWTH_AUDIT = {
     "portfolios": {"class": "canonical financial records", "inserted_by": "initialize_database/portfolio bootstrap", "frequency": "one row per market", "retention": "never auto-delete"},
@@ -137,6 +138,13 @@ DATABASE_TABLE_GROWTH_AUDIT = {
     "trade_audits": {"class": "governance/audit records", "inserted_by": "trade audit", "frequency": "audit events", "retention": "preserve until archive strategy exists"},
     "position_audits": {"class": "governance/audit records", "inserted_by": "position audit", "frequency": "audit events", "retention": "preserve until archive strategy exists"},
     "risk_events": {"class": "governance/audit records", "inserted_by": "risk engine", "frequency": "risk checks/events", "retention": "preserve until archive strategy exists"},
+    "global_asset_identities": {"class": "canonical identity records", "inserted_by": "global adaptive engine", "frequency": "one per canonical asset identity", "retention": "never auto-delete"},
+    "global_decision_ledger": {"class": "governance/audit records", "inserted_by": "global adaptive engine", "frequency": "decision-level audit", "retention": "preserve until archive strategy exists"},
+    "global_forecast_outcomes": {"class": "governance/audit records", "inserted_by": "learning loop outcome evaluator", "frequency": "decision horizon outcomes", "retention": "preserve until archive strategy exists"},
+    "provider_budget_ledger": {"class": "governance/provider quota records", "inserted_by": "provider budget manager", "frequency": "provider/capability/day", "retention": "preserve recent quota history until archive strategy exists"},
+    "invalid_symbol_quarantine": {"class": "governance/provider safety records", "inserted_by": "provider symbol quarantine", "frequency": "provider-symbol failures", "retention": "preserve until retry policy/archive exists"},
+    "global_model_governance": {"class": "governance/model records", "inserted_by": "champion/challenger governance", "frequency": "model lifecycle changes", "retention": "never auto-delete"},
+    "global_decision_events": {"class": "append-only analytical/ephemeral records", "inserted_by": "global adaptive engine", "frequency": "worker decision funnel events", "retention": "keep newest 20000 rows"},
 }
 
 
@@ -963,6 +971,8 @@ def initialize_database() -> None:
         """,
         "CREATE INDEX IF NOT EXISTS idx_global_decision_symbol_created ON global_decision_ledger (symbol, created_at DESC)",
         "CREATE INDEX IF NOT EXISTS idx_global_outcomes_decision ON global_forecast_outcomes (decision_id)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_global_outcomes_decision_horizon ON global_forecast_outcomes (decision_id, horizon)",
+        "CREATE INDEX IF NOT EXISTS idx_global_outcomes_forecast_horizon ON global_forecast_outcomes (forecast_id, horizon)",
         "CREATE INDEX IF NOT EXISTS idx_provider_budget_capability ON provider_budget_ledger (provider, capability, utc_date)",
         """
         CREATE TABLE IF NOT EXISTS global_decision_events (
@@ -989,7 +999,9 @@ def initialize_database() -> None:
         """,
         "CREATE INDEX IF NOT EXISTS idx_global_decision_events_created ON global_decision_events (created_at DESC)",
         "CREATE INDEX IF NOT EXISTS idx_global_decision_events_decision ON global_decision_events (decision_id, stage)",
+        "CREATE INDEX IF NOT EXISTS idx_global_decision_events_market_symbol_stage ON global_decision_events (market, symbol, stage, created_at DESC)",
         "CREATE INDEX IF NOT EXISTS idx_invalid_symbol_retry ON invalid_symbol_quarantine (retry_after)",
+        "CREATE INDEX IF NOT EXISTS idx_invalid_symbol_provider_retry ON invalid_symbol_quarantine (provider, retry_after)",
     ]
 
     with connect() as conn:

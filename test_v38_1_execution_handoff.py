@@ -264,3 +264,181 @@ def test_enable_broker_submission_remains_false():
     import config
 
     assert config.ENABLE_BROKER_SUBMISSION is False
+
+
+def test_v39_optimizer_amount_reaches_buy_and_caps_execution(monkeypatch):
+    import oracle_bot
+
+    signal = _signal("AAPL", price=100.0)
+    signal.signal_id = 42
+    signal.scan_type = "fast"
+    signal.source_interval = "5m"
+    signal.planned_trade_value = 600_000
+    signal.v39_optimizer_approved_amount = 600_000
+    quote = _quote("AAPL", 100.0, avg_dollar_volume=100_000_000)
+    captured = {}
+
+    monkeypatch.setattr(oracle_bot, "ENABLE_AUTOTRADE", True)
+    monkeypatch.setattr(oracle_bot, "ENABLE_STOCK_AUTOTRADE", True)
+    monkeypatch.setattr(oracle_bot, "ENABLE_NEW_ENTRIES", True)
+    monkeypatch.setattr(oracle_bot, "ENABLE_QUANT_TRADE_STANDARD", False)
+    monkeypatch.setattr(oracle_bot, "_entry_forecast_gate", lambda *args, **kwargs: (True, "approved"))
+    monkeypatch.setattr(oracle_bot, "_penny_stock_gate", lambda *args, **kwargs: (True, "not penny"))
+    monkeypatch.setattr(oracle_bot, "recent_trade", lambda *args, **kwargs: None)
+    monkeypatch.setattr(oracle_bot, "_open_position_count", lambda market: 0)
+    monkeypatch.setattr(oracle_bot, "row", lambda *args, **kwargs: None)
+
+    def fake_buy(market, symbol, price, signal_obj, *args, **kwargs):
+        captured["target_trade_value"] = kwargs.get("target_trade_value")
+        return True, "paper buy executed", None
+
+    monkeypatch.setattr(oracle_bot, "_buy", fake_buy)
+
+    actions = oracle_bot.process_signals("cash", [signal], {"AAPL": quote})
+
+    assert captured["target_trade_value"] == 600_000
+    assert actions[0]["optimizer_approved_amount"] == 600_000
+    assert actions[0]["planned_trade_value"] <= 600_000
+
+
+def test_v39_optimizer_uses_stricter_oracle_sizing(monkeypatch):
+    import oracle_bot
+    from quant_trade_standard import QuantTradeAssessment
+
+    signal = _signal("AAPL", price=100.0)
+    signal.signal_id = 42
+    signal.scan_type = "fast"
+    signal.source_interval = "5m"
+    signal.planned_trade_value = 600_000
+    quote = _quote("AAPL", 100.0, avg_dollar_volume=100_000_000)
+    captured = {}
+
+    monkeypatch.setattr(oracle_bot, "ENABLE_AUTOTRADE", True)
+    monkeypatch.setattr(oracle_bot, "ENABLE_STOCK_AUTOTRADE", True)
+    monkeypatch.setattr(oracle_bot, "ENABLE_NEW_ENTRIES", True)
+    monkeypatch.setattr(oracle_bot, "_entry_forecast_gate", lambda *args, **kwargs: (True, "approved"))
+    monkeypatch.setattr(oracle_bot, "_penny_stock_gate", lambda *args, **kwargs: (True, "not penny"))
+    monkeypatch.setattr(oracle_bot, "recent_trade", lambda *args, **kwargs: None)
+    monkeypatch.setattr(oracle_bot, "_open_position_count", lambda market: 0)
+    monkeypatch.setattr(oracle_bot, "row", lambda *args, **kwargs: None)
+    monkeypatch.setattr(oracle_bot, "portfolio_equity", lambda market: {"equity": 1_000_000})
+    monkeypatch.setattr(oracle_bot, "rows", lambda *args, **kwargs: [])
+
+    class Decision:
+        recommendation = "BUY"
+        reason = "unit"
+        scenario = {"position_multiplier": 1.0, "summary": ""}
+        global_intelligence = {"position_multiplier": 1.0, "summary": ""}
+        capital = {"final_multiplier": 1.0, "summary": ""}
+        radar = {"position_multiplier": 1.0, "summary": ""}
+        portfolio_supercomputer = {"position_multiplier": 1.0, "recommended_trade_value": 450_000, "summary": ""}
+        explainability = {"summary": ""}
+
+    assessment = QuantTradeAssessment(
+        alpha_score=90,
+        execution_score=90,
+        risk_score=90,
+        relative_value_score=90,
+        trade_quality=90,
+        gross_expected_value_pct=0.02,
+        estimated_cost_pct=0.001,
+        net_expected_value_pct=0.019,
+        adverse_selection_score=10,
+        position_multiplier=1.0,
+        approved=True,
+        classification="approved",
+        reason="unit",
+    )
+
+    monkeypatch.setattr(oracle_bot, "evaluate_opportunity", lambda *args, **kwargs: Decision())
+    monkeypatch.setattr(oracle_bot, "assess_trade", lambda *args, **kwargs: assessment)
+
+    def fake_buy(market, symbol, price, signal_obj, *args, **kwargs):
+        captured["target_trade_value"] = kwargs.get("target_trade_value")
+        return True, "paper buy executed", None
+
+    monkeypatch.setattr(oracle_bot, "_buy", fake_buy)
+
+    actions = oracle_bot.process_signals("cash", [signal], {"AAPL": quote})
+
+    assert captured["target_trade_value"] == 450_000
+    assert actions[0]["planned_trade_value"] == 450_000
+    assert actions[0]["optimizer_approved_amount"] == 600_000
+
+
+def test_v39_signal_opportunity_does_not_mark_signal_id_as_forecast_approved():
+    import market_worker
+
+    signal = _signal("AAPL", price=100.0)
+    signal.signal_id = 123
+    quote = _quote("AAPL", 100.0, avg_dollar_volume=25_000_000, spread_pct=0.001, tradeable=True)
+    opportunity = market_worker._v39_signal_opportunity(
+        "cash",
+        signal,
+        {"AAPL": quote},
+        {"AAPL": {"risk_score": 25, "spread_pct": 0.001, "liquidity": 25_000_000}},
+        "fast",
+    )
+
+    assert "forecast_approved" not in opportunity["stages"]
+    assert opportunity["qualified_for_capital"] is True
+
+
+def test_v39_iterative_execution_reloads_optimizer_after_success(monkeypatch):
+    import market_worker
+
+    signals = [_signal("AAPL", 100.0), _signal("MSFT", 200.0)]
+    prices = {"AAPL": _quote("AAPL", 100.0), "MSFT": _quote("MSFT", 200.0)}
+    calls = []
+
+    def fake_prioritize(market, remaining, prices_arg, ranked, scan_type):
+        calls.append([item.symbol for item in remaining])
+        for item in remaining:
+            item.planned_trade_value = 1_000
+        return list(remaining)
+
+    def fake_process(market, batch, prices=None):
+        return [{"symbol": batch[0].symbol, "action": "BUY"}]
+
+    monkeypatch.setattr(market_worker, "_v39_prioritize_signals", fake_prioritize)
+    monkeypatch.setattr(market_worker, "process_signals", fake_process)
+
+    actions = market_worker._v39_execute_iterative("cash", signals, prices, [], "fast")
+
+    assert [action["symbol"] for action in actions] == ["AAPL", "MSFT"]
+    assert calls == [["AAPL", "MSFT"], ["MSFT"]]
+
+
+def test_v39_executed_action_records_sequential_funnel_stages(monkeypatch):
+    import market_worker
+
+    captured = []
+    monkeypatch.setattr(
+        market_worker,
+        "_v39_record_event",
+        lambda market, symbol, stage, payload, rejection_reason=None: captured.append((stage, payload)),
+    )
+
+    market_worker._v39_record_actions(
+        "cash",
+        [
+            {
+                "symbol": "AAPL",
+                "action": "BUY",
+                "signal_id": 42,
+                "forecast_id": "forecast-42",
+                "created_at": "2026-01-01T10:00:00+00:00",
+                "planned_trade_value": 450_000,
+                "optimizer_approved_amount": 600_000,
+            }
+        ],
+    )
+
+    assert [stage for stage, _ in captured] == [
+        "forecast_approved",
+        "portfolio_approved",
+        "execution_approved",
+        "paper_trade_executed",
+    ]
+    assert all(payload["signal_id"] == 42 for _, payload in captured)
+    assert all(payload["forecast_id"] == "forecast-42" for _, payload in captured)

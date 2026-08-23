@@ -46,6 +46,22 @@ def test_global_identity_prevents_symbol_collisions():
     assert len(merged) == 2
 
 
+def test_canonical_identity_keeps_provider_symbol_as_alias_not_native():
+    identity = v39.canonical_identity(
+        {
+            "symbol": "AAPL",
+            "provider_symbol": "AAPL.US",
+            "provider": "EODHD",
+            "asset_class": "stock",
+            "exchange": "NASDAQ",
+            "currency": "USD",
+        }
+    )
+
+    assert identity["native_symbol"] == "AAPL"
+    assert identity["provider_aliases"]["EODHD"] == "AAPL.US"
+
+
 def test_stock_and_crypto_capital_cannot_mix():
     opportunities = [fresh_quote("AAPL"), fresh_quote("BTC-USD", asset_class="crypto")]
     engines = v39.split_capital_engines(
@@ -129,6 +145,14 @@ def test_provider_budget_reservation_is_shared_in_supplied_ledger():
     assert v39.reserve_provider_budget(ledger, "polygon", "quote")["reserved"] is False
 
 
+def test_provider_budget_has_no_universal_500_default():
+    import config
+
+    assert config.PROVIDER_CAPABILITY_DAILY_BUDGETS[("alpha vantage", "us_history")] == config.ALPHA_VANTAGE_DAILY_REQUEST_BUDGET
+    assert config.PROVIDER_CAPABILITY_DAILY_BUDGETS[("alpha vantage", "crypto")] == 0
+    assert config.PROVIDER_CAPABILITY_DAILY_BUDGETS.get(("unknown", "quote")) is None
+
+
 def test_decision_funnel_reflects_real_stage_counts_and_reasons():
     funnel = v39.decision_funnel([
         {"symbol": "AAPL", "stages": ["surveillance", "active_hot", "deep_research", "buy_signal", "verified_quote", "forecast_approved", "portfolio_approved"], "quote_verified": True, "qualified_for_capital": True},
@@ -162,6 +186,8 @@ def test_v39_table_bootstrap_executes_all_statements():
     assert "global_asset_identities" in joined
     assert "global_decision_ledger" in joined
     assert "provider_budget_ledger" in joined
+    assert "idx_global_decision_events_market_symbol_stage" in joined
+    assert "idx_global_outcomes_decision_horizon" in joined
 
 
 

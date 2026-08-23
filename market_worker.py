@@ -54,7 +54,7 @@ from execution_policy import execution_policy
 from engine import analyze_market
 from forecasting import forecast_price
 from global_market_scanner import active_global_watchlist
-from global_pit_engine import build_global_universe, persist_global_pit_state, rank_global_opportunities
+from global_pit_engine import _execution_quote_eligible, build_global_universe, persist_global_pit_state, rank_global_opportunities
 from global_adaptive_engine import (
     adaptive_portfolio_optimizer,
     apply_cross_market_influence,
@@ -490,8 +490,35 @@ def _v39_signal_opportunity(market: str, signal: Any, prices: dict[str, Any], ra
         stages.append("buy_signal")
     if quote.get("quote_verified") is True:
         stages.append("verified_quote")
-    if getattr(signal, "signal_id", None):
-        stages.append("forecast_approved")
+    requested_symbol = str(quote.get("requested_symbol") or "").upper().strip()
+    provider_symbol = str(quote.get("provider_symbol") or "").upper().strip()
+    identity_verified = requested_symbol == symbol and provider_symbol == symbol
+    execution_fresh = _execution_quote_eligible(
+        {
+            **quote,
+            "symbol": symbol,
+            "market": market,
+            "asset_class": "crypto" if market == "crypto" else "stock",
+        }
+    )
+    tradeable = bool(quote.get("tradeable", quote.get("quote_verified") is True))
+    spread = ranked.get("spread_pct")
+    if spread in (None, ""):
+        spread = quote.get("spread_pct")
+    risk_score = ranked.get("risk_score")
+    if risk_score in (None, ""):
+        risk_score = getattr(signal, "risk_score", None)
+    qualified = bool(
+        action in {"BUY", "STRONG_BUY", "ACCUMULATE", "LONG"}
+        and quote.get("quote_verified") is True
+        and identity_verified
+        and execution_fresh
+        and tradeable
+        and liquidity > 0
+        and spread not in (None, "")
+        and risk_score not in (None, "")
+        and getattr(signal, "signal_id", None)
+    )
     return {
         "symbol": symbol,
         "requested_symbol": quote.get("requested_symbol"),
@@ -506,18 +533,19 @@ def _v39_signal_opportunity(market: str, signal: Any, prices: dict[str, Any], ra
         "quote_timestamp": quote.get("quote_timestamp"),
         "source_interval": quote.get("source_interval") or quote.get("interval"),
         "interval": quote.get("interval"),
-        "tradeable": bool(quote.get("quote_verified") is True and liquidity > 0),
-        "qualified_for_capital": bool(quote.get("quote_verified") is True and liquidity > 0),
+        "tradeable": tradeable,
+        "qualified_for_capital": qualified,
         "avg_dollar_volume": liquidity,
         "liquidity": liquidity,
-        "spread_pct": ranked.get("spread_pct") or quote.get("spread_pct") or 0.02,
+        "spread_pct": spread,
         "opportunity_score": ranked.get("opportunity_score") or getattr(signal, "score", 0.0),
         "expected_move_pct": ranked.get("expected_return") or ranked.get("expected_move_pct"),
         "confidence": getattr(signal, "confidence", 0.0),
         "data_quality_score": quote.get("data_quality_score") or ranked.get("data_quality_score") or 0.0,
-        "risk_score": ranked.get("risk_score") or 50,
+        "risk_score": risk_score,
         "scan_type": scan_type,
         "signal_id": getattr(signal, "signal_id", None),
+        "forecast_id": getattr(signal, "forecast_id", None),
         "created_at": getattr(signal, "created_at", None),
         "stages": stages,
     }
@@ -544,8 +572,20 @@ def _v39_prioritize_signals(market: str, signals: list[Any], prices: dict[str, A
     except Exception as exc:
         log.debug("V39 optimizer skipped | market=%s | error=%s", market, exc)
         plan = {"allocations": []}
-    allocation_symbols = [row.get("symbol") for row in plan.get("allocations", [])]
-    allocation_set = {str(symbol).upper() for symbol in allocation_symbols if symbol}
+    allocations = [row for row in plan.get("allocations", []) if row.get("symbol")]
+    allocation_symbols = [str(row.get("symbol")).upper() for row in allocations]
+    allocation_by_symbol = {str(row.get("symbol")).upper(): row for row in allocations}
+    allocation_set = set(allocation_by_symbol)
+    signal_by_symbol = {str(getattr(signal, "symbol", "")).upper(): signal for signal in signals}
+    for symbol, allocation in allocation_by_symbol.items():
+        signal = signal_by_symbol.get(symbol)
+        if signal is None:
+            continue
+        approved_amount = _finite_positive(allocation.get("amount"))
+        setattr(signal, "planned_trade_value", approved_amount)
+        setattr(signal, "v39_optimizer_approved_amount", approved_amount)
+        setattr(signal, "v39_optimizer_allocation", allocation)
+        setattr(signal, "v39_optimizer_plan", plan)
     for opportunity in opportunities:
         symbol = str(opportunity.get("symbol") or "").upper()
         stage = "portfolio_approved" if symbol in allocation_set else "verified_quote" if opportunity.get("quote_verified") else "surveillance"
@@ -563,6 +603,39 @@ def _v39_prioritize_signals(market: str, signals: list[Any], prices: dict[str, A
     return ordered
 
 
+def _v39_execute_iterative(
+    market: str,
+    signals: list[Any],
+    prices: dict[str, Any],
+    ranked: list[dict[str, Any]],
+    scan_type: str,
+) -> list[Any]:
+    """Execute at most one optimized paper entry per portfolio snapshot.
+
+    A rejected candidate is skipped and the worker continues. After a successful
+    paper action, the next loop reloads the portfolio inside
+    ``_v39_prioritize_signals`` before considering another allocation.
+    """
+    remaining = list(signals or [])
+    actions: list[Any] = []
+    attempts = 0
+    while remaining and attempts < len(signals or []):
+        attempts += 1
+        ordered = _v39_prioritize_signals(market, remaining, prices, ranked, scan_type)
+        if not ordered:
+            break
+        signal = ordered[0]
+        symbol = str(getattr(signal, "symbol", "") or "").upper()
+        before_count = len(actions)
+        result = process_signals(market, [signal], prices=prices) or []
+        actions.extend(result)
+        remaining = [item for item in remaining if str(getattr(item, "symbol", "") or "").upper() != symbol]
+        if len(actions) > before_count:
+            log.info("V39 optimizer executed one allocation and will reload portfolio | market=%s | symbol=%s", market, symbol)
+            continue
+    return actions
+
+
 def _v39_record_actions(market: str, actions: list[Any]) -> None:
     for action in actions or []:
         if not isinstance(action, dict):
@@ -570,8 +643,22 @@ def _v39_record_actions(market: str, actions: list[Any]) -> None:
         symbol = str(action.get("symbol") or "").upper()
         if not symbol:
             continue
-        stage = "paper_trade_executed" if str(action.get("action") or "").upper() in {"BUY", "SELL", "STRONG_BUY", "ACCUMULATE", "LONG"} else "execution_approved"
-        _v39_record_event(market, symbol, stage, {"trade_id": action.get("trade_id"), "price": action.get("price"), "action": action.get("action")})
+        payload = {
+            "trade_id": action.get("trade_id"),
+            "price": action.get("price"),
+            "action": action.get("action"),
+            "signal_id": action.get("signal_id"),
+            "forecast_id": action.get("forecast_id"),
+            "created_at": action.get("created_at"),
+            "planned_trade_value": action.get("planned_trade_value"),
+            "optimizer_approved_amount": action.get("optimizer_approved_amount"),
+        }
+        executed = str(action.get("action") or "").upper() in {"BUY", "SELL", "STRONG_BUY", "ACCUMULATE", "LONG"}
+        if executed:
+            for stage in ("forecast_approved", "portfolio_approved", "execution_approved", "paper_trade_executed"):
+                _v39_record_event(market, symbol, stage, payload)
+        else:
+            _v39_record_event(market, symbol, "execution_approved", payload)
 
 
 def _v39_quarantine_symbol(symbol: str, provider: str, failure_type: str) -> None:
@@ -815,6 +902,7 @@ def fast_scan_market(market: str) -> list[Any]:
                     source_interval=route.get("interval", "1d"),
                 )
                 if forecast:
+                    setattr(signal, "forecast_id", getattr(forecast, "forecast_id", None))
                     save_forecast(market, symbol, forecast, scan_type="fast", signal_id=signal_id, signal_created_at=signal_created_at)
             except Exception as exc:
                 log.debug("Fast persistence failed | market=%s | symbol=%s | error=%s", market, symbol, exc)
@@ -828,8 +916,6 @@ def fast_scan_market(market: str) -> list[Any]:
         ),
         reverse=True,
     )
-
-    signals = _v39_prioritize_signals(market, signals, prices, [], "fast")
 
     actions: list[Any] = []
     with trade_cycle_lock:
@@ -846,7 +932,10 @@ def fast_scan_market(market: str) -> list[Any]:
                 log.exception("%s fast risk exits failed: %s", market, exc)
         if entries_enabled or exits_enabled:
             try:
-                actions.extend(process_signals(market, signals, prices=prices) or [])
+                if entries_enabled:
+                    actions.extend(_v39_execute_iterative(market, signals, prices, [], "fast") or [])
+                elif exits_enabled:
+                    actions.extend(process_signals(market, signals, prices=prices) or [])
             except Exception as exc:
                 log.exception("%s fast execution failed: %s", market, exc)
         try:
@@ -977,6 +1066,7 @@ def scan_market(market: str) -> list[Any]:
                 source_interval=route.get("interval", "1d"),
             )
             if forecast:
+                setattr(signal, "forecast_id", getattr(forecast, "forecast_id", None))
                 save_forecast(market, symbol, forecast, scan_type="deep", signal_id=signal_id, signal_created_at=signal_created_at)
         except Exception as exc:
             log.warning("Oracle pass failed | market=%s | symbol=%s | error=%s", market, symbol, exc)
@@ -1034,7 +1124,6 @@ def scan_market(market: str) -> list[Any]:
 
         _persist_global_pit_rankings(market, ranked, prices)
         by_symbol = {item["symbol"]: item for item in ranked}
-        signals = _v39_prioritize_signals(market, signals, prices, ranked, "deep")
         try:
             with connect() as conn:
                 positions = list(
@@ -1080,7 +1169,10 @@ def scan_market(market: str) -> list[Any]:
                 log.exception("%s deep-scan risk exits failed: %s", market, exc)
         if entries_enabled or exits_enabled:
             try:
-                actions.extend(process_signals(market, signals, prices=prices) or [])
+                if entries_enabled:
+                    actions.extend(_v39_execute_iterative(market, signals, prices, ranked, "deep") or [])
+                elif exits_enabled:
+                    actions.extend(process_signals(market, signals, prices=prices) or [])
             except Exception as exc:
                 log.exception("%s signal execution failed: %s", market, exc)
         try:
