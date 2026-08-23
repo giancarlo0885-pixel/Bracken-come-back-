@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, asdict
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 import hashlib
+import os
 import json
 import math
 from typing import Any
@@ -36,6 +37,18 @@ INTELLIGENCE_ONLY_ASSET_CLASSES = {
 PROMOTION_MIN_SAMPLE = 30
 PROMOTION_MIN_ACCURACY = 0.55
 PROMOTION_MAX_MAPE = 15.0
+FUNNEL_STAGES = [
+    "surveillance",
+    "active_hot",
+    "deep_research",
+    "buy_signal",
+    "verified_quote",
+    "forecast_approved",
+    "portfolio_approved",
+    "execution_approved",
+    "paper_trade_executed",
+]
+V39_OUTCOME_HORIZONS = {"5m": 5, "15m": 15, "1h": 60, "4h": 240, "1d": 1440, "1w": 10080}
 
 
 def utc_now() -> str:
@@ -44,6 +57,29 @@ def utc_now() -> str:
 
 def _json(value: Any) -> str:
     return json.dumps(value, sort_keys=True, default=str)
+
+
+def _parse_aware_datetime(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, date):
+        parsed = datetime(value.year, value.month, value.day)
+    else:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _decision_id(market: str, symbol: str, signal_id: Any = None, created_at: Any = None) -> str:
+    raw = f"{market}|{symbol}|{signal_id or ''}|{created_at or utc_now()}"
+    return "decision:" + hashlib.sha1(raw.encode("utf-8")).hexdigest()[:18]
 
 
 @dataclass(frozen=True)
@@ -144,17 +180,23 @@ def liquidity_capacity(asset: dict[str, Any], proposed_order_value: float) -> di
     adv = _finite(asset.get("avg_dollar_volume") or asset.get("liquidity"))
     spread_pct = max(0.0, _finite(asset.get("spread_pct")))
     proposed = max(0.0, _finite(proposed_order_value))
-    participation = proposed / adv if adv > 0 else math.inf
-    verified = adv > 0 and math.isfinite(participation)
+    verified = adv > 0
+    max_order_value = adv * PAPER_MAX_MARKET_PARTICIPATION_PCT if verified else 0.0
+    executable_value = min(proposed, max_order_value) if verified else 0.0
+    participation = executable_value / adv if adv > 0 and executable_value > 0 else (math.inf if proposed > 0 else 0.0)
+    desired_participation = proposed / adv if adv > 0 else math.inf
     estimated_slippage_pct = spread_pct / 2.0 + max(0.0, participation - PAPER_MAX_MARKET_PARTICIPATION_PCT) * 100.0
     return {
         "verified": verified,
         "average_dollar_volume": adv,
         "proposed_order_value": proposed,
+        "executable_order_value": executable_value,
         "market_participation_pct": participation,
+        "desired_market_participation_pct": desired_participation,
         "max_market_participation_pct": PAPER_MAX_MARKET_PARTICIPATION_PCT,
         "estimated_slippage_pct": estimated_slippage_pct,
-        "allowed": bool(verified and participation <= PAPER_MAX_MARKET_PARTICIPATION_PCT),
+        "partial_sizing": bool(verified and 0 < executable_value < proposed),
+        "allowed": bool(verified and executable_value > 0 and participation <= PAPER_MAX_MARKET_PARTICIPATION_PCT),
     }
 
 
@@ -163,15 +205,21 @@ def apply_cross_market_influence(executable: list[dict[str, Any]], intelligence:
     for item in intelligence:
         cls = _asset_class(item.get("asset_class"))
         strength = _finite(item.get("strength_score") or item.get("opportunity_score") or item.get("change_1d_pct"))
-        if cls in {"commodity", "commodities", "future", "futures"} and "oil" in str(item.get("symbol") or item.get("name") or "").lower():
-            influences["Energy"] = influences.get("Energy", 0.0) + min(8.0, abs(strength) * 0.08)
+        confidence = max(0.0, min(1.0, _finite(item.get("confidence"), 1.0)))
+        signed = strength * confidence
+        label = str(item.get("symbol") or item.get("name") or "").lower()
+        if cls in {"commodity", "commodities", "future", "futures"} and "oil" in label:
+            influences["Energy"] = influences.get("Energy", 0.0) + max(-8.0, min(8.0, signed * 0.08))
+        if cls in {"commodity", "commodities", "future", "futures"} and "copper" in label:
+            influences["Industrials"] = influences.get("Industrials", 0.0) + max(-6.0, min(6.0, signed * 0.06))
         if cls in {"rates", "fixed_income"}:
-            influences["Financials"] = influences.get("Financials", 0.0) + min(5.0, abs(strength) * 0.05)
-            influences["Technology"] = influences.get("Technology", 0.0) - min(5.0, abs(strength) * 0.04)
+            influences["Financials"] = influences.get("Financials", 0.0) + max(-5.0, min(5.0, signed * 0.05))
+            influences["Technology"] = influences.get("Technology", 0.0) - max(-5.0, min(5.0, signed * 0.04))
         if cls == "forex" and "USD" in str(item.get("symbol") or "").upper():
-            influences["International"] = influences.get("International", 0.0) - min(4.0, abs(strength) * 0.04)
+            influences["International"] = influences.get("International", 0.0) - max(-4.0, min(4.0, signed * 0.04))
+            influences["Commodities"] = influences.get("Commodities", 0.0) - max(-4.0, min(4.0, signed * 0.03))
         if cls == "crypto" and str(item.get("symbol") or "").upper().startswith("BTC"):
-            influences["Crypto"] = influences.get("Crypto", 0.0) + min(8.0, abs(strength) * 0.08)
+            influences["Crypto"] = influences.get("Crypto", 0.0) + max(-8.0, min(8.0, signed * 0.08))
     adjusted = []
     for asset in executable:
         sector = str(asset.get("sector") or "")
@@ -186,9 +234,11 @@ def apply_cross_market_influence(executable: list[dict[str, Any]], intelligence:
 
 
 def evaluate_forecast_outcome(decision: dict[str, Any], observed: dict[str, Any]) -> dict[str, Any]:
-    generated = str(decision.get("generated_at") or decision.get("created_at") or "")
-    observed_at = str(observed.get("observed_at") or observed.get("timestamp") or "")
-    if generated and observed_at and observed_at <= generated:
+    generated = _parse_aware_datetime(decision.get("generated_at") or decision.get("created_at"))
+    observed_at = _parse_aware_datetime(observed.get("observed_at") or observed.get("timestamp"))
+    if generated is None or observed_at is None:
+        return {"evaluated": False, "reason": "timestamp missing or invalid"}
+    if observed_at <= generated:
         return {"evaluated": False, "reason": "future leakage guard: observation is not after decision"}
     entry = _finite(decision.get("price") or decision.get("source_price"))
     exit_price = _finite(observed.get("price"))
@@ -237,7 +287,7 @@ def champion_challenger_decision(model: dict[str, Any], champion: dict[str, Any]
         return {"promote": False, "status": status, "reason": "promotion metrics below threshold"}
     if champion and accuracy <= _finite(champion.get("directional_accuracy")) and mape >= _finite(champion.get("mape"), 100.0):
         return {"promote": False, "status": status, "reason": "challenger does not beat champion"}
-    return {"promote": True, "status": "CHALLENGER", "reason": "eligible for explicit governance promotion"}
+    return {"promote": False, "status": "ELIGIBLE_FOR_PROMOTION", "reason": "eligible for explicit governance promotion"}
 
 
 def adaptive_portfolio_optimizer(opportunities: list[dict[str, Any]], portfolio: dict[str, Any], positions: list[dict[str, Any]], *, engine: str) -> dict[str, Any]:
@@ -268,33 +318,28 @@ def adaptive_portfolio_optimizer(opportunities: list[dict[str, Any]], portfolio:
         capacity = liquidity_capacity(item, candidate_amount)
         if not capacity["allowed"]:
             continue
-        sector = str(item.get("sector") or "Unknown")
-        if equity and (sector_exposure.get(sector, 0.0) + candidate_amount) / equity > 0.35:
+        executable_amount = min(candidate_amount, _finite(capacity.get("executable_order_value")))
+        if executable_amount <= 0:
             continue
-        allocations.append({"symbol": symbol, "amount": round(candidate_amount, 2), "sector": sector, "liquidity": capacity})
-        cash -= candidate_amount
-        exposure_by_symbol[symbol] = current + candidate_amount
-        sector_exposure[sector] = sector_exposure.get(sector, 0.0) + candidate_amount
+        sector = str(item.get("sector") or "Unknown")
+        if equity and (sector_exposure.get(sector, 0.0) + executable_amount) / equity > 0.35:
+            continue
+        allocations.append({"symbol": symbol, "amount": round(executable_amount, 2), "sector": sector, "liquidity": capacity})
+        cash -= executable_amount
+        exposure_by_symbol[symbol] = current + executable_amount
+        sector_exposure[sector] = sector_exposure.get(sector, 0.0) + executable_amount
         recalc_count += 1
     return {**state, "allocations": allocations, "recalculations": recalc_count, "cash_after_plan": round(cash, 2)}
 
 
 def decision_funnel(records: list[dict[str, Any]]) -> dict[str, Any]:
-    stages = [
-        "surveillance",
-        "active_hot",
-        "deep_research",
-        "buy_signal",
-        "verified_quote",
-        "forecast_approved",
-        "portfolio_approved",
-        "execution_approved",
-        "paper_trade_executed",
-    ]
-    counts = {stage: 0 for stage in stages}
+    counts = {stage: 0 for stage in FUNNEL_STAGES}
     rejection_reasons: dict[str, int] = {}
     for record in records:
-        reached = set(record.get("stages") or [])
+        reached = {str(stage).lower() for stage in (record.get("stages") or [])}
+        event_stage = str(record.get("stage") or "").lower()
+        if event_stage:
+            reached.add(event_stage)
         if record.get("attention_level") in {"HOT", "CRITICAL"}:
             reached.add("active_hot")
         if record.get("qualified_for_capital"):
@@ -302,8 +347,9 @@ def decision_funnel(records: list[dict[str, Any]]) -> dict[str, Any]:
         if record.get("quote_verified"):
             reached.add("verified_quote")
         reached.add("surveillance")
-        for stage in stages:
-            if stage in reached:
+        for index, stage in enumerate(FUNNEL_STAGES):
+            required = set(FUNNEL_STAGES[: index + 1])
+            if required.issubset(reached):
                 counts[stage] += 1
         for reason in record.get("rejection_reasons") or ([] if not record.get("rejection_reason") else [record.get("rejection_reason")]):
             rejection_reasons[str(reason)] = rejection_reasons.get(str(reason), 0) + 1
@@ -324,6 +370,129 @@ def reserve_provider_budget(ledger: dict[str, Any] | None, provider: str, capabi
     entry["used"] = int(entry.get("used") or 0) + 1
     entry["last_reserved_at"] = utc_now()
     return {"reserved": True, "entry": entry}
+
+
+def reserve_provider_budget_db(conn: Any, provider: str, capability: str, *, daily_budget: int, entitlement: str = "configured", data_mode: str = "unknown", now: datetime | None = None) -> dict[str, Any]:
+    now_dt = now or datetime.now(timezone.utc)
+    utc_date = now_dt.date().isoformat()
+    timestamp = now_dt.isoformat()
+    budget = max(0, int(daily_budget))
+    existing = conn.execute(
+        """SELECT * FROM provider_budget_ledger
+           WHERE provider=%s AND capability=%s AND utc_date=%s
+           FOR UPDATE""",
+        (provider, capability, utc_date),
+    ).fetchone()
+    if not existing:
+        conn.execute(
+            """INSERT INTO provider_budget_ledger
+               (provider,capability,utc_date,entitlement,daily_budget,requests_used,remaining_budget,data_mode,updated_at)
+               VALUES (%s,%s,%s,%s,%s,0,%s,%s,%s)""",
+            (provider, capability, utc_date, entitlement, budget, budget, data_mode, timestamp),
+        )
+        existing = {"requests_used": 0, "remaining_budget": budget, "cooldown_until": None}
+    cooldown_until = _parse_aware_datetime(existing.get("cooldown_until"))
+    if cooldown_until and cooldown_until > now_dt.astimezone(timezone.utc):
+        return {"reserved": False, "reason": "provider capability in cooldown", "remaining": int(existing.get("remaining_budget") or 0)}
+    remaining = int(existing.get("remaining_budget") or 0)
+    if remaining <= 0:
+        return {"reserved": False, "reason": "provider capability budget exhausted", "remaining": 0}
+    conn.execute(
+        """UPDATE provider_budget_ledger
+           SET requests_used=requests_used+1,
+               remaining_budget=remaining_budget-1,
+               updated_at=%s
+           WHERE provider=%s AND capability=%s AND utc_date=%s AND remaining_budget > 0""",
+        (timestamp, provider, capability, utc_date),
+    )
+    return {"reserved": True, "remaining": remaining - 1, "provider": provider, "capability": capability}
+
+
+def reserve_provider_budget_live(provider: str, capability: str, *, daily_budget: int, entitlement: str = "configured", data_mode: str = "unknown") -> dict[str, Any]:
+    if os.getenv("DATABASE_URL", "").strip():
+        try:
+            from database import connect
+            with connect() as conn:
+                return reserve_provider_budget_db(conn, provider, capability, daily_budget=daily_budget, entitlement=entitlement, data_mode=data_mode)
+        except Exception as exc:
+            return {"reserved": False, "reason": f"shared provider ledger unavailable; fail closed: {exc.__class__.__name__}"}
+    return {"reserved": True, "reason": "DATABASE_URL not configured; shared provider ledger not required for local mode"}
+
+
+def persist_decision_event(conn: Any, *, market: str, symbol: str, stage: str, decision_id: str | None = None, payload: dict[str, Any] | None = None, rejection_reason: str | None = None) -> str:
+    payload = payload or {}
+    identity = canonical_identity({**payload, "symbol": symbol, "asset_class": payload.get("asset_class") or ("crypto" if market == "crypto" else "stock")})
+    did = decision_id or _decision_id(market, symbol, payload.get("signal_id"), payload.get("created_at"))
+    created_at = utc_now()
+    reasons = [rejection_reason] if rejection_reason else list(payload.get("rejection_reasons") or [])
+    conn.execute(
+        """INSERT INTO global_asset_identities
+           (canonical_id, asset_class, exchange, native_symbol, currency, provider_aliases, created_at, updated_at)
+           VALUES (%s,%s,%s,%s,%s,%s::jsonb,%s,%s)
+           ON CONFLICT (canonical_id) DO UPDATE SET provider_aliases=EXCLUDED.provider_aliases, updated_at=EXCLUDED.updated_at""",
+        (identity["canonical_id"], identity["asset_class"], identity["exchange"], identity["native_symbol"], identity["currency"], _json(identity.get("provider_aliases") or {}), created_at, created_at),
+    )
+    conn.execute(
+        """INSERT INTO global_decision_ledger
+           (decision_id, scan_id, signal_id, forecast_id, execution_claim_id, trade_id, canonical_id, market, symbol, asset_class,
+            features, portfolio_context, decision, rejection_reasons, created_at)
+           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s::jsonb,%s,%s::jsonb,%s)
+           ON CONFLICT (decision_id) DO UPDATE SET decision=EXCLUDED.decision, rejection_reasons=EXCLUDED.rejection_reasons""",
+        (
+            did,
+            payload.get("scan_id"),
+            str(payload.get("signal_id")) if payload.get("signal_id") is not None else None,
+            payload.get("forecast_id"),
+            payload.get("execution_claim_id"),
+            payload.get("trade_id"),
+            identity["canonical_id"],
+            market,
+            symbol,
+            identity["asset_class"],
+            _json(payload.get("features") or payload),
+            _json(payload.get("portfolio_context") or {}),
+            stage,
+            _json(reasons),
+            created_at,
+        ),
+    )
+    conn.execute(
+        """INSERT INTO global_decision_events
+           (decision_id, market, symbol, stage, rejection_reason, payload, created_at)
+           VALUES (%s,%s,%s,%s,%s,%s::jsonb,%s)""",
+        (did, market, symbol, stage, rejection_reason, _json(payload), created_at),
+    )
+    return did
+
+
+def build_decision_funnel_from_events(events: list[dict[str, Any]]) -> dict[str, Any]:
+    by_decision: dict[str, dict[str, Any]] = {}
+    for event in events:
+        did = str(event.get("decision_id") or f"{event.get('market')}:{event.get('symbol')}")
+        record = by_decision.setdefault(did, {"stages": [], "rejection_reasons": []})
+        stage = str(event.get("stage") or "").lower()
+        if stage:
+            record["stages"].append(stage)
+        if event.get("rejection_reason"):
+            record["rejection_reasons"].append(event.get("rejection_reason"))
+    return decision_funnel(list(by_decision.values()))
+
+
+def record_invalid_symbol_failure(conn: Any, *, symbol: str, provider: str, failure_type: str, retry_after_seconds: int = 3600) -> dict[str, Any]:
+    timestamp = utc_now()
+    retry_after = (datetime.now(timezone.utc) + timedelta(seconds=max(60, int(retry_after_seconds)))).isoformat()
+    conn.execute(
+        """INSERT INTO invalid_symbol_quarantine
+           (symbol, provider, failure_type, failure_count, last_failure, retry_after)
+           VALUES (%s,%s,%s,1,%s,%s)
+           ON CONFLICT(symbol, provider, failure_type)
+           DO UPDATE SET failure_count=invalid_symbol_quarantine.failure_count+1,
+                         last_failure=EXCLUDED.last_failure,
+                         retry_after=EXCLUDED.retry_after""",
+        (_upper(symbol), provider, failure_type, timestamp, retry_after),
+    )
+    return {"symbol": _upper(symbol), "provider": provider, "failure_type": failure_type, "retry_after": retry_after}
+
 
 
 def v39_dashboard_summary(stock_engine: dict[str, Any], crypto_engine: dict[str, Any], funnel: dict[str, Any], provider_states: list[dict[str, Any]] | None = None) -> dict[str, Any]:
@@ -363,6 +532,13 @@ def ensure_v39_tables(conn: Any) -> None:
             remaining_budget INTEGER DEFAULT 0, latency_ms DOUBLE PRECISION, last_success TEXT,
             last_failure TEXT, cooldown_until TEXT, data_mode TEXT, updated_at TEXT NOT NULL,
             PRIMARY KEY(provider, capability, utc_date))""",
+        """CREATE TABLE IF NOT EXISTS global_decision_events (
+            id BIGSERIAL PRIMARY KEY, decision_id TEXT NOT NULL, market TEXT, symbol TEXT,
+            stage TEXT NOT NULL, rejection_reason TEXT, payload JSONB, created_at TEXT NOT NULL)""",
+        """CREATE TABLE IF NOT EXISTS invalid_symbol_quarantine (
+            symbol TEXT NOT NULL, provider TEXT NOT NULL, failure_type TEXT NOT NULL,
+            failure_count INTEGER NOT NULL DEFAULT 1, last_failure TEXT NOT NULL, retry_after TEXT NOT NULL,
+            PRIMARY KEY(symbol, provider, failure_type))""",
     ]
     for statement in statements:
         conn.execute(statement)

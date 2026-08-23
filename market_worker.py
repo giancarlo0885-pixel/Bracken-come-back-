@@ -54,7 +54,13 @@ from execution_policy import execution_policy
 from engine import analyze_market
 from forecasting import forecast_price
 from global_market_scanner import active_global_watchlist
-from global_pit_engine import build_global_universe, capital_deployment_plan, persist_global_pit_state, rank_global_opportunities
+from global_pit_engine import build_global_universe, persist_global_pit_state, rank_global_opportunities
+from global_adaptive_engine import (
+    adaptive_portfolio_optimizer,
+    apply_cross_market_influence,
+    persist_decision_event,
+    record_invalid_symbol_failure,
+)
 from intelligence_hub import collect_all
 from market_data import get_history, get_many_snapshots
 from news_intelligence import get_news_sentiment
@@ -457,6 +463,125 @@ def _build_completion_message(label: str, actions: list[Any]) -> str:
     return f"{label} deep scan completed. Actions: " + ", ".join(_format_action(action) for action in actions)
 
 
+
+def _v39_position_rows(market: str) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    with connect() as conn:
+        portfolio = conn.execute("SELECT * FROM portfolios WHERE market=%s", (market,)).fetchone() or {}
+        positions = list(conn.execute("SELECT * FROM positions WHERE market=%s", (market,)).fetchall())
+    positions_value = sum(
+        _finite_positive(position.get("market_value"))
+        or _finite_positive(position.get("quantity")) * _finite_positive(position.get("current_price"))
+        for position in positions
+    )
+    cash = float(portfolio.get("cash", 0.0) or 0.0)
+    leverage = float(portfolio.get("leverage_limit", 1.0) or 1.0)
+    enriched = {**portfolio, "equity": cash + positions_value, "buying_power": max(0.0, cash * leverage)}
+    return enriched, positions
+
+
+def _v39_signal_opportunity(market: str, signal: Any, prices: dict[str, Any], ranked_by_symbol: dict[str, dict[str, Any]], scan_type: str) -> dict[str, Any]:
+    symbol = str(getattr(signal, "symbol", "") or "").upper()
+    quote = dict(prices.get(symbol) or {})
+    ranked = dict(ranked_by_symbol.get(symbol) or {})
+    liquidity = _finite_positive(quote.get("avg_dollar_volume")) or _finite_positive(ranked.get("liquidity")) or 0.0
+    stages = ["surveillance", "deep_research" if scan_type == "deep" else "active_hot"]
+    action = str(getattr(signal, "action", "") or "").upper()
+    if action in {"BUY", "STRONG_BUY", "ACCUMULATE", "LONG"}:
+        stages.append("buy_signal")
+    if quote.get("quote_verified") is True:
+        stages.append("verified_quote")
+    if getattr(signal, "signal_id", None):
+        stages.append("forecast_approved")
+    return {
+        "symbol": symbol,
+        "requested_symbol": quote.get("requested_symbol"),
+        "provider_symbol": quote.get("provider_symbol"),
+        "provider": quote.get("provider"),
+        "asset_class": "crypto" if market == "crypto" else "stock",
+        "market": market,
+        "exchange": quote.get("exchange") or ranked.get("exchange"),
+        "currency": quote.get("currency") or "USD",
+        "sector": ranked.get("sector") or "Crypto" if market == "crypto" else ranked.get("sector") or "Unknown",
+        "quote_verified": quote.get("quote_verified") is True,
+        "quote_timestamp": quote.get("quote_timestamp"),
+        "source_interval": quote.get("source_interval") or quote.get("interval"),
+        "interval": quote.get("interval"),
+        "tradeable": bool(quote.get("quote_verified") is True and liquidity > 0),
+        "qualified_for_capital": bool(quote.get("quote_verified") is True and liquidity > 0),
+        "avg_dollar_volume": liquidity,
+        "liquidity": liquidity,
+        "spread_pct": ranked.get("spread_pct") or quote.get("spread_pct") or 0.02,
+        "opportunity_score": ranked.get("opportunity_score") or getattr(signal, "score", 0.0),
+        "expected_move_pct": ranked.get("expected_return") or ranked.get("expected_move_pct"),
+        "confidence": getattr(signal, "confidence", 0.0),
+        "data_quality_score": quote.get("data_quality_score") or ranked.get("data_quality_score") or 0.0,
+        "risk_score": ranked.get("risk_score") or 50,
+        "scan_type": scan_type,
+        "signal_id": getattr(signal, "signal_id", None),
+        "created_at": getattr(signal, "created_at", None),
+        "stages": stages,
+    }
+
+
+def _v39_record_event(market: str, symbol: str, stage: str, payload: dict[str, Any], rejection_reason: str | None = None) -> None:
+    try:
+        with connect() as conn:
+            persist_decision_event(conn, market=market, symbol=symbol, stage=stage, payload=payload, rejection_reason=rejection_reason)
+    except Exception as exc:
+        log.debug("V39 decision event skipped | market=%s | symbol=%s | stage=%s | error=%s", market, symbol, stage, exc)
+
+
+def _v39_prioritize_signals(market: str, signals: list[Any], prices: dict[str, Any], ranked: list[dict[str, Any]], scan_type: str) -> list[Any]:
+    if not signals:
+        return signals
+    ranked_by_symbol = {str(item.get("symbol", "")).upper(): item for item in ranked or []}
+    opportunities = [_v39_signal_opportunity(market, signal, prices, ranked_by_symbol, scan_type) for signal in signals]
+    intelligence = [item for item in opportunities if item.get("asset_class") not in {"stock", "crypto", "equity", "etf"}]
+    opportunities = apply_cross_market_influence(opportunities, intelligence)
+    try:
+        portfolio, positions = _v39_position_rows(market)
+        plan = adaptive_portfolio_optimizer(opportunities, portfolio, positions, engine="crypto" if market == "crypto" else "stock")
+    except Exception as exc:
+        log.debug("V39 optimizer skipped | market=%s | error=%s", market, exc)
+        plan = {"allocations": []}
+    allocation_symbols = [row.get("symbol") for row in plan.get("allocations", [])]
+    allocation_set = {str(symbol).upper() for symbol in allocation_symbols if symbol}
+    for opportunity in opportunities:
+        symbol = str(opportunity.get("symbol") or "").upper()
+        stage = "portfolio_approved" if symbol in allocation_set else "verified_quote" if opportunity.get("quote_verified") else "surveillance"
+        reason = None if symbol in allocation_set else ("optimizer did not allocate capital" if opportunity.get("qualified_for_capital") else "not capital qualified")
+        _v39_record_event(market, symbol, stage, {**opportunity, "portfolio_context": plan}, reason)
+    ordered = sorted(
+        signals,
+        key=lambda signal: (
+            str(getattr(signal, "symbol", "")).upper() in allocation_set,
+            -allocation_symbols.index(str(getattr(signal, "symbol", "")).upper()) if str(getattr(signal, "symbol", "")).upper() in allocation_set else -9999,
+            float(getattr(signal, "score", 0.0) or 0.0),
+        ),
+        reverse=True,
+    )
+    return ordered
+
+
+def _v39_record_actions(market: str, actions: list[Any]) -> None:
+    for action in actions or []:
+        if not isinstance(action, dict):
+            continue
+        symbol = str(action.get("symbol") or "").upper()
+        if not symbol:
+            continue
+        stage = "paper_trade_executed" if str(action.get("action") or "").upper() in {"BUY", "SELL", "STRONG_BUY", "ACCUMULATE", "LONG"} else "execution_approved"
+        _v39_record_event(market, symbol, stage, {"trade_id": action.get("trade_id"), "price": action.get("price"), "action": action.get("action")})
+
+
+def _v39_quarantine_symbol(symbol: str, provider: str, failure_type: str) -> None:
+    try:
+        with connect() as conn:
+            record_invalid_symbol_failure(conn, symbol=symbol, provider=provider or "unknown", failure_type=failure_type)
+    except Exception as exc:
+        log.debug("V39 invalid-symbol quarantine skipped | symbol=%s | provider=%s | error=%s", symbol, provider, exc)
+
+
 def _persist_global_pit_rankings(market: str, ranked: list[dict[str, Any]], prices: dict[str, Any]) -> None:
     if not GLOBAL_PIT_MODE or market != "cash" or not ranked:
         return
@@ -524,6 +649,7 @@ def _discover_symbol(market: str, symbol: str, name: str) -> tuple[Any, str, Any
     try:
         history = get_history(symbol, "1y", "1d")
         if history is None or history.empty:
+            _v39_quarantine_symbol(symbol, "market_data", "empty_history")
             return None
         signal = analyze_market(symbol, history, 0.0)
         if signal is None:
@@ -531,6 +657,7 @@ def _discover_symbol(market: str, symbol: str, name: str) -> tuple[Any, str, Any
         _attach_execution_metadata(signal, history, "deep")
         return signal, name, history
     except Exception as exc:
+        _v39_quarantine_symbol(symbol, "market_data", exc.__class__.__name__)
         log.warning("Discovery failed | market=%s | symbol=%s | error=%s", market, symbol, exc)
         return None
 
@@ -602,6 +729,8 @@ def _fast_discover_symbol(market: str, symbol: str, name: str) -> tuple[Any, Any
         try:
             history = get_history(symbol, period, interval)
             if history is None or history.empty or len(history) < 60:
+                if history is None or history.empty:
+                    _v39_quarantine_symbol(symbol, "market_data", "empty_fast_history")
                 continue
             signal = analyze_market(symbol, history, 0.0)
             if signal is None:
@@ -700,6 +829,8 @@ def fast_scan_market(market: str) -> list[Any]:
         reverse=True,
     )
 
+    signals = _v39_prioritize_signals(market, signals, prices, [], "fast")
+
     actions: list[Any] = []
     with trade_cycle_lock:
         exits_enabled = _execution_enabled(market, "exit")
@@ -722,6 +853,7 @@ def fast_scan_market(market: str) -> list[Any]:
             snapshot(market)
         except Exception as exc:
             log.debug("%s fast snapshot failed: %s", market, exc)
+    _v39_record_actions(market, actions)
     return actions
 
 def scan_market(market: str) -> list[Any]:
@@ -902,10 +1034,7 @@ def scan_market(market: str) -> list[Any]:
 
         _persist_global_pit_rankings(market, ranked, prices)
         by_symbol = {item["symbol"]: item for item in ranked}
-        signals.sort(
-            key=lambda signal: by_symbol.get(str(getattr(signal, "symbol", "")), {}).get("opportunity_score", 0),
-            reverse=True,
-        )
+        signals = _v39_prioritize_signals(market, signals, prices, ranked, "deep")
         try:
             with connect() as conn:
                 positions = list(
@@ -958,6 +1087,7 @@ def scan_market(market: str) -> list[Any]:
             snapshot(market)
         except Exception as exc:
             log.exception("%s portfolio snapshot failed: %s", market, exc)
+    _v39_record_actions(market, actions)
     return actions
 
 

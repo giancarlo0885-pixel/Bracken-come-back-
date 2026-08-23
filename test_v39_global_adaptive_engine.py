@@ -88,14 +88,18 @@ def test_challengers_cannot_auto_promote_without_evidence():
     shadow = {"status": "SHADOW", "sample_count": 5, "directional_accuracy": 0.8, "mape": 5}
     mature = {"status": "CHALLENGER", "sample_count": 50, "directional_accuracy": 0.62, "mape": 8}
     assert v39.champion_challenger_decision(shadow)["promote"] is False
-    assert v39.champion_challenger_decision(mature, {"directional_accuracy": 0.56, "mape": 12})["promote"] is True
+    decision = v39.champion_challenger_decision(mature, {"directional_accuracy": 0.56, "mape": 12})
+    assert decision["promote"] is False
+    assert decision["status"] == "ELIGIBLE_FOR_PROMOTION"
 
 
 def test_liquidity_uses_adv_market_participation():
     ok = v39.liquidity_capacity({"avg_dollar_volume": 10_000_000, "spread_pct": 0.02}, 50_000)
     too_large = v39.liquidity_capacity({"avg_dollar_volume": 10_000_000, "spread_pct": 0.02}, 500_000)
     assert ok["allowed"] is True
-    assert too_large["allowed"] is False
+    assert too_large["allowed"] is True
+    assert too_large["partial_sizing"] is True
+    assert too_large["executable_order_value"] == 100_000
 
 
 def test_optimizer_respects_concentration_and_recalculates_after_each_allocation():
@@ -127,7 +131,7 @@ def test_provider_budget_reservation_is_shared_in_supplied_ledger():
 
 def test_decision_funnel_reflects_real_stage_counts_and_reasons():
     funnel = v39.decision_funnel([
-        {"symbol": "AAPL", "stages": ["deep_research", "buy_signal", "forecast_approved"], "quote_verified": True, "qualified_for_capital": True},
+        {"symbol": "AAPL", "stages": ["surveillance", "active_hot", "deep_research", "buy_signal", "verified_quote", "forecast_approved", "portfolio_approved"], "quote_verified": True, "qualified_for_capital": True},
         {"symbol": "OLD", "rejection_reasons": ["stale quote", "liquidity"]},
     ])
     assert funnel["counts"]["surveillance"] == 2
@@ -158,3 +162,93 @@ def test_v39_table_bootstrap_executes_all_statements():
     assert "global_asset_identities" in joined
     assert "global_decision_ledger" in joined
     assert "provider_budget_ledger" in joined
+
+
+
+def test_forecast_outcome_parses_timezone_aware_timestamps_not_strings():
+    decision = {"generated_at": "2026-01-02T10:30:00+01:00", "price": 100, "expected_move_pct": 2}
+    same_in_utc = {"observed_at": "2026-01-02T09:30:00Z", "price": 103}
+    later = {"observed_at": "2026-01-02T09:35:00Z", "price": 103}
+    assert v39.evaluate_forecast_outcome(decision, same_in_utc)["evaluated"] is False
+    assert v39.evaluate_forecast_outcome(decision, later)["evaluated"] is True
+
+
+def test_cross_market_influence_preserves_direction():
+    energy = [fresh_quote("XOM", sector="Energy", opportunity_score=70)]
+    rising = v39.apply_cross_market_influence(energy, [{"symbol": "OIL", "asset_class": "commodity", "strength_score": 60, "confidence": 1.0}])[0]
+    falling = v39.apply_cross_market_influence(energy, [{"symbol": "OIL", "asset_class": "commodity", "strength_score": -60, "confidence": 1.0}])[0]
+    assert rising["soft_score"] > 70
+    assert falling["soft_score"] < 70
+
+
+def test_optimizer_uses_partial_liquidity_capacity_instead_of_full_reject():
+    candidate = fresh_quote("LIQ", avg_dollar_volume=75_000_000, liquidity=75_000_000, sector="Energy")
+    plan = v39.adaptive_portfolio_optimizer(
+        [candidate],
+        {"equity": 100_000_000, "cash": 50_000_000, "buying_power": 50_000_000},
+        [],
+        engine="stock",
+    )
+    assert plan["allocations"]
+    assert plan["allocations"][0]["amount"] == 750_000
+    assert plan["allocations"][0]["liquidity"]["partial_sizing"] is True
+
+
+def test_decision_funnel_is_sequential():
+    funnel = v39.decision_funnel([
+        {"stages": ["surveillance", "verified_quote"]},
+        {"stages": ["surveillance", "active_hot", "deep_research", "buy_signal", "verified_quote"]},
+    ])
+    assert funnel["counts"]["surveillance"] == 2
+    assert funnel["counts"]["active_hot"] == 1
+    assert funnel["counts"]["verified_quote"] == 1
+
+
+class FakeConn:
+    def __init__(self, row=None):
+        self.row = row
+        self.statements = []
+    def execute(self, statement, params=None):
+        self.statements.append((statement, params))
+        return self
+    def fetchone(self):
+        return self.row
+
+
+def test_provider_db_budget_reservation_is_atomic_shape():
+    conn = FakeConn({"requests_used": 0, "remaining_budget": 1, "cooldown_until": None})
+    result = v39.reserve_provider_budget_db(conn, "polygon", "us_history", daily_budget=20)
+    assert result["reserved"] is True
+    assert result["remaining"] == 0
+    assert any("FOR UPDATE" in statement for statement, _ in conn.statements)
+    assert any("remaining_budget > 0" in statement for statement, _ in conn.statements)
+
+
+def test_provider_db_budget_exhaustion_blocks_request():
+    conn = FakeConn({"requests_used": 20, "remaining_budget": 0, "cooldown_until": None})
+    result = v39.reserve_provider_budget_db(conn, "alpha", "daily", daily_budget=20)
+    assert result["reserved"] is False
+    assert "exhausted" in result["reason"]
+
+
+def test_invalid_symbol_quarantine_records_retry_window():
+    conn = FakeConn()
+    record = v39.record_invalid_symbol_failure(conn, symbol="bad", provider="Yahoo", failure_type="empty_history", retry_after_seconds=120)
+    assert record["symbol"] == "BAD"
+    assert record["provider"] == "Yahoo"
+    assert any("invalid_symbol_quarantine" in statement for statement, _ in conn.statements)
+
+
+def test_v39_live_worker_has_actual_optimizer_and_funnel_callers():
+    import inspect
+    import market_worker
+    source = inspect.getsource(market_worker)
+    assert "adaptive_portfolio_optimizer" in source
+    assert "persist_decision_event" in source
+    assert "record_invalid_symbol_failure" in source
+
+
+def test_local_provider_budget_does_not_block_without_database_url(monkeypatch):
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    result = v39.reserve_provider_budget_live("polygon", "us_history", daily_budget=1)
+    assert result["reserved"] is True

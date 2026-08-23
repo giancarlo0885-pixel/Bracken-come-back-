@@ -964,6 +964,32 @@ def initialize_database() -> None:
         "CREATE INDEX IF NOT EXISTS idx_global_decision_symbol_created ON global_decision_ledger (symbol, created_at DESC)",
         "CREATE INDEX IF NOT EXISTS idx_global_outcomes_decision ON global_forecast_outcomes (decision_id)",
         "CREATE INDEX IF NOT EXISTS idx_provider_budget_capability ON provider_budget_ledger (provider, capability, utc_date)",
+        """
+        CREATE TABLE IF NOT EXISTS global_decision_events (
+            id BIGSERIAL PRIMARY KEY,
+            decision_id TEXT NOT NULL,
+            market TEXT,
+            symbol TEXT,
+            stage TEXT NOT NULL,
+            rejection_reason TEXT,
+            payload JSONB,
+            created_at TEXT NOT NULL
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS invalid_symbol_quarantine (
+            symbol TEXT NOT NULL,
+            provider TEXT NOT NULL,
+            failure_type TEXT NOT NULL,
+            failure_count INTEGER NOT NULL DEFAULT 1,
+            last_failure TEXT NOT NULL,
+            retry_after TEXT NOT NULL,
+            PRIMARY KEY(symbol, provider, failure_type)
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS idx_global_decision_events_created ON global_decision_events (created_at DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_global_decision_events_decision ON global_decision_events (decision_id, stage)",
+        "CREATE INDEX IF NOT EXISTS idx_invalid_symbol_retry ON invalid_symbol_quarantine (retry_after)",
     ]
 
     with connect() as conn:
