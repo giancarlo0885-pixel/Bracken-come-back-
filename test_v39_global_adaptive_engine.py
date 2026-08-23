@@ -227,10 +227,20 @@ def test_postgres_v39_sector_enrichment_and_decision_ledger_persistence():
         )
         conn.execute(
             """
-            INSERT INTO positions (market,symbol,quantity,entry_price,current_price,updated_at)
-            VALUES ('cash','V39SEC',10,100,100,%s)
+            INSERT INTO positions (
+                market,
+                symbol,
+                quantity,
+                entry_price,
+                average_price,
+                current_price,
+                highest_price,
+                opened_at,
+                updated_at
+            )
+            VALUES ('cash','V39SEC',10,100,100,100,100,%s,%s)
             """,
-            (now,),
+            (now, now),
         )
         conn.execute(
             """
