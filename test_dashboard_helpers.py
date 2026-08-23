@@ -6,6 +6,8 @@ from dashboard_helpers import (
     balanced_money_bar,
     balanced_opportunity_rows,
     balanced_portfolio_rows,
+    capital_deployment_status,
+    compact_money_text,
     clean_market,
     data_age_label,
     live_data_status,
@@ -211,6 +213,74 @@ def test_planner_rejects_unverified_or_stale_opportunities():
     )
 
     assert [item["symbol"] for item in plan] == ["CASH"]
+
+
+def test_compact_money_text_abbreviates_large_dashboard_values():
+    assert compact_money_text(1_953_837_204) == "$2.0B"
+    assert compact_money_text(65_389_901) == "$65.4M"
+    assert compact_money_text(357_000) == "$357K"
+
+
+def test_stale_buy_is_not_displayed_as_green_buy():
+    rows = balanced_opportunity_rows(
+        [
+            {
+                "symbol": "COPX",
+                "action": "BUY",
+                "price": 33.08,
+                "target": 34.12,
+                "expected_return": 3.1,
+                "confidence": 87,
+                "risk": "LOW",
+                "trade_eligible": True,
+                "quote_verified": True,
+                "quote_age_seconds": 60 * 60 * 24,
+                "interval": "5m",
+            }
+        ]
+    )
+
+    assert rows[0]["Action"] == "YELLOW WATCH"
+    assert rows[0]["Data Age"] == "Old"
+
+
+def test_stale_buy_summary_explains_waiting_for_fresh_quotes():
+    summary = simple_opportunity_summary(
+        {
+            "symbol": "COPX",
+            "action": "BUY",
+            "price": 33.08,
+            "target": 34.12,
+            "risk": "LOW",
+            "trade_eligible": True,
+            "quote_verified": True,
+            "quote_age_seconds": 60 * 60 * 24,
+            "interval": "5m",
+        }
+    )
+
+    assert summary["action"] == "WATCH"
+    assert "waiting for verified fresh price data" in summary["why"]
+    assert "look strong" not in summary["why"]
+
+
+def test_capital_deployment_waits_when_no_qualified_opportunities():
+    status = capital_deployment_status(
+        {"equity": 1_000_000, "cash": 900_000},
+        [
+            {
+                "market": "cash",
+                "symbol": "COPX",
+                "action": "BUY",
+                "trade_eligible": False,
+                "data_status": "stale quote",
+            }
+        ],
+        market="cash",
+    )
+
+    assert status["status"] == "blocked_quote"
+    assert "Too much capital" not in status["message"]
 
 
 def test_simple_opportunity_card_output_is_child_readable():
