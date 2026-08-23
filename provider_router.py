@@ -15,7 +15,7 @@ import requests
 
 from alpha_vantage_provider import daily_history as alpha_daily_history
 from api_manager import get_api_settings
-from cache import cached_call
+from cache import cached_call, get as cache_get, make_key as cache_make_key, set_value as cache_set_value
 from config import (
     API_CACHE_TTL_SECONDS,
     ALPHA_VANTAGE_PREMIUM,
@@ -32,6 +32,7 @@ from provider_capabilities import (
     classify_plan_limited_status,
     disable_capability,
 )
+from security import redact_url as _security_redact_url
 
 log = logging.getLogger("provider-router")
 _provider_cooldowns: dict[str, float] = {}
@@ -89,28 +90,7 @@ def _symbol_matches(requested: str, provider_symbol: object) -> bool:
 
 
 def _redact_url(text: str) -> str:
-    def replace(match: re.Match[str]) -> str:
-        raw = match.group(0)
-        try:
-            parts = urlsplit(raw)
-            query = urlencode(
-                [
-                    (key, "REDACTED" if key.lower() in SECRET_QUERY_KEYS else value)
-                    for key, value in parse_qsl(parts.query, keep_blank_values=True)
-                ]
-            )
-            return urlunsplit((parts.scheme, parts.netloc, parts.path, query, parts.fragment))
-        except Exception:
-            return raw
-
-    redacted = re.sub(r"https?://[^\s)]+", replace, str(text))
-    for key in SECRET_QUERY_KEYS:
-        redacted = re.sub(
-            rf"(?i)([?&\s]{re.escape(key)}=)[^&\s)]+",
-            rf"\1REDACTED",
-            redacted,
-        )
-    return redacted
+    return _security_redact_url(text)
 
 
 def _select_symbol_columns(frame: pd.DataFrame, symbol: str) -> pd.DataFrame:
@@ -248,14 +228,54 @@ def _cooldown_active(store: dict[str, float], key: str) -> bool:
     return True
 
 
-def mark_symbol_unavailable(symbol: str, seconds: int = UNAVAILABLE_SYMBOL_COOLDOWN_SECONDS) -> None:
+def _interval_family(interval: str) -> str:
+    return "intraday" if _is_intraday(interval) else "daily"
+
+
+def _symbol_cooldown_key(symbol: str, provider: str = "all", capability: str = "all", interval_family: str = "all") -> str:
+    return "|".join(
+        [
+            normalize_symbol(symbol),
+            str(provider or "all").lower(),
+            str(capability or "all").lower(),
+            str(interval_family or "all").lower(),
+        ]
+    )
+
+
+def mark_symbol_unavailable(
+    symbol: str,
+    seconds: int = UNAVAILABLE_SYMBOL_COOLDOWN_SECONDS,
+    *,
+    provider: str = "all",
+    capability: str = "all",
+    interval_family: str = "all",
+) -> None:
     symbol = str(symbol or "").upper().strip()
     if symbol:
-        _symbol_cooldowns[symbol] = time.time() + max(1, int(seconds))
+        _symbol_cooldowns[_symbol_cooldown_key(symbol, provider, capability, interval_family)] = time.time() + max(1, int(seconds))
 
 
-def symbol_is_unavailable(symbol: str) -> bool:
-    return _cooldown_active(_symbol_cooldowns, str(symbol or "").upper().strip())
+def symbol_is_unavailable(
+    symbol: str,
+    provider: str = "all",
+    capability: str = "all",
+    interval_family: str = "all",
+) -> bool:
+    normalized_symbol = normalize_symbol(symbol)
+    if provider == "all" and capability == "all" and interval_family == "all":
+        prefix = f"{normalized_symbol}|"
+        return any(
+            key.startswith(prefix) and _cooldown_active(_symbol_cooldowns, key)
+            for key in list(_symbol_cooldowns)
+        )
+    keys = [
+        _symbol_cooldown_key(symbol, provider, capability, interval_family),
+        _symbol_cooldown_key(symbol, "all", capability, interval_family),
+        _symbol_cooldown_key(symbol, provider, capability, "all"),
+        _symbol_cooldown_key(symbol, "all", "all", "all"),
+    ]
+    return any(_cooldown_active(_symbol_cooldowns, key) for key in keys)
 
 
 def _mark_provider_limited(provider: str) -> None:
@@ -608,7 +628,8 @@ def route_history(
     capability = _history_capability(symbol, interval)
     ttl = REALTIME_CACHE_TTL_SECONDS if intraday else API_CACHE_TTL_SECONDS
     symbol = str(symbol or "").upper().strip()
-    if symbol_is_unavailable(symbol):
+    interval_family = _interval_family(interval)
+    if symbol_is_unavailable(symbol, "all", capability, interval_family):
         return RoutedHistory(
             pd.DataFrame(),
             "none",
@@ -643,6 +664,9 @@ def route_history(
         if _cooldown_active(_provider_cooldowns, provider):
             attempts.append(ProviderAttempt(provider, False, 0, "provider_cooldown"))
             continue
+        if symbol_is_unavailable(symbol, provider, capability, interval_family):
+            attempts.append(ProviderAttempt(provider, False, 0, "symbol_capability_cooldown", "temporarily skipped after scoped provider/capability failure"))
+            continue
         key = settings.get(key_name)
         if not key:
             attempts.append(ProviderAttempt(provider, False, status="not_configured"))
@@ -652,16 +676,22 @@ def route_history(
         if daily_budget is None:
             attempts.append(ProviderAttempt(provider, False, 0, "provider_budget_unknown", "provider capability budget is not configured"))
             continue
-        budget = reserve_provider_budget_live(provider, capability, daily_budget=daily_budget, entitlement="configured", data_mode="intraday" if intraday else "historical")
-        if not budget.get("reserved"):
-            attempts.append(ProviderAttempt(provider, False, 0, "provider_budget_blocked", str(budget.get("reason") or "budget unavailable")))
-            continue
         try:
             namespace = (
                 f"history_{provider.lower().replace(' ', '_')}_{symbol}_{period}_{interval}"
                 f"_adjusted_true_extended_{str(intraday).lower()}"
             )
-            frame = cached_call(namespace, ttl, function, symbol, period, interval, key)
+            cache_key = cache_make_key(namespace, symbol, period, interval)
+            cached_frame = cache_get(cache_key)
+            if cached_frame is not None:
+                frame = cached_frame
+            else:
+                budget = reserve_provider_budget_live(provider, capability, daily_budget=daily_budget, entitlement="configured", data_mode="intraday" if intraday else "historical")
+                if not budget.get("reserved"):
+                    attempts.append(ProviderAttempt(provider, False, 0, "provider_budget_blocked", str(budget.get("reason") or "budget unavailable")))
+                    continue
+                frame = function(symbol, period, interval, key)
+                cache_set_value(cache_key, frame, ttl)
             frame = _normalise(frame, symbol, interval)
             if not frame.empty:
                 frame.attrs["cache_identity"] = namespace
@@ -673,6 +703,12 @@ def route_history(
                 attempts.append(ProviderAttempt(provider, True, len(frame), "healthy"))
                 return RoutedHistory(frame, provider, attempts, datetime.now(timezone.utc).isoformat())
             attempts.append(ProviderAttempt(provider, False, 0, "symbol_mismatch_or_no_data"))
+            mark_symbol_unavailable(
+                symbol,
+                provider=provider,
+                capability=capability,
+                interval_family=interval_family,
+            )
         except Exception as exc:
             text = _redact_url(str(exc))[:220]
             status_code = _provider_status_from_exception(exc)
@@ -691,18 +727,25 @@ def route_history(
                 _mark_provider_limited(provider)
             attempts.append(ProviderAttempt(provider, False, 0, status, text))
             _record_failure(provider, status, symbol)
+            mark_symbol_unavailable(
+                symbol,
+                provider=provider,
+                capability=capability,
+                interval_family=interval_family,
+            )
 
     try:
-        frame = _verified_history(yahoo_loader(symbol, period, interval), "Yahoo Finance", symbol, symbol, period, interval, identity_verified=True)
-        if not frame.empty and frame.attrs.get("quote_verified") is True and verify_frame_symbol(frame, symbol):
+        frame = _verified_history(yahoo_loader(symbol, period, interval), "Yahoo Finance", symbol, symbol, period, interval, identity_verified=False)
+        if not frame.empty and verify_frame_symbol(frame, symbol):
+            frame.attrs["quote_verified"] = False
             frame.attrs["source_identity"] = f"Yahoo Finance:{symbol}:{period}:{interval}"
             frame.attrs["period"] = period
             frame.attrs["interval"] = interval
-            attempts.append(ProviderAttempt("Yahoo Finance", True, len(frame), "fallback"))
+            attempts.append(ProviderAttempt("Yahoo Finance", True, len(frame), "research_only_fallback"))
             return RoutedHistory(frame, "Yahoo Finance", attempts, datetime.now(timezone.utc).isoformat())
     except Exception as exc:
         attempts.append(ProviderAttempt("Yahoo Finance", False, 0, "degraded", _redact_url(str(exc))[:220]))
         _record_failure("Yahoo Finance", "degraded", symbol)
 
-    mark_symbol_unavailable(symbol)
+    mark_symbol_unavailable(symbol, provider="all", capability=capability, interval_family=interval_family)
     return RoutedHistory(pd.DataFrame(), "none", attempts, datetime.now(timezone.utc).isoformat())

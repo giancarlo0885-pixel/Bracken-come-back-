@@ -6,7 +6,7 @@ import logging
 import re
 from typing import Any
 
-from security import redact_url
+from security import is_secret_key, redact_url
 
 STANDARD_LOG_RECORD_KEYS = set(logging.makeLogRecord({}).__dict__)
 
@@ -36,11 +36,13 @@ def _record_field(record: logging.LogRecord, message: str, name: str) -> Any:
 
 
 
-def _redact_value(value: Any) -> Any:
+def _redact_value(value: Any, key_name: Any = None) -> Any:
+    if key_name is not None and is_secret_key(key_name):
+        return "REDACTED"
     if isinstance(value, str):
         return redact_url(value)
     if isinstance(value, dict):
-        return {key: _redact_value(item) for key, item in value.items()}
+        return {key: _redact_value(item, key) for key, item in value.items()}
     if isinstance(value, (list, tuple)):
         return [_redact_value(item) for item in value]
     return value

@@ -8,6 +8,7 @@ on:
       - "v36*"
       - "v37*"
       - "v38*"
+      - "v39*"
 
 jobs:
   test:
@@ -91,3 +92,5 @@ jobs:
           test_v37_db_resilience_storage.py::test_postgres_storage_report_and_retention_protects_canonical_tables
           test_v37_db_resilience_storage.py::test_postgres_maintenance_advisory_lock_allows_one_runner
           test_v37_db_resilience_storage.py::test_postgres_bootstrap_advisory_lock_runs_migrations_once
+          test_v39_global_adaptive_engine.py::test_postgres_v39_sector_enrichment_and_decision_ledger_persistence
+          test_v39_global_adaptive_engine.py::test_postgres_v39_provider_budget_shared_ledger_exhausts_once

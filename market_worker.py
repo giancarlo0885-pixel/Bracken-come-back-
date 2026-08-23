@@ -468,6 +468,28 @@ def _v39_position_rows(market: str) -> tuple[dict[str, Any], list[dict[str, Any]
     with connect() as conn:
         portfolio = conn.execute("SELECT * FROM portfolios WHERE market=%s", (market,)).fetchone() or {}
         positions = list(conn.execute("SELECT * FROM positions WHERE market=%s", (market,)).fetchall())
+        if market == "cash" and positions:
+            enriched_positions = []
+            for position in positions:
+                item = dict(position)
+                if not str(item.get("sector") or "").strip():
+                    symbol = str(item.get("symbol") or "").upper().strip()
+                    sector_row = conn.execute(
+                        """
+                        SELECT sector
+                        FROM global_market_candidates
+                        WHERE symbol = %s
+                          AND sector IS NOT NULL
+                          AND sector NOT IN ('', 'Unknown', 'UNKNOWN')
+                        ORDER BY scanned_at DESC
+                        LIMIT 1
+                        """,
+                        (symbol,),
+                    ).fetchone() if symbol else None
+                    if sector_row and sector_row.get("sector"):
+                        item["sector"] = sector_row.get("sector")
+                enriched_positions.append(item)
+            positions = enriched_positions
     positions_value = sum(
         _finite_positive(position.get("market_value"))
         or _finite_positive(position.get("quantity")) * _finite_positive(position.get("current_price"))
@@ -508,6 +530,16 @@ def _v39_signal_opportunity(market: str, signal: Any, prices: dict[str, Any], ra
     risk_score = ranked.get("risk_score")
     if risk_score in (None, ""):
         risk_score = getattr(signal, "risk_score", None)
+    try:
+        spread_known = spread is not None and math.isfinite(float(spread)) and float(spread) >= 0
+    except (TypeError, ValueError):
+        spread_known = False
+    try:
+        risk_known = risk_score is not None and math.isfinite(float(risk_score))
+    except (TypeError, ValueError):
+        risk_known = False
+    signal_id = getattr(signal, "signal_id", None)
+    forecast_id = getattr(signal, "forecast_id", None)
     qualified = bool(
         action in {"BUY", "STRONG_BUY", "ACCUMULATE", "LONG"}
         and quote.get("quote_verified") is True
@@ -515,10 +547,14 @@ def _v39_signal_opportunity(market: str, signal: Any, prices: dict[str, Any], ra
         and execution_fresh
         and tradeable
         and liquidity > 0
-        and spread not in (None, "")
-        and risk_score not in (None, "")
-        and getattr(signal, "signal_id", None)
+        and spread_known
+        and risk_known
+        and signal_id
+        and forecast_id
     )
+    sector = ranked.get("sector") or quote.get("sector")
+    if market == "crypto" and not sector:
+        sector = "Crypto"
     return {
         "symbol": symbol,
         "requested_symbol": quote.get("requested_symbol"),
@@ -528,7 +564,7 @@ def _v39_signal_opportunity(market: str, signal: Any, prices: dict[str, Any], ra
         "market": market,
         "exchange": quote.get("exchange") or ranked.get("exchange"),
         "currency": quote.get("currency") or "USD",
-        "sector": ranked.get("sector") or "Crypto" if market == "crypto" else ranked.get("sector") or "Unknown",
+        "sector": sector or "",
         "quote_verified": quote.get("quote_verified") is True,
         "quote_timestamp": quote.get("quote_timestamp"),
         "source_interval": quote.get("source_interval") or quote.get("interval"),
@@ -544,8 +580,8 @@ def _v39_signal_opportunity(market: str, signal: Any, prices: dict[str, Any], ra
         "data_quality_score": quote.get("data_quality_score") or ranked.get("data_quality_score") or 0.0,
         "risk_score": risk_score,
         "scan_type": scan_type,
-        "signal_id": getattr(signal, "signal_id", None),
-        "forecast_id": getattr(signal, "forecast_id", None),
+        "signal_id": signal_id,
+        "forecast_id": forecast_id,
         "created_at": getattr(signal, "created_at", None),
         "stages": stages,
     }
@@ -577,11 +613,25 @@ def _v39_prioritize_signals(market: str, signals: list[Any], prices: dict[str, A
     allocation_by_symbol = {str(row.get("symbol")).upper(): row for row in allocations}
     allocation_set = set(allocation_by_symbol)
     signal_by_symbol = {str(getattr(signal, "symbol", "")).upper(): signal for signal in signals}
+    for signal in signals:
+        for attr in (
+            "planned_trade_value",
+            "v39_optimizer_approved_amount",
+            "v39_optimizer_allocation",
+            "v39_optimizer_plan",
+        ):
+            if hasattr(signal, attr):
+                try:
+                    delattr(signal, attr)
+                except Exception:
+                    setattr(signal, attr, None)
     for symbol, allocation in allocation_by_symbol.items():
         signal = signal_by_symbol.get(symbol)
         if signal is None:
             continue
         approved_amount = _finite_positive(allocation.get("amount"))
+        if approved_amount is None:
+            continue
         setattr(signal, "planned_trade_value", approved_amount)
         setattr(signal, "v39_optimizer_approved_amount", approved_amount)
         setattr(signal, "v39_optimizer_allocation", allocation)
@@ -626,6 +676,25 @@ def _v39_execute_iterative(
             break
         signal = ordered[0]
         symbol = str(getattr(signal, "symbol", "") or "").upper()
+        action = str(getattr(signal, "action", "") or "").upper()
+        if GLOBAL_PIT_MODE and action in {"BUY", "STRONG_BUY", "ACCUMULATE", "LONG"}:
+            approved_amount = _finite_positive(getattr(signal, "v39_optimizer_approved_amount", None))
+            allocation_symbol = str((getattr(signal, "v39_optimizer_allocation", {}) or {}).get("symbol") or "").upper()
+            if approved_amount is None or allocation_symbol != symbol:
+                _v39_record_event(
+                    market,
+                    symbol,
+                    "portfolio_rejected",
+                    {
+                        "symbol": symbol,
+                        "action": action,
+                        "scan_type": scan_type,
+                        "reason": "V39 optimizer allocation required before entry execution",
+                    },
+                    "optimizer_allocation_required",
+                )
+                remaining = [item for item in remaining if str(getattr(item, "symbol", "") or "").upper() != symbol]
+                continue
         before_count = len(actions)
         result = process_signals(market, [signal], prices=prices) or []
         actions.extend(result)
