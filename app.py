@@ -34,7 +34,8 @@ from dashboard_helpers import (
 from database import bootstrap_database_with_lock, database_ready, database_storage_report, row, rows
 from earnings_calendar import mobile_card_lines, prepare_events, table_rows
 from market_data import get_history
-from global_pit_engine import capital_deployment_plan, dashboard_activity_labels
+from global_pit_engine import dashboard_activity_labels
+from global_adaptive_engine import decision_funnel, split_capital_engines, v39_dashboard_summary
 from migrations import run_migrations
 from portfolio_advisor import analyze_portfolio, simulate_trade
 from paper_broker import build_account
@@ -394,18 +395,32 @@ def render_global_pit_section() -> None:
     countries = {str(row.get("country") or "Unknown") for row in global_pit_universe}
     exchanges = {str(row.get("exchange") or "Unknown") for row in global_pit_universe}
     qualified = [row for row in global_pit_queue if row.get("qualified_for_capital")]
-    combined_equity_local = stock_metrics["equity"] + crypto_metrics["equity"]
-    combined_cash_local = stock_metrics["cash"] + crypto_metrics["cash"]
-    plan = capital_deployment_plan(global_pit_queue, combined_equity_local, combined_cash_local, stock_positions + crypto_positions)
+    engines = split_capital_engines(
+        stock_metrics,
+        crypto_metrics,
+        stock_positions,
+        crypto_positions,
+        [row.get("payload") if isinstance(row.get("payload"), dict) else row for row in global_pit_queue],
+    )
+    funnel = decision_funnel(global_decisions_v39 or global_pit_queue)
+    v39_summary = v39_dashboard_summary(engines["stock"], engines["crypto"], funnel, provider_budgets_v39)
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Markets Under Surveillance", universe_count)
     c2.metric("Asset Classes", len(asset_classes))
     c3.metric("Countries", len(countries))
     c4.metric("Exchanges", len(exchanges))
-    cap1, cap2, cap3 = st.columns(3)
-    cap1.metric("Invested %", f"{plan['current_invested_pct'] * 100:.1f}%")
-    cap2.metric("Cash Reserve Target", f"{plan['reserve_pct'] * 100:.1f}%")
-    cap3.metric("Qualified Allocations", plan["qualified_assets_used"])
+    cap1, cap2, cap3, cap4 = st.columns(4)
+    cap1.metric("Stock Invested", f"{engines['stock']['invested_pct'] * 100:.1f}%")
+    cap2.metric("Stock Qualified", engines["stock"]["qualified_opportunities"])
+    cap3.metric("Crypto Invested", f"{engines['crypto']['invested_pct'] * 100:.1f}%")
+    cap4.metric("Crypto Qualified", engines["crypto"]["qualified_opportunities"])
+    st.caption("V39 keeps stock and crypto executable cash separate. Intelligence can inform soft scores, but hard execution gates remain final.")
+    with st.expander("Global Decision Funnel", expanded=True):
+        counts = v39_summary["decision_funnel"]["counts"]
+        st.dataframe(pd.DataFrame([{"Stage": key.replace("_", " ").title(), "Count": value} for key, value in counts.items()]), width="stretch", hide_index=True)
+        reasons = v39_summary["decision_funnel"].get("rejection_reasons") or {}
+        if reasons:
+            st.dataframe(pd.DataFrame([{"Reason": key, "Count": value} for key, value in reasons.items()]), width="stretch", hide_index=True)
     activity = dashboard_activity_labels({
         **global_pit_activity,
         "qualified_allocations": len(qualified),
@@ -445,7 +460,7 @@ def render_global_pit_section() -> None:
     with st.expander("Show Details"):
         st.caption("Global Pit scans broadly for intelligence. Unsupported asset classes are not routed to fake broker execution.")
         st.write(f"Asset classes seen: {', '.join(sorted(asset_classes)) if asset_classes else 'waiting for persisted scans'}")
-        st.write(f"Broker submission enabled: {False}")
+        st.write(f"Broker submission enabled: {v39_summary['broker_submission_enabled']}")
 
 
 def simple_portfolio_card(
@@ -550,6 +565,8 @@ global_pit_queue = safe_rows("SELECT * FROM global_opportunity_queue ORDER BY op
 global_pit_activity = safe_row("SELECT * FROM global_pit_activity WHERE id=1")
 global_pit_map = safe_rows("SELECT * FROM global_market_map ORDER BY strength_score DESC LIMIT 25")
 global_learning = safe_rows("SELECT * FROM global_learning_observations ORDER BY id DESC LIMIT 10")
+global_decisions_v39 = safe_rows("SELECT * FROM global_decision_ledger ORDER BY created_at DESC LIMIT 250")
+provider_budgets_v39 = safe_rows("SELECT * FROM provider_budget_ledger ORDER BY updated_at DESC LIMIT 50")
 
 stock_health = analyze_portfolio(
     stock_metrics["cash"], stock_positions, stock_metrics["margin_debt"],
