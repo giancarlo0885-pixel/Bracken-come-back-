@@ -35,7 +35,8 @@ from database import bootstrap_database_with_lock, database_ready, database_stor
 from earnings_calendar import mobile_card_lines, prepare_events, table_rows
 from market_data import get_history
 from global_pit_engine import dashboard_activity_labels
-from global_adaptive_engine import decision_funnel, split_capital_engines, v39_dashboard_summary
+from global_adaptive_engine import build_decision_funnel_from_events, split_capital_engines, v39_dashboard_summary
+from execution_policy import execution_policy
 from migrations import run_migrations
 from portfolio_advisor import analyze_portfolio, simulate_trade
 from paper_broker import build_account
@@ -402,7 +403,7 @@ def render_global_pit_section() -> None:
         crypto_positions,
         [row.get("payload") if isinstance(row.get("payload"), dict) else row for row in global_pit_queue],
     )
-    funnel = decision_funnel(global_decisions_v39 or global_pit_queue)
+    funnel = build_decision_funnel_from_events(global_decision_events_v39) if global_decision_events_v39 else build_decision_funnel_from_events([])
     v39_summary = v39_dashboard_summary(engines["stock"], engines["crypto"], funnel, provider_budgets_v39)
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Markets Under Surveillance", universe_count)
@@ -421,13 +422,31 @@ def render_global_pit_section() -> None:
         reasons = v39_summary["decision_funnel"].get("rejection_reasons") or {}
         if reasons:
             st.dataframe(pd.DataFrame([{"Reason": key, "Count": value} for key, value in reasons.items()]), width="stretch", hide_index=True)
+    stock_entry_policy = execution_policy(market="cash", intent="entry")
+    stock_exit_policy = execution_policy(market="cash", intent="exit")
+    stock_rotation_policy = execution_policy(market="cash", intent="rotation")
+    crypto_entry_policy = execution_policy(market="crypto", intent="entry")
+    crypto_exit_policy = execution_policy(market="crypto", intent="exit")
+    crypto_rotation_policy = execution_policy(market="crypto", intent="rotation")
+    broker_policy = execution_policy(market="cash", intent="broker")
     activity = dashboard_activity_labels({
         **global_pit_activity,
         "qualified_allocations": len(qualified),
-        "execution_enabled": False,
+        "execution_enabled": stock_entry_policy.allowed or crypto_entry_policy.allowed,
     })
     st.markdown("**Oracle Activity**")
     st.dataframe(pd.DataFrame([{"Activity": key, "Status": value} for key, value in activity.items()]), width="stretch", hide_index=True)
+    st.markdown("**Execution Policy Truth**")
+    policy_rows = [
+        {"Switch": "Stock Entries", "Enabled": stock_entry_policy.allowed, "Reason": stock_entry_policy.reason},
+        {"Switch": "Stock Exits", "Enabled": stock_exit_policy.allowed, "Reason": stock_exit_policy.reason},
+        {"Switch": "Stock Rotation", "Enabled": stock_rotation_policy.allowed, "Reason": stock_rotation_policy.reason},
+        {"Switch": "Crypto Entries", "Enabled": crypto_entry_policy.allowed, "Reason": crypto_entry_policy.reason},
+        {"Switch": "Crypto Exits", "Enabled": crypto_exit_policy.allowed, "Reason": crypto_exit_policy.reason},
+        {"Switch": "Crypto Rotation", "Enabled": crypto_rotation_policy.allowed, "Reason": crypto_rotation_policy.reason},
+        {"Switch": "Broker Submission", "Enabled": broker_policy.allowed, "Reason": broker_policy.reason},
+    ]
+    st.dataframe(pd.DataFrame(policy_rows), width="stretch", hide_index=True)
     if global_pit_queue:
         st.markdown("**Hot Right Now**")
         rows_for_view = []
@@ -566,6 +585,7 @@ global_pit_activity = safe_row("SELECT * FROM global_pit_activity WHERE id=1")
 global_pit_map = safe_rows("SELECT * FROM global_market_map ORDER BY strength_score DESC LIMIT 25")
 global_learning = safe_rows("SELECT * FROM global_learning_observations ORDER BY id DESC LIMIT 10")
 global_decisions_v39 = safe_rows("SELECT * FROM global_decision_ledger ORDER BY created_at DESC LIMIT 250")
+global_decision_events_v39 = safe_rows("SELECT * FROM global_decision_events ORDER BY created_at DESC LIMIT 500")
 provider_budgets_v39 = safe_rows("SELECT * FROM provider_budget_ledger ORDER BY updated_at DESC LIMIT 50")
 
 stock_health = analyze_portfolio(

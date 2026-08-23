@@ -25,6 +25,7 @@ from config import (
     UNAVAILABLE_SYMBOL_COOLDOWN_SECONDS,
 )
 from asset_routing import infer_asset_class
+from global_adaptive_engine import reserve_provider_budget_live
 from provider_capabilities import (
     capability_available,
     classify_plan_limited_status,
@@ -644,6 +645,10 @@ def route_history(
         key = settings.get(key_name)
         if not key:
             attempts.append(ProviderAttempt(provider, False, status="not_configured"))
+            continue
+        budget = reserve_provider_budget_live(provider, capability, daily_budget=500, entitlement="configured", data_mode="intraday" if intraday else "historical")
+        if not budget.get("reserved"):
+            attempts.append(ProviderAttempt(provider, False, 0, "provider_budget_blocked", str(budget.get("reason") or "budget unavailable")))
             continue
         try:
             namespace = (
