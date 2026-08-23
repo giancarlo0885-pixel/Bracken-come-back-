@@ -129,6 +129,20 @@ def test_missing_liquidity_never_qualifies_for_capital():
 
 
 
+def test_global_pit_liquidity_normalizes_to_percent_scale():
+    base = fresh_asset("BASE", liquidity=0, avg_dollar_volume=0)
+    liquid = fresh_asset("LIQ", liquidity=1_000_000, avg_dollar_volume=1_000_000)
+    assert pit._ranking_score(liquid) > pit._ranking_score(base) + 8
+
+
+def test_missing_risk_information_is_not_treated_as_low_risk():
+    missing = fresh_asset("MISS")
+    missing.pop("risk_score")
+    missing.pop("risk_level_score", None)
+    low_risk = fresh_asset("LOW", risk_score=10)
+    assert pit._ranking_score(low_risk) > pit._ranking_score(missing)
+
+
 def test_portfolio_reaches_deployment_target_only_through_qualified_assets():
     ranked = pit.rank_global_opportunities([
         fresh_asset("AAPL"),

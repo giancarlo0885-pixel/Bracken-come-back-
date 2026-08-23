@@ -332,13 +332,15 @@ def _ranking_score(asset: dict[str, Any], learning_weights: dict[str, float] | N
             weights[key] = max(0.0, min(0.40, float(value)))
     total = sum(weights.values()) or 1.0
     weights = {key: value / total for key, value in weights.items()}
-    risk_score = _clamp(_finite(asset.get("risk_score") or asset.get("risk_level_score"), 100.0))
+    raw_risk = asset.get("risk_score") if asset.get("risk_score") is not None else asset.get("risk_level_score")
+    risk_score = _clamp(_finite(raw_risk, 100.0))
+    liquidity_value = _finite(asset.get("liquidity") or asset.get("avg_dollar_volume"))
     values = {
         "edge": _finite(asset.get("expected_edge") or asset.get("expected_move_pct") or asset.get("change_1d_pct")) * 10.0,
         "probability": _percent_score(asset.get("probability_up")),
         "confidence": _percent_score(asset.get("confidence")),
         "data": _percent_score(asset.get("data_quality_score")),
-        "liquidity": min(100.0, _finite(asset.get("liquidity") or asset.get("avg_dollar_volume")) / 1_000_000.0),
+        "liquidity": _clamp((liquidity_value / 1_000_000.0) * 100.0),
         "risk": 100.0 - risk_score,
         "regime": _percent_score(asset.get("regime_score")),
         "portfolio_fit": _percent_score(asset.get("portfolio_fit")),
