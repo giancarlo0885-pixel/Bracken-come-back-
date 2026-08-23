@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pandas as pd
+import pytest
 
 from engine import OracleSignal
 
@@ -371,6 +372,7 @@ def test_v39_signal_opportunity_does_not_mark_signal_id_as_forecast_approved():
 
     signal = _signal("AAPL", price=100.0)
     signal.signal_id = 123
+    signal.forecast_id = "forecast-123"
     quote = _quote("AAPL", 100.0, avg_dollar_volume=25_000_000, spread_pct=0.001, tradeable=True)
     opportunity = market_worker._v39_signal_opportunity(
         "cash",
@@ -384,6 +386,24 @@ def test_v39_signal_opportunity_does_not_mark_signal_id_as_forecast_approved():
     assert opportunity["qualified_for_capital"] is True
 
 
+def test_v39_signal_opportunity_requires_forecast_id_for_capital():
+    import market_worker
+
+    signal = _signal("AAPL", price=100.0)
+    signal.signal_id = 123
+    quote = _quote("AAPL", 100.0, avg_dollar_volume=25_000_000, spread_pct=0.001, tradeable=True)
+
+    opportunity = market_worker._v39_signal_opportunity(
+        "cash",
+        signal,
+        {"AAPL": quote},
+        {"AAPL": {"risk_score": 25, "spread_pct": 0.001, "liquidity": 25_000_000, "sector": "Technology"}},
+        "fast",
+    )
+
+    assert opportunity["qualified_for_capital"] is False
+
+
 def test_v39_iterative_execution_reloads_optimizer_after_success(monkeypatch):
     import market_worker
 
@@ -395,6 +415,8 @@ def test_v39_iterative_execution_reloads_optimizer_after_success(monkeypatch):
         calls.append([item.symbol for item in remaining])
         for item in remaining:
             item.planned_trade_value = 1_000
+            item.v39_optimizer_approved_amount = 1_000
+            item.v39_optimizer_allocation = {"symbol": item.symbol, "amount": 1_000}
         return list(remaining)
 
     def fake_process(market, batch, prices=None):
@@ -407,6 +429,130 @@ def test_v39_iterative_execution_reloads_optimizer_after_success(monkeypatch):
 
     assert [action["symbol"] for action in actions] == ["AAPL", "MSFT"]
     assert calls == [["AAPL", "MSFT"], ["MSFT"]]
+
+
+def test_v39_optimizer_rejection_cannot_execute_buy(monkeypatch):
+    import market_worker
+
+    signal = _signal("AAPL", 100.0)
+    prices = {"AAPL": _quote("AAPL", 100.0)}
+    process_calls = []
+    events = []
+
+    monkeypatch.setattr(market_worker, "GLOBAL_PIT_MODE", True)
+    monkeypatch.setattr(market_worker, "_v39_prioritize_signals", lambda *args, **kwargs: [signal])
+    monkeypatch.setattr(market_worker, "process_signals", lambda *args, **kwargs: process_calls.append(args) or [])
+    monkeypatch.setattr(
+        market_worker,
+        "_v39_record_event",
+        lambda market, symbol, stage, payload, rejection_reason=None: events.append((stage, rejection_reason)),
+    )
+
+    actions = market_worker._v39_execute_iterative("cash", [signal], prices, [], "fast")
+
+    assert actions == []
+    assert process_calls == []
+    assert ("portfolio_rejected", "optimizer_allocation_required") in events
+
+
+def test_v39_optimizer_amount_is_upper_bound(monkeypatch):
+    import oracle_bot
+    from quant_trade_standard import QuantTradeAssessment
+
+    signal = _signal("AAPL", price=100.0)
+    signal.signal_id = 42
+    signal.forecast_id = "forecast-42"
+    signal.scan_type = "fast"
+    signal.source_interval = "5m"
+    signal.planned_trade_value = 1_000
+    quote = _quote("AAPL", 100.0, avg_dollar_volume=100_000_000, sector="Technology")
+    captured = {}
+
+    monkeypatch.setattr(oracle_bot, "ENABLE_AUTOTRADE", True)
+    monkeypatch.setattr(oracle_bot, "ENABLE_STOCK_AUTOTRADE", True)
+    monkeypatch.setattr(oracle_bot, "ENABLE_NEW_ENTRIES", True)
+    monkeypatch.setattr(oracle_bot, "_entry_forecast_gate", lambda *args, **kwargs: (True, "approved"))
+    monkeypatch.setattr(oracle_bot, "_penny_stock_gate", lambda *args, **kwargs: (True, "not penny"))
+    monkeypatch.setattr(oracle_bot, "recent_trade", lambda *args, **kwargs: None)
+    monkeypatch.setattr(oracle_bot, "_open_position_count", lambda market: 0)
+    monkeypatch.setattr(oracle_bot, "row", lambda *args, **kwargs: None)
+    monkeypatch.setattr(oracle_bot, "portfolio_equity", lambda market: {"equity": 1_000_000})
+    monkeypatch.setattr(oracle_bot, "rows", lambda *args, **kwargs: [])
+
+    class Decision:
+        recommendation = "BUY"
+        reason = "unit"
+        scenario = {"position_multiplier": 1.0, "summary": ""}
+        global_intelligence = {"position_multiplier": 1.0, "summary": ""}
+        capital = {"final_multiplier": 1.0, "summary": ""}
+        radar = {"position_multiplier": 1.0, "summary": ""}
+        portfolio_supercomputer = {"position_multiplier": 1.0, "recommended_trade_value": 50_000, "summary": ""}
+        explainability = {"summary": ""}
+
+    assessment = QuantTradeAssessment(
+        alpha_score=90,
+        execution_score=90,
+        risk_score=90,
+        relative_value_score=90,
+        trade_quality=90,
+        gross_expected_value_pct=0.02,
+        estimated_cost_pct=0.001,
+        net_expected_value_pct=0.019,
+        adverse_selection_score=10,
+        position_multiplier=1.0,
+        approved=True,
+        classification="approved",
+        reason="unit",
+    )
+
+    monkeypatch.setattr(oracle_bot, "evaluate_opportunity", lambda *args, **kwargs: Decision())
+    monkeypatch.setattr(oracle_bot, "assess_trade", lambda *args, **kwargs: assessment)
+
+    def fake_buy(market, symbol, price, signal_obj, *args, **kwargs):
+        captured["target_trade_value"] = kwargs.get("target_trade_value")
+        return True, "paper buy executed", None
+
+    monkeypatch.setattr(oracle_bot, "_buy", fake_buy)
+
+    oracle_bot.process_signals("cash", [signal], {"AAPL": quote})
+
+    assert captured["target_trade_value"] == 1_000
+
+
+def test_closed_stock_market_stale_intraday_quote_reports_precise_reason(caplog):
+    import oracle_bot
+
+    signal = _signal("AAPL", price=100.0)
+    signal.signal_id = 1
+    signal.forecast_id = "forecast-1"
+    stale_quote = _quote(
+        "AAPL",
+        100.0,
+        quote_timestamp=(datetime.now(timezone.utc) - timedelta(days=2)).isoformat(),
+        interval="5m",
+        exchange="NASDAQ",
+    )
+
+    with caplog.at_level("INFO", logger="oracle-bot"):
+        actions = oracle_bot.process_signals("cash", [signal], {"AAPL": stale_quote})
+
+    assert actions == []
+    assert "MARKET_CLOSED_STALE_INTRADAY_QUOTE" in caplog.text or "verified quote timestamp is stale" in caplog.text
+
+
+def test_valid_regular_session_quote_keeps_positive_price(monkeypatch):
+    import market_worker
+
+    timestamp = datetime(2026, 7, 6, 15, 0, tzinfo=timezone.utc).isoformat()
+    history = _history("AAPL", price=123.45, interval="5m", quote_timestamp=timestamp)
+    signal = _signal("AAPL", price=0.0)
+
+    route = market_worker._attach_execution_metadata(signal, history, "fast")
+    quote = market_worker._quote_payload_from_history("AAPL", history, signal.price, scan_type="fast")
+
+    assert signal.price == pytest.approx(123.45)
+    assert route["price"] == pytest.approx(123.45)
+    assert quote["price"] == pytest.approx(123.45)
 
 
 def test_v39_executed_action_records_sequential_funnel_stages(monkeypatch):

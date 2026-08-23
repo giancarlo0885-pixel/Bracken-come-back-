@@ -143,6 +143,8 @@ def test_storage_report_capacity_status(monkeypatch):
     assert report["status"] == "warning"
     assert report["largest_tables"][0]["table"] == "signals"
     assert report["largest_tables"][0]["index_bytes"] == 1024
+    assert report["archive_candidates"][0]["table"] == "signals"
+    assert report["capacity_projection"]["projected_30d_bytes"] == int(int(0.8 * 1024**3) * 1.10)
 
 
 def test_maintenance_lock_skip_does_not_crash(monkeypatch):

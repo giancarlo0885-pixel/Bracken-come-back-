@@ -22,6 +22,7 @@ from risk_engine import ExecutionSwitches, pre_trade_risk_checks
 from market_sessions import (
     confirmed_us_listing,
     is_otc_exchange,
+    market_session_state,
     normalize_exchange,
     parse_utc,
     quote_is_fresh,
@@ -417,6 +418,44 @@ def _verified_quote_for(
         return None
     payload["price"] = price
     return payload
+
+
+def _quote_rejection_reason(symbol: str, quotes: dict[str, Any] | None, market: str = "cash") -> str:
+    symbol = _normalized_symbol(symbol)
+    payload = _quote_payload((quotes or {}).get(symbol) or (quotes or {}).get(symbol.lower()), symbol)
+    if not payload:
+        return "invalid/missing price"
+    price = safe_float(payload.get("price"))
+    if price <= 0:
+        return "invalid/missing price"
+    requested = _normalized_symbol(payload.get("requested_symbol"))
+    provider_symbol = _normalized_symbol(payload.get("provider_symbol"))
+    quote_symbol = _normalized_symbol(payload.get("symbol") or symbol)
+    if quote_symbol != symbol or requested != symbol or provider_symbol != symbol:
+        return "provider quote identity mismatch"
+    if payload.get("quote_verified") is not True:
+        return "quote is not provider verified"
+    quote_timestamp = payload.get("quote_timestamp") or payload.get("timestamp")
+    interval = safe_text(payload.get("interval"), "1d")
+    if _parse_utc(quote_timestamp) is None:
+        return "verified quote timestamp is missing"
+    max_age_seconds = (
+        DECISION_CRYPTO_MAX_AGE_MINUTES
+        if safe_text(market).lower() == "crypto"
+        else DECISION_STOCK_MAX_AGE_MINUTES
+    ) * 60
+    if not quote_is_fresh(
+        quote_timestamp,
+        interval,
+        max_intraday_age_seconds=max_age_seconds,
+        symbol=symbol,
+    ):
+        intraday = not interval.lower().endswith("d") and interval.lower() not in {"1wk", "1mo", "3mo"}
+        session = market_session_state(exchange=payload.get("exchange"), region=payload.get("region"), symbol=symbol)
+        if market == "cash" and intraday and session in {"closed", "after-hours", "premarket"}:
+            return "MARKET_CLOSED_STALE_INTRADAY_QUOTE"
+        return "verified quote timestamp is stale"
+    return "verified quote unavailable"
 
 
 def _verified_price_for(symbol: str, quotes: dict[str, Any] | None, market: str = "cash") -> float:
@@ -2503,7 +2542,9 @@ def process_signals(
         quote = _verified_quote_for(symbol, prices, market)
         if quote is None:
             price = 0.0
+            quote_rejection_reason = _quote_rejection_reason(symbol, prices, market)
         else:
+            quote_rejection_reason = ""
             price = safe_float(quote.get("price"))
             signal_price_value = signal_price(signal, price)
             if not _quote_price_matches(signal_price_value, price):
@@ -2529,9 +2570,10 @@ def process_signals(
 
         if price <= 0:
             log.info(
-                "%s | REJECT | %s | invalid/missing price",
+                "%s | REJECT | %s | %s",
                 market.upper(),
                 symbol,
+                quote_rejection_reason or "invalid/missing price",
             )
             continue
         if symbol in anomalous_symbols:

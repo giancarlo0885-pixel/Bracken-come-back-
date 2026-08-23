@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+import os
 
 import pytest
 
@@ -133,6 +134,18 @@ def test_optimizer_respects_concentration_and_recalculates_after_each_allocation
     assert plan["recalculations"] == len(plan["allocations"])
 
 
+def test_optimizer_fails_closed_when_existing_stock_sector_unknown():
+    candidate = fresh_quote("MSFT", sector="Technology", opportunity_score=90)
+    plan = v39.adaptive_portfolio_optimizer(
+        [candidate],
+        {"equity": 1_000_000, "cash": 500_000, "buying_power": 500_000},
+        [{"symbol": "MYSTERY", "market_value": 10_000}],
+        engine="stock",
+    )
+    assert plan["allocations"] == []
+    assert plan["rejections"][0]["reason"] == "unknown existing position sector prevents concentration calculation"
+
+
 def test_concurrent_budget_fails_closed_when_shared_ledger_required():
     result = v39.reserve_provider_budget(None, "alpha_vantage", "daily_history", database_url_configured=True)
     assert result["reserved"] is False
@@ -188,6 +201,84 @@ def test_v39_table_bootstrap_executes_all_statements():
     assert "provider_budget_ledger" in joined
     assert "idx_global_decision_events_market_symbol_stage" in joined
     assert "idx_global_outcomes_decision_horizon" in joined
+
+
+def test_postgres_v39_sector_enrichment_and_decision_ledger_persistence():
+    if not os.getenv("DATABASE_URL"):
+        pytest.skip("PostgreSQL integration test runs in CI service container")
+    import database
+    import market_worker
+
+    database.initialize_database()
+    now = datetime.now(timezone.utc).isoformat()
+    with database.connect() as conn:
+        v39.ensure_v39_tables(conn)
+        conn.execute("DELETE FROM global_decision_events WHERE symbol=%s", ("V39SEC",))
+        conn.execute("DELETE FROM global_decision_ledger WHERE symbol=%s", ("V39SEC",))
+        conn.execute("DELETE FROM positions WHERE market=%s AND symbol=%s", ("cash", "V39SEC"))
+        conn.execute("DELETE FROM global_market_candidates WHERE symbol=%s", ("V39SEC",))
+        conn.execute(
+            """
+            INSERT INTO portfolios (market,cash,starting_balance,leverage_limit,margin_debt,updated_at)
+            VALUES ('cash',1000000,1000000,4,0,%s)
+            ON CONFLICT (market) DO UPDATE SET cash=1000000, starting_balance=1000000, leverage_limit=4, margin_debt=0, updated_at=EXCLUDED.updated_at
+            """,
+            (now,),
+        )
+        conn.execute(
+            """
+            INSERT INTO positions (market,symbol,quantity,entry_price,current_price,updated_at)
+            VALUES ('cash','V39SEC',10,100,100,%s)
+            """,
+            (now,),
+        )
+        conn.execute(
+            """
+            INSERT INTO global_market_candidates (symbol,name,exchange,region,sector,payload,scanned_at)
+            VALUES ('V39SEC','V39 Sector Test','NASDAQ','United States','Technology','{}'::jsonb,%s)
+            ON CONFLICT (symbol) DO UPDATE SET sector=EXCLUDED.sector, scanned_at=EXCLUDED.scanned_at
+            """,
+            (now,),
+        )
+
+    _, positions = market_worker._v39_position_rows("cash")
+    enriched = next(position for position in positions if position["symbol"] == "V39SEC")
+    assert enriched["sector"] == "Technology"
+
+    with database.connect() as conn:
+        v39.persist_decision_event(
+            conn,
+            market="cash",
+            symbol="V39SEC",
+            stage="portfolio_rejected",
+            payload={"signal_id": "sig-v39", "forecast_id": "fc-v39", "sector": "Technology"},
+            rejection_reason="optimizer_allocation_required",
+        )
+        record = conn.execute(
+            "SELECT decision, rejection_reasons FROM global_decision_ledger WHERE symbol=%s ORDER BY created_at DESC LIMIT 1",
+            ("V39SEC",),
+        ).fetchone()
+    assert record["decision"] == "portfolio_rejected"
+    assert "optimizer_allocation_required" in str(record["rejection_reasons"])
+
+
+def test_postgres_v39_provider_budget_shared_ledger_exhausts_once():
+    if not os.getenv("DATABASE_URL"):
+        pytest.skip("PostgreSQL integration test runs in CI service container")
+    import database
+
+    database.initialize_database()
+    with database.connect() as conn:
+        v39.ensure_v39_tables(conn)
+        conn.execute(
+            "DELETE FROM provider_budget_ledger WHERE provider=%s AND capability=%s",
+            ("unit_v39", "quote"),
+        )
+        first = v39.reserve_provider_budget_db(conn, "unit_v39", "quote", daily_budget=1)
+        second = v39.reserve_provider_budget_db(conn, "unit_v39", "quote", daily_budget=1)
+
+    assert first["reserved"] is True
+    assert second["reserved"] is False
 
 
 

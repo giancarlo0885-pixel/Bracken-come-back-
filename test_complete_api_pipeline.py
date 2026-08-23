@@ -1,5 +1,6 @@
 import pandas as pd
 import provider_router
+from cache import make_key, set_value
 
 
 def test_router_falls_back_and_records_attempts(monkeypatch):
@@ -12,6 +13,7 @@ def test_router_falls_back_and_records_attempts(monkeypatch):
     assert routed.provider == "Yahoo Finance"
     assert routed.metadata()["records"] == 3
     assert routed.attempts[-1].ok is True
+    assert routed.metadata()["quote_verified"] is False
 
 
 def test_router_marks_unavailable_symbol_after_empty_routes(monkeypatch):
@@ -22,6 +24,59 @@ def test_router_marks_unavailable_symbol_after_empty_routes(monkeypatch):
     assert provider_router.symbol_is_unavailable("UNI-USD") is True
     skipped = provider_router.route_history("UNI-USD", "1d", "1m", lambda *args: pd.DataFrame())
     assert skipped.attempts[0].status == "symbol_cooldown"
+
+
+def test_intraday_symbol_cooldown_does_not_block_daily_history(monkeypatch):
+    provider_router._provider_cooldowns.clear()
+    provider_router._symbol_cooldowns.clear()
+
+    class Settings:
+        def get(self, name):
+            return "key" if name == "POLYGON_API_KEY" else None
+
+    def polygon(symbol, period, interval, key):
+        if interval == "1m":
+            raise RuntimeError("intraday unavailable")
+        idx = pd.DatetimeIndex(["2026-01-02"])
+        frame = pd.DataFrame({"Close": [10.0], "Volume": [1000]}, index=idx)
+        return provider_router._verified_history(frame, "Polygon", symbol, symbol, period, interval, identity_verified=True)
+
+    monkeypatch.setattr(provider_router, "get_api_settings", lambda: Settings())
+    monkeypatch.setattr(provider_router, "_polygon", polygon)
+    monkeypatch.setattr(provider_router, "reserve_provider_budget_live", lambda *args, **kwargs: {"reserved": True})
+
+    intraday = provider_router.route_history("V39COOL", "1d", "1m", lambda *args: pd.DataFrame())
+    assert any(attempt.status == "degraded" for attempt in intraday.attempts)
+
+    daily = provider_router.route_history("V39COOL", "5d", "1d", lambda *args: pd.DataFrame())
+    assert daily.provider == "Polygon"
+    assert daily.frame.attrs["quote_verified"] is True
+
+
+def test_cache_hit_consumes_zero_provider_budget(monkeypatch):
+    provider_router._provider_cooldowns.clear()
+    provider_router._symbol_cooldowns.clear()
+
+    class Settings:
+        def get(self, name):
+            return "key" if name == "POLYGON_API_KEY" else None
+
+    namespace = "history_polygon_CACHEDV39_5d_1d_adjusted_true_extended_false"
+    cache_key = make_key(namespace, "CACHEDV39", "5d", "1d")
+    idx = pd.DatetimeIndex(["2026-01-02"])
+    frame = pd.DataFrame({"Close": [10.0], "Volume": [1000]}, index=idx)
+    cached = provider_router._verified_history(frame, "Polygon", "CACHEDV39", "CACHEDV39", "5d", "1d", identity_verified=True)
+    set_value(cache_key, cached, 60)
+    budget_calls = []
+
+    monkeypatch.setattr(provider_router, "get_api_settings", lambda: Settings())
+    monkeypatch.setattr(provider_router, "_polygon", lambda *args: (_ for _ in ()).throw(AssertionError("external call should not run")))
+    monkeypatch.setattr(provider_router, "reserve_provider_budget_live", lambda *args, **kwargs: budget_calls.append(args) or {"reserved": True})
+
+    routed = provider_router.route_history("CACHEDV39", "5d", "1d", lambda *args: pd.DataFrame())
+
+    assert routed.provider == "Polygon"
+    assert budget_calls == []
 
 
 def test_rate_limited_provider_enters_cooldown(monkeypatch):

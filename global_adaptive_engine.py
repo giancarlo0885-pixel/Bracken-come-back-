@@ -14,6 +14,7 @@ from config import (
     GLOBAL_PIT_PREFERRED_POSITION_PCT,
     GLOBAL_PIT_RESERVE_PCT,
     GLOBAL_PIT_TARGET_INVESTED_PCT,
+    MAX_SECTOR_EXPOSURE_PCT,
     PAPER_MAX_MARKET_PARTICIPATION_PCT,
 )
 from global_pit_engine import _execution_quote_eligible, _finite, _asset_class, _upper, hard_risk_gate
@@ -301,17 +302,26 @@ def adaptive_portfolio_optimizer(opportunities: list[dict[str, Any]], portfolio:
     reserve = state["reserve_cash_required"]
     exposure_by_symbol = {_upper(p.get("symbol")): _finite(p.get("market_value") or _finite(p.get("quantity")) * _finite(p.get("current_price"))) for p in positions}
     sector_exposure: dict[str, float] = {}
+    unknown_position_sector = False
     for p in positions:
-        sector = str(p.get("sector") or "Unknown")
+        sector = str(p.get("sector") or "").strip()
+        if engine == "stock" and not sector:
+            unknown_position_sector = True
+            sector = "__UNKNOWN_SECTOR__"
+        sector = sector or "Unknown"
         sector_exposure[sector] = sector_exposure.get(sector, 0.0) + _finite(p.get("market_value") or _finite(p.get("quantity")) * _finite(p.get("current_price")))
     allocations = []
     recalc_count = 0
+    rejections: list[dict[str, Any]] = []
     for item in sorted(opportunities, key=lambda row: _finite(row.get("soft_score") or row.get("opportunity_score")), reverse=True):
         if classify_capital_engine(item) != engine or item.get("qualified_for_capital") is not True:
             continue
+        symbol = _upper(item.get("symbol"))
+        if engine == "stock" and unknown_position_sector:
+            rejections.append({"symbol": symbol, "reason": "unknown existing position sector prevents concentration calculation"})
+            continue
         if not hard_risk_gate(item).get("allowed"):
             continue
-        symbol = _upper(item.get("symbol"))
         current = exposure_by_symbol.get(symbol, 0.0)
         max_position = equity * GLOBAL_PIT_MAX_POSITION_PCT
         if current >= max_position:
@@ -325,15 +335,20 @@ def adaptive_portfolio_optimizer(opportunities: list[dict[str, Any]], portfolio:
         executable_amount = min(candidate_amount, _finite(capacity.get("executable_order_value")))
         if executable_amount <= 0:
             continue
-        sector = str(item.get("sector") or "Unknown")
-        if equity and (sector_exposure.get(sector, 0.0) + executable_amount) / equity > 0.35:
+        sector = str(item.get("sector") or "").strip()
+        if engine == "stock" and not sector:
+            rejections.append({"symbol": symbol, "reason": "unknown candidate sector prevents concentration calculation"})
+            continue
+        sector = sector or "Unknown"
+        if equity and (sector_exposure.get(sector, 0.0) + executable_amount) / equity > MAX_SECTOR_EXPOSURE_PCT:
+            rejections.append({"symbol": symbol, "reason": "sector concentration limit"})
             continue
         allocations.append({"symbol": symbol, "amount": round(executable_amount, 2), "sector": sector, "liquidity": capacity})
         cash -= executable_amount
         exposure_by_symbol[symbol] = current + executable_amount
         sector_exposure[sector] = sector_exposure.get(sector, 0.0) + executable_amount
         recalc_count += 1
-    return {**state, "allocations": allocations, "recalculations": recalc_count, "cash_after_plan": round(cash, 2)}
+    return {**state, "allocations": allocations, "recalculations": recalc_count, "cash_after_plan": round(cash, 2), "rejections": rejections}
 
 
 def decision_funnel(records: list[dict[str, Any]]) -> dict[str, Any]:

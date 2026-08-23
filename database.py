@@ -1518,6 +1518,35 @@ def database_storage_report(limit: int = 12) -> dict[str, Any]:
         item["table_size"] = _human_bytes(item["table_bytes"])
         item["index_size"] = _human_bytes(item["index_bytes"])
         tables.append(item)
+    archive_candidates = []
+    for item in tables:
+        audit = DATABASE_TABLE_GROWTH_AUDIT.get(item["table"], {})
+        retention = str(audit.get("retention") or "")
+        if "never auto-delete" in retention or "canonical financial" in str(audit.get("class") or ""):
+            continue
+        if "preserve" in retention:
+            archive_candidates.append(
+                {
+                    "table": item["table"],
+                    "recommendation": "roll up or archive after explicit operator review",
+                    "retention": retention,
+                    "live_rows": item["live_rows"],
+                    "total_bytes": item["total_bytes"],
+                }
+            )
+        elif "keep newest" in retention:
+            archive_candidates.append(
+                {
+                    "table": item["table"],
+                    "recommendation": "eligible for configured rolling retention",
+                    "retention": retention,
+                    "live_rows": item["live_rows"],
+                    "total_bytes": item["total_bytes"],
+                }
+            )
+    projected_30d_bytes = None
+    if database_bytes:
+        projected_30d_bytes = int(database_bytes * 1.10)
     return {
         "database": db.get("name"),
         "database_bytes": database_bytes,
@@ -1526,6 +1555,12 @@ def database_storage_report(limit: int = 12) -> dict[str, Any]:
         "used_pct": used_pct,
         "status": status,
         "largest_tables": tables,
+        "archive_candidates": archive_candidates,
+        "capacity_projection": {
+            "method": "conservative static 10 percent 30-day growth estimate until historical samples are available",
+            "projected_30d_bytes": projected_30d_bytes,
+            "projected_30d_size": _human_bytes(projected_30d_bytes or 0) if projected_30d_bytes else None,
+        },
         "retention_policies": DATABASE_RETENTION_POLICIES,
         "table_growth_audit": DATABASE_TABLE_GROWTH_AUDIT,
     }
