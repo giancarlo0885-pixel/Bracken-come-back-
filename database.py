@@ -882,6 +882,88 @@ def initialize_database() -> None:
         "CREATE INDEX IF NOT EXISTS idx_risk_events_market_created ON risk_events (market, created_at DESC)",
         "CREATE INDEX IF NOT EXISTS idx_trade_audits_status ON trade_audits (status, created_at DESC)",
         "CREATE INDEX IF NOT EXISTS idx_position_audits_status ON position_audits (status, created_at DESC)",
+        """
+        CREATE TABLE IF NOT EXISTS global_asset_identities (
+            canonical_id TEXT PRIMARY KEY,
+            asset_class TEXT NOT NULL,
+            exchange TEXT NOT NULL,
+            native_symbol TEXT NOT NULL,
+            currency TEXT NOT NULL,
+            provider_aliases JSONB DEFAULT '{}'::jsonb,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS global_decision_ledger (
+            decision_id TEXT PRIMARY KEY,
+            scan_id TEXT,
+            signal_id TEXT,
+            forecast_id TEXT,
+            execution_claim_id TEXT,
+            trade_id BIGINT,
+            canonical_id TEXT,
+            market TEXT,
+            symbol TEXT,
+            asset_class TEXT,
+            features JSONB,
+            portfolio_context JSONB,
+            decision TEXT,
+            rejection_reasons JSONB DEFAULT '[]'::jsonb,
+            created_at TEXT NOT NULL
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS global_forecast_outcomes (
+            id BIGSERIAL PRIMARY KEY,
+            decision_id TEXT,
+            forecast_id TEXT,
+            symbol TEXT,
+            horizon TEXT,
+            realized_return_pct DOUBLE PRECISION,
+            absolute_forecast_error DOUBLE PRECISION,
+            direction_correct BOOLEAN,
+            mfe_pct DOUBLE PRECISION,
+            mae_pct DOUBLE PRECISION,
+            drawdown_pct DOUBLE PRECISION,
+            payload JSONB,
+            created_at TEXT NOT NULL
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS global_model_governance (
+            model_key TEXT PRIMARY KEY,
+            status TEXT NOT NULL DEFAULT 'SHADOW',
+            champion BOOLEAN DEFAULT FALSE,
+            sample_count INTEGER DEFAULT 0,
+            directional_accuracy DOUBLE PRECISION DEFAULT 0,
+            mape DOUBLE PRECISION DEFAULT 100,
+            calibration_error DOUBLE PRECISION DEFAULT 100,
+            payload JSONB,
+            updated_at TEXT NOT NULL
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS provider_budget_ledger (
+            provider TEXT NOT NULL,
+            capability TEXT NOT NULL,
+            utc_date TEXT NOT NULL,
+            entitlement TEXT,
+            daily_budget INTEGER DEFAULT 0,
+            requests_used INTEGER DEFAULT 0,
+            remaining_budget INTEGER DEFAULT 0,
+            latency_ms DOUBLE PRECISION,
+            last_success TEXT,
+            last_failure TEXT,
+            cooldown_until TEXT,
+            data_mode TEXT,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY(provider, capability, utc_date)
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS idx_global_decision_symbol_created ON global_decision_ledger (symbol, created_at DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_global_outcomes_decision ON global_forecast_outcomes (decision_id)",
+        "CREATE INDEX IF NOT EXISTS idx_provider_budget_capability ON provider_budget_ledger (provider, capability, utc_date)",
     ]
 
     with connect() as conn:

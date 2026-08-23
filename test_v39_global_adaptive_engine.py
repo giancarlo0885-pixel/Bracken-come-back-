@@ -1,0 +1,160 @@
+from datetime import datetime, timedelta, timezone
+
+import pytest
+
+import global_adaptive_engine as v39
+
+
+def fresh_quote(symbol="AAPL", asset_class="stock", **overrides):
+    data = {
+        "symbol": symbol,
+        "requested_symbol": symbol,
+        "provider_symbol": symbol,
+        "native_symbol": symbol,
+        "asset_class": asset_class,
+        "exchange": "NASDAQ" if asset_class != "crypto" else "CRYPTO",
+        "currency": "USD",
+        "sector": "Technology" if asset_class != "crypto" else "Crypto",
+        "quote_verified": True,
+        "quote_timestamp": (datetime.now(timezone.utc) - timedelta(seconds=20)).isoformat(),
+        "interval": "5m",
+        "source_interval": "5m",
+        "tradeable": True,
+        "qualified_for_capital": True,
+        "avg_dollar_volume": 50_000_000,
+        "liquidity": 50_000_000,
+        "spread_pct": 0.02,
+        "opportunity_score": 82,
+        "expected_move_pct": 3,
+        "probability_up": 0.64,
+        "confidence": 0.7,
+        "data_quality_score": 90,
+        "risk_score": 25,
+    }
+    data.update(overrides)
+    return data
+
+
+def test_global_identity_prevents_symbol_collisions():
+    us = v39.canonical_identity({"symbol": "ABC", "native_symbol": "ABC", "asset_class": "stock", "exchange": "NYSE", "currency": "USD"})
+    london = v39.canonical_identity({"symbol": "ABC", "native_symbol": "ABC", "asset_class": "stock", "exchange": "LSE", "currency": "GBP"})
+    assert us["canonical_id"] != london["canonical_id"]
+    merged = v39.merge_global_asset_records([
+        {"symbol": "ABC", "native_symbol": "ABC", "asset_class": "stock", "exchange": "NYSE", "currency": "USD", "provider": "polygon", "provider_symbol": "ABC"},
+        {"symbol": "ABC", "native_symbol": "ABC", "asset_class": "stock", "exchange": "LSE", "currency": "GBP", "provider": "eodhd", "provider_symbol": "ABC.L"},
+    ])
+    assert len(merged) == 2
+
+
+def test_stock_and_crypto_capital_cannot_mix():
+    opportunities = [fresh_quote("AAPL"), fresh_quote("BTC-USD", asset_class="crypto")]
+    engines = v39.split_capital_engines(
+        {"equity": 100_000, "cash": 80_000, "buying_power": 200_000},
+        {"equity": 50_000, "cash": 40_000, "buying_power": 80_000},
+        [],
+        [],
+        opportunities,
+    )
+    assert engines["stock"]["cash"] == 80_000
+    assert engines["crypto"]["cash"] == 40_000
+    assert engines["stock"]["qualified_opportunities"] == 1
+    assert engines["crypto"]["qualified_opportunities"] == 1
+
+
+def test_unsupported_assets_remain_intelligence_only_but_can_influence_soft_scores():
+    executable = [fresh_quote("XOM", sector="Energy", opportunity_score=70)]
+    intelligence = [{"symbol": "OIL", "asset_class": "commodity", "strength_score": 80}]
+    adjusted = v39.apply_cross_market_influence(executable, intelligence)
+    assert adjusted[0]["soft_score"] > executable[0]["opportunity_score"]
+    assert v39.classify_capital_engine({"asset_class": "commodity"}) == "intelligence_only"
+
+
+def test_forecast_outcomes_reject_future_leakage():
+    decision = {"generated_at": "2026-01-02T10:00:00+00:00", "price": 100, "expected_move_pct": 2}
+    observed = {"observed_at": "2026-01-02T09:59:00+00:00", "price": 103}
+    result = v39.evaluate_forecast_outcome(decision, observed)
+    assert result["evaluated"] is False
+    assert "future leakage" in result["reason"]
+
+
+def test_learning_weights_adapt_only_after_sufficient_evidence():
+    weak = [{"model": "m", "asset_class": "stock", "market_regime": "RISK_ON", "realized_edge_pct": 5} for _ in range(3)]
+    strong = [{"model": "m", "asset_class": "stock", "market_regime": "RISK_ON", "realized_edge_pct": 5} for _ in range(12)]
+    assert v39.learning_weights_by_context(weak, min_samples=10) == {}
+    assert v39.learning_weights_by_context(strong, min_samples=10)["m|stock|RISK_ON"] > 1.0
+
+
+def test_challengers_cannot_auto_promote_without_evidence():
+    shadow = {"status": "SHADOW", "sample_count": 5, "directional_accuracy": 0.8, "mape": 5}
+    mature = {"status": "CHALLENGER", "sample_count": 50, "directional_accuracy": 0.62, "mape": 8}
+    assert v39.champion_challenger_decision(shadow)["promote"] is False
+    assert v39.champion_challenger_decision(mature, {"directional_accuracy": 0.56, "mape": 12})["promote"] is True
+
+
+def test_liquidity_uses_adv_market_participation():
+    ok = v39.liquidity_capacity({"avg_dollar_volume": 10_000_000, "spread_pct": 0.02}, 50_000)
+    too_large = v39.liquidity_capacity({"avg_dollar_volume": 10_000_000, "spread_pct": 0.02}, 500_000)
+    assert ok["allowed"] is True
+    assert too_large["allowed"] is False
+
+
+def test_optimizer_respects_concentration_and_recalculates_after_each_allocation():
+    tech = fresh_quote("MSFT", sector="Technology", opportunity_score=90)
+    energy = fresh_quote("XOM", sector="Energy", opportunity_score=80)
+    plan = v39.adaptive_portfolio_optimizer(
+        [tech, energy],
+        {"equity": 1_000_000, "cash": 500_000, "buying_power": 500_000},
+        [{"symbol": "AAPL", "sector": "Technology", "market_value": 330_000}],
+        engine="stock",
+    )
+    symbols = {row["symbol"] for row in plan["allocations"]}
+    assert "MSFT" not in symbols
+    assert "XOM" in symbols
+    assert plan["recalculations"] == len(plan["allocations"])
+
+
+def test_concurrent_budget_fails_closed_when_shared_ledger_required():
+    result = v39.reserve_provider_budget(None, "alpha_vantage", "daily_history", database_url_configured=True)
+    assert result["reserved"] is False
+    assert "fail closed" in result["reason"]
+
+
+def test_provider_budget_reservation_is_shared_in_supplied_ledger():
+    ledger = {"polygon:quote": {"remaining": 1, "used": 0}}
+    assert v39.reserve_provider_budget(ledger, "polygon", "quote")["reserved"] is True
+    assert v39.reserve_provider_budget(ledger, "polygon", "quote")["reserved"] is False
+
+
+def test_decision_funnel_reflects_real_stage_counts_and_reasons():
+    funnel = v39.decision_funnel([
+        {"symbol": "AAPL", "stages": ["deep_research", "buy_signal", "forecast_approved"], "quote_verified": True, "qualified_for_capital": True},
+        {"symbol": "OLD", "rejection_reasons": ["stale quote", "liquidity"]},
+    ])
+    assert funnel["counts"]["surveillance"] == 2
+    assert funnel["counts"]["verified_quote"] == 1
+    assert funnel["counts"]["portfolio_approved"] == 1
+    assert funnel["rejection_reasons"]["stale quote"] == 1
+
+
+def test_stale_data_cannot_execute_through_optimizer():
+    stale = fresh_quote("AAPL", quote_timestamp=(datetime.now(timezone.utc) - timedelta(days=3)).isoformat())
+    plan = v39.adaptive_portfolio_optimizer([stale], {"equity": 100_000, "cash": 80_000}, [], engine="stock")
+    assert plan["allocations"] == []
+
+
+def test_broker_submission_remains_false():
+    assert v39.ENABLE_BROKER_SUBMISSION is False
+
+
+def test_v39_table_bootstrap_executes_all_statements():
+    class Conn:
+        def __init__(self):
+            self.statements = []
+        def execute(self, statement):
+            self.statements.append(statement)
+    conn = Conn()
+    v39.ensure_v39_tables(conn)
+    joined = "\n".join(conn.statements)
+    assert "global_asset_identities" in joined
+    assert "global_decision_ledger" in joined
+    assert "provider_budget_ledger" in joined
