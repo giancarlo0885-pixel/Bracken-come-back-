@@ -507,6 +507,68 @@ def simple_oracle_summary(
     ]
 
 
+def capital_deployment_status(
+    metrics: dict[str, Any],
+    opportunities: list[dict[str, Any]],
+    *,
+    market: str = "cash",
+    session_label: str = "",
+    reserve_pct: float = 0.05,
+) -> dict[str, str]:
+    equity = max(0.0, as_float(metrics.get("equity")))
+    cash = max(0.0, as_float(metrics.get("cash")))
+    deployable_cash = max(0.0, cash - equity * reserve_pct) if equity else 0.0
+    approved_actions = {"BUY", "STRONG_BUY", "ACCUMULATE", "LONG"}
+    related = [item for item in opportunities if str(item.get("market") or market).lower() == market]
+    qualified: list[dict[str, Any]] = []
+    quote_blocked = False
+    metadata_blocked = False
+    for item in related:
+        if str(item.get("action") or "").upper() not in approved_actions:
+            continue
+        data = live_data_status(item)
+        if data["blocks_execution"] or data["label"] in {"FRESHNESS UNKNOWN", "OLD DATA"}:
+            quote_blocked = True
+            continue
+        required = ("scan_type", "source_interval", "quote_timestamp", "requested_symbol", "provider_symbol")
+        if any(item.get(field) in (None, "") for field in required):
+            metadata_blocked = True
+            continue
+        if item.get("trade_eligible") is False:
+            continue
+        qualified.append(item)
+    session = str(session_label or "").lower()
+    if market == "cash" and "closed" in session and not qualified:
+        return {
+            "status": "paused_market_closed",
+            "message": "Stock capital deployment paused ? market closed and waiting for verified execution quotes.",
+        }
+    if quote_blocked and not qualified:
+        return {
+            "status": "blocked_quote",
+            "message": "Capital deployment blocked ? candidate quote failed execution verification.",
+        }
+    if metadata_blocked and not qualified:
+        return {
+            "status": "blocked_metadata",
+            "message": "Capital deployment blocked ? signal metadata incomplete.",
+        }
+    if not qualified:
+        return {
+            "status": "waiting_for_opportunity",
+            "message": "Capital available ? waiting for qualified opportunities.",
+        }
+    if deployable_cash > 0:
+        return {
+            "status": "deployable_cash_available",
+            "message": "Too much capital is sitting in cash ? qualified opportunities are available and will still pass hard execution checks before any paper order.",
+        }
+    return {
+        "status": "reserve_protected",
+        "message": "Final 5% reserve protected ? no extra capital is available without breaking the cash reserve.",
+    }
+
+
 def simple_portfolio_builder_plan(
     cash: Any,
     equity: Any,

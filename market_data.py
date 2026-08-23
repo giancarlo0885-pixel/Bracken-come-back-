@@ -194,12 +194,15 @@ def get_history(symbol: str, period: str = "1y", interval: str = "1d") -> pd.Dat
     routed = route_history(symbol, period, interval, _download_yahoo)
     frame = routed.frame.copy(deep=True)
     route_metadata = routed.metadata()
+    latest_close = finite_scalar(_column(frame, "Close")) if "Close" in frame.columns else None
     route_metadata.update(
         {
             "requested_symbol": normalize_symbol(symbol),
             "provider_symbol": normalize_symbol(frame.attrs.get("provider_symbol") or symbol),
             "period": period,
             "interval": interval,
+            "price": latest_close,
+            "current_price": latest_close,
             "source_identity": frame.attrs.get("source_identity"),
             "cache_identity": frame.attrs.get("cache_identity"),
             "ohlcv_fingerprint": _ohlcv_fingerprint(frame),

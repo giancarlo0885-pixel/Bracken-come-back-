@@ -6,6 +6,7 @@ import signal
 import time
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
+import math
 from threading import Event, Lock
 from typing import Any
 
@@ -103,21 +104,122 @@ def _execution_enabled(market: str = "cash", intent: str = "entry") -> bool:
     return False
 
 
-def _quote_payload_from_history(symbol: str, history: Any, price: float) -> dict[str, Any]:
+def _finite_positive(value: Any) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(number) or number <= 0:
+        return None
+    return number
+
+
+def _quote_age_seconds(quote_timestamp: Any) -> float | None:
+    text = str(quote_timestamp or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return max(0.0, (datetime.now(timezone.utc) - parsed.astimezone(timezone.utc)).total_seconds())
+
+
+def _latest_history_price(history: Any) -> float | None:
+    try:
+        import pandas as pd
+
+        if history is None or getattr(history, "empty", True) or "Close" not in history.columns:
+            return None
+        values = pd.to_numeric(history["Close"], errors="coerce").dropna()
+        values = values[values.map(lambda item: math.isfinite(float(item)))]
+        if values.empty:
+            return None
+        return _finite_positive(values.iloc[-1])
+    except Exception:
+        return None
+
+
+def _execution_price_from_history(symbol: str, history: Any, signal_price: Any = None) -> float | None:
     route = dict(getattr(history, "attrs", {}).get("provider_route", {}) or {})
+    for value in (route.get("price"), route.get("current_price"), route.get("last_price"), _latest_history_price(history), signal_price):
+        price = _finite_positive(value)
+        if price is not None:
+            return price
+    return None
+
+
+def _quote_payload_from_history(symbol: str, history: Any, price: Any = None, *, scan_type: str = "") -> dict[str, Any]:
+    route = dict(getattr(history, "attrs", {}).get("provider_route", {}) or {})
+    execution_price = _execution_price_from_history(symbol, history, price)
+    quote_timestamp = route.get("quote_timestamp")
+    interval = route.get("interval", "1d")
     return {
         "symbol": str(symbol).upper(),
         "requested_symbol": route.get("requested_symbol"),
         "provider_symbol": route.get("provider_symbol"),
         "provider": route.get("provider"),
-        "price": float(price),
-        "quote_timestamp": route.get("quote_timestamp"),
-        "interval": route.get("interval", "1d"),
+        "price": execution_price,
+        "quote_timestamp": quote_timestamp,
+        "quote_age_seconds": route.get("quote_age_seconds") if route.get("quote_age_seconds") is not None else _quote_age_seconds(quote_timestamp),
+        "interval": interval,
+        "source_interval": interval,
+        "source_mode": route.get("source_mode") or route.get("mode"),
+        "scan_type": scan_type or route.get("scan_type"),
         "quote_verified": route.get("quote_verified") is True,
         "source_identity": route.get("source_identity"),
         "cache_identity": route.get("cache_identity"),
         "ohlcv_fingerprint": route.get("ohlcv_fingerprint"),
     }
+
+
+def _attach_execution_metadata(signal: Any, history: Any, scan_type: str) -> dict[str, Any]:
+    route = dict(getattr(history, "attrs", {}).get("provider_route", {}) or {})
+    route["scan_type"] = scan_type
+    route["source_interval"] = route.get("interval", "1d")
+    route.setdefault("quote_age_seconds", _quote_age_seconds(route.get("quote_timestamp")))
+    price = _execution_price_from_history(getattr(signal, "symbol", ""), history, getattr(signal, "price", None))
+    if price is not None:
+        route["price"] = price
+        route["current_price"] = price
+        setattr(signal, "price", price)
+    try:
+        history.attrs["provider_route"] = route
+    except Exception:
+        pass
+    setattr(signal, "market_data_route", route)
+    setattr(signal, "scan_type", scan_type)
+    setattr(signal, "source_interval", route.get("interval", "1d"))
+    setattr(signal, "quote_timestamp", route.get("quote_timestamp"))
+    setattr(signal, "source_quote_timestamp", route.get("quote_timestamp"))
+    setattr(signal, "requested_symbol", route.get("requested_symbol"))
+    setattr(signal, "provider_symbol", route.get("provider_symbol"))
+    setattr(signal, "provider", route.get("provider"))
+    setattr(signal, "quote_verified", route.get("quote_verified") is True)
+    setattr(signal, "quote_age_seconds", route.get("quote_age_seconds"))
+    return route
+
+
+def _signal_payload(signal: Any, route: dict[str, Any], scan_type: str, **extra: Any) -> dict[str, Any]:
+    payload = signal.to_dict() if hasattr(signal, "to_dict") else dict(getattr(signal, "__dict__", {}) or {})
+    payload.update(
+        {
+            "scan_type": scan_type,
+            "source_interval": route.get("interval", "1d"),
+            "source_quote_timestamp": route.get("quote_timestamp"),
+            "quote_timestamp": route.get("quote_timestamp"),
+            "quote_age_seconds": route.get("quote_age_seconds"),
+            "requested_symbol": route.get("requested_symbol"),
+            "provider_symbol": route.get("provider_symbol"),
+            "provider": route.get("provider"),
+            "quote_verified": route.get("quote_verified") is True,
+            "market_data_route": route,
+        }
+    )
+    payload.update(extra)
+    return payload
 
 
 def _normalize_starter_action(signal: Any) -> Any:
@@ -356,6 +458,7 @@ def _discover_symbol(market: str, symbol: str, name: str) -> tuple[Any, str, Any
         signal = analyze_market(symbol, history, 0.0)
         if signal is None:
             return None
+        _attach_execution_metadata(signal, history, "deep")
         return signal, name, history
     except Exception as exc:
         log.warning("Discovery failed | market=%s | symbol=%s | error=%s", market, symbol, exc)
@@ -433,7 +536,7 @@ def _fast_discover_symbol(market: str, symbol: str, name: str) -> tuple[Any, Any
             signal = analyze_market(symbol, history, 0.0)
             if signal is None:
                 continue
-            setattr(signal, "market_data_route", dict(getattr(history, "attrs", {}).get("provider_route", {}) or {}))
+            _attach_execution_metadata(signal, history, "fast")
             signal = _normalize_starter_action(signal)
             signal.reason = (
                 f"Always-on {interval} market pulse. " + str(getattr(signal, "reason", ""))
@@ -475,8 +578,9 @@ def fast_scan_market(market: str) -> list[Any]:
             if result is None:
                 continue
             signal, history = result
+            route = _attach_execution_metadata(signal, history, "fast")
             signals.append(signal)
-            prices[symbol] = _quote_payload_from_history(symbol, history, float(getattr(signal, "price", 0.0) or 0.0))
+            prices[symbol] = _quote_payload_from_history(symbol, history, getattr(signal, "price", None), scan_type="fast")
             try:
                 signal_created_at = utc_now()
                 setattr(signal, "created_at", signal_created_at)
@@ -487,19 +591,21 @@ def fast_scan_market(market: str) -> list[Any]:
                     signal.score,
                     signal.action,
                     signal.confidence,
-                    signal.to_dict()
-                    | {
-                        "always_on_fast_scan": True,
-                        "market_data_route": dict(getattr(history, "attrs", {}).get("provider_route", {}) or {}),
-                        "trade_configuration": {
+                    _signal_payload(
+                        signal,
+                        route,
+                        "fast",
+                        always_on_fast_scan=True,
+                        trade_configuration={
                             "mode": EXECUTION_MODE,
                             "scan": "fast",
+                            "scan_type": "fast",
                             "action": str(signal.action),
                             "confidence": float(signal.confidence),
                             "score": float(signal.score),
                             "entry_price": float(signal.price),
                         },
-                    },
+                    ),
                     created_at=signal_created_at,
                 )
                 setattr(signal, "signal_id", signal_id)
@@ -507,7 +613,7 @@ def fast_scan_market(market: str) -> list[Any]:
                     history,
                     3 if market == "cash" else 1,
                     market=market,
-                    source_interval=dict(getattr(history, "attrs", {}).get("provider_route", {}) or {}).get("interval", "1d"),
+                    source_interval=route.get("interval", "1d"),
                 )
                 if forecast:
                     save_forecast(market, symbol, forecast, scan_type="fast", signal_id=signal_id, signal_created_at=signal_created_at)
@@ -622,15 +728,16 @@ def scan_market(market: str) -> list[Any]:
             signal = analyze_market(symbol, history, news.sentiment)
             if signal is None:
                 continue
-            setattr(signal, "market_data_route", dict(getattr(history, "attrs", {}).get("provider_route", {}) or {}))
+            route = _attach_execution_metadata(signal, history, "deep")
             council = deliberate(signal, news.headlines[:8])
             signal.score = council["score"]
             signal.action = council["action"]
             signal.confidence = council["confidence"]
             signal = _normalize_starter_action(signal)
+            route = _attach_execution_metadata(signal, history, "deep")
             signal.reason = (str(signal.reason) + " " + str(council["explanation"])).strip()
             signals.append(signal)
-            prices[symbol] = _quote_payload_from_history(symbol, history, float(signal.price))
+            prices[symbol] = _quote_payload_from_history(symbol, history, getattr(signal, "price", None), scan_type="deep")
             signal_created_at = utc_now()
             setattr(signal, "created_at", signal_created_at)
             signal_id = save_json_signal(
@@ -640,21 +747,24 @@ def scan_market(market: str) -> list[Any]:
                 signal.score,
                 signal.action,
                 signal.confidence,
-                signal.to_dict()
-                | {
-                    "headlines": news.headlines[:8],
-                    "news_source": news.source,
-                    "news_priority": priority,
-                    "market_data_route": dict(getattr(history, "attrs", {}).get("provider_route", {}) or {}),
-                    "trade_configuration": {
+                _signal_payload(
+                    signal,
+                    route,
+                    "deep",
+                    headlines=news.headlines[:8],
+                    news_source=news.source,
+                    news_priority=priority,
+                    trade_configuration={
                         "mode": EXECUTION_MODE,
+                        "scan": "deep",
+                        "scan_type": "deep",
                         "action": str(signal.action),
                         "confidence": float(signal.confidence),
                         "score": float(signal.score),
                         "entry_price": float(signal.price),
                     },
-                    "oracle_council": council,
-                },
+                    oracle_council=council,
+                ),
                 created_at=signal_created_at,
             )
             setattr(signal, "signal_id", signal_id)
@@ -662,7 +772,7 @@ def scan_market(market: str) -> list[Any]:
                 history,
                 5,
                 market=market,
-                source_interval=dict(getattr(history, "attrs", {}).get("provider_route", {}) or {}).get("interval", "1d"),
+                source_interval=route.get("interval", "1d"),
             )
             if forecast:
                 save_forecast(market, symbol, forecast, scan_type="deep", signal_id=signal_id, signal_created_at=signal_created_at)
