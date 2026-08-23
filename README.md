@@ -87,6 +87,16 @@ GLOBAL_ETF_SYMBOLS_PER_CYCLE=8
 GLOBAL_MAJOR_MOVER_MIN_CHANGE_PCT=3.0
 GLOBAL_GAP_MOVER_MIN_CHANGE_PCT=2.0
 GLOBAL_UNUSUAL_VOLUME_MIN_RATIO=1.8
+GLOBAL_PIT_MODE=true
+GLOBAL_PIT_FAST_LOOP_SECONDS=5
+GLOBAL_PIT_MARKET_LOOP_SECONDS=60
+GLOBAL_PIT_DEEP_RESEARCH_SECONDS=900
+GLOBAL_PIT_TARGET_INVESTED_PCT=0.95
+GLOBAL_PIT_RESERVE_PCT=0.05
+GLOBAL_PIT_PREFERRED_POSITION_PCT=0.08
+GLOBAL_PIT_MAX_POSITION_PCT=0.10
+GLOBAL_PIT_ROTATION_MIN_ADVANTAGE_PCT=2.5
+GLOBAL_PIT_MAX_PARALLEL_LANES=9
 PENNY_STOCK_MIN_PRICE=0.50
 PENNY_STOCK_MAX_PRICE=5.00
 PENNY_STOCK_ENABLED=true
@@ -117,6 +127,8 @@ Lower intervals increase provider traffic and can trigger rate limits. The defau
 ## Production data scanner
 
 The stock worker now combines the fixed watchlist with dynamic discovery. Every scan keeps recurring coverage for GOOGL, GOOG, AMZN, AAPL, MSFT, NVDA and other core stocks, plus major ETFs. The rotating universe also supports blue-chip core stocks, large caps, mid caps, small caps, qualified penny stocks, ETFs, major gainers, major losers, gap movers, unusual-volume names, and global liquid leaders.
+
+V38 Global Pit mode adds a continuously updated global financial universe, attention scoring, scanning lanes, and one global opportunity queue. The universe uses static watchlists only as seeds and can include equities, ETFs, crypto, forex, commodities, rates, indexes, futures, and options intelligence. Unsupported asset classes remain intelligence-only and cannot be routed to fake paper-broker execution. The capital planner targets 95% invested / 5% reserve only when enough verified, qualified paper-tradeable opportunities pass freshness, liquidity, concentration, and existing hard risk gates. Dashboard Oracle Pit labels are driven by persisted scanner, research, learning, allocation, and rotation state; unknown or delayed data is never labeled live.
 
 Major movers are discovered first through supported provider mover/snapshot capabilities, including Polygon stock snapshots, Alpha Vantage top gainers/losers/most-active data, and EODHD screener signals when those configured plans expose them. The scanner falls back to rotating price-history discovery and ranks one-day change, five-day change, relative volume, volatility, and average dollar volume. Provider errors, rate limits, and unavailable symbols enter temporary cooldowns so a bad symbol such as an unavailable crypto pair does not stop either worker. Candidate rows older than `GLOBAL_CANDIDATE_TTL_SECONDS` are ignored or removed so stale high scores cannot dominate current opportunities.
 

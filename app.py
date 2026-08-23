@@ -33,6 +33,7 @@ from dashboard_helpers import (
 from database import bootstrap_database_with_lock, database_ready, database_storage_report, row, rows
 from earnings_calendar import mobile_card_lines, prepare_events, table_rows
 from market_data import get_history
+from global_pit_engine import capital_deployment_plan, dashboard_activity_labels
 from migrations import run_migrations
 from portfolio_advisor import analyze_portfolio, simulate_trade
 from paper_broker import build_account
@@ -385,6 +386,67 @@ def render_trade_history_section(trades: list[dict[str, Any]], key_prefix: str) 
         st.dataframe(readable[detail_columns], width="stretch", hide_index=True)
 
 
+def render_global_pit_section() -> None:
+    st.markdown("<div class='section-title'>GLOBAL WALL STREET PIT</div>", unsafe_allow_html=True)
+    universe_count = len(global_pit_universe)
+    asset_classes = {str(row.get("asset_class") or "Unknown") for row in global_pit_universe}
+    countries = {str(row.get("country") or "Unknown") for row in global_pit_universe}
+    exchanges = {str(row.get("exchange") or "Unknown") for row in global_pit_universe}
+    qualified = [row for row in global_pit_queue if row.get("qualified_for_capital")]
+    combined_equity_local = stock_metrics["equity"] + crypto_metrics["equity"]
+    combined_cash_local = stock_metrics["cash"] + crypto_metrics["cash"]
+    plan = capital_deployment_plan(global_pit_queue, combined_equity_local, combined_cash_local, stock_positions + crypto_positions)
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Markets Under Surveillance", universe_count)
+    c2.metric("Asset Classes", len(asset_classes))
+    c3.metric("Countries", len(countries))
+    c4.metric("Exchanges", len(exchanges))
+    cap1, cap2, cap3 = st.columns(3)
+    cap1.metric("Invested %", f"{plan['current_invested_pct'] * 100:.1f}%")
+    cap2.metric("Cash Reserve Target", f"{plan['reserve_pct'] * 100:.1f}%")
+    cap3.metric("Qualified Allocations", plan["qualified_assets_used"])
+    activity = dashboard_activity_labels({
+        **global_pit_activity,
+        "qualified_allocations": len(qualified),
+        "execution_enabled": False,
+    })
+    st.markdown("**Oracle Activity**")
+    st.dataframe(pd.DataFrame([{"Activity": key, "Status": value} for key, value in activity.items()]), width="stretch", hide_index=True)
+    if global_pit_queue:
+        st.markdown("**Hot Right Now**")
+        rows_for_view = []
+        for row in global_pit_queue[:15]:
+            rows_for_view.append({
+                "Rank": row.get("payload", {}).get("global_rank") if isinstance(row.get("payload"), dict) else row.get("symbol"),
+                "Symbol": row.get("symbol"),
+                "Asset Class": row.get("asset_class"),
+                "Sector": row.get("sector"),
+                "Country": row.get("country"),
+                "Attention": row.get("attention_level"),
+                "Score": round(as_float(row.get("opportunity_score")), 1),
+                "Data": row.get("data_label"),
+                "Mode": "Paper candidate" if row.get("paper_execution_supported") else "Intelligence only",
+            })
+        st.dataframe(pd.DataFrame(rows_for_view), width="stretch", hide_index=True)
+    else:
+        st.info("Global Pit has not persisted a queue yet. It will show activity only after scanners record real observations.")
+    if global_pit_map:
+        st.markdown("**Global Capital Flow**")
+        st.dataframe(pd.DataFrame(global_pit_map), width="stretch", hide_index=True)
+    if global_learning:
+        st.markdown("**Latest Learning**")
+        latest = global_learning[0]
+        st.write(
+            f"{latest.get('feature') or 'Pattern'} observation for {latest.get('symbol') or 'market'}: "
+            f"predicted {as_float(latest.get('predicted_move_pct')):+.1f}%, "
+            f"realized {as_float(latest.get('actual_move_pct')):+.1f}%."
+        )
+    with st.expander("Show Details"):
+        st.caption("Global Pit scans broadly for intelligence. Unsupported asset classes are not routed to fake broker execution.")
+        st.write(f"Asset classes seen: {', '.join(sorted(asset_classes)) if asset_classes else 'waiting for persisted scans'}")
+        st.write(f"Broker submission enabled: {False}")
+
+
 def simple_portfolio_card(
     name: str,
     metrics: dict[str, Any],
@@ -482,6 +544,11 @@ alerts = safe_rows("SELECT * FROM alerts WHERE acknowledged=0 ORDER BY id DESC L
 events = safe_rows("SELECT * FROM intelligence_events ORDER BY id DESC LIMIT 100")
 workers = safe_rows("SELECT * FROM market_worker_status ORDER BY market")
 recent_trades = safe_rows("SELECT * FROM trades ORDER BY id DESC LIMIT 50")
+global_pit_universe = safe_rows("SELECT * FROM global_financial_universe ORDER BY updated_at DESC LIMIT 500")
+global_pit_queue = safe_rows("SELECT * FROM global_opportunity_queue ORDER BY opportunity_score DESC, updated_at DESC LIMIT 50")
+global_pit_activity = safe_row("SELECT * FROM global_pit_activity WHERE id=1")
+global_pit_map = safe_rows("SELECT * FROM global_market_map ORDER BY strength_score DESC LIMIT 25")
+global_learning = safe_rows("SELECT * FROM global_learning_observations ORDER BY id DESC LIMIT 10")
 
 stock_health = analyze_portfolio(
     stock_metrics["cash"], stock_positions, stock_metrics["margin_debt"],
@@ -506,7 +573,7 @@ with st.sidebar:
     st.caption("The AI Chief Investment Officer")
     page = st.radio(
         "Main navigation",
-        ["Dashboard", "Markets", "Portfolios", "Oracle", "Intelligence", "Professional"],
+        ["Dashboard", "Global Pit", "Markets", "Portfolios", "Oracle", "Intelligence", "Professional"],
         label_visibility="collapsed",
     )
     st.divider()
@@ -579,7 +646,10 @@ if show_advanced_chrome:
     )
     status_cols[3].metric("Auto recovery", "Ready" if error_total == 0 else "Recovering", f"Cycle errors: {error_total}")
 
-if page == "Dashboard":
+if page == "Global Pit":
+    render_global_pit_section()
+
+elif page == "Dashboard":
     top = buy_decisions[0] if buy_decisions else (decisions[0] if decisions else None)
     stock_scores = simple_portfolio_scores(stock_metrics, stock_positions, len([d for d in buy_decisions if d.get("market") == "cash"]))
     crypto_scores = simple_portfolio_scores(crypto_metrics, crypto_positions, len([d for d in buy_decisions if d.get("market") == "crypto"]))
