@@ -7,7 +7,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from collections import defaultdict
 import time
-from typing import Callable
+from typing import Any, Callable
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import pandas as pd
@@ -19,14 +19,20 @@ from cache import cached_call, get as cache_get, make_key as cache_make_key, set
 from config import (
     API_CACHE_TTL_SECONDS,
     ALPHA_VANTAGE_PREMIUM,
+    FINNHUB_CRYPTO_EXCHANGES,
     PROVIDER_CAPABILITY_DAILY_BUDGETS,
+    PROVIDER_DAILY_REQUEST_BUDGETS,
     PROVIDER_PERMISSION_COOLDOWN_SECONDS,
     PROVIDER_RATE_LIMIT_COOLDOWN_SECONDS,
     REALTIME_CACHE_TTL_SECONDS,
     UNAVAILABLE_SYMBOL_COOLDOWN_SECONDS,
 )
 from asset_routing import infer_asset_class
-from global_adaptive_engine import reserve_provider_budget_live
+from global_adaptive_engine import (
+    mark_provider_cooldown_live,
+    provider_cooldown_active_live,
+    reserve_provider_budget_live,
+)
 from provider_capabilities import (
     capability_available,
     classify_plan_limited_status,
@@ -44,6 +50,7 @@ EODHD_US_EXCHANGES = {"US", "NYSE", "NASDAQ", "NYSE ARCA", "NYSEARCA", "AMEX", "
 EODHD_STOCK_TYPES = {"common stock", "common share", "stock", "preferred stock", "preferred share"}
 EODHD_ETF_TYPES = {"etf", "fund", "mutual fund"}
 EODHD_EQUITY_TYPES = EODHD_STOCK_TYPES | EODHD_ETF_TYPES
+CRYPTO_QUOTES = ("USD", "USDT", "USDC")
 
 
 @dataclass
@@ -70,10 +77,14 @@ class RoutedHistory:
             "records": int(len(self.frame)),
             "requested_symbol": self.frame.attrs.get("requested_symbol"),
             "provider_symbol": self.frame.attrs.get("provider_symbol"),
+            "provider_native_symbol": self.frame.attrs.get("provider_native_symbol"),
             "period": self.frame.attrs.get("period"),
             "interval": self.frame.attrs.get("interval"),
             "source_identity": self.frame.attrs.get("source_identity"),
             "cache_identity": self.frame.attrs.get("cache_identity"),
+            "quote_timestamp": self.frame.attrs.get("quote_timestamp"),
+            "quote_age_seconds": self.frame.attrs.get("quote_age_seconds"),
+            "source_mode": self.frame.attrs.get("source_mode"),
             "quote_verified": self.frame.attrs.get("quote_verified") is True,
         }
 
@@ -83,6 +94,56 @@ SECRET_QUERY_KEYS = {"api_token", "apikey", "token", "key", "authorization"}
 
 def normalize_symbol(value: object) -> str:
     return str(value or "").upper().strip()
+
+
+def canonical_crypto_symbol(value: object) -> str:
+    symbol = normalize_symbol(value).replace("/", "-")
+    if not symbol:
+        return ""
+    if symbol.endswith(".CC"):
+        symbol = symbol[:-3]
+    if "-" in symbol:
+        base, quote = symbol.split("-", 1)
+        quote = "USD" if quote in {"USDT", "USDC"} else quote
+        return f"{base}-{quote}" if base and quote else ""
+    for quote in CRYPTO_QUOTES:
+        if symbol.endswith(quote) and len(symbol) > len(quote):
+            base = symbol[: -len(quote)]
+            return f"{base}-USD" if quote in {"USD", "USDT", "USDC"} else f"{base}-{quote}"
+    return symbol
+
+
+def polygon_crypto_native_symbol(symbol: str) -> str | None:
+    canonical = canonical_crypto_symbol(symbol)
+    if "-" not in canonical:
+        return None
+    base, quote = canonical.split("-", 1)
+    if quote != "USD":
+        return None
+    return f"X:{base}USD"
+
+
+def eodhd_crypto_native_symbol(symbol: str) -> str | None:
+    canonical = canonical_crypto_symbol(symbol)
+    if "-" not in canonical:
+        return None
+    base, quote = canonical.split("-", 1)
+    if quote != "USD":
+        return None
+    return f"{base}-USD.CC"
+
+
+def native_crypto_to_canonical(provider: str, native_symbol: object) -> str:
+    native = normalize_symbol(native_symbol)
+    provider_key = str(provider or "").lower()
+    if provider_key == "polygon" and native.startswith("X:"):
+        return canonical_crypto_symbol(native[2:])
+    if provider_key == "eodhd" and native.endswith(".CC"):
+        return canonical_crypto_symbol(native)
+    if provider_key == "finnhub" and ":" in native:
+        pair = native.split(":", 1)[1]
+        return canonical_crypto_symbol(pair)
+    return canonical_crypto_symbol(native)
 
 
 def _symbol_matches(requested: str, provider_symbol: object) -> bool:
@@ -119,6 +180,7 @@ def _stamp_frame(
     adjusted: bool,
     extended_hours: bool,
     quote_verified: bool = False,
+    provider_native_symbol: str | None = None,
 ) -> pd.DataFrame:
     out = frame.copy(deep=True)
     out.attrs.clear()
@@ -126,6 +188,7 @@ def _stamp_frame(
         {
             "requested_symbol": normalize_symbol(requested_symbol),
             "provider_symbol": normalize_symbol(provider_symbol),
+            "provider_native_symbol": normalize_symbol(provider_native_symbol or provider_symbol),
             "provider": provider,
             "period": str(period),
             "interval": str(interval),
@@ -185,6 +248,7 @@ def _verified_history(
     adjusted: bool = True,
     extended_hours: bool = True,
     identity_verified: bool = False,
+    provider_native_symbol: str | None = None,
 ) -> pd.DataFrame:
     if not requested_symbol or not _symbol_matches(requested_symbol, provider_symbol):
         return pd.DataFrame()
@@ -201,6 +265,7 @@ def _verified_history(
         adjusted,
         extended_hours,
         identity_verified,
+        provider_native_symbol,
     )
 
 
@@ -303,6 +368,38 @@ def _provider_status_from_exception(exc: Exception) -> int | None:
     return None
 
 
+def _provider_budget(provider: str) -> int:
+    return int(PROVIDER_DAILY_REQUEST_BUDGETS.get(str(provider or "").lower(), 0) or 0)
+
+
+def _capability_budget(provider: str, capability: str) -> int | None:
+    return PROVIDER_CAPABILITY_DAILY_BUDGETS.get((str(provider or "").lower(), capability))
+
+
+def provider_supports_capability(provider: str, capability: str) -> bool:
+    budget = _capability_budget(provider, capability)
+    return budget is not None and int(budget or 0) > 0
+
+
+def crypto_execution_provider_redundancy(settings: dict[str, str] | None = None) -> dict[str, Any]:
+    settings = settings or get_api_settings()
+    providers = []
+    for provider, key_name in (
+        ("Polygon", "POLYGON_API_KEY"),
+        ("Finnhub", "FINNHUB_API_KEY"),
+        ("EODHD", "EODHD_API_KEY"),
+    ):
+        if provider_supports_capability(provider, "crypto") and settings.get(key_name):
+            providers.append(provider)
+    if len(providers) >= 2:
+        status = "READY"
+    elif len(providers) == 1:
+        status = "DEGRADED"
+    else:
+        status = "UNAVAILABLE"
+    return {"status": status, "verified_provider_count": len(providers), "providers": providers}
+
+
 def _record_failure(provider: str, status: str, symbol: str) -> None:
     global _last_failure_log
     _failure_summary[(provider, status)].add(symbol)
@@ -364,11 +461,16 @@ def _polygon_interval(interval: str) -> tuple[int, str]:
 
 
 def _polygon(symbol: str, period: str, interval: str, key: str) -> pd.DataFrame:
+    is_crypto = infer_asset_class(symbol) == "crypto"
+    requested_symbol = canonical_crypto_symbol(symbol) if is_crypto else normalize_symbol(symbol)
+    provider_native_symbol = polygon_crypto_native_symbol(requested_symbol) if is_crypto else requested_symbol
+    if not provider_native_symbol:
+        return pd.DataFrame()
     multiplier, timespan = _polygon_interval(interval)
     end = datetime.now(timezone.utc).date()
     days = _period_days(period)
     start = pd.Timestamp(end) - pd.Timedelta(days=days)
-    url = f"https://api.polygon.io/v2/aggs/ticker/{symbol}/range/{multiplier}/{timespan}/{start.date()}/{end}"
+    url = f"https://api.polygon.io/v2/aggs/ticker/{provider_native_symbol}/range/{multiplier}/{timespan}/{start.date()}/{end}"
     response = requests.get(
         url,
         params={"adjusted": "true", "sort": "asc", "limit": 50000, "apiKey": key},
@@ -383,11 +485,12 @@ def _polygon(symbol: str, period: str, interval: str, key: str) -> pd.DataFrame:
     return _verified_history(
         frame.rename(columns={"o": "Open", "h": "High", "l": "Low", "c": "Close", "v": "Volume"}),
         "Polygon",
-        symbol,
-        symbol,
+        requested_symbol,
+        requested_symbol,
         period,
         interval,
         identity_verified=True,
+        provider_native_symbol=provider_native_symbol,
     )
 
 
@@ -446,10 +549,18 @@ def _eodhd_symbol_mapping(symbol: str, key: str) -> dict[str, Any] | None:
 def _eodhd(symbol: str, period: str, interval: str, key: str) -> pd.DataFrame:
     if _is_intraday(interval):
         return pd.DataFrame()
-    mapping = _eodhd_symbol_mapping(symbol, key)
-    if not mapping:
-        return pd.DataFrame()
-    code = mapping["provider_code"]
+    is_crypto = infer_asset_class(symbol) == "crypto"
+    if is_crypto:
+        requested_symbol = canonical_crypto_symbol(symbol)
+        code = eodhd_crypto_native_symbol(requested_symbol)
+        if not code or native_crypto_to_canonical("EODHD", code) != requested_symbol:
+            return pd.DataFrame()
+    else:
+        mapping = _eodhd_symbol_mapping(symbol, key)
+        if not mapping:
+            return pd.DataFrame()
+        requested_symbol = mapping["requested_symbol"]
+        code = mapping["provider_code"]
     start = (pd.Timestamp.utcnow() - pd.Timedelta(days=_period_days(period))).date()
     response = requests.get(
         f"https://eodhd.com/api/eod/{code}",
@@ -465,11 +576,12 @@ def _eodhd(symbol: str, period: str, interval: str, key: str) -> pd.DataFrame:
     return _verified_history(
         frame.rename(columns={"open": "Open", "high": "High", "low": "Low", "close": "Close", "volume": "Volume"}),
         "EODHD",
-        symbol,
-        mapping["requested_symbol"],
+        requested_symbol,
+        requested_symbol,
         period,
         interval,
         identity_verified=True,
+        provider_native_symbol=code,
     )
 
 
@@ -590,12 +702,51 @@ def _finnhub_resolution(interval: str) -> str:
     return "D"
 
 
+def _load_finnhub_crypto_symbols(exchange: str, key: str) -> list[dict[str, Any]]:
+    response = requests.get(
+        "https://finnhub.io/api/v1/crypto/symbol",
+        params={"exchange": exchange, "token": key},
+        timeout=12,
+    )
+    response.raise_for_status()
+    data = response.json()
+    return data if isinstance(data, list) else []
+
+
+def _finnhub_crypto_symbol(symbol: str, key: str) -> str | None:
+    requested = canonical_crypto_symbol(symbol)
+    if "-" not in requested:
+        return None
+    for exchange in FINNHUB_CRYPTO_EXCHANGES:
+        records = cached_call(
+            f"finnhub_crypto_symbols_{exchange}",
+            API_CACHE_TTL_SECONDS * 12,
+            _load_finnhub_crypto_symbols,
+            exchange,
+            key,
+        )
+        for record in records:
+            candidate = normalize_symbol(record.get("symbol") or record.get("displaySymbol"))
+            if not candidate:
+                continue
+            native = candidate if ":" in candidate else f"{exchange}:{candidate.replace('/', '')}"
+            if native_crypto_to_canonical("Finnhub", native) == requested:
+                return native
+    return None
+
+
 def _finnhub(symbol: str, period: str, interval: str, key: str) -> pd.DataFrame:
+    is_crypto = infer_asset_class(symbol) == "crypto"
+    requested_symbol = canonical_crypto_symbol(symbol) if is_crypto else normalize_symbol(symbol)
+    endpoint = "https://finnhub.io/api/v1/crypto/candle" if is_crypto else "https://finnhub.io/api/v1/stock/candle"
+    provider_native_symbol = _finnhub_crypto_symbol(requested_symbol, key) if is_crypto else requested_symbol
+    if not provider_native_symbol:
+        return pd.DataFrame()
     now = int(pd.Timestamp.utcnow().timestamp())
     start = now - _period_days(period) * 86400
     response = requests.get(
-        "https://finnhub.io/api/v1/stock/candle",
-        params={"symbol": symbol, "resolution": _finnhub_resolution(interval), "from": start, "to": now, "token": key},
+        endpoint,
+        params={"symbol": provider_native_symbol, "resolution": _finnhub_resolution(interval), "from": start, "to": now, "token": key},
         timeout=12,
     )
     response.raise_for_status()
@@ -612,7 +763,16 @@ def _finnhub(symbol: str, period: str, interval: str, key: str) -> pd.DataFrame:
         },
         index=pd.to_datetime(data.get("t", []), unit="s", utc=True),
     )
-    return _verified_history(frame, "Finnhub", symbol, symbol, period, interval, identity_verified=True)
+    return _verified_history(
+        frame,
+        "Finnhub",
+        requested_symbol,
+        requested_symbol,
+        period,
+        interval,
+        identity_verified=True,
+        provider_native_symbol=provider_native_symbol,
+    )
 
 
 def route_history(
@@ -643,6 +803,7 @@ def route_history(
             ("Finnhub", "FINNHUB_API_KEY", _finnhub),
             ("EODHD", "EODHD_API_KEY", _eodhd),
         ]
+        routes = [route for route in routes if provider_supports_capability(route[0], "crypto")]
     elif intraday:
         routes = [
             ("Polygon", "POLYGON_API_KEY", _polygon),
@@ -660,6 +821,10 @@ def route_history(
     for provider, key_name, function in routes:
         if not capability_available(provider, capability):
             attempts.append(ProviderAttempt(provider, False, 0, "capability_cooldown_or_unsupported"))
+            continue
+        shared_cooldown = provider_cooldown_active_live(provider)
+        if shared_cooldown.get("active"):
+            attempts.append(ProviderAttempt(provider, False, 0, "provider_shared_cooldown", str(shared_cooldown.get("reason") or "provider cooldown")))
             continue
         if _cooldown_active(_provider_cooldowns, provider):
             attempts.append(ProviderAttempt(provider, False, 0, "provider_cooldown"))
@@ -686,6 +851,16 @@ def route_history(
             if cached_frame is not None:
                 frame = cached_frame
             else:
+                provider_wide_budget = reserve_provider_budget_live(
+                    provider,
+                    "__provider__",
+                    daily_budget=_provider_budget(provider),
+                    entitlement="configured",
+                    data_mode="provider-wide",
+                )
+                if not provider_wide_budget.get("reserved"):
+                    attempts.append(ProviderAttempt(provider, False, 0, "provider_budget_blocked", str(provider_wide_budget.get("reason") or "provider budget unavailable")))
+                    continue
                 budget = reserve_provider_budget_live(provider, capability, daily_budget=daily_budget, entitlement="configured", data_mode="intraday" if intraday else "historical")
                 if not budget.get("reserved"):
                     attempts.append(ProviderAttempt(provider, False, 0, "provider_budget_blocked", str(budget.get("reason") or "budget unavailable")))
@@ -725,6 +900,11 @@ def route_history(
                 status = "rate_limited" if status_code == 429 or "429" in text or "limit" in text.lower() else "degraded"
             if status == "rate_limited":
                 _mark_provider_limited(provider)
+                mark_provider_cooldown_live(
+                    provider,
+                    seconds=PROVIDER_RATE_LIMIT_COOLDOWN_SECONDS,
+                    reason=text or "provider rate limited",
+                )
             attempts.append(ProviderAttempt(provider, False, 0, status, text))
             _record_failure(provider, status, symbol)
             mark_symbol_unavailable(

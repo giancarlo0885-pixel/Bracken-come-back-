@@ -291,6 +291,14 @@ def test_postgres_v39_provider_budget_shared_ledger_exhausts_once():
     assert second["reserved"] is False
 
 
+def test_provider_wide_cooldown_db_helpers_share_provider_state():
+    now = datetime.now(timezone.utc)
+    conn = FakeConn({"cooldown_until": (now + timedelta(minutes=5)).isoformat(), "last_failure": "429 rate limit"})
+    active = v39.provider_cooldown_active_db(conn, "Polygon", now=now)
+    assert active["active"] is True
+    assert "429" in active["reason"]
+
+
 
 def test_forecast_outcome_parses_timezone_aware_timestamps_not_strings():
     decision = {"generated_at": "2026-01-02T10:30:00+01:00", "price": 100, "expected_move_pct": 2}

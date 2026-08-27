@@ -194,6 +194,7 @@ def _quote_payload_from_history(symbol: str, history: Any, price: Any = None, *,
     normalized_symbol = str(symbol or "").upper().strip()
     requested_symbol = str(route.get("requested_symbol") or "").upper().strip()
     provider_symbol = str(route.get("provider_symbol") or "").upper().strip()
+    provider_native_symbol = str(route.get("provider_native_symbol") or provider_symbol).upper().strip()
     quote_verified = route.get("quote_verified") is True
     identity_verified = bool(
         normalized_symbol
@@ -205,6 +206,7 @@ def _quote_payload_from_history(symbol: str, history: Any, price: Any = None, *,
         "symbol": normalized_symbol,
         "requested_symbol": requested_symbol,
         "provider_symbol": provider_symbol,
+        "provider_native_symbol": provider_native_symbol,
         "provider": route.get("provider"),
         "price": execution_price,
         "quote_timestamp": quote_timestamp,
@@ -244,6 +246,7 @@ def _attach_execution_metadata(signal: Any, history: Any, scan_type: str) -> dic
     setattr(signal, "source_quote_timestamp", route.get("quote_timestamp"))
     setattr(signal, "requested_symbol", route.get("requested_symbol"))
     setattr(signal, "provider_symbol", route.get("provider_symbol"))
+    setattr(signal, "provider_native_symbol", route.get("provider_native_symbol"))
     setattr(signal, "provider", route.get("provider"))
     setattr(signal, "quote_verified", route.get("quote_verified") is True)
     setattr(signal, "quote_age_seconds", route.get("quote_age_seconds"))
@@ -261,6 +264,7 @@ def _signal_payload(signal: Any, route: dict[str, Any], scan_type: str, **extra:
             "quote_age_seconds": route.get("quote_age_seconds"),
             "requested_symbol": route.get("requested_symbol"),
             "provider_symbol": route.get("provider_symbol"),
+            "provider_native_symbol": route.get("provider_native_symbol"),
             "provider": route.get("provider"),
             "quote_verified": route.get("quote_verified") is True,
             "market_data_route": route,

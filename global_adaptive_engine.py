@@ -427,6 +427,54 @@ def reserve_provider_budget_db(conn: Any, provider: str, capability: str, *, dai
     return {"reserved": True, "remaining": remaining - 1, "provider": provider, "capability": capability}
 
 
+PROVIDER_WIDE_CAPABILITY = "__provider__"
+
+
+def provider_cooldown_active_db(conn: Any, provider: str, capability: str = PROVIDER_WIDE_CAPABILITY, *, now: datetime | None = None) -> dict[str, Any]:
+    now_dt = now or datetime.now(timezone.utc)
+    row = conn.execute(
+        """SELECT cooldown_until, last_failure FROM provider_budget_ledger
+           WHERE provider=%s AND capability=%s AND utc_date=%s""",
+        (provider, capability, now_dt.date().isoformat()),
+    ).fetchone()
+    if not row:
+        return {"active": False}
+    cooldown_until = _parse_aware_datetime(row.get("cooldown_until"))
+    if cooldown_until and cooldown_until > now_dt.astimezone(timezone.utc):
+        return {
+            "active": True,
+            "cooldown_until": cooldown_until.isoformat(),
+            "reason": row.get("last_failure") or "provider cooldown",
+        }
+    return {"active": False}
+
+
+def mark_provider_cooldown_db(
+    conn: Any,
+    provider: str,
+    *,
+    seconds: int,
+    reason: str = "provider cooldown",
+    capability: str = PROVIDER_WIDE_CAPABILITY,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    now_dt = now or datetime.now(timezone.utc)
+    timestamp = now_dt.isoformat()
+    utc_date = now_dt.date().isoformat()
+    cooldown_until = (now_dt + timedelta(seconds=max(1, int(seconds)))).isoformat()
+    conn.execute(
+        """INSERT INTO provider_budget_ledger
+           (provider,capability,utc_date,entitlement,daily_budget,requests_used,remaining_budget,last_failure,cooldown_until,data_mode,updated_at)
+           VALUES (%s,%s,%s,%s,0,0,0,%s,%s,%s,%s)
+           ON CONFLICT (provider, capability, utc_date) DO UPDATE SET
+               last_failure=EXCLUDED.last_failure,
+               cooldown_until=EXCLUDED.cooldown_until,
+               updated_at=EXCLUDED.updated_at""",
+        (provider, capability, utc_date, "configured", reason[:500], cooldown_until, "shared_cooldown", timestamp),
+    )
+    return {"active": True, "cooldown_until": cooldown_until, "reason": reason}
+
+
 def reserve_provider_budget_live(provider: str, capability: str, *, daily_budget: int, entitlement: str = "configured", data_mode: str = "unknown") -> dict[str, Any]:
     if os.getenv("DATABASE_URL", "").strip():
         try:
@@ -436,6 +484,28 @@ def reserve_provider_budget_live(provider: str, capability: str, *, daily_budget
         except Exception as exc:
             return {"reserved": False, "reason": f"shared provider ledger unavailable; fail closed: {exc.__class__.__name__}"}
     return {"reserved": True, "reason": "DATABASE_URL not configured; shared provider ledger not required for local mode"}
+
+
+def provider_cooldown_active_live(provider: str, capability: str = PROVIDER_WIDE_CAPABILITY) -> dict[str, Any]:
+    if os.getenv("DATABASE_URL", "").strip():
+        try:
+            from database import connect
+            with connect() as conn:
+                return provider_cooldown_active_db(conn, provider, capability)
+        except Exception as exc:
+            return {"active": True, "reason": f"shared provider cooldown unavailable; fail closed: {exc.__class__.__name__}"}
+    return {"active": False}
+
+
+def mark_provider_cooldown_live(provider: str, *, seconds: int, reason: str = "provider cooldown", capability: str = PROVIDER_WIDE_CAPABILITY) -> dict[str, Any]:
+    if os.getenv("DATABASE_URL", "").strip():
+        try:
+            from database import connect
+            with connect() as conn:
+                return mark_provider_cooldown_db(conn, provider, seconds=seconds, reason=reason, capability=capability)
+        except Exception as exc:
+            return {"active": True, "reason": f"shared provider cooldown unavailable; fail closed: {exc.__class__.__name__}"}
+    return {"active": True, "reason": reason}
 
 
 def persist_decision_event(conn: Any, *, market: str, symbol: str, stage: str, decision_id: str | None = None, payload: dict[str, Any] | None = None, rejection_reason: str | None = None) -> str:
