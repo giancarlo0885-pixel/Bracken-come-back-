@@ -32,8 +32,23 @@ ALPHA_VANTAGE_PREMIUM = os.getenv("ALPHA_VANTAGE_PREMIUM", "false").lower() == "
 POLYGON_DAILY_REQUEST_BUDGET = max(0, int(os.getenv("POLYGON_DAILY_REQUEST_BUDGET", "1000")))
 FINNHUB_DAILY_REQUEST_BUDGET = max(0, int(os.getenv("FINNHUB_DAILY_REQUEST_BUDGET", "200")))
 EODHD_DAILY_REQUEST_BUDGET = max(0, int(os.getenv("EODHD_DAILY_REQUEST_BUDGET", "200")))
+FINNHUB_CRYPTO_DAILY_REQUEST_BUDGET = max(0, int(os.getenv("FINNHUB_CRYPTO_DAILY_REQUEST_BUDGET", "0")))
+EODHD_CRYPTO_DAILY_REQUEST_BUDGET = max(0, int(os.getenv("EODHD_CRYPTO_DAILY_REQUEST_BUDGET", "0")))
 NEWSAPI_DAILY_REQUEST_BUDGET = max(0, int(os.getenv("NEWSAPI_DAILY_REQUEST_BUDGET", "40")))
 YAHOO_DAILY_REQUEST_BUDGET = max(0, int(os.getenv("YAHOO_DAILY_REQUEST_BUDGET", "0")))
+PROVIDER_DAILY_REQUEST_BUDGETS = {
+    "alpha vantage": ALPHA_VANTAGE_DAILY_REQUEST_BUDGET,
+    "polygon": POLYGON_DAILY_REQUEST_BUDGET,
+    "finnhub": FINNHUB_DAILY_REQUEST_BUDGET,
+    "eodhd": EODHD_DAILY_REQUEST_BUDGET,
+    "newsapi": NEWSAPI_DAILY_REQUEST_BUDGET,
+    "yahoo": YAHOO_DAILY_REQUEST_BUDGET,
+}
+FINNHUB_CRYPTO_EXCHANGES = [
+    value.strip().upper()
+    for value in os.getenv("FINNHUB_CRYPTO_EXCHANGES", "BINANCE,COINBASE,KRAKEN").split(",")
+    if value.strip()
+]
 PROVIDER_CAPABILITY_DAILY_BUDGETS = {
     ("alpha vantage", "history"): ALPHA_VANTAGE_DAILY_REQUEST_BUDGET,
     ("alpha vantage", "us_history"): ALPHA_VANTAGE_DAILY_REQUEST_BUDGET,
@@ -51,13 +66,13 @@ PROVIDER_CAPABILITY_DAILY_BUDGETS = {
     ("finnhub", "history"): FINNHUB_DAILY_REQUEST_BUDGET,
     ("finnhub", "us_history"): FINNHUB_DAILY_REQUEST_BUDGET,
     ("finnhub", "international_history"): FINNHUB_DAILY_REQUEST_BUDGET,
-    ("finnhub", "crypto"): 0,
+    ("finnhub", "crypto"): FINNHUB_CRYPTO_DAILY_REQUEST_BUDGET,
     ("finnhub", "quote"): FINNHUB_DAILY_REQUEST_BUDGET,
     ("finnhub", "earnings"): FINNHUB_DAILY_REQUEST_BUDGET,
     ("eodhd", "history"): EODHD_DAILY_REQUEST_BUDGET,
     ("eodhd", "us_history"): EODHD_DAILY_REQUEST_BUDGET,
     ("eodhd", "international_history"): EODHD_DAILY_REQUEST_BUDGET,
-    ("eodhd", "crypto"): 0,
+    ("eodhd", "crypto"): EODHD_CRYPTO_DAILY_REQUEST_BUDGET,
     ("eodhd", "quote"): EODHD_DAILY_REQUEST_BUDGET,
     ("newsapi", "news"): NEWSAPI_DAILY_REQUEST_BUDGET,
     ("yahoo", "history"): YAHOO_DAILY_REQUEST_BUDGET,

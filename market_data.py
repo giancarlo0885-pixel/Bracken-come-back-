@@ -31,6 +31,7 @@ class MarketSnapshot:
     fetched_at: str | None = None
     requested_symbol: str | None = None
     provider_symbol: str | None = None
+    provider_native_symbol: str | None = None
     quote_verified: bool = False
     source_identity: str | None = None
     cache_identity: str | None = None
@@ -41,6 +42,7 @@ class MarketSnapshot:
             "symbol": self.symbol,
             "requested_symbol": self.requested_symbol,
             "provider_symbol": self.provider_symbol,
+            "provider_native_symbol": self.provider_native_symbol,
             "provider": self.provider,
             "price": self.price,
             "quote_timestamp": self.timestamp,
@@ -91,6 +93,7 @@ def _stamp_history(frame: pd.DataFrame, requested_symbol: str, provider_symbol: 
         {
             "requested_symbol": normalize_symbol(requested_symbol),
             "provider_symbol": normalize_symbol(provider_symbol),
+            "provider_native_symbol": normalize_symbol(provider_symbol),
             "provider": provider,
             "interval": interval,
         }
@@ -199,6 +202,7 @@ def get_history(symbol: str, period: str = "1y", interval: str = "1d") -> pd.Dat
         {
             "requested_symbol": normalize_symbol(symbol),
             "provider_symbol": normalize_symbol(frame.attrs.get("provider_symbol") or symbol),
+            "provider_native_symbol": normalize_symbol(frame.attrs.get("provider_native_symbol") or frame.attrs.get("provider_symbol") or symbol),
             "period": period,
             "interval": interval,
             "price": latest_close,
@@ -249,6 +253,7 @@ def _snapshot_from_history(symbol: str, history: pd.DataFrame, interval: str) ->
     route = dict(history.attrs.get("provider_route") or {})
     requested_symbol = normalize_symbol(route.get("requested_symbol") or history.attrs.get("requested_symbol") or symbol)
     provider_symbol = normalize_symbol(route.get("provider_symbol") or history.attrs.get("provider_symbol") or "")
+    provider_native_symbol = normalize_symbol(route.get("provider_native_symbol") or history.attrs.get("provider_native_symbol") or provider_symbol)
     provider = str(route.get("provider") or "unknown")
     period = str(route.get("period") or history.attrs.get("period") or "")
     cache_identity = str(route.get("cache_identity") or "")
@@ -269,6 +274,7 @@ def _snapshot_from_history(symbol: str, history: pd.DataFrame, interval: str) ->
         fetched_at=fetched_at,
         requested_symbol=requested_symbol,
         provider_symbol=provider_symbol,
+        provider_native_symbol=provider_native_symbol,
         quote_verified=route.get("quote_verified") is True,
         source_identity=source_identity,
         cache_identity=cache_identity,
@@ -302,6 +308,7 @@ def _alpha_vantage_delayed_snapshot(symbol: str) -> MarketSnapshot | None:
         fetched_at=fetched_at,
         requested_symbol=requested,
         provider_symbol=provider_symbol,
+        provider_native_symbol=provider_symbol,
         quote_verified=False,
         source_identity=f"Alpha Vantage:{requested}:GLOBAL_QUOTE:delayed",
         cache_identity=f"alpha_vantage_global_quote:{requested}",
