@@ -7,6 +7,7 @@ import math
 from typing import Any, Iterable
 
 from config import (
+    CORE_SIGNAL_SUPPORT_THRESHOLD,
     DECISION_CRYPTO_MAX_AGE_MINUTES,
     DECISION_STOCK_MAX_AGE_MINUTES,
     ENABLE_BROKER_SUBMISSION,
@@ -21,6 +22,10 @@ from config import (
     GLOBAL_PIT_RESERVE_PCT,
     GLOBAL_PIT_ROTATION_MIN_ADVANTAGE_PCT,
     GLOBAL_PIT_TARGET_INVESTED_PCT,
+    MAX_SECONDARY_SCORE_ADJUSTMENT,
+    MIN_CONFIDENCE_TO_TRADE,
+    MIN_CORE_SIGNALS_AGREE,
+    MIN_REWARD_RISK_RATIO,
 )
 from market_sessions import market_session_state, quote_freshness_seconds, quote_is_fresh
 
@@ -348,6 +353,135 @@ def _ranking_score(asset: dict[str, Any], learning_weights: dict[str, float] | N
     return _clamp(sum(_clamp(values[key]) * weights[key] for key in weights))
 
 
+def _score_from_move(value: Any, multiplier: float = 20.0) -> float:
+    return _clamp(abs(_finite(value)) * multiplier)
+
+
+def _first_score(asset: dict[str, Any], keys: Iterable[str]) -> float | None:
+    for key in keys:
+        if asset.get(key) not in (None, ""):
+            return _percent_score(asset.get(key))
+    return None
+
+
+def _catalyst_score(asset: dict[str, Any]) -> float:
+    explicit = _first_score(asset, ("catalyst_score",))
+    if explicit is not None:
+        return explicit
+    expires_at = asset.get("catalyst_expiry") or asset.get("expires_at")
+    if expires_at:
+        try:
+            expiry = datetime.fromisoformat(str(expires_at).replace("Z", "+00:00"))
+            if expiry.tzinfo is None:
+                expiry = expiry.replace(tzinfo=timezone.utc)
+            if expiry <= datetime.now(timezone.utc):
+                return 0.0
+        except Exception:
+            return 0.0
+    return min(
+        _percent_score(asset.get("news_score") or asset.get("sentiment_score")),
+        70.0,
+    )
+
+
+def _risk_reward_ratio(asset: dict[str, Any]) -> float:
+    ratio = _finite(asset.get("reward_risk_ratio"))
+    if ratio > 0:
+        return ratio
+    entry = _finite(asset.get("entry_price") or asset.get("entry") or asset.get("price"))
+    stop = _finite(asset.get("stop_price") or asset.get("stop"))
+    target = _finite(asset.get("target_price") or asset.get("target"))
+    downside = abs(entry - stop)
+    upside = abs(target - entry)
+    if entry > 0 and downside > 0 and upside > 0:
+        return upside / downside
+    risk_score = _finite(asset.get("risk_score"), 100.0)
+    if risk_score < 100:
+        return max(0.1, (100.0 - risk_score) / 35.0)
+    return 0.0
+
+
+def core_signal_assessment(asset: dict[str, Any]) -> dict[str, Any]:
+    trend = _first_score(asset, ("trend_score", "momentum_score"))
+    if trend is None:
+        trend = max(_score_from_move(asset.get("change_1d_pct"), 10.0), _score_from_move(asset.get("expected_move_pct"), 20.0))
+    volume = _first_score(asset, ("volume_liquidity_score", "volume_score", "liquidity_score"))
+    if volume is None:
+        volume = max(
+            _clamp((_finite(asset.get("relative_volume"), 1.0) - 1.0) * 35.0 + 45.0),
+            _clamp((_finite(asset.get("liquidity") or asset.get("avg_dollar_volume")) / 1_000_000.0) * 8.0),
+        )
+    catalyst = _catalyst_score(asset)
+    regime = _first_score(asset, ("regime_score", "macro_score"))
+    if regime is None:
+        label = str(asset.get("regime_label") or asset.get("regime") or "").lower()
+        regime = {
+            "strong_risk_on": 90.0,
+            "risk_on": 75.0,
+            "neutral": 50.0,
+            "risk_off": 30.0,
+            "strong_risk_off": 15.0,
+            "high_volatility": 25.0,
+        }.get(label, 50.0)
+    rr_ratio = _risk_reward_ratio(asset)
+    risk_reward = _first_score(asset, ("risk_reward_score",))
+    if risk_reward is None:
+        risk_reward = _clamp((rr_ratio / max(MIN_REWARD_RISK_RATIO * 2.0, 0.1)) * 100.0)
+    scores = {
+        "trend_score": round(_clamp(trend), 2),
+        "volume_liquidity_score": round(_clamp(volume), 2),
+        "catalyst_score": round(_clamp(catalyst), 2),
+        "regime_score": round(_clamp(regime), 2),
+        "risk_reward_score": round(_clamp(risk_reward), 2),
+    }
+    supporting = [key for key, value in scores.items() if value >= CORE_SIGNAL_SUPPORT_THRESHOLD]
+    opposing = [key for key, value in scores.items() if value < 40.0]
+    neutral = [key for key in scores if key not in supporting and key not in opposing]
+    weighted = (
+        scores["trend_score"] * 0.30
+        + scores["volume_liquidity_score"] * 0.20
+        + scores["catalyst_score"] * 0.20
+        + scores["regime_score"] * 0.15
+        + scores["risk_reward_score"] * 0.15
+    )
+    secondary_raw = max(
+        _percent_score(asset.get("flow_score")),
+        _percent_score(asset.get("on_chain_score")),
+        _percent_score(asset.get("options_flow_score")),
+        _percent_score(asset.get("social_sentiment_score")),
+        _percent_score(asset.get("news_sentiment_score")),
+    )
+    secondary_adjustment = min(MAX_SECONDARY_SCORE_ADJUSTMENT, secondary_raw * (MAX_SECONDARY_SCORE_ADJUSTMENT / 100.0))
+    explicit_confidence = _percent_score(asset.get("confidence"))
+    data_quality = _percent_score(asset.get("data_quality_score"), 70.0)
+    populated = sum(1 for value in scores.values() if value > 0)
+    completeness = populated / 5.0
+    confidence = explicit_confidence if explicit_confidence > 0 else data_quality
+    completeness_factor = 1.0 if completeness >= 0.80 else 0.90 + 0.10 * completeness
+    confidence = _clamp((confidence * completeness_factor) + secondary_adjustment)
+    return {
+        **scores,
+        "opportunity_score": round(_clamp(weighted), 2),
+        "confidence_score": round(confidence, 2),
+        "confidence": round(confidence, 2),
+        "data_completeness": round(completeness * 100.0, 2),
+        "secondary_confirmation_adjustment": round(secondary_adjustment, 2),
+        "core_signals_supporting": len(supporting),
+        "core_signals_opposing": len(opposing),
+        "core_signals_neutral": len(neutral),
+        "supporting_core_signals": supporting,
+        "opposing_core_signals": opposing,
+        "neutral_core_signals": neutral,
+        "reward_risk_ratio": round(rr_ratio, 3),
+        "core_signal_agreement": f"{len(supporting)}/5",
+    }
+
+
+def strategy_opportunity_score(asset: dict[str, Any]) -> dict[str, float]:
+    """Score the five Core Signal Engine categories while keeping confidence separate."""
+    return core_signal_assessment(asset)
+
+
 def rank_global_opportunities(assets: list[dict[str, Any]], learning_weights: dict[str, float] | None = None, now: datetime | None = None) -> list[dict[str, Any]]:
     ranked = []
     for asset in assets:
@@ -365,14 +499,43 @@ def rank_global_opportunities(assets: list[dict[str, Any]], learning_weights: di
         )
         buy_type = _upper(asset.get("action") or asset.get("recommendation")) in {"BUY", "STRONG_BUY", "ACCUMULATE", "LONG"}
         explicitly_tradeable = asset.get("tradeable") is True
-        score = _ranking_score(asset, learning_weights) + min(12.0, attention["attention_score"] * 0.12)
+        strategy_score = strategy_opportunity_score(asset)
+        score = strategy_score["opportunity_score"]
         if not data_ok:
             score *= 0.60
+        confidence_score = strategy_score["confidence_score"]
+        core_agreement_ok = int(strategy_score["core_signals_supporting"]) >= MIN_CORE_SIGNALS_AGREE
+        confidence_ok = confidence_score >= MIN_CONFIDENCE_TO_TRADE
+        reward_risk_ok = _finite(strategy_score["reward_risk_ratio"]) >= MIN_REWARD_RISK_RATIO
+        primary_reason = (
+            f"{strategy_score['core_signal_agreement']} core agreement; "
+            f"confidence {confidence_score:.0f}; reward/risk {strategy_score['reward_risk_ratio']:.2f}"
+        )
+        risk_reason = ""
+        if not core_agreement_ok:
+            risk_reason = "fewer than three core signals support the trade"
+        elif not confidence_ok:
+            risk_reason = "confidence below trade threshold"
+        elif not reward_risk_ok:
+            risk_reason = "reward/risk below trade threshold"
+        elif not data_ok:
+            risk_reason = "verified fresh quote required"
+        elif liquidity <= 0:
+            risk_reason = "verified liquidity required"
         payload = {
             **asset,
             **attention,
+            **strategy_score,
             "opportunity_score": round(_clamp(score), 2),
+            "confidence": confidence_score,
+            "confidence_score": confidence_score,
+            "data_completeness_score": strategy_score["data_completeness"],
             "data_label": freshness["label"],
+            "entry": asset.get("entry") or asset.get("entry_price") or asset.get("price"),
+            "stop": asset.get("stop") or asset.get("stop_price"),
+            "target": asset.get("target") or asset.get("target_price"),
+            "primary_reason": primary_reason,
+            "risk_reason": risk_reason,
             "paper_execution_supported": supported,
             "qualified_for_capital": bool(
                 supported
@@ -382,6 +545,9 @@ def rank_global_opportunities(assets: list[dict[str, Any]], learning_weights: di
                 and explicitly_tradeable
                 and required_known
                 and liquidity > 0
+                and core_agreement_ok
+                and confidence_ok
+                and reward_risk_ok
             ),
             "execution_mode": "paper_only" if supported else "intelligence_only",
         }
@@ -455,6 +621,7 @@ def learning_weights_from_observations(observations: list[dict[str, Any]]) -> di
 
 def hard_risk_gate(signal: dict[str, Any], now: datetime | None = None) -> dict[str, Any]:
     freshness = quote_freshness_label(signal)
+    core = core_signal_assessment(signal)
     reasons = []
     if signal.get("quote_verified") is not True:
         reasons.append("verified quote required")
@@ -464,11 +631,17 @@ def hard_risk_gate(signal: dict[str, Any], now: datetime | None = None) -> dict[
         reasons.append("execution-fresh quote required")
     if _finite(signal.get("liquidity") or signal.get("avg_dollar_volume")) <= 0:
         reasons.append("verified liquidity required")
+    if int(core["core_signals_supporting"]) < MIN_CORE_SIGNALS_AGREE:
+        reasons.append("at least three core signals must support the trade")
+    if _finite(core["confidence_score"]) < MIN_CONFIDENCE_TO_TRADE:
+        reasons.append("confidence below trade threshold")
+    if _finite(core["reward_risk_ratio"]) < MIN_REWARD_RISK_RATIO:
+        reasons.append("reward/risk below trade threshold")
     if not supported_for_paper_execution(signal):
         reasons.append("unsupported asset class cannot execute")
     if ENABLE_BROKER_SUBMISSION:
         reasons.append("broker submission must remain disabled for V38 paper mode")
-    return {"allowed": not reasons, "reasons": reasons, "data_label": freshness["label"]}
+    return {"allowed": not reasons, "reasons": reasons, "data_label": freshness["label"], **core}
 
 
 def dashboard_activity_labels(state: dict[str, Any]) -> dict[str, str]:

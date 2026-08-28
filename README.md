@@ -54,6 +54,7 @@ Link the same `DATABASE_URL` to all three application services. Add the V33 vari
 ```text
 REALTIME_MODE=true
 EXECUTION_MODE=paper
+MARKET_SCOPE=US_CRYPTO
 UI_AUTO_REFRESH=true
 UI_REFRESH_SECONDS=15
 STOCK_PULSE_SECONDS=15
@@ -68,6 +69,9 @@ LIVE_POSITION_PRICE_WORKERS=4
 DEEP_ANALYSIS_CANDIDATES=35
 PROVIDER_RATE_LIMIT_COOLDOWN_SECONDS=900
 UNAVAILABLE_SYMBOL_COOLDOWN_SECONDS=1800
+FINNHUB_CRYPTO_DAILY_REQUEST_BUDGET=0
+EODHD_CRYPTO_DAILY_REQUEST_BUDGET=0
+FINNHUB_CRYPTO_EXCHANGES=BINANCE,COINBASE,KRAKEN
 ENABLE_AUTOTRADE=false
 ENABLE_STOCK_AUTOTRADE=false
 ENABLE_CRYPTO_AUTOTRADE=false
@@ -77,6 +81,16 @@ ENABLE_PORTFOLIO_ROTATION=false
 ENABLE_BROKER_SUBMISSION=false
 ENABLE_OPENAI=false
 GLOBAL_KILL_SWITCH=false
+LIVE_TRADING_ARMED=false
+LIVE_ORDER_APPROVAL_MODE=manual
+ROBINHOOD_CRYPTO_ENABLED=false
+ROBINHOOD_CRYPTO_API_KEY=
+ROBINHOOD_CRYPTO_PRIVATE_KEY_BASE64=
+ROBINHOOD_CRYPTO_API_VERSION=v2
+ROBINHOOD_CRYPTO_BASE_URL=https://trading.robinhood.com
+ROBINHOOD_CRYPTO_API_MODE=disabled
+CRYPTO_PRIORITY_WEIGHT=0.70
+STOCK_PRIORITY_WEIGHT=0.30
 GLOBAL_SCANNER_ENABLED=true
 GLOBAL_SCAN_SYMBOLS_PER_CYCLE=45
 GLOBAL_ACTIVE_CANDIDATES=20
@@ -97,6 +111,11 @@ GLOBAL_PIT_PREFERRED_POSITION_PCT=0.08
 GLOBAL_PIT_MAX_POSITION_PCT=0.10
 GLOBAL_PIT_ROTATION_MIN_ADVANTAGE_PCT=2.5
 GLOBAL_PIT_MAX_PARALLEL_LANES=9
+CORE_SIGNAL_SUPPORT_THRESHOLD=60
+MIN_CORE_SIGNALS_AGREE=3
+MIN_CONFIDENCE_TO_TRADE=70
+MIN_REWARD_RISK_RATIO=1.5
+MAX_SECONDARY_SCORE_ADJUSTMENT=5
 PENNY_STOCK_MIN_PRICE=0.50
 PENNY_STOCK_MAX_PRICE=5.00
 PENNY_STOCK_ENABLED=true
@@ -151,6 +170,10 @@ The stock and crypto workers now use three simultaneous cadences:
 3. **Deep global scan** performs broader research, news analysis, ranking, and market-memory work.
 
 The workers automatically retry after cycle errors and Railway is configured to restart them if the process exits. The engine never forces a low-quality trade: it remains active at all times and executes immediately when a candidate passes live-data, forecast, portfolio, quant, leverage, and risk gates. When the portfolio is full, it can rotate out of a materially weaker holding for a stronger approved opportunity.
+
+## V39.4 Robinhood Crypto Readiness
+
+Robinhood support is split into two isolated paths: `robinhood_agentic_mcp.py` for an authorized Agentic MCP connection and `robinhood_crypto_api.py` for the direct Crypto API v2. Both default to disconnected/disabled, never use username/password automation, never log keys or signatures, and require the normal Oracle quote, risk, duplicate-order, and live-arming gates before any future live submission path can be considered.
 
 ## V36 Forecast And Provider Quality
 

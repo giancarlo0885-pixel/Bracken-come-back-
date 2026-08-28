@@ -130,6 +130,108 @@ def test_missing_liquidity_never_qualifies_for_capital():
     assert "verified liquidity required" in gate["reasons"]
 
 
+def core_asset(symbol="CORE", **overrides):
+    data = fresh_asset(
+        symbol,
+        trend_score=82,
+        volume_liquidity_score=78,
+        catalyst_score=75,
+        regime_score=72,
+        risk_reward_score=80,
+        reward_risk_ratio=2.1,
+        confidence=86,
+        price=100,
+        stop=94,
+        target=114,
+    )
+    data.update(overrides)
+    return data
+
+
+def test_five_strong_core_signals_with_unverified_quote_cannot_trade():
+    ranked = pit.rank_global_opportunities([core_asset("NOQUOTE", quote_verified=False)])
+    assert ranked[0]["core_signals_supporting"] == 5
+    assert ranked[0]["qualified_for_capital"] is False
+    gate = pit.hard_risk_gate(ranked[0])
+    assert gate["allowed"] is False
+    assert "verified quote required" in gate["reasons"]
+
+
+def test_two_core_signals_with_high_additive_noise_cannot_trade():
+    asset = core_asset(
+        "TWO",
+        trend_score=90,
+        volume_liquidity_score=90,
+        catalyst_score=20,
+        regime_score=20,
+        risk_reward_score=20,
+        reward_risk_ratio=0.8,
+        flow_score=100,
+        on_chain_score=100,
+        options_flow_score=100,
+        confidence=95,
+        opportunity_score=99,
+    )
+    ranked = pit.rank_global_opportunities([asset])
+    assert ranked[0]["core_signals_supporting"] == 2
+    assert ranked[0]["qualified_for_capital"] is False
+    assert ranked[0]["secondary_confirmation_adjustment"] <= pit.MAX_SECONDARY_SCORE_ADJUSTMENT
+
+
+def test_three_core_signals_verified_confident_and_good_rr_is_eligible():
+    ranked = pit.rank_global_opportunities([
+        core_asset("THREE", catalyst_score=10, regime_score=45, risk_reward_score=78, reward_risk_ratio=1.8)
+    ])
+    assert ranked[0]["core_signals_supporting"] == 3
+    assert ranked[0]["confidence_score"] >= pit.MIN_CONFIDENCE_TO_TRADE
+    assert ranked[0]["qualified_for_capital"] is True
+
+
+def test_missing_secondary_feeds_do_not_block_core_trade():
+    asset = core_asset("NOSECONDARY")
+    for key in ("flow_score", "on_chain_score", "options_flow_score", "social_sentiment_score", "news_sentiment_score"):
+        asset.pop(key, None)
+    ranked = pit.rank_global_opportunities([asset])
+    assert ranked[0]["qualified_for_capital"] is True
+    assert ranked[0]["secondary_confirmation_adjustment"] == 0
+
+
+def test_missing_core_data_lowers_confidence():
+    complete = pit.strategy_opportunity_score(core_asset("COMPLETE"))
+    missing = pit.strategy_opportunity_score(core_asset("MISSING", catalyst_score=0, regime_score=0))
+    assert missing["confidence_score"] < complete["confidence_score"]
+    assert missing["core_signals_supporting"] < complete["core_signals_supporting"]
+
+
+def test_stale_catalyst_expires_before_scoring():
+    expired = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+    score = pit.strategy_opportunity_score(core_asset("STALECAT", catalyst_score=None, news_score=95, catalyst_expiry=expired))
+    assert score["catalyst_score"] == 0
+
+
+def test_duplicate_technical_indicators_do_not_multiply_momentum_score():
+    base = pit.strategy_opportunity_score(core_asset("BASE", trend_score=70))
+    duplicate = pit.strategy_opportunity_score(core_asset("DUP", trend_score=70, momentum_score=95, sma_score=100, ema_score=100, macd_score=100))
+    assert duplicate["trend_score"] == base["trend_score"]
+    assert duplicate["opportunity_score"] <= 100
+
+
+def test_weak_reward_risk_blocks_execution():
+    ranked = pit.rank_global_opportunities([core_asset("WEAKRR", reward_risk_ratio=1.0, risk_reward_score=45)])
+    assert ranked[0]["qualified_for_capital"] is False
+    gate = pit.hard_risk_gate(ranked[0])
+    assert "reward/risk below trade threshold" in gate["reasons"]
+
+
+def test_opposing_regime_reduces_regime_contribution_and_output_reports_components():
+    ranked = pit.rank_global_opportunities([core_asset("REGIME", regime_label="strong_risk_off", regime_score=None)])
+    item = ranked[0]
+    assert item["regime_score"] < pit.CORE_SIGNAL_SUPPORT_THRESHOLD
+    assert item["core_signal_agreement"] == "4/5"
+    for key in ("trend_score", "volume_liquidity_score", "catalyst_score", "regime_score", "risk_reward_score"):
+        assert key in item
+
+
 
 def test_global_pit_liquidity_normalizes_to_percent_scale():
     base = fresh_asset("BASE", liquidity=0, avg_dollar_volume=0)

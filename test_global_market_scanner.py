@@ -25,55 +25,61 @@ from types import SimpleNamespace
 import global_market_scanner as scanner
 
 
-def sample_history() -> pd.DataFrame:
-    return pd.DataFrame({
+def sample_history(symbol: str = "AAPL") -> pd.DataFrame:
+    frame = pd.DataFrame({
         "Open": [100,101,102,103,104,105],
         "High": [102,103,104,105,107,111],
         "Low": [99,100,101,102,103,104],
         "Close": [101,102,103,104,106,110],
         "Volume": [1_000_000,1_050_000,1_100_000,1_000_000,1_200_000,2_500_000],
     }, index=pd.bdate_range("2026-07-24 20:00", periods=6, tz="UTC", normalize=False))
-
-
-def previous_session_history() -> pd.DataFrame:
-    frame = sample_history().copy()
+    frame.attrs["provider_route"] = {
+        "provider": "Polygon",
+        "requested_symbol": symbol,
+        "provider_symbol": symbol,
+        "quote_verified": True,
+        "quote_timestamp": frame.index[-1].isoformat(),
+        "interval": "1d",
+    }
     return frame
 
 
-def penny_history() -> pd.DataFrame:
-    frame = sample_history().copy()
+def previous_session_history(symbol: str = "AAPL") -> pd.DataFrame:
+    frame = sample_history(symbol).copy()
+    return frame
+
+
+def penny_history(symbol: str = "PENNY") -> pd.DataFrame:
+    frame = sample_history(symbol).copy()
     frame["Close"] = [1.1, 1.15, 1.2, 1.25, 1.3, 1.4]
     frame["Volume"] = [1_000_000, 1_100_000, 1_200_000, 1_300_000, 1_400_000, 2_000_000]
     return frame
 
 
 def test_yahoo_symbol_mapping():
-    assert scanner._to_yahoo_symbol("7203", "TSE") == "7203.T"
-    assert scanner._to_yahoo_symbol("700", "HK") == "0700.HK"
-    assert scanner._to_yahoo_symbol("SAP", "XETRA") == "SAP.DE"
+    assert scanner._to_yahoo_symbol("AAPL", "US") == "AAPL"
 
 
 def test_candidate_metrics_detects_liquid_mover(monkeypatch):
-    monkeypatch.setattr(scanner, "get_history", lambda *args, **kwargs: sample_history())
+    monkeypatch.setattr(scanner, "get_history", lambda symbol, *args, **kwargs: sample_history(symbol))
     candidate = scanner._candidate_metrics(
-        {"symbol":"SAP.DE","name":"SAP","exchange":"XETRA","region":"Europe","sector":"Technology"},
+        {"symbol":"AAPL","name":"Apple","exchange":"NASDAQ","region":"United States","sector":"Technology"},
         now=datetime(2026, 8, 1, 16, 0, tzinfo=timezone.utc),
     )
     assert candidate is not None
     assert candidate.mover_score > 0
     assert candidate.relative_volume > 1
-    assert candidate.primary_category == "dynamic_opportunity"
+    assert candidate.primary_category == "blue_chip"
     assert "major_gainer" in candidate.mover_tags
 
 
-def test_seed_universe_is_worldwide(monkeypatch):
+def test_seed_universe_is_us_crypto_scoped(monkeypatch):
     monkeypatch.setattr(scanner, "EODHD_API_KEY", "")
     universe = scanner._load_universe()
     regions = {item["region"] for item in universe}
-    assert "Europe" in regions
-    assert "Japan" in regions
-    assert "India" in regions
-    assert "Latin America" in regions
+    symbols = {item["symbol"] for item in universe}
+    assert regions == {"United States"}
+    assert not any(symbol.endswith((".DE", ".L", ".AX", ".NS", ".PA", ".AS")) for symbol in symbols)
 
 
 def test_dynamic_universe_includes_core_etfs_and_size_categories(monkeypatch):
@@ -87,7 +93,7 @@ def test_dynamic_universe_includes_core_etfs_and_size_categories(monkeypatch):
 
 
 def test_qualified_penny_stock_requires_strict_liquidity(monkeypatch):
-    frame = sample_history().copy()
+    frame = sample_history("SOUN").copy()
     frame["Close"] = [1.1, 1.15, 1.2, 1.25, 1.3, 1.4]
     frame["Volume"] = [100, 100, 100, 100, 100, 100]
     monkeypatch.setattr(scanner, "get_history", lambda *args, **kwargs: frame)
@@ -96,7 +102,7 @@ def test_qualified_penny_stock_requires_strict_liquidity(monkeypatch):
 
 
 def test_blue_chip_can_also_be_major_mover(monkeypatch):
-    monkeypatch.setattr(scanner, "get_history", lambda *args, **kwargs: sample_history())
+    monkeypatch.setattr(scanner, "get_history", lambda symbol, *args, **kwargs: sample_history(symbol))
     candidate = scanner._candidate_metrics(
         {"symbol":"AAPL","name":"Apple","exchange":"US","region":"United States","sector":"mega_cap_core"},
         now=datetime(2026, 8, 1, 16, 0, tzinfo=timezone.utc),
@@ -185,7 +191,7 @@ def test_provider_discovered_core_stock_keeps_mover_metadata(monkeypatch):
     assert merged[0]["discovery_source"] == "polygon_snapshot"
     assert "major_gainer" in merged[0]["mover_tags"]
 
-    monkeypatch.setattr(scanner, "get_history", lambda *args, **kwargs: sample_history())
+    monkeypatch.setattr(scanner, "get_history", lambda symbol, *args, **kwargs: sample_history(symbol))
     candidate = scanner._candidate_metrics(merged[0], now=datetime(2026, 8, 1, 16, 0, tzinfo=timezone.utc))
     assert candidate is not None
     assert candidate.primary_category == "blue_chip"
@@ -218,7 +224,7 @@ def test_stale_daily_bar_is_not_fresh_during_open_session():
 
 
 def test_candidate_metrics_rejects_stale_candidate(monkeypatch):
-    stale = sample_history()
+    stale = sample_history("AAPL")
     stale.index = pd.date_range("2026-07-20", periods=6, tz="UTC")
     monkeypatch.setattr(scanner, "get_history", lambda *args, **kwargs: stale)
     candidate = scanner._candidate_metrics(
@@ -229,7 +235,7 @@ def test_candidate_metrics_rejects_stale_candidate(monkeypatch):
 
 
 def test_candidate_metrics_accepts_friday_daily_bar_during_saturday(monkeypatch):
-    monkeypatch.setattr(scanner, "get_history", lambda *args, **kwargs: sample_history())
+    monkeypatch.setattr(scanner, "get_history", lambda symbol, *args, **kwargs: sample_history(symbol))
     candidate = scanner._candidate_metrics(
         {"symbol": "AAPL", "name": "Apple", "exchange": "NASDAQ", "region": "United States", "sector": "mega_cap_core"},
         now=datetime(2026, 8, 1, 16, 0, tzinfo=timezone.utc),
@@ -239,7 +245,7 @@ def test_candidate_metrics_accepts_friday_daily_bar_during_saturday(monkeypatch)
 
 
 def test_candidate_metrics_rejects_previous_session_bar_after_monday_open(monkeypatch):
-    monkeypatch.setattr(scanner, "get_history", lambda *args, **kwargs: sample_history())
+    monkeypatch.setattr(scanner, "get_history", lambda symbol, *args, **kwargs: sample_history(symbol))
     monkeypatch.setattr(scanner, "get_live_snapshot", lambda symbol: None)
     candidate = scanner._candidate_metrics(
         {"symbol": "AAPL", "name": "Apple", "exchange": "NASDAQ", "region": "United States", "sector": "mega_cap_core"},
@@ -249,7 +255,7 @@ def test_candidate_metrics_rejects_previous_session_bar_after_monday_open(monkey
 
 
 def test_candidate_metrics_rejects_provider_discovered_otc_penny(monkeypatch):
-    monkeypatch.setattr(scanner, "get_history", lambda *args, **kwargs: penny_history())
+    monkeypatch.setattr(scanner, "get_history", lambda symbol, *args, **kwargs: penny_history(symbol))
     candidate = scanner._candidate_metrics(
         {"symbol": "PENNY", "name": "Penny", "exchange": "OTCQB", "region": "United States", "sector": "major_gainer"},
         now=datetime(2026, 8, 1, 16, 0, tzinfo=timezone.utc),
@@ -258,7 +264,7 @@ def test_candidate_metrics_rejects_provider_discovered_otc_penny(monkeypatch):
 
 
 def test_candidate_metrics_rejects_unknown_exchange_penny(monkeypatch):
-    monkeypatch.setattr(scanner, "get_history", lambda *args, **kwargs: penny_history())
+    monkeypatch.setattr(scanner, "get_history", lambda symbol, *args, **kwargs: penny_history(symbol))
     candidate = scanner._candidate_metrics(
         {"symbol": "PENNY", "name": "Penny", "exchange": "", "region": "United States", "sector": "major_gainer"},
         now=datetime(2026, 8, 1, 16, 0, tzinfo=timezone.utc),
@@ -292,7 +298,7 @@ def test_one_ticker_retains_multiple_provider_mover_tags(monkeypatch):
 
 
 def test_provider_without_in_progress_daily_candle_uses_snapshot_during_regular_trading(monkeypatch):
-    monkeypatch.setattr(scanner, "get_history", lambda *args, **kwargs: previous_session_history())
+    monkeypatch.setattr(scanner, "get_history", lambda symbol, *args, **kwargs: previous_session_history(symbol))
     candidate = scanner._candidate_metrics(
         {
             "symbol": "AAPL",
@@ -319,7 +325,7 @@ def test_provider_without_in_progress_daily_candle_uses_snapshot_during_regular_
 
 
 def test_fresh_intraday_quote_plus_previous_session_daily_history(monkeypatch):
-    monkeypatch.setattr(scanner, "get_history", lambda *args, **kwargs: previous_session_history())
+    monkeypatch.setattr(scanner, "get_history", lambda symbol, *args, **kwargs: previous_session_history(symbol))
     monkeypatch.setattr(
         scanner,
         "get_live_snapshot",
@@ -346,7 +352,7 @@ def test_fresh_intraday_quote_plus_previous_session_daily_history(monkeypatch):
 
 
 def test_premarket_mover_uses_current_premarket_quote(monkeypatch):
-    monkeypatch.setattr(scanner, "get_history", lambda *args, **kwargs: previous_session_history())
+    monkeypatch.setattr(scanner, "get_history", lambda symbol, *args, **kwargs: previous_session_history(symbol))
     candidate = scanner._candidate_metrics(
         {
                 "symbol": "AAPL",
@@ -373,7 +379,7 @@ def test_premarket_mover_uses_current_premarket_quote(monkeypatch):
 
 
 def test_after_hours_mover_uses_current_after_hours_quote(monkeypatch):
-    monkeypatch.setattr(scanner, "get_history", lambda *args, **kwargs: previous_session_history())
+    monkeypatch.setattr(scanner, "get_history", lambda symbol, *args, **kwargs: previous_session_history(symbol))
     candidate = scanner._candidate_metrics(
         {
             "symbol": "AAPL",
@@ -399,7 +405,7 @@ def test_after_hours_mover_uses_current_after_hours_quote(monkeypatch):
 
 
 def test_stale_intraday_quote_rejected(monkeypatch):
-    monkeypatch.setattr(scanner, "get_history", lambda *args, **kwargs: previous_session_history())
+    monkeypatch.setattr(scanner, "get_history", lambda symbol, *args, **kwargs: previous_session_history(symbol))
     monkeypatch.setattr(
         scanner,
         "get_live_snapshot",
@@ -420,7 +426,7 @@ def test_stale_intraday_quote_rejected(monkeypatch):
 
 
 def test_provider_snapshot_values_enter_mover_ranking(monkeypatch):
-    monkeypatch.setattr(scanner, "get_history", lambda *args, **kwargs: previous_session_history())
+    monkeypatch.setattr(scanner, "get_history", lambda symbol, *args, **kwargs: previous_session_history(symbol))
     candidate = scanner._candidate_metrics(
         {
                 "symbol": "GAIN",
@@ -448,7 +454,7 @@ def test_provider_snapshot_values_enter_mover_ranking(monkeypatch):
     assert candidate.mover_score > 50
 
 
-def test_foreign_stock_freshness_uses_own_exchange_calendar(monkeypatch):
+def test_foreign_stock_candidates_are_out_of_us_crypto_scope(monkeypatch):
     hist = previous_session_history()
     hist.index = pd.bdate_range("2026-07-23 15:30", periods=6, tz="UTC", normalize=False)
     monkeypatch.setattr(scanner, "get_history", lambda *args, **kwargs: hist)
@@ -471,12 +477,11 @@ def test_foreign_stock_freshness_uses_own_exchange_calendar(monkeypatch):
         },
         now=datetime(2026, 7, 31, 8, 31, tzinfo=timezone.utc),
     )
-    assert candidate is not None
-    assert candidate.exchange == "XETRA"
+    assert candidate is None
 
 
 def test_provider_fallback_when_current_quote_data_is_incomplete(monkeypatch):
-    monkeypatch.setattr(scanner, "get_history", lambda *args, **kwargs: previous_session_history())
+    monkeypatch.setattr(scanner, "get_history", lambda symbol, *args, **kwargs: previous_session_history(symbol))
     monkeypatch.setattr(
         scanner,
         "get_live_snapshot",
@@ -517,7 +522,7 @@ def test_provider_fallback_when_current_quote_data_is_incomplete(monkeypatch):
 
 
 def test_provider_fetched_at_is_never_accepted_as_quote_timestamp(monkeypatch):
-    monkeypatch.setattr(scanner, "get_history", lambda *args, **kwargs: previous_session_history())
+    monkeypatch.setattr(scanner, "get_history", lambda symbol, *args, **kwargs: previous_session_history(symbol))
     monkeypatch.setattr(scanner, "get_live_snapshot", lambda symbol: None)
     candidate = scanner._candidate_metrics(
         {
@@ -539,7 +544,7 @@ def test_provider_fetched_at_is_never_accepted_as_quote_timestamp(monkeypatch):
 
 
 def test_fresh_live_snapshot_upgrades_discovery_only_mover(monkeypatch):
-    monkeypatch.setattr(scanner, "get_history", lambda *args, **kwargs: previous_session_history())
+    monkeypatch.setattr(scanner, "get_history", lambda symbol, *args, **kwargs: previous_session_history(symbol))
     monkeypatch.setattr(
         scanner,
         "get_live_snapshot",

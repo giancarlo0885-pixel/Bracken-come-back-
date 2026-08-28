@@ -22,6 +22,7 @@ from config import (
     ENABLE_STOCK_AUTOTRADE,
     GLOBAL_KILL_SWITCH,
     GLOBAL_PIT_MODE,
+    CRYPTO_PRIORITY_WEIGHT,
     EXECUTION_MODE,
     FAST_SCAN_BATCH_SIZE,
     FAST_SCAN_TOP_RANKED,
@@ -38,6 +39,7 @@ from config import (
     WORKER_DB_READY_INITIAL_DELAY_SECONDS,
     WORKER_DB_READY_MAX_DELAY_SECONDS,
     DATABASE_MAINTENANCE_INTERVAL_SECONDS,
+    STOCK_PRIORITY_WEIGHT,
 )
 from database import (
     bootstrap_database_with_lock,
@@ -75,11 +77,32 @@ stop_event = Event()
 trade_cycle_lock = Lock()
 _rolling_offsets: dict[str, int] = {"cash": 0, "crypto": 0}
 _EXECUTION_DISABLED_LOGGED = False
+_REJECTION_LOGGED_AT: dict[tuple[str, str], float] = {}
+REJECTION_LOG_COOLDOWN_SECONDS = 300
 
 
 def _request_stop(*_: object) -> None:
     log.info("Worker shutdown requested.")
     stop_event.set()
+
+
+def _v39_log_rejection(symbol: str, reason: str, details: dict[str, Any] | None = None) -> None:
+    now = time.time()
+    key = (str(symbol or "").upper(), str(reason or "SIGNAL_GATE").upper())
+    if now - _REJECTION_LOGGED_AT.get(key, 0.0) < REJECTION_LOG_COOLDOWN_SECONDS:
+        return
+    _REJECTION_LOGGED_AT[key] = now
+    safe_details = {
+        k: v
+        for k, v in (details or {}).items()
+        if str(k).lower() not in {"apikey", "api_key", "token", "authorization", "signature"}
+    }
+    log.info(
+        "execution_candidate_rejected | symbol=%s | reason=%s | details=%s",
+        key[0],
+        key[1],
+        json.dumps(safe_details, sort_keys=True, default=str),
+    )
 
 
 def _execution_overrides() -> dict[str, Any]:
@@ -223,6 +246,23 @@ def _quote_payload_from_history(symbol: str, history: Any, price: Any = None, *,
         "cache_identity": route.get("cache_identity"),
         "ohlcv_fingerprint": route.get("ohlcv_fingerprint"),
     }
+
+
+def analysis_priority_weight(market: str) -> float:
+    return CRYPTO_PRIORITY_WEIGHT if str(market or "").lower() == "crypto" else STOCK_PRIORITY_WEIGHT
+
+
+def _execution_quote_payload_from_history(symbol: str, history: Any, price: Any = None, *, scan_type: str = "") -> dict[str, Any] | None:
+    payload = _quote_payload_from_history(symbol, history, price, scan_type=scan_type)
+    execution_price = _finite_positive(payload.get("price"))
+    if execution_price is None:
+        _v39_log_rejection(symbol, "ZERO_PRICE", {"scan_type": scan_type, "provider": payload.get("provider")})
+        return None
+    payload["price"] = execution_price
+    if payload.get("quote_timestamp") in (None, ""):
+        _v39_log_rejection(symbol, "QUOTE_STALE", {"scan_type": scan_type, "provider": payload.get("provider")})
+        return None
+    return payload
 
 
 def _attach_execution_metadata(signal: Any, history: Any, scan_type: str) -> dict[str, Any]:
@@ -938,8 +978,11 @@ def fast_scan_market(market: str) -> list[Any]:
                 continue
             signal, history = result
             route = _attach_execution_metadata(signal, history, "fast")
+            quote_payload = _execution_quote_payload_from_history(symbol, history, getattr(signal, "price", None), scan_type="fast")
+            if quote_payload is None:
+                continue
             signals.append(signal)
-            prices[symbol] = _quote_payload_from_history(symbol, history, getattr(signal, "price", None), scan_type="fast")
+            prices[symbol] = quote_payload
             try:
                 signal_created_at = utc_now()
                 setattr(signal, "created_at", signal_created_at)
@@ -1100,8 +1143,11 @@ def scan_market(market: str) -> list[Any]:
             signal = _normalize_starter_action(signal)
             route = _attach_execution_metadata(signal, history, "deep")
             signal.reason = (str(signal.reason) + " " + str(council["explanation"])).strip()
+            quote_payload = _execution_quote_payload_from_history(symbol, history, getattr(signal, "price", None), scan_type="deep")
+            if quote_payload is None:
+                continue
             signals.append(signal)
-            prices[symbol] = _quote_payload_from_history(symbol, history, getattr(signal, "price", None), scan_type="deep")
+            prices[symbol] = quote_payload
             signal_created_at = utc_now()
             setattr(signal, "created_at", signal_created_at)
             signal_id = save_json_signal(

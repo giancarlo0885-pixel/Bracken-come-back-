@@ -14,6 +14,7 @@ def test_router_falls_back_and_records_attempts(monkeypatch):
     assert routed.metadata()["records"] == 3
     assert routed.attempts[-1].ok is True
     assert routed.metadata()["quote_verified"] is False
+    assert routed.attempts[-1].status == "strict_research_fallback"
 
 
 def test_router_marks_unavailable_symbol_after_empty_routes(monkeypatch):
