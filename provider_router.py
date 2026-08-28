@@ -27,7 +27,7 @@ from config import (
     REALTIME_CACHE_TTL_SECONDS,
     UNAVAILABLE_SYMBOL_COOLDOWN_SECONDS,
 )
-from asset_routing import infer_asset_class
+from asset_routing import infer_asset_class, is_in_market_scope
 from global_adaptive_engine import (
     mark_provider_cooldown_live,
     provider_cooldown_active_live,
@@ -35,8 +35,10 @@ from global_adaptive_engine import (
 )
 from provider_capabilities import (
     capability_available,
+    capability_priority_penalty,
     classify_plan_limited_status,
     disable_capability,
+    record_capability_result,
 )
 from security import redact_url as _security_redact_url
 
@@ -51,6 +53,18 @@ EODHD_STOCK_TYPES = {"common stock", "common share", "stock", "preferred stock",
 EODHD_ETF_TYPES = {"etf", "fund", "mutual fund"}
 EODHD_EQUITY_TYPES = EODHD_STOCK_TYPES | EODHD_ETF_TYPES
 CRYPTO_QUOTES = ("USD", "USDT", "USDC")
+HISTORY_ROUTE_STRENGTH = {
+    ("Polygon", "crypto"): 10,
+    ("EODHD", "crypto"): 25,
+    ("Finnhub", "crypto"): 35,
+    ("Polygon", "intraday_history"): 10,
+    ("Finnhub", "intraday_history"): 25,
+    ("Alpha Vantage", "intraday_history"): 60,
+    ("Polygon", "us_history"): 10,
+    ("EODHD", "us_history"): 20,
+    ("Finnhub", "us_history"): 35,
+    ("Alpha Vantage", "us_history"): 45,
+}
 
 
 @dataclass
@@ -269,6 +283,38 @@ def _verified_history(
     )
 
 
+def _latest_positive_close(frame: pd.DataFrame) -> float | None:
+    if frame is None or frame.empty or "Close" not in frame.columns:
+        return None
+    close_value = frame["Close"]
+    if isinstance(close_value, pd.DataFrame):
+        close_value = close_value.iloc[:, -1]
+    close = pd.to_numeric(close_value, errors="coerce")
+    close = close[close.map(lambda value: pd.notna(value) and float(value) > 0)]
+    if close.empty:
+        return None
+    return float(close.iloc[-1])
+
+
+def _strict_yahoo_history(frame: pd.DataFrame, symbol: str, period: str, interval: str) -> pd.DataFrame:
+    if not is_in_market_scope(symbol):
+        return pd.DataFrame()
+    verified = _verified_history(
+        frame,
+        "Yahoo Finance",
+        symbol,
+        symbol,
+        period,
+        interval,
+        identity_verified=True,
+    )
+    if verified.empty or _latest_positive_close(verified) is None:
+        return pd.DataFrame()
+    verified.attrs["quote_verified"] = False
+    verified.attrs["source_mode"] = "strict_research_fallback"
+    return verified
+
+
 def verify_frame_symbol(frame: pd.DataFrame, requested_symbol: str) -> bool:
     if frame is None or frame.empty:
         return False
@@ -368,6 +414,28 @@ def _provider_status_from_exception(exc: Exception) -> int | None:
     return None
 
 
+def classify_provider_failure(exc: Exception | str, status_code: int | None = None) -> str:
+    text = _redact_url(str(exc)).lower()
+    code = status_code
+    if code is None and isinstance(exc, Exception):
+        code = _provider_status_from_exception(exc)
+    if code == 429 or "429" in text or "rate limit" in text or "too many requests" in text:
+        return "rate_limited"
+    if code == 402 or "payment required" in text:
+        return "payment_required"
+    if code in {401, 403} and any(term in text for term in ("plan", "premium", "permission", "entitlement", "subscription")):
+        return "plan_limited"
+    if "timeout" in text or "timed out" in text:
+        return "timeout"
+    if "symbol" in text and ("mismatch" in text or "not found" in text or "invalid" in text):
+        return "symbol_mismatch"
+    if "malformed" in text or "json" in text or "parse" in text:
+        return "malformed_response"
+    if code and code >= 500:
+        return "outage"
+    return "degraded"
+
+
 def _provider_budget(provider: str) -> int:
     return int(PROVIDER_DAILY_REQUEST_BUDGETS.get(str(provider or "").lower(), 0) or 0)
 
@@ -379,6 +447,17 @@ def _capability_budget(provider: str, capability: str) -> int | None:
 def provider_supports_capability(provider: str, capability: str) -> bool:
     budget = _capability_budget(provider, capability)
     return budget is not None and int(budget or 0) > 0
+
+
+def _history_route_priority(provider: str, capability: str) -> int:
+    return HISTORY_ROUTE_STRENGTH.get((provider, capability), 100) + capability_priority_penalty(provider, capability)
+
+
+def _ranked_history_routes(
+    routes: list[tuple[str, str, Callable[[str, str, str, str], pd.DataFrame]]],
+    capability: str,
+) -> list[tuple[str, str, Callable[[str, str, str, str], pd.DataFrame]]]:
+    return sorted(routes, key=lambda route: (_history_route_priority(route[0], capability), route[0]))
 
 
 def crypto_execution_provider_redundancy(settings: dict[str, str] | None = None) -> dict[str, Any]:
@@ -789,6 +868,13 @@ def route_history(
     ttl = REALTIME_CACHE_TTL_SECONDS if intraday else API_CACHE_TTL_SECONDS
     symbol = str(symbol or "").upper().strip()
     interval_family = _interval_family(interval)
+    if not is_in_market_scope(symbol):
+        return RoutedHistory(
+            pd.DataFrame(),
+            "none",
+            [ProviderAttempt("scope", False, 0, "scope_rejected", "MARKET_SCOPE=US_CRYPTO allows only U.S.-listed stocks/ETFs and crypto")],
+            datetime.now(timezone.utc).isoformat(),
+        )
     if symbol_is_unavailable(symbol, "all", capability, interval_family):
         return RoutedHistory(
             pd.DataFrame(),
@@ -818,7 +904,7 @@ def route_history(
             ("Alpha Vantage", "ALPHA_VANTAGE_API_KEY", _alpha),
         ]
 
-    for provider, key_name, function in routes:
+    for provider, key_name, function in _ranked_history_routes(routes, capability):
         if not capability_available(provider, capability):
             attempts.append(ProviderAttempt(provider, False, 0, "capability_cooldown_or_unsupported"))
             continue
@@ -875,9 +961,11 @@ def route_history(
                 frame.attrs["interval"] = interval
             if not frame.empty and frame.attrs.get("quote_verified") is True and verify_frame_symbol(frame, symbol):
                 frame = frame.copy(deep=True)
+                record_capability_result(provider, capability, True)
                 attempts.append(ProviderAttempt(provider, True, len(frame), "healthy"))
                 return RoutedHistory(frame, provider, attempts, datetime.now(timezone.utc).isoformat())
             attempts.append(ProviderAttempt(provider, False, 0, "symbol_mismatch_or_no_data"))
+            record_capability_result(provider, capability, False, "symbol_mismatch_or_no_data")
             mark_symbol_unavailable(
                 symbol,
                 provider=provider,
@@ -897,7 +985,7 @@ def route_history(
                 )
                 status = "capability_plan_limited"
             else:
-                status = "rate_limited" if status_code == 429 or "429" in text or "limit" in text.lower() else "degraded"
+                status = classify_provider_failure(exc, status_code)
             if status == "rate_limited":
                 _mark_provider_limited(provider)
                 mark_provider_cooldown_live(
@@ -905,6 +993,7 @@ def route_history(
                     seconds=PROVIDER_RATE_LIMIT_COOLDOWN_SECONDS,
                     reason=text or "provider rate limited",
                 )
+            record_capability_result(provider, capability, False, status, status_code=status_code)
             attempts.append(ProviderAttempt(provider, False, 0, status, text))
             _record_failure(provider, status, symbol)
             mark_symbol_unavailable(
@@ -915,16 +1004,17 @@ def route_history(
             )
 
     try:
-        frame = _verified_history(yahoo_loader(symbol, period, interval), "Yahoo Finance", symbol, symbol, period, interval, identity_verified=False)
+        frame = _strict_yahoo_history(yahoo_loader(symbol, period, interval), symbol, period, interval)
         if not frame.empty and verify_frame_symbol(frame, symbol):
-            frame.attrs["quote_verified"] = False
             frame.attrs["source_identity"] = f"Yahoo Finance:{symbol}:{period}:{interval}"
             frame.attrs["period"] = period
             frame.attrs["interval"] = interval
-            attempts.append(ProviderAttempt("Yahoo Finance", True, len(frame), "research_only_fallback"))
+            record_capability_result("Yahoo Finance", capability, True)
+            attempts.append(ProviderAttempt("Yahoo Finance", True, len(frame), "strict_research_fallback"))
             return RoutedHistory(frame, "Yahoo Finance", attempts, datetime.now(timezone.utc).isoformat())
     except Exception as exc:
         attempts.append(ProviderAttempt("Yahoo Finance", False, 0, "degraded", _redact_url(str(exc))[:220]))
+        record_capability_result("Yahoo Finance", capability, False, "degraded")
         _record_failure("Yahoo Finance", "degraded", symbol)
 
     mark_symbol_unavailable(symbol, provider="all", capability=capability, interval_family=interval_family)

@@ -28,6 +28,8 @@ def analyze_market(symbol, history, news_sentiment=0.0):
     if len(close)<60:
         return None
     price=float(close.iloc[-1])
+    if not math.isfinite(price) or price <= 0:
+        return None
     ret=close.pct_change().dropna()
     m5=float(close.iloc[-1]/close.iloc[-6]-1)
     m20=float(close.iloc[-1]/close.iloc[-21]-1)

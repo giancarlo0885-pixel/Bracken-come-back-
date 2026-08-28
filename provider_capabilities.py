@@ -35,7 +35,7 @@ CAPABILITY_MATRIX: dict[str, dict[str, bool]] = {
         "daily_history": True,
         "us_quotes": True,
         "us_history": True,
-        "international_history": True,
+        "international_history": False,
         "crypto": True,
         "movers": False,
         "exchange_symbol_lists": True,
@@ -52,7 +52,7 @@ CAPABILITY_MATRIX: dict[str, dict[str, bool]] = {
         "daily_history": True,
         "us_quotes": True,
         "us_history": True,
-        "international_history": True,
+        "international_history": False,
         "crypto": True,
         "movers": True,
         "exchange_symbol_lists": True,
@@ -69,7 +69,7 @@ CAPABILITY_MATRIX: dict[str, dict[str, bool]] = {
         "daily_history": True,
         "us_quotes": True,
         "us_history": True,
-        "international_history": True,
+        "international_history": False,
         "crypto": False,
         "movers": True,
         "exchange_symbol_lists": False,
@@ -87,7 +87,7 @@ CAPABILITY_MATRIX: dict[str, dict[str, bool]] = {
         "daily_history": True,
         "us_quotes": True,
         "us_history": True,
-        "international_history": True,
+        "international_history": False,
         "crypto": True,
         "movers": False,
         "exchange_symbol_lists": False,
@@ -108,7 +108,24 @@ class CapabilityCooldown:
     status_code: int | None = None
 
 
+@dataclass
+class CapabilityHealth:
+    status: str = "healthy"
+    consecutive_successes: int = 0
+    consecutive_failures: int = 0
+    last_success: str = ""
+    last_failure: str = ""
+    reason: str = ""
+    demoted_until: float = 0.0
+
+
 _cooldowns: dict[tuple[str, str], CapabilityCooldown] = {}
+_health: dict[tuple[str, str], CapabilityHealth] = {}
+
+HEALTH_DEMOTION_SECONDS = 15 * 60
+HEALTH_RESTORE_SUCCESSES = 2
+DEGRADED_PENALTY = 50
+LAST_RESORT_PENALTY = 500
 
 
 def _iso_to_epoch(value: Any) -> float:
@@ -207,6 +224,75 @@ def disable_capability(provider: str, capability: str, reason: str, *, status_co
     _persist_capability(provider, capability, cooldown)
 
 
+def record_capability_result(
+    provider: str,
+    capability: str,
+    ok: bool,
+    reason: str = "",
+    *,
+    status_code: int | None = None,
+    now: float | None = None,
+) -> CapabilityHealth:
+    """Track short-term health for a single provider capability."""
+    timestamp = time.time() if now is None else float(now)
+    key = (provider, capability)
+    health = _health.get(key) or CapabilityHealth()
+    iso = _epoch_to_iso(timestamp)
+    if ok:
+        health.consecutive_successes += 1
+        health.consecutive_failures = 0
+        health.last_success = iso
+        if health.status != "healthy" and health.consecutive_successes >= HEALTH_RESTORE_SUCCESSES:
+            health.status = "healthy"
+            health.reason = ""
+            health.demoted_until = 0.0
+        elif health.status == "healthy":
+            health.reason = ""
+            health.demoted_until = 0.0
+    else:
+        text = str(reason or "provider capability failure")
+        health.consecutive_failures += 1
+        health.consecutive_successes = 0
+        health.last_failure = iso
+        health.reason = text
+        if status_code in {402, 403} or "plan" in text.lower() or "permission" in text.lower():
+            health.status = "last_resort"
+            health.demoted_until = timestamp + PLAN_LIMIT_COOLDOWN_SECONDS
+        elif status_code == 429 or "rate" in text.lower() or "quota" in text.lower():
+            health.status = "last_resort"
+            health.demoted_until = timestamp + HEALTH_DEMOTION_SECONDS
+        else:
+            health.status = "degraded" if health.consecutive_failures == 1 else "last_resort"
+            health.demoted_until = timestamp + HEALTH_DEMOTION_SECONDS
+    _health[key] = health
+    return health
+
+
+def capability_health(provider: str, capability: str, *, now: float | None = None) -> CapabilityHealth:
+    timestamp = time.time() if now is None else float(now)
+    health = _health.get((provider, capability))
+    if not health:
+        return CapabilityHealth()
+    if health.demoted_until and health.demoted_until <= timestamp:
+        health.status = "probation"
+        health.reason = health.reason or "awaiting recovery success"
+        health.demoted_until = 0.0
+    return health
+
+
+def capability_priority_penalty(provider: str, capability: str, *, now: float | None = None) -> int:
+    if not capability_supported(provider, capability):
+        return LAST_RESORT_PENALTY * 2
+    if not capability_available(provider, capability):
+        return LAST_RESORT_PENALTY
+    health = capability_health(provider, capability, now=now)
+    if health.status == "last_resort":
+        return LAST_RESORT_PENALTY
+    if health.status in {"degraded", "probation"}:
+        return DEGRADED_PENALTY
+    return 0
+
+
 def classify_plan_limited_status(status_code: int | None, message: str = "") -> bool:
     text = str(message or "").lower()
     return status_code in {402, 403} or any(
@@ -240,6 +326,8 @@ def diagnostics() -> list[dict[str, Any]]:
                     "cooldown_remaining_seconds": remaining,
                     "limitation": cooldown.reason if cooldown and remaining else "",
                     "status_code": cooldown.status_code if cooldown else None,
+                    "health_status": capability_health(provider, capability).status,
+                    "health_reason": capability_health(provider, capability).reason,
                 }
             )
     return records

@@ -4,6 +4,7 @@ import os
 
 APP_NAME = "GARIBALDI MARKET ORACLE™"
 DATABASE_PATH = os.getenv("DATABASE_PATH", "oracle.db")
+MARKET_SCOPE = os.getenv("MARKET_SCOPE", "US_CRYPTO").strip().upper() or "US_CRYPTO"
 # Institutional paper-broker capital. These are simulated balances only.
 # Existing paper portfolios are upgraded in place while preserving their P/L.
 STARTING_BALANCE = float(os.getenv("STARTING_BALANCE", "10000000"))
@@ -52,26 +53,22 @@ FINNHUB_CRYPTO_EXCHANGES = [
 PROVIDER_CAPABILITY_DAILY_BUDGETS = {
     ("alpha vantage", "history"): ALPHA_VANTAGE_DAILY_REQUEST_BUDGET,
     ("alpha vantage", "us_history"): ALPHA_VANTAGE_DAILY_REQUEST_BUDGET,
-    ("alpha vantage", "international_history"): ALPHA_VANTAGE_DAILY_REQUEST_BUDGET,
     ("alpha vantage", "crypto"): 0,
     ("alpha vantage", "quote"): ALPHA_VANTAGE_DAILY_REQUEST_BUDGET,
     ("alpha vantage", "symbol_search"): ALPHA_VANTAGE_DAILY_REQUEST_BUDGET,
     ("alpha vantage", "news"): ALPHA_VANTAGE_DAILY_REQUEST_BUDGET,
     ("polygon", "history"): POLYGON_DAILY_REQUEST_BUDGET,
     ("polygon", "us_history"): POLYGON_DAILY_REQUEST_BUDGET,
-    ("polygon", "international_history"): POLYGON_DAILY_REQUEST_BUDGET,
     ("polygon", "crypto"): POLYGON_DAILY_REQUEST_BUDGET,
     ("polygon", "quote"): POLYGON_DAILY_REQUEST_BUDGET,
     ("polygon", "movers"): POLYGON_DAILY_REQUEST_BUDGET,
     ("finnhub", "history"): FINNHUB_DAILY_REQUEST_BUDGET,
     ("finnhub", "us_history"): FINNHUB_DAILY_REQUEST_BUDGET,
-    ("finnhub", "international_history"): FINNHUB_DAILY_REQUEST_BUDGET,
     ("finnhub", "crypto"): FINNHUB_CRYPTO_DAILY_REQUEST_BUDGET,
     ("finnhub", "quote"): FINNHUB_DAILY_REQUEST_BUDGET,
     ("finnhub", "earnings"): FINNHUB_DAILY_REQUEST_BUDGET,
     ("eodhd", "history"): EODHD_DAILY_REQUEST_BUDGET,
     ("eodhd", "us_history"): EODHD_DAILY_REQUEST_BUDGET,
-    ("eodhd", "international_history"): EODHD_DAILY_REQUEST_BUDGET,
     ("eodhd", "crypto"): EODHD_CRYPTO_DAILY_REQUEST_BUDGET,
     ("eodhd", "quote"): EODHD_DAILY_REQUEST_BUDGET,
     ("newsapi", "news"): NEWSAPI_DAILY_REQUEST_BUDGET,
@@ -138,6 +135,16 @@ ENABLE_PORTFOLIO_ROTATION = os.getenv("ENABLE_PORTFOLIO_ROTATION", "false").lowe
 ENABLE_BROKER_SUBMISSION = os.getenv("ENABLE_BROKER_SUBMISSION", "false").lower() == "true"
 ENABLE_OPENAI = os.getenv("ENABLE_OPENAI", "false").lower() == "true"
 GLOBAL_KILL_SWITCH = os.getenv("GLOBAL_KILL_SWITCH", "false").lower() == "true"
+LIVE_TRADING_ARMED = os.getenv("LIVE_TRADING_ARMED", "false").lower() == "true"
+LIVE_ORDER_APPROVAL_MODE = os.getenv("LIVE_ORDER_APPROVAL_MODE", "manual").strip().lower()
+ROBINHOOD_CRYPTO_ENABLED = os.getenv("ROBINHOOD_CRYPTO_ENABLED", "false").lower() == "true"
+ROBINHOOD_CRYPTO_API_KEY = os.getenv("ROBINHOOD_CRYPTO_API_KEY", "").strip()
+ROBINHOOD_CRYPTO_PRIVATE_KEY_BASE64 = os.getenv("ROBINHOOD_CRYPTO_PRIVATE_KEY_BASE64", "").strip()
+ROBINHOOD_CRYPTO_API_VERSION = os.getenv("ROBINHOOD_CRYPTO_API_VERSION", "v2").strip()
+ROBINHOOD_CRYPTO_BASE_URL = os.getenv("ROBINHOOD_CRYPTO_BASE_URL", "https://trading.robinhood.com").strip().rstrip("/")
+ROBINHOOD_CRYPTO_API_MODE = os.getenv("ROBINHOOD_CRYPTO_API_MODE", "disabled").strip().lower()
+CRYPTO_PRIORITY_WEIGHT = max(0.0, min(1.0, float(os.getenv("CRYPTO_PRIORITY_WEIGHT", "0.70"))))
+STOCK_PRIORITY_WEIGHT = max(0.0, min(1.0, float(os.getenv("STOCK_PRIORITY_WEIGHT", "0.30"))))
 ENABLE_NEWS = os.getenv("ENABLE_NEWS", "true").lower() == "true"
 NEWS_PRIORITY_CANDIDATES = max(3, int(os.getenv("NEWS_PRIORITY_CANDIDATES", "8")))
 NEWS_CACHE_TTL_SECONDS = max(900, int(os.getenv("NEWS_CACHE_TTL_SECONDS", "7200")))
@@ -399,6 +406,11 @@ GLOBAL_PIT_HOT_ATTENTION_SCORE = max(60.0, float(os.getenv("GLOBAL_PIT_HOT_ATTEN
 GLOBAL_PIT_CRITICAL_ATTENTION_SCORE = max(GLOBAL_PIT_HOT_ATTENTION_SCORE, float(os.getenv("GLOBAL_PIT_CRITICAL_ATTENTION_SCORE", "88")))
 GLOBAL_PIT_ROTATION_MIN_ADVANTAGE_PCT = max(0.0, float(os.getenv("GLOBAL_PIT_ROTATION_MIN_ADVANTAGE_PCT", "2.5")))
 GLOBAL_PIT_MAX_PARALLEL_LANES = max(1, min(12, int(os.getenv("GLOBAL_PIT_MAX_PARALLEL_LANES", "9"))))
+CORE_SIGNAL_SUPPORT_THRESHOLD = max(1.0, min(100.0, float(os.getenv("CORE_SIGNAL_SUPPORT_THRESHOLD", "60"))))
+MIN_CORE_SIGNALS_AGREE = max(1, min(5, int(os.getenv("MIN_CORE_SIGNALS_AGREE", "3"))))
+MIN_CONFIDENCE_TO_TRADE = max(1.0, min(100.0, float(os.getenv("MIN_CONFIDENCE_TO_TRADE", "70"))))
+MIN_REWARD_RISK_RATIO = max(0.1, float(os.getenv("MIN_REWARD_RISK_RATIO", "1.5")))
+MAX_SECONDARY_SCORE_ADJUSTMENT = max(0.0, min(10.0, float(os.getenv("MAX_SECONDARY_SCORE_ADJUSTMENT", "5"))))
 PENNY_STOCK_MAX_PRICE = float(os.getenv("PENNY_STOCK_MAX_PRICE", "5.00"))
 PENNY_STOCK_ENABLED = os.getenv("PENNY_STOCK_ENABLED", "true").lower() == "true"
 PENNY_STOCK_MIN_PRICE = float(os.getenv("PENNY_STOCK_MIN_PRICE", "0.50"))

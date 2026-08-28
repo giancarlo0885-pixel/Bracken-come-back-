@@ -405,10 +405,9 @@ def render_trade_history_section(trades: list[dict[str, Any]], key_prefix: str) 
 
 
 def render_global_pit_section() -> None:
-    st.markdown("<div class='section-title'>GLOBAL WALL STREET PIT</div>", unsafe_allow_html=True)
+    st.markdown("<div class='section-title'>U.S. + CRYPTO MISSION CONTROL</div>", unsafe_allow_html=True)
     universe_count = len(global_pit_universe)
     asset_classes = {str(row.get("asset_class") or "Unknown") for row in global_pit_universe}
-    countries = {str(row.get("country") or "Unknown") for row in global_pit_universe}
     exchanges = {str(row.get("exchange") or "Unknown") for row in global_pit_universe}
     qualified = [row for row in global_pit_queue if row.get("qualified_for_capital")]
     engines = split_capital_engines(
@@ -421,16 +420,16 @@ def render_global_pit_section() -> None:
     funnel = build_decision_funnel_from_events(global_decision_events_v39) if global_decision_events_v39 else build_decision_funnel_from_events([])
     v39_summary = v39_dashboard_summary(engines["stock"], engines["crypto"], funnel, provider_budgets_v39)
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Markets Under Surveillance", universe_count)
-    c2.metric("Asset Classes", len(asset_classes))
-    c3.metric("Countries", len(countries))
-    c4.metric("Exchanges", len(exchanges))
+    c1.metric("U.S./Crypto Symbols", universe_count)
+    c2.metric("Qualified Opportunities", len(qualified))
+    c3.metric("Provider Limits", len(provider_budgets_v39))
+    c4.metric("Worker Heartbeat", "Online" if any(worker_live(record) for record in workers) else "Waiting")
     cap1, cap2, cap3, cap4 = st.columns(4)
     cap1.metric("Stock Invested", f"{engines['stock']['invested_pct'] * 100:.1f}%")
     cap2.metric("Stock Qualified", engines["stock"]["qualified_opportunities"])
     cap3.metric("Crypto Invested", f"{engines['crypto']['invested_pct'] * 100:.1f}%")
     cap4.metric("Crypto Qualified", engines["crypto"]["qualified_opportunities"])
-    st.caption("V39 keeps stock and crypto executable cash separate. Intelligence can inform soft scores, but hard execution gates remain final.")
+    st.caption("Mission Control shows only U.S. stocks/ETFs, crypto, portfolio risk, verified providers, ranked opportunities, catalysts, and worker heartbeat.")
     with st.expander("Global Decision Funnel", expanded=True):
         counts = v39_summary["decision_funnel"]["counts"]
         st.dataframe(pd.DataFrame([{"Stage": key.replace("_", " ").title(), "Count": value} for key, value in counts.items()]), width="stretch", hide_index=True)
@@ -474,15 +473,15 @@ def render_global_pit_section() -> None:
                 "Symbol": row.get("symbol"),
                 "Asset Class": row.get("asset_class"),
                 "Sector": row.get("sector"),
-                "Country": row.get("country"),
                 "Attention": row.get("attention_level"),
                 "Score": round(as_float(row.get("opportunity_score")), 1),
+                "Confidence": round(as_float(row.get("confidence")), 1),
                 "Data": row.get("data_label"),
                 "Mode": "Paper candidate" if row.get("paper_execution_supported") else "Intelligence only",
             })
         st.dataframe(pd.DataFrame(rows_for_view), width="stretch", hide_index=True)
     else:
-        st.info("Global Pit has not persisted a queue yet. It will show activity only after scanners record real observations.")
+        st.info("Mission Control is waiting for the U.S./crypto scanners to record verified observations.")
     if global_pit_map:
         st.markdown("**Global Capital Flow**")
         st.dataframe(pd.DataFrame(global_pit_map), width="stretch", hide_index=True)
@@ -495,8 +494,9 @@ def render_global_pit_section() -> None:
             f"realized {as_float(latest.get('actual_move_pct')):+.1f}%."
         )
     with st.expander("Show Details"):
-        st.caption("Global Pit scans broadly for intelligence. Unsupported asset classes are not routed to fake broker execution.")
+        st.caption("Unsupported foreign equities, FX, commodities, and indexes are out of execution scope and are not routed to provider trading data.")
         st.write(f"Asset classes seen: {', '.join(sorted(asset_classes)) if asset_classes else 'waiting for persisted scans'}")
+        st.write(f"Exchanges seen: {', '.join(sorted(exchanges)) if exchanges else 'waiting for persisted scans'}")
         st.write(f"Broker submission enabled: {v39_summary['broker_submission_enabled']}")
 
 

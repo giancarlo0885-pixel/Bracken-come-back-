@@ -148,7 +148,7 @@ def test_crypto_routes_are_built_from_configured_capabilities(monkeypatch):
     assert routed.frame.attrs["provider_native_symbol"] == "X:BTCUSD"
 
 
-def test_yahoo_crypto_fallback_is_research_only(monkeypatch):
+def test_yahoo_crypto_fallback_is_strict_research(monkeypatch):
     _reset_provider_state(monkeypatch)
     monkeypatch.setitem(provider_router.PROVIDER_CAPABILITY_DAILY_BUDGETS, ("polygon", "crypto"), 0)
     monkeypatch.setitem(provider_router.PROVIDER_CAPABILITY_DAILY_BUDGETS, ("finnhub", "crypto"), 0)
@@ -160,6 +160,7 @@ def test_yahoo_crypto_fallback_is_research_only(monkeypatch):
     assert routed.provider == "Yahoo Finance"
     assert routed.frame.attrs["quote_verified"] is False
     assert routed.metadata()["quote_verified"] is False
+    assert routed.attempts[-1].status == "strict_research_fallback"
 
 
 def test_polygon_rate_limit_falls_back_to_second_verified_crypto_provider(monkeypatch):
@@ -228,12 +229,13 @@ def test_crypto_redundancy_reports_degraded_and_unavailable(monkeypatch):
     assert provider_router.crypto_execution_provider_redundancy(_Settings(POLYGON_API_KEY="key"))["status"] == "UNAVAILABLE"
 
 
-def test_provider_fetched_research_price_is_not_execution_quote(monkeypatch):
+def test_unverified_research_price_is_not_execution_quote(monkeypatch):
     _reset_provider_state(monkeypatch)
     monkeypatch.setitem(provider_router.PROVIDER_CAPABILITY_DAILY_BUDGETS, ("polygon", "crypto"), 0)
     monkeypatch.setattr(provider_router, "get_api_settings", lambda: _Settings())
     history = provider_router.route_history("BTC-USD", "5d", "1d", lambda *args: _ohlcv_frame(100)).frame
-    history.attrs["provider_route"] = provider_router.RoutedHistory(history, "Yahoo Finance", [], datetime.now(timezone.utc).isoformat()).metadata()
+    history.attrs["quote_verified"] = False
+    history.attrs["provider_route"] = provider_router.RoutedHistory(history, "Unverified Research", [], datetime.now(timezone.utc).isoformat()).metadata()
 
     quote = market_worker._quote_payload_from_history("BTC-USD", history, 100.0, scan_type="fast")
 
