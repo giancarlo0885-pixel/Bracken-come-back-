@@ -124,6 +124,8 @@ REPAIR_STATEMENTS = [
         volatility_pct DOUBLE PRECISION, mover_score DOUBLE PRECISION, payload JSONB,
         scanned_at TEXT NOT NULL)""",
     "CREATE INDEX IF NOT EXISTS idx_global_candidates_score ON global_market_candidates(mover_score DESC, scanned_at DESC)",
+    "ALTER TABLE IF EXISTS trade_ledger ALTER COLUMN decision_id TYPE TEXT USING decision_id::TEXT",
+    "ALTER TABLE IF EXISTS position_lots ALTER COLUMN decision_id TYPE TEXT USING decision_id::TEXT",
     """CREATE TABLE IF NOT EXISTS global_scanner_status (
         id INTEGER PRIMARY KEY DEFAULT 1, cursor INTEGER NOT NULL DEFAULT 0,
         universe_size INTEGER NOT NULL DEFAULT 0, scanned_count INTEGER NOT NULL DEFAULT 0,

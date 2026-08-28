@@ -7,6 +7,12 @@ from typing import Any
 from config import DECISION_CRYPTO_MAX_AGE_MINUTES, DECISION_STOCK_MAX_AGE_MINUTES
 from capital_allocator import adaptive_capital_allocation, max_positions_for_equity
 from market_sessions import quote_is_fresh
+from stock_best_movers import (
+    holding_quality_score,
+    holding_view_rows,
+    is_allowed_us_stock as stock_scope_allowed,
+    should_rotate,
+)
 
 
 def as_float(value: Any, default: float = 0.0) -> float:
@@ -879,13 +885,7 @@ def market_focus_sections(candidates: list[dict[str, Any]], positions: list[dict
 
 
 def is_allowed_us_stock(record: dict[str, Any]) -> bool:
-    symbol = str(record.get("symbol") or "").upper().strip()
-    asset_class = str(record.get("asset_class") or record.get("market") or "").lower().strip()
-    if not symbol or symbol.endswith("-USD"):
-        return False
-    if asset_class not in {"stock", "equity", "etf", "cash", ""}:
-        return False
-    return is_us_crypto_scope(record)
+    return stock_scope_allowed(record)
 
 
 def wall_street_quality_score(record: dict[str, Any]) -> float:
@@ -992,31 +992,35 @@ def wall_street_market_focus(
         row["Rank"] = index
         row.pop("_score", None)
 
+    equity = sum(_position_value(position) for position in positions)
     owned = []
-    for position in positions:
-        if not is_allowed_us_stock(position):
-            continue
-        qty = as_float(position.get("quantity"))
-        avg = as_float(position.get("average_price") or position.get("entry_price"))
-        current = as_float(position.get("current_price") or position.get("price"))
-        value = qty * current
-        pnl_value = (current - avg) * qty if avg > 0 and current > 0 else 0.0
-        pnl_pct = ((current / avg) - 1) * 100 if avg > 0 and current > 0 else 0.0
+    for view in holding_view_rows(positions, equity=equity):
+        data_label = "VERIFIED" if view["quote_verified"] else "NEEDS PRICE"
+        h_score = holding_quality_score(
+            weighted_signal_score=next((position.get("weighted_signal_score") or position.get("score") or 50 for position in positions if str(position.get("symbol") or "").upper() == view["symbol"]), 50),
+            confidence=next((position.get("confidence") or 50 for position in positions if str(position.get("symbol") or "").upper() == view["symbol"]), 50),
+            rr=next((position.get("reward_risk_ratio") or 1.5 for position in positions if str(position.get("symbol") or "").upper() == view["symbol"]), 1.5),
+            relative_strength=next((position.get("relative_strength") or position.get("holding_score") or position.get("score") or 50 for position in positions if str(position.get("symbol") or "").upper() == view["symbol"]), 50),
+        )
         owned.append(
             {
-                "Symbol": str(position.get("symbol") or "").upper(),
-                "Company": position.get("company") or position.get("name") or "",
-                "Bucket": position.get("bucket") or "Stock",
-                "Shares": format_quantity(qty),
-                "Avg Cost": money_text(avg),
-                "Current Price": money_text(current),
-                "Market Value": money_text(value),
-                "P/L $": signed_money_text(pnl_value),
-                "P/L %": f"{pnl_pct:+.1f}%",
-                "Strategy": position.get("strategy") or "",
-                "Tier": position.get("tier") or "",
-                "Holding Score": round(normalized_score(position.get("holding_score") or position.get("score") or 50), 1),
-                "Action": str(position.get("action") or "HOLD").upper(),
+                "Symbol": view["symbol"],
+                "Company": view["name"],
+                "Bucket": view["bucket"],
+                "Shares": format_quantity(view["shares"]),
+                "Avg Cost": money_text(view["avg_cost"]),
+                "Current Price": money_text(view["current_price"]),
+                "Market Value": money_text(view["market_value"]),
+                "P/L $": signed_money_text(view["unrealized_pnl"]),
+                "P/L %": f"{view['unrealized_pnl_pct']:+.1f}%",
+                "Weight": f"{view['portfolio_weight_pct']:.1f}%",
+                "Sector": view["sector"] or "Unknown",
+                "Tier": view["trade_tier"] or "",
+                "Strategy": view["strategy"] or "",
+                "Provider": view["quote_provider"] or "Unknown",
+                "Data Status": data_label,
+                "Holding Score": h_score,
+                "Action": "HOLD",
             }
         )
 
@@ -1058,12 +1062,30 @@ def wall_street_market_focus(
             }
         )
 
+    rotations = []
+    tactical_owned = [row for row in owned if row.get("Bucket") == "TACTICAL"]
+    if tactical_owned and best:
+        weakest = min(tactical_owned, key=lambda row: as_float(row.get("Holding Score"), 50.0))
+        strongest = best[0]
+        improvement = as_float(strongest.get("Mover Score")) - as_float(weakest.get("Holding Score"))
+        if should_rotate(incoming_score=strongest.get("Mover Score"), held_score=weakest.get("Holding Score")):
+            rotations.append(
+                {
+                    "current_holding": weakest["Symbol"],
+                    "holding_score": weakest["Holding Score"],
+                    "incoming_candidate": strongest["Symbol"],
+                    "candidate_score": strongest["Mover Score"],
+                    "score_improvement": round(improvement, 1),
+                    "recommended_action": "ROTATE INTO",
+                }
+            )
+
     return {
         "best_trades": best,
         "movers": sorted(movers, key=lambda row: as_float(row.get("Mover Score")), reverse=True)[:15],
         "action_queue": action_queue,
         "owned": owned,
-        "rotations": [],
+        "rotations": rotations,
         "profit_sources": profit_sources,
         "sectors": sorted(sectors.values(), key=lambda row: as_float(row.get("Relative Strength")), reverse=True),
         "rejected": rejected[:20],

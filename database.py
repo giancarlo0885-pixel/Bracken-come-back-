@@ -317,7 +317,7 @@ def initialize_database() -> None:
             confidence_score DOUBLE PRECISION,
             weighted_signal_score DOUBLE PRECISION,
             quote_provider TEXT,
-            decision_id BIGINT,
+            decision_id TEXT,
             order_id TEXT,
             broker_mode TEXT NOT NULL DEFAULT 'PAPER',
             account_environment TEXT NOT NULL DEFAULT 'PAPER',
@@ -339,7 +339,7 @@ def initialize_database() -> None:
             quantity_remaining DOUBLE PRECISION NOT NULL,
             entry_price DOUBLE PRECISION NOT NULL,
             entry_fees DOUBLE PRECISION NOT NULL DEFAULT 0,
-            decision_id BIGINT,
+            decision_id TEXT,
             broker_mode TEXT NOT NULL DEFAULT 'PAPER',
             account_environment TEXT NOT NULL DEFAULT 'PAPER',
             created_at TEXT NOT NULL

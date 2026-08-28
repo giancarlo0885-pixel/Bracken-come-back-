@@ -386,7 +386,29 @@ MAX_POSITION_VS_DAILY_DOLLAR_VOLUME_PCT = max(
 )
 MAX_SINGLE_STOCK_POSITION_PCT = max(0.0, min(1.0, float(os.getenv("MAX_SINGLE_STOCK_POSITION_PCT", "0.12"))))
 STOCK_MIN_CASH_RESERVE_PCT = max(0.0, min(1.0, float(os.getenv("STOCK_MIN_CASH_RESERVE_PCT", "0.15"))))
-STOCK_CORE_TARGET_PCT = max(0.0, min(1.0, float(os.getenv("STOCK_CORE_TARGET_PCT", "0.40"))))
+STOCK_ALWAYS_INVESTED = os.getenv("STOCK_ALWAYS_INVESTED", "true").lower() == "true"
+STOCK_CORE_TARGET_PCT = max(0.0, min(1.0, float(os.getenv("STOCK_CORE_TARGET_PCT", "0.30"))))
+STOCK_TACTICAL_MAX_PCT = max(0.0, min(1.0, float(os.getenv("STOCK_TACTICAL_MAX_PCT", "0.55"))))
+STOCK_CORE_WEIGHTS = {
+    "SPY": max(0.0, float(os.getenv("STOCK_CORE_SPY_WEIGHT", "0.45"))),
+    "QQQ": max(0.0, float(os.getenv("STOCK_CORE_QQQ_WEIGHT", "0.35"))),
+    "IWM": max(0.0, float(os.getenv("STOCK_CORE_IWM_WEIGHT", "0.10"))),
+    "DIA": max(0.0, float(os.getenv("STOCK_CORE_DIA_WEIGHT", "0.10"))),
+}
+MAX_STOCK_TACTICAL_POSITIONS = max(1, int(os.getenv("MAX_STOCK_TACTICAL_POSITIONS", "8")))
+MAX_STOCK_SECTOR_EXPOSURE_PCT = max(
+    0.0,
+    min(1.0, float(os.getenv("MAX_STOCK_SECTOR_EXPOSURE_PCT", os.getenv("MAX_SECTOR_EXPOSURE_PCT", "0.30")))),
+)
+MIN_STOCK_PRICE = max(0.0, float(os.getenv("MIN_STOCK_PRICE", "3.00")))
+MIN_AVG_DOLLAR_VOLUME = max(0.0, float(os.getenv("MIN_AVG_DOLLAR_VOLUME", "20000000")))
+MIN_AVG_VOLUME = max(0.0, float(os.getenv("MIN_AVG_VOLUME", "500000")))
+MAX_STOCK_SPREAD_PCT = max(0.0, float(os.getenv("MAX_STOCK_SPREAD_PCT", os.getenv("MAX_SPREAD_PCT", "0.015"))))
+STOCK_ROTATION_MIN_SCORE_IMPROVEMENT = max(0.0, float(os.getenv("STOCK_ROTATION_MIN_SCORE_IMPROVEMENT", "8")))
+MAX_ENTRY_EXTENSION_FROM_VWAP_PCT = max(0.0, float(os.getenv("MAX_ENTRY_EXTENSION_FROM_VWAP_PCT", "0.06")))
+MAX_SINGLE_BAR_SPIKE_PCT = max(0.0, float(os.getenv("MAX_SINGLE_BAR_SPIKE_PCT", "0.08")))
+ENABLE_STOCK_REGULAR_HOURS = os.getenv("ENABLE_STOCK_REGULAR_HOURS", "true").lower() == "true"
+ENABLE_STOCK_EXTENDED_HOURS = os.getenv("ENABLE_STOCK_EXTENDED_HOURS", "true").lower() == "true"
 TIER_SIZE_MULTIPLIERS = {"A": 1.00, "B": 0.60, "C": 0.30}
 MARKET_REGIME_SIZE_MULTIPLIERS = {"risk_on": 1.00, "neutral": 0.75, "risk_off": 0.40, "high_volatility": 0.35}
 

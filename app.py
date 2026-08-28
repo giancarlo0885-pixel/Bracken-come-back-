@@ -38,6 +38,7 @@ from crypto_opportunity_engine import crypto_page_sections
 from database import bootstrap_database_with_lock, database_ready, database_storage_report, row, rows
 from earnings_calendar import mobile_card_lines, prepare_events, table_rows
 from market_data import get_history
+from stock_best_movers import holding_view_rows
 from global_pit_engine import dashboard_activity_labels
 from global_adaptive_engine import build_decision_funnel_from_events, split_capital_engines, v39_dashboard_summary
 from execution_policy import execution_policy
@@ -538,6 +539,31 @@ def simple_portfolio_card(
 
 
 def portfolio_table(positions: list[dict[str, Any]]) -> pd.DataFrame:
+    equity = sum(as_float(p.get("quantity")) * as_float(p.get("current_price") or p.get("price")) for p in positions)
+    stock_rows = holding_view_rows(positions, equity=equity)
+    if stock_rows:
+        return pd.DataFrame(
+            [
+                {
+                    "Symbol": item["symbol"],
+                    "Company": item["name"],
+                    "Bucket": item["bucket"],
+                    "Shares": item["shares"],
+                    "Avg Cost": item["avg_cost"],
+                    "Current Price": item["current_price"],
+                    "Market Value": item["market_value"],
+                    "P/L $": item["unrealized_pnl"],
+                    "P/L %": item["unrealized_pnl_pct"],
+                    "Weight": item["portfolio_weight_pct"],
+                    "Sector": item["sector"] or "Unknown",
+                    "Tier": item["trade_tier"] or "",
+                    "Strategy": item["strategy"] or "",
+                    "Provider": item["quote_provider"] or "Unknown",
+                    "Data Status": "VERIFIED" if item["quote_verified"] else "NEEDS PRICE",
+                }
+                for item in stock_rows
+            ]
+        )
     data = []
     for p in positions:
         qty = as_float(p.get("quantity"))
@@ -1073,8 +1099,24 @@ elif page == "Portfolios":
                 if frame.empty:
                     st.info(f"The {name.lower()} portfolio has no open positions.")
                 else:
+                    formatters = {
+                        key: value
+                        for key, value in {
+                            "Average Cost": "${:,.2f}",
+                            "Avg Cost": "${:,.2f}",
+                            "Current Price": "${:,.2f}",
+                            "Current Value": "${:,.2f}",
+                            "Market Value": "${:,.2f}",
+                            "Gain/Loss": "${:+,.2f}",
+                            "P/L $": "${:+,.2f}",
+                            "Return %": "{:+.1f}%",
+                            "P/L %": "{:+.1f}%",
+                            "Weight": "{:.1f}%",
+                        }.items()
+                        if key in frame.columns
+                    }
                     st.dataframe(
-                        frame.style.format({"Average Cost": "${:,.2f}", "Current Price": "${:,.2f}", "Current Value": "${:,.2f}", "Gain/Loss": "${:+,.2f}", "Return %": "{:+.1f}%"}),
+                        frame.style.format(formatters),
                         width="stretch", hide_index=True,
                     )
             with activity_tab:

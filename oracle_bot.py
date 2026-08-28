@@ -81,6 +81,9 @@ from profit_attribution import fifo_close_lots
 MAX_SECTOR_EXPOSURE_PCT = float(
     globals().get("MAX_SECTOR_EXPOSURE_PCT", 0.35)
 )
+MAX_STOCK_SECTOR_EXPOSURE_PCT = float(
+    globals().get("MAX_STOCK_SECTOR_EXPOSURE_PCT", MAX_SECTOR_EXPOSURE_PCT)
+)
 
 DEFAULT_STOP_LOSS_PCT = float(
     globals().get("STOP_LOSS_PCT", 0.06)
@@ -1054,11 +1057,12 @@ def _paper_buy_safeguard(
     )
     if market == "cash" and not sector:
         return False, "paper buy safeguard requires verified stock sector metadata"
-    if sector_after is not None and sector_after > MAX_SECTOR_EXPOSURE_PCT:
+    sector_limit = MAX_STOCK_SECTOR_EXPOSURE_PCT if market == "cash" else MAX_SECTOR_EXPOSURE_PCT
+    if sector_after is not None and sector_after > sector_limit:
         return (
             False,
             f"paper buy safeguard rejected sector concentration "
-            f"{sector} ({sector_after:.2%}/{MAX_SECTOR_EXPOSURE_PCT:.2%})",
+            f"{sector} ({sector_after:.2%}/{sector_limit:.2%})",
         )
     return True, "paper buy safeguard approved"
 
