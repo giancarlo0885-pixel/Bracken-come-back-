@@ -6,6 +6,7 @@ from dashboard_helpers import (
     balanced_money_bar,
     balanced_opportunity_rows,
     balanced_portfolio_rows,
+    capital_allocation_rows,
     capital_deployment_status,
     compact_money_text,
     clean_market,
@@ -218,6 +219,32 @@ def test_planner_rejects_unverified_or_stale_opportunities():
 def test_compact_money_text_abbreviates_large_dashboard_values():
     assert compact_money_text(1_953_837_204) == "$2.0B"
     assert compact_money_text(65_389_901) == "$65.4M"
+
+
+def test_capital_allocation_rows_explain_position_size():
+    rows = capital_allocation_rows(
+        [
+            {
+                "symbol": "NVDA",
+                "price": 100,
+                "stop_loss": 95,
+                "tier": "A",
+                "confidence": 88,
+                "reward_risk_ratio": 2.0,
+                "market_regime": "risk_on",
+                "avg_dollar_volume": 1_000_000_000,
+                "spread_pct": 0.002,
+            }
+        ],
+        {"equity": 10_000, "cash": 6_000, "invested": 2_000},
+        [],
+        market="cash",
+    )
+
+    assert rows[0]["Symbol"] == "NVDA"
+    assert rows[0]["Base Risk $"] == "$100.00"
+    assert rows[0]["Position Size $"] != "$0.00"
+    assert "final risk budget" in rows[0]["Why This Size"]
     assert compact_money_text(357_000) == "$357K"
 
 

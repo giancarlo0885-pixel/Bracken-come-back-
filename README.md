@@ -83,6 +83,15 @@ ENABLE_OPENAI=false
 GLOBAL_KILL_SWITCH=false
 LIVE_TRADING_ARMED=false
 LIVE_ORDER_APPROVAL_MODE=manual
+BROKER_MODE=paper
+LIVE_TRADING_KILL_SWITCH=true
+LIVE_MAX_SINGLE_ORDER_DOLLARS=100
+LIVE_MAX_DAILY_NEW_EXPOSURE_DOLLARS=250
+LIVE_MAX_DAILY_LOSS_DOLLARS=50
+LIVE_MAX_POSITION_PCT=0.05
+LIVE_MAX_TOTAL_DEPLOYED_PCT=0.25
+PAPER_TAX_LOT_METHOD=FIFO
+MAX_RECONCILIATION_DIFFERENCE_PCT=0.005
 ROBINHOOD_CRYPTO_ENABLED=false
 ROBINHOOD_CRYPTO_API_KEY=
 ROBINHOOD_CRYPTO_PRIVATE_KEY_BASE64=
@@ -91,6 +100,33 @@ ROBINHOOD_CRYPTO_BASE_URL=https://trading.robinhood.com
 ROBINHOOD_CRYPTO_API_MODE=disabled
 CRYPTO_PRIORITY_WEIGHT=0.70
 STOCK_PRIORITY_WEIGHT=0.30
+CRYPTO_ALWAYS_INVESTED=true
+CRYPTO_CORE_TARGET_PCT=0.30
+CRYPTO_TACTICAL_MAX_PCT=0.60
+CRYPTO_MIN_CASH_RESERVE_PCT=0.10
+CRYPTO_DYNAMIC_UNIVERSE_SIZE=40
+CRYPTO_MAX_ACTIVE_SCAN_SYMBOLS=50
+CRYPTO_MIN_24H_DOLLAR_VOLUME=25000000
+CRYPTO_MAX_SPREAD_PCT=0.02
+MAX_SINGLE_CRYPTO_TACTICAL_POSITION_PCT=0.12
+CRYPTO_ROTATION_MIN_SCORE_IMPROVEMENT=7
+CRYPTO_FULL_SCAN_SECONDS=120
+CRYPTO_SYMBOL_COOLDOWN_MINUTES=20
+CRYPTO_ROTATION_COOLDOWN_MINUTES=30
+CRYPTO_STOP_OUT_COOLDOWN_MINUTES=60
+CRYPTO_BREAKEVEN_TRIGGER_R=1.0
+CRYPTO_TRAILING_STOP_TRIGGER_R=1.5
+MAX_PORTFOLIO_RISK_PER_TRADE=0.01
+MAX_TOTAL_DEPLOYED_PCT=0.90
+MIN_TRADE_NOTIONAL=2.00
+ENABLE_FRACTIONAL_EQUITIES=true
+ENABLE_FRACTIONAL_CRYPTO=true
+SMALL_ACCOUNT_THRESHOLD=500
+LARGE_ACCOUNT_THRESHOLD=100000
+MAX_POSITION_VS_DAILY_DOLLAR_VOLUME_PCT=0.001
+MAX_SINGLE_STOCK_POSITION_PCT=0.12
+STOCK_MIN_CASH_RESERVE_PCT=0.15
+STOCK_CORE_TARGET_PCT=0.40
 GLOBAL_SCANNER_ENABLED=true
 GLOBAL_SCAN_SYMBOLS_PER_CYCLE=45
 GLOBAL_ACTIVE_CANDIDATES=20
@@ -147,7 +183,36 @@ Lower intervals increase provider traffic and can trigger rate limits. The defau
 
 The stock worker now combines the fixed watchlist with dynamic discovery. Every scan keeps recurring coverage for GOOGL, GOOG, AMZN, AAPL, MSFT, NVDA and other core stocks, plus major ETFs. The rotating universe also supports blue-chip core stocks, large caps, mid caps, small caps, qualified penny stocks, ETFs, major gainers, major losers, gap movers, unusual-volume names, and global liquid leaders.
 
-V38 Global Pit mode adds a continuously updated global financial universe, attention scoring, scanning lanes, and one global opportunity queue. The universe uses static watchlists only as seeds and can include equities, ETFs, crypto, forex, commodities, rates, indexes, futures, and options intelligence. Unsupported asset classes remain intelligence-only and cannot be routed to fake paper-broker execution. The capital planner targets 95% invested / 5% reserve only when enough verified, qualified paper-tradeable opportunities pass freshness, liquidity, concentration, and existing hard risk gates. Dashboard Oracle Pit labels are driven by persisted scanner, research, learning, allocation, and rotation state; unknown or delayed data is never labeled live.
+Market Focus keeps the execution universe to U.S.-listed stocks/ETFs and crypto while preserving useful intelligence from broader market context. The scanner uses static watchlists only as seeds, ranks verified stock and crypto opportunities separately, and keeps unsupported assets intelligence-only. The capital planner targets 95% invested / 5% reserve only when enough verified, qualified paper-tradeable opportunities pass freshness, liquidity, concentration, and existing hard risk gates. Dashboard labels are driven by persisted scanner, research, learning, allocation, and rotation state; unknown or delayed data is never labeled live.
+
+## Profit Attribution and Brokerage Readiness
+
+V39 profit attribution adds canonical `trade_ledger`, `position_lots`, and `executions` records so realized P/L is traceable by symbol, market, bucket, strategy, lot, entry, exit, quantity, fees, provider, decision, order, broker mode, and account environment. Realized P/L is calculated from execution and lot records rather than balance changes. Unrealized P/L is shown only when the position has a current verified quote; otherwise the dashboard should display `WAITING FOR VERIFIED PRICE`.
+
+## Wider Crypto Opportunity Engine
+
+The crypto workflow is separate from Wall Street Market Focus. It keeps a protected strategic core basket and scans a wider tactical universe of liquid crypto assets. Tactical candidates must pass verified quote identity, 24/7 freshness, minimum 24h dollar volume, maximum spread, provider capability support, at least three of five supporting signals, and A/B/C tier rules. C-tier trades are smaller rather than automatically denied. Core and tactical quantities are tracked separately so tactical rotations cannot liquidate protected core exposure.
+
+Default paper allocation structure:
+
+- 30% strategic crypto core
+- Up to 60% tactical crypto opportunities
+- At least 10% crypto cash reserve
+
+The dedicated Crypto page shows summary, current holdings, best crypto trades, strongest crypto movers, rotation opportunities, crypto profit attribution, core allocation, waiting/rejected candidates, and provider diagnostics.
+
+## Adaptive Capital Sizing
+
+Tactical paper entries use one canonical allocator for stocks and crypto. Size is derived from validated equity, validated cash, stop distance, tier, confidence, regime, liquidity, drawdown, current exposure, cash reserve, single-position limits, total deployment limits, and daily-volume participation. Buying power is used only when it is explicitly validated by the paper account path. Small portfolios use fewer positions and smaller orders; large portfolios can scale up while remaining capped by liquidity participation.
+
+Future live brokerage support is staged behind safe modes only:
+
+- `paper`
+- `live_read_only`
+- `live_preview`
+- `live_manual_approval`
+
+Live order submission remains blocked by default through `LIVE_TRADING_KILL_SWITCH=true` and `ENABLE_BROKER_SUBMISSION=false`. A live proposal must pass verified quote identity, freshness, reconciliation, risk checks, daily exposure limits, single-order limits, position concentration, and total deployed limits. Manual approval is tied to an immutable proposal hash; changing quantity, price, symbol, side, or risk payload invalidates the approval. Broker fills, when imported in the future, must override proposal/reference prices with the actual fill price.
 
 Major movers are discovered first through supported provider mover/snapshot capabilities, including Polygon stock snapshots, Alpha Vantage top gainers/losers/most-active data, and EODHD screener signals when those configured plans expose them. The scanner falls back to rotating price-history discovery and ranks one-day change, five-day change, relative volume, volatility, and average dollar volume. Provider errors, rate limits, and unavailable symbols enter temporary cooldowns so a bad symbol such as an unavailable crypto pair does not stop either worker. Candidate rows older than `GLOBAL_CANDIDATE_TTL_SECONDS` are ignored or removed so stale high scores cannot dominate current opportunities.
 

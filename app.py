@@ -20,10 +20,12 @@ from dashboard_helpers import (
     balanced_money_bar,
     balanced_opportunity_rows,
     balanced_portfolio_rows,
+    capital_allocation_rows,
     capital_deployment_status,
     compact_money_text,
     format_asset_price,
     live_data_status,
+    wall_street_market_focus,
     money_text,
     readable_trade_rows,
     simple_opportunity_summary,
@@ -32,6 +34,7 @@ from dashboard_helpers import (
     trade_summary,
     worker_is_online,
 )
+from crypto_opportunity_engine import crypto_page_sections
 from database import bootstrap_database_with_lock, database_ready, database_storage_report, row, rows
 from earnings_calendar import mobile_card_lines, prepare_events, table_rows
 from market_data import get_history
@@ -405,99 +408,88 @@ def render_trade_history_section(trades: list[dict[str, Any]], key_prefix: str) 
 
 
 def render_global_pit_section() -> None:
-    st.markdown("<div class='section-title'>U.S. + CRYPTO MISSION CONTROL</div>", unsafe_allow_html=True)
-    universe_count = len(global_pit_universe)
-    asset_classes = {str(row.get("asset_class") or "Unknown") for row in global_pit_universe}
-    exchanges = {str(row.get("exchange") or "Unknown") for row in global_pit_universe}
-    qualified = [row for row in global_pit_queue if row.get("qualified_for_capital")]
-    engines = split_capital_engines(
-        stock_metrics,
-        crypto_metrics,
-        stock_positions,
-        crypto_positions,
-        [row.get("payload") if isinstance(row.get("payload"), dict) else row for row in global_pit_queue],
-    )
-    funnel = build_decision_funnel_from_events(global_decision_events_v39) if global_decision_events_v39 else build_decision_funnel_from_events([])
-    v39_summary = v39_dashboard_summary(engines["stock"], engines["crypto"], funnel, provider_budgets_v39)
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("U.S./Crypto Symbols", universe_count)
-    c2.metric("Qualified Opportunities", len(qualified))
-    c3.metric("Provider Limits", len(provider_budgets_v39))
-    c4.metric("Worker Heartbeat", "Online" if any(worker_live(record) for record in workers) else "Waiting")
-    cap1, cap2, cap3, cap4 = st.columns(4)
-    cap1.metric("Stock Invested", f"{engines['stock']['invested_pct'] * 100:.1f}%")
-    cap2.metric("Stock Qualified", engines["stock"]["qualified_opportunities"])
-    cap3.metric("Crypto Invested", f"{engines['crypto']['invested_pct'] * 100:.1f}%")
-    cap4.metric("Crypto Qualified", engines["crypto"]["qualified_opportunities"])
-    st.caption("Mission Control shows only U.S. stocks/ETFs, crypto, portfolio risk, verified providers, ranked opportunities, catalysts, and worker heartbeat.")
-    with st.expander("Global Decision Funnel", expanded=True):
-        counts = v39_summary["decision_funnel"]["counts"]
-        st.dataframe(pd.DataFrame([{"Stage": key.replace("_", " ").title(), "Count": value} for key, value in counts.items()]), width="stretch", hide_index=True)
-        watched = int(counts.get("surveillance", 0) or counts.get("scanned", 0) or universe_count)
-        executable = int(counts.get("execution_approved", 0) or counts.get("paper_trade_executed", 0) or 0)
-        st.caption(f"Plain English: {watched} markets watched, {executable} executable right now.")
-        reasons = v39_summary["decision_funnel"].get("rejection_reasons") or {}
-        if reasons:
-            st.dataframe(pd.DataFrame([{"Reason": key, "Count": value} for key, value in reasons.items()]), width="stretch", hide_index=True)
+    st.markdown("<div class='section-title'>MARKET FOCUS</div>", unsafe_allow_html=True)
+    stock_queue = [row for row in global_pit_queue if str(row.get("market") or "cash").lower() in {"cash", "stock", ""}]
+    ledger_rows = safe_rows("SELECT * FROM trade_ledger WHERE market='cash' ORDER BY id DESC LIMIT 100")
+    focus = wall_street_market_focus(stock_queue, stock_positions, ledger_rows)
+    stock_worker = next((record for record in workers if record.get("market") == "cash"), {})
+    today_stock_pnl = sum(as_float(trade.get("realized_pnl")) for trade in recent_trades if str(trade.get("market") or "").lower() == "cash")
+    market_regime = "NEUTRAL"
+    for row_data in stock_queue:
+        candidate_regime = str(row_data.get("market_regime") or "").upper()
+        if candidate_regime in {"RISK ON", "RISK OFF", "HIGH VOLATILITY", "NEUTRAL"}:
+            market_regime = candidate_regime
+            break
+    c1, c2, c3, c4, c5, c6, c7 = st.columns(7)
+    c1.metric("U.S. Market Regime", market_regime)
+    c2.metric("Stock Session", stock_worker.get("session_label") or stock_worker.get("status") or "Waiting")
+    c3.metric("Today's Stock P/L", money(today_stock_pnl))
+    c4.metric("Stock Capital Invested", money(stock_metrics["invested"]))
+    c5.metric("Stock Cash Available", money(stock_metrics["cash"]))
+    c6.metric("Open Stock Positions", len(stock_positions))
+    c7.metric("Qualified Trades Now", len(focus["best_trades"]))
+    st.caption("Market Focus answers one question: what are the best verified Wall Street stock and ETF trades right now?")
+
     stock_entry_policy = execution_policy(market="cash", intent="entry")
     stock_exit_policy = execution_policy(market="cash", intent="exit")
     stock_rotation_policy = execution_policy(market="cash", intent="rotation")
-    crypto_entry_policy = execution_policy(market="crypto", intent="entry")
-    crypto_exit_policy = execution_policy(market="crypto", intent="exit")
-    crypto_rotation_policy = execution_policy(market="crypto", intent="rotation")
     broker_policy = execution_policy(market="cash", intent="broker")
     activity = dashboard_activity_labels({
         **global_pit_activity,
-        "qualified_allocations": len(qualified),
-        "execution_enabled": stock_entry_policy.allowed or crypto_entry_policy.allowed,
+        "qualified_allocations": len(focus["best_trades"]),
+        "execution_enabled": stock_entry_policy.allowed,
     })
-    st.markdown("**Oracle Activity**")
-    st.dataframe(pd.DataFrame([{"Activity": key, "Status": value} for key, value in activity.items()]), width="stretch", hide_index=True)
-    st.markdown("**Execution Policy Truth**")
-    policy_rows = [
-        {"Switch": "Stock Entries", "Enabled": stock_entry_policy.allowed, "Reason": stock_entry_policy.reason},
-        {"Switch": "Stock Exits", "Enabled": stock_exit_policy.allowed, "Reason": stock_exit_policy.reason},
-        {"Switch": "Stock Rotation", "Enabled": stock_rotation_policy.allowed, "Reason": stock_rotation_policy.reason},
-        {"Switch": "Crypto Entries", "Enabled": crypto_entry_policy.allowed, "Reason": crypto_entry_policy.reason},
-        {"Switch": "Crypto Exits", "Enabled": crypto_exit_policy.allowed, "Reason": crypto_exit_policy.reason},
-        {"Switch": "Crypto Rotation", "Enabled": crypto_rotation_policy.allowed, "Reason": crypto_rotation_policy.reason},
-        {"Switch": "Broker Submission", "Enabled": broker_policy.allowed, "Reason": broker_policy.reason},
-    ]
-    st.dataframe(pd.DataFrame(policy_rows), width="stretch", hide_index=True)
-    if global_pit_queue:
-        st.markdown("**Hot Right Now**")
-        rows_for_view = []
-        for row in global_pit_queue[:15]:
-            rows_for_view.append({
-                "Rank": row.get("payload", {}).get("global_rank") if isinstance(row.get("payload"), dict) else row.get("symbol"),
-                "Symbol": row.get("symbol"),
-                "Asset Class": row.get("asset_class"),
-                "Sector": row.get("sector"),
-                "Attention": row.get("attention_level"),
-                "Score": round(as_float(row.get("opportunity_score")), 1),
-                "Confidence": round(as_float(row.get("confidence")), 1),
-                "Data": row.get("data_label"),
-                "Mode": "Paper candidate" if row.get("paper_execution_supported") else "Intelligence only",
-            })
-        st.dataframe(pd.DataFrame(rows_for_view), width="stretch", hide_index=True)
+
+    st.markdown("**BEST WALL STREET TRADES NOW**")
+    if focus["best_trades"]:
+        st.dataframe(pd.DataFrame(focus["best_trades"]), width="stretch", hide_index=True)
     else:
-        st.info("Mission Control is waiting for the U.S./crypto scanners to record verified observations.")
-    if global_pit_map:
-        st.markdown("**Global Capital Flow**")
-        st.dataframe(pd.DataFrame(global_pit_map), width="stretch", hide_index=True)
-    if global_learning:
-        st.markdown("**Latest Learning**")
-        latest = global_learning[0]
-        st.write(
-            f"{latest.get('feature') or 'Pattern'} observation for {latest.get('symbol') or 'market'}: "
-            f"predicted {as_float(latest.get('predicted_move_pct')):+.1f}%, "
-            f"realized {as_float(latest.get('actual_move_pct')):+.1f}%."
-        )
-    with st.expander("Show Details"):
-        st.caption("Unsupported foreign equities, FX, commodities, and indexes are out of execution scope and are not routed to provider trading data.")
-        st.write(f"Asset classes seen: {', '.join(sorted(asset_classes)) if asset_classes else 'waiting for persisted scans'}")
-        st.write(f"Exchanges seen: {', '.join(sorted(exchanges)) if exchanges else 'waiting for persisted scans'}")
-        st.write(f"Broker submission enabled: {v39_summary['broker_submission_enabled']}")
+        st.info("No U.S. stock or ETF has passed verified quote, liquidity, risk, and portfolio checks right now.")
+
+    st.markdown("**STRONGEST VERIFIED MOVERS**")
+    st.dataframe(pd.DataFrame(focus["movers"]), width="stretch", hide_index=True) if focus["movers"] else st.info("No liquid verified stock movers are available yet.")
+
+    st.markdown("**ORACLE ACTION QUEUE**")
+    st.dataframe(pd.DataFrame(focus["action_queue"]), width="stretch", hide_index=True) if focus["action_queue"] else st.info("No stock action is queued.")
+
+    st.markdown("**WHAT THE ORACLE OWNS**")
+    st.dataframe(pd.DataFrame(focus["owned"]), width="stretch", hide_index=True) if focus["owned"] else st.info("No open stock positions are currently recorded.")
+
+    st.markdown("**ROTATION OPPORTUNITIES**")
+    rotation_rows = [
+        {
+            "Current Holding": item.get("current_holding") or "",
+            "Holding Score": item.get("holding_score") or "",
+            "Incoming Candidate": item.get("incoming_candidate") or item.get("symbol") or "",
+            "Candidate Score": item.get("candidate_score") or item.get("opportunity_score") or "",
+            "Score Improvement": item.get("score_improvement") or "",
+            "Recommended Action": item.get("recommended_action") or "WATCH",
+        }
+        for item in focus["rotations"]
+    ]
+    st.dataframe(pd.DataFrame(rotation_rows), width="stretch", hide_index=True) if rotation_rows else st.info("No verified stock rotation currently clears the improvement threshold and execution checks.")
+
+    st.markdown("**HOW STOCK PROFITS WERE CREATED**")
+    st.dataframe(pd.DataFrame(focus["profit_sources"]), width="stretch", hide_index=True) if focus["profit_sources"] else st.info("Stock profit attribution will appear after ledgered paper fills close or verified open marks are available.")
+
+    st.markdown("**LEADING WALL STREET SECTORS**")
+    st.dataframe(pd.DataFrame(focus["sectors"]), width="stretch", hide_index=True) if focus["sectors"] else st.info("Sector leadership will appear when qualified Wall Street candidates are available.")
+
+    with st.expander("REJECTED / WAITING"):
+        st.dataframe(pd.DataFrame(focus["rejected"]), width="stretch", hide_index=True) if focus["rejected"] else st.success("No rejected stock candidates are currently in the focus view.")
+
+    with st.expander("Provider Diagnostics"):
+        st.caption("Provider diagnostics are secondary and shown here only to explain trade-impacting data limits. They do not override quote verification.")
+        policy_rows = [
+            {"Switch": "Stock Entries", "Enabled": stock_entry_policy.allowed, "Reason": stock_entry_policy.reason},
+            {"Switch": "Stock Exits", "Enabled": stock_exit_policy.allowed, "Reason": stock_exit_policy.reason},
+            {"Switch": "Stock Rotation", "Enabled": stock_rotation_policy.allowed, "Reason": stock_rotation_policy.reason},
+            {"Switch": "Broker Submission", "Enabled": broker_policy.allowed, "Reason": broker_policy.reason},
+        ]
+        st.dataframe(pd.DataFrame(policy_rows), width="stretch", hide_index=True)
+        st.dataframe(pd.DataFrame([{"Activity": key, "Status": value} for key, value in activity.items()]), width="stretch", hide_index=True)
+        diagnostics = provider_diagnostics()
+        st.dataframe(pd.DataFrame(diagnostics), width="stretch", hide_index=True) if diagnostics else st.info("No provider limitations are currently reported.")
 
 
 def simple_portfolio_card(
@@ -629,7 +621,7 @@ with st.sidebar:
     st.caption("The AI Chief Investment Officer")
     page = st.radio(
         "Main navigation",
-        ["Dashboard", "Global Pit", "Markets", "Portfolios", "Oracle", "Intelligence", "Professional"],
+        ["Dashboard", "Market Focus", "Crypto", "Markets", "Portfolios", "Oracle", "Intelligence", "Professional"],
         label_visibility="collapsed",
     )
     st.divider()
@@ -702,8 +694,43 @@ if show_advanced_chrome:
     )
     status_cols[3].metric("Auto recovery", "Ready" if error_total == 0 else "Recovering", f"Cycle errors: {error_total}")
 
-if page == "Global Pit":
+if page == "Market Focus":
     render_global_pit_section()
+
+elif page == "Crypto":
+    st.markdown("<div class='section-title'>CRYPTO SUMMARY</div>", unsafe_allow_html=True)
+    crypto_queue = [row for row in global_pit_queue if str(row.get("market") or "").lower() == "crypto" or str(row.get("asset_class") or "").lower() == "crypto" or str(row.get("symbol") or "").upper().endswith("-USD")]
+    crypto_ledger = safe_rows("SELECT * FROM trade_ledger WHERE market='crypto' ORDER BY id DESC LIMIT 100")
+    crypto_focus = crypto_page_sections(crypto_queue, crypto_positions, crypto_ledger, crypto_metrics)
+    summary_cols = st.columns(6)
+    for index, (label, value) in enumerate(list(crypto_focus["summary"].items())[:6]):
+        summary_cols[index].metric(label, value)
+    st.caption("Crypto stays in paper mode and uses verified 24/7 quotes, liquidity, tier sizing, reserve protection, and core/tactical separation.")
+
+    st.markdown("**WHAT I OWN NOW**")
+    st.dataframe(pd.DataFrame(crypto_focus["owned"]), width="stretch", hide_index=True) if crypto_focus["owned"] else st.info("No crypto positions are currently recorded.")
+
+    st.markdown("**BEST CRYPTO TRADES NOW**")
+    st.dataframe(pd.DataFrame(crypto_focus["best_trades"]), width="stretch", hide_index=True) if crypto_focus["best_trades"] else st.info("No crypto trade has passed quote, liquidity, signal, tier, and portfolio checks right now.")
+
+    st.markdown("**STRONGEST CRYPTO MOVERS**")
+    st.dataframe(pd.DataFrame(crypto_focus["movers"]), width="stretch", hide_index=True) if crypto_focus["movers"] else st.info("No verified crypto movers are available yet.")
+
+    st.markdown("**ROTATION OPPORTUNITIES**")
+    st.dataframe(pd.DataFrame(crypto_focus["rotations"]), width="stretch", hide_index=True) if crypto_focus["rotations"] else st.info("No tactical crypto rotation clears the required score improvement.")
+
+    st.markdown("**HOW CRYPTO PROFITS WERE CREATED**")
+    st.dataframe(pd.DataFrame(crypto_focus["profit_sources"]), width="stretch", hide_index=True) if crypto_focus["profit_sources"] else st.info("Crypto profit attribution will appear after ledgered paper fills close or verified open marks are available.")
+
+    st.markdown("**CORE ALLOCATION**")
+    st.dataframe(pd.DataFrame(crypto_focus["core_allocation"]), width="stretch", hide_index=True)
+
+    with st.expander("WATCHLIST / WAITING"):
+        st.dataframe(pd.DataFrame(crypto_focus["waiting"]), width="stretch", hide_index=True) if crypto_focus["waiting"] else st.success("No crypto candidates are waiting on data or liquidity right now.")
+    with st.expander("PROVIDER DIAGNOSTICS"):
+        st.caption("Provider diagnostics do not override verified quote requirements.")
+        diagnostics = provider_diagnostics()
+        st.dataframe(pd.DataFrame(diagnostics), width="stretch", hide_index=True) if diagnostics else st.info("No provider limitations are currently reported.")
 
 elif page == "Dashboard":
     top = buy_decisions[0] if buy_decisions else (decisions[0] if decisions else None)
@@ -826,6 +853,15 @@ elif page == "Dashboard":
     with st.expander("Details"):
         st.caption("This is a planning view only. It does not place trades. Stale or unverified opportunities are excluded before allocation.")
         st.write("The planner considers opportunity score, confidence, expected return, risk, current exposure, cash reserve, duplicate exposure, concentration, and data freshness. The paper execution path still rechecks every hard safeguard before any simulated order.")
+
+    st.markdown("<div class='section-title'>CAPITAL ALLOCATION</div>", unsafe_allow_html=True)
+    allocation_rows = capital_allocation_rows(
+        buy_decisions[:8],
+        combined_metrics,
+        stock_positions + crypto_positions,
+        market="crypto" if buy_decisions and str(buy_decisions[0].get("market") or "").lower() == "crypto" else "cash",
+    )
+    st.dataframe(pd.DataFrame(allocation_rows), width="stretch", hide_index=True)
 
     st.markdown("<div class='section-title'>TRADE HISTORY</div>", unsafe_allow_html=True)
     dashboard_trades = safe_rows("SELECT * FROM trades ORDER BY id DESC LIMIT 500")
