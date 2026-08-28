@@ -107,6 +107,30 @@ def test_crypto_cash_reserve_remains_protected():
     assert "reserve" in sized["reason"]
 
 
+def test_crypto_core_rebalance_deploys_only_above_protected_reserve():
+    quotes = {
+        "BTC-USD": candidate("BTC-USD", price=60_000, confidence=0.80, reward_risk_ratio=1.6),
+        "ETH-USD": candidate("ETH-USD", price=3_000, confidence=0.80, reward_risk_ratio=1.6),
+    }
+    plan = crypto.crypto_core_rebalance_plan(quotes, {"equity": 100_000, "cash": 25_000}, [])
+
+    assert plan
+    assert sum(row["Amount"] for row in plan) <= 15_000
+    assert plan[0]["Bucket"] == "Core"
+
+
+def test_crypto_core_rebalance_excludes_unverified_core_quotes():
+    quotes = {
+        "BTC-USD": candidate("BTC-USD", quote_verified=False),
+        "ETH-USD": candidate("ETH-USD", price=3_000),
+    }
+
+    plan = crypto.crypto_core_rebalance_plan(quotes, {"equity": 100_000, "cash": 25_000}, [])
+
+    assert all(row["Asset"] != "BTC-USD" for row in plan)
+    assert any(row["Asset"] == "ETH-USD" for row in plan)
+
+
 def test_single_tactical_position_stays_under_max_allocation():
     sized = crypto.tactical_position_size(candidate(), {"equity": 100_000, "cash": 80_000}, existing_value=11_500)
 

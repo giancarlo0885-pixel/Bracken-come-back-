@@ -37,7 +37,7 @@ class TradeLedgerRow:
     confidence_score: float | None
     weighted_signal_score: float | None
     quote_provider: str | None
-    decision_id: int | None
+    decision_id: str | None
     status: str
     broker_mode: str = "PAPER"
     account_environment: str = "PAPER"
@@ -63,7 +63,7 @@ class PositionLot:
     quantity_remaining: float
     entry_price: float
     entry_fees: float = 0.0
-    decision_id: int | None = None
+    decision_id: str | None = None
     broker_mode: str = "PAPER"
     account_environment: str = "PAPER"
 
@@ -107,7 +107,7 @@ def create_lot(
     bucket: str = "Tactical",
     strategy: str = "",
     entry_fees: float = 0.0,
-    decision_id: int | None = None,
+    decision_id: str | None = None,
     broker_mode: str = "PAPER",
     account_environment: str = "PAPER",
 ) -> PositionLot:
@@ -161,7 +161,7 @@ def fifo_close_lots(
     confidence_score: float | None = None,
     weighted_signal_score: float | None = None,
     quote_provider: str | None = None,
-    decision_id: int | None = None,
+    decision_id: str | None = None,
     order_id: str | None = None,
 ) -> list[TradeLedgerRow]:
     remaining = _finite(quantity)
@@ -293,3 +293,133 @@ def reconcile_portfolio(*, cash: float, positions: Iterable[dict[str, Any]], quo
         "waiting_for_verified_price": waiting,
         "status": "PORTFOLIO_RECONCILIATION_ERROR" if waiting or pct > tolerance_pct else "RECONCILED",
     }
+
+
+def profit_attribution_rows(
+    *,
+    positions: Iterable[dict[str, Any]],
+    ledger_rows: Iterable[TradeLedgerRow | dict[str, Any]],
+    quotes: dict[str, dict[str, Any]] | None = None,
+    market: str | None = None,
+    equity: float = 0.0,
+) -> list[dict[str, Any]]:
+    """Summarize realized and unrealized P/L by symbol for Portfolio Center."""
+    wanted_market = str(market or "").lower().strip()
+    quote_map = {normalize_symbol(symbol): dict(quote) for symbol, quote in (quotes or {}).items()}
+    by_symbol: dict[str, dict[str, Any]] = {}
+
+    for row in ledger_rows:
+        data = row.to_dict() if isinstance(row, TradeLedgerRow) else dict(row)
+        row_market = str(data.get("market") or "").lower().strip()
+        if wanted_market and row_market != wanted_market:
+            continue
+        symbol = normalize_symbol(data.get("symbol"))
+        if not symbol:
+            continue
+        bucket = by_symbol.setdefault(
+            symbol,
+            {
+                "symbol": symbol,
+                "market": row_market,
+                "bucket": data.get("bucket") or "",
+                "strategy": data.get("strategy") or "",
+                "quantity": 0.0,
+                "entry_price": _finite(data.get("entry_price")),
+                "exit_or_current_price": _finite(data.get("exit_price")),
+                "realized_pnl": 0.0,
+                "unrealized_pnl": 0.0,
+                "total_pnl": 0.0,
+                "return_pct": 0.0,
+                "fees": 0.0,
+                "first_entry_time": data.get("entry_time") or data.get("created_at") or "",
+                "latest_fill_time": data.get("exit_time") or data.get("created_at") or "",
+                "tier": data.get("tier") or "",
+                "quote_provider": data.get("quote_provider") or "",
+                "status": data.get("status") or "",
+                "entry_reason": data.get("entry_reason") or data.get("reason") or "",
+                "exit_or_hold_reason": data.get("exit_reason") or data.get("reason") or data.get("status") or "",
+            },
+        )
+        bucket["quantity"] += _finite(data.get("quantity"))
+        bucket["realized_pnl"] += _finite(data.get("net_pnl"))
+        bucket["fees"] += _finite(data.get("fees"))
+        if data.get("entry_time") and (not bucket["first_entry_time"] or str(data["entry_time"]) < str(bucket["first_entry_time"])):
+            bucket["first_entry_time"] = data["entry_time"]
+        latest = data.get("exit_time") or data.get("created_at")
+        if latest and str(latest) > str(bucket.get("latest_fill_time") or ""):
+            bucket["latest_fill_time"] = latest
+        for key in ("bucket", "strategy", "tier", "quote_provider", "status"):
+            if data.get(key):
+                bucket[key] = data.get(key)
+
+    for position in positions:
+        row_market = str(position.get("market") or "").lower().strip()
+        if wanted_market and row_market != wanted_market:
+            continue
+        symbol = normalize_symbol(position.get("symbol"))
+        if not symbol:
+            continue
+        avg_cost = _finite(position.get("average_price") or position.get("avg_cost") or position.get("entry_price"))
+        qty = _finite(position.get("quantity"))
+        quote = quote_map.get(symbol)
+        if quote is None:
+            quote = {
+                "symbol": symbol,
+                "requested_symbol": symbol,
+                "provider_symbol": symbol,
+                "price": position.get("current_price") or position.get("price"),
+                "quote_verified": position.get("quote_verified") is True,
+            }
+        mark = unrealized_position_pnl(position, quote)
+        current = _finite(mark.get("current_verified_price") or position.get("current_price") or position.get("price"))
+        item = by_symbol.setdefault(
+            symbol,
+            {
+                "symbol": symbol,
+                "market": row_market,
+                "bucket": position.get("bucket") or "",
+                "strategy": position.get("strategy") or "",
+                "quantity": 0.0,
+                "entry_price": avg_cost,
+                "exit_or_current_price": current,
+                "realized_pnl": 0.0,
+                "unrealized_pnl": 0.0,
+                "total_pnl": 0.0,
+                "return_pct": 0.0,
+                "fees": 0.0,
+                "first_entry_time": position.get("opened_at") or "",
+                "latest_fill_time": position.get("updated_at") or position.get("opened_at") or "",
+                "tier": position.get("tier") or "",
+                "quote_provider": position.get("quote_provider") or position.get("provider") or "",
+                "status": mark["status"],
+                "entry_reason": position.get("entry_reason") or position.get("reason") or "",
+                "exit_or_hold_reason": position.get("hold_reason") or "Open position",
+            },
+        )
+        item["quantity"] = max(item["quantity"], qty)
+        item["entry_price"] = item["entry_price"] or avg_cost
+        item["exit_or_current_price"] = current or item["exit_or_current_price"]
+        if mark["status"] == "VERIFIED":
+            item["unrealized_pnl"] += _finite(mark.get("unrealized_pnl"))
+            item["return_pct"] = _finite(mark.get("unrealized_return_pct"))
+            item["status"] = "VERIFIED"
+        elif item.get("status") not in {"VERIFIED", "CLOSED"}:
+            item["status"] = mark["status"]
+        for key in ("bucket", "strategy", "tier"):
+            if position.get(key):
+                item[key] = position.get(key)
+        if position.get("quote_provider") or position.get("provider"):
+            item["quote_provider"] = position.get("quote_provider") or position.get("provider")
+        if position.get("opened_at") and (not item["first_entry_time"] or str(position["opened_at"]) < str(item["first_entry_time"])):
+            item["first_entry_time"] = position["opened_at"]
+        if position.get("updated_at") and str(position["updated_at"]) > str(item.get("latest_fill_time") or ""):
+            item["latest_fill_time"] = position["updated_at"]
+
+    output = []
+    for item in by_symbol.values():
+        item["realized_pnl"] = round(_finite(item.get("realized_pnl")), 10)
+        item["unrealized_pnl"] = round(_finite(item.get("unrealized_pnl")), 10)
+        item["total_pnl"] = round(item["realized_pnl"] + item["unrealized_pnl"], 10)
+        item["contribution_to_portfolio_profit_pct"] = round((item["total_pnl"] / equity * 100.0), 6) if equity else 0.0
+        output.append(item)
+    return sorted(output, key=lambda row: _finite(row.get("total_pnl")), reverse=True)

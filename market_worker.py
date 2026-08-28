@@ -4,6 +4,7 @@ import json
 import logging
 import signal
 import time
+import uuid
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 import math
@@ -202,7 +203,7 @@ def _average_dollar_volume(history: Any, lookback: int = 20) -> float | None:
 
 def _execution_price_from_history(symbol: str, history: Any, signal_price: Any = None) -> float | None:
     route = dict(getattr(history, "attrs", {}).get("provider_route", {}) or {})
-    for value in (route.get("price"), route.get("current_price"), route.get("last_price"), _latest_history_price(history), signal_price):
+    for value in (route.get("price"), route.get("current_price"), route.get("last_price"), _latest_history_price(history)):
         price = _finite_positive(value)
         if price is not None:
             return price
@@ -215,8 +216,8 @@ def _quote_payload_from_history(symbol: str, history: Any, price: Any = None, *,
     quote_timestamp = route.get("quote_timestamp")
     interval = route.get("interval", "1d")
     normalized_symbol = str(symbol or "").upper().strip()
-    requested_symbol = str(route.get("requested_symbol") or "").upper().strip()
-    provider_symbol = str(route.get("provider_symbol") or "").upper().strip()
+    requested_symbol = str(route.get("requested_symbol") or getattr(history, "attrs", {}).get("requested_symbol") or "").upper().strip()
+    provider_symbol = str(route.get("provider_symbol") or getattr(history, "attrs", {}).get("provider_symbol") or "").upper().strip()
     provider_native_symbol = str(route.get("provider_native_symbol") or provider_symbol).upper().strip()
     quote_verified = route.get("quote_verified") is True
     identity_verified = bool(
@@ -225,27 +226,36 @@ def _quote_payload_from_history(symbol: str, history: Any, price: Any = None, *,
         and provider_symbol == normalized_symbol
     )
     avg_dollar_volume = _average_dollar_volume(history)
-    return {
+    payload = {
         "symbol": normalized_symbol,
+        "market": "crypto" if normalized_symbol.endswith("-USD") else "cash",
         "requested_symbol": requested_symbol,
         "provider_symbol": provider_symbol,
         "provider_native_symbol": provider_native_symbol,
         "provider": route.get("provider"),
         "price": execution_price,
+        "bid": route.get("bid"),
+        "ask": route.get("ask"),
         "quote_timestamp": quote_timestamp,
+        "timestamp": quote_timestamp,
         "quote_age_seconds": route.get("quote_age_seconds") if route.get("quote_age_seconds") is not None else _quote_age_seconds(quote_timestamp),
         "interval": interval,
         "source_interval": interval,
         "source_mode": route.get("source_mode") or route.get("mode"),
+        "source_capability": route.get("source_capability") or route.get("capability") or ("history_intraday" if str(interval).lower() not in {"1d", "daily"} else "history_daily"),
         "scan_type": scan_type or route.get("scan_type"),
         "quote_verified": quote_verified,
+        "verified": quote_verified,
         "avg_dollar_volume": avg_dollar_volume,
         "data_quality_score": route.get("data_quality_score"),
         "tradeable": bool(quote_verified and identity_verified and avg_dollar_volume),
         "source_identity": route.get("source_identity"),
         "cache_identity": route.get("cache_identity"),
         "ohlcv_fingerprint": route.get("ohlcv_fingerprint"),
+        "decision_correlation_id": route.get("decision_correlation_id") or str(uuid.uuid4()),
     }
+    payload["stale"] = not bool(_execution_quote_eligible({**payload, "asset_class": "crypto" if normalized_symbol.endswith("-USD") else "stock"}))
+    return payload
 
 
 def analysis_priority_weight(market: str) -> float:
@@ -262,6 +272,16 @@ def _execution_quote_payload_from_history(symbol: str, history: Any, price: Any 
     if payload.get("quote_timestamp") in (None, ""):
         _v39_log_rejection(symbol, "QUOTE_STALE", {"scan_type": scan_type, "provider": payload.get("provider")})
         return None
+    log.info(
+        "verified_quote_handoff | symbol=%s | provider=%s | scan_type=%s | provider_price=%s | normalized_price=%s | quote_timestamp=%s | correlation_id=%s",
+        str(symbol or "").upper(),
+        payload.get("provider"),
+        scan_type,
+        execution_price,
+        payload.get("price"),
+        payload.get("quote_timestamp"),
+        payload.get("decision_correlation_id"),
+    )
     return payload
 
 
@@ -290,6 +310,8 @@ def _attach_execution_metadata(signal: Any, history: Any, scan_type: str) -> dic
     setattr(signal, "provider", route.get("provider"))
     setattr(signal, "quote_verified", route.get("quote_verified") is True)
     setattr(signal, "quote_age_seconds", route.get("quote_age_seconds"))
+    setattr(signal, "source_capability", route.get("source_capability") or route.get("capability"))
+    setattr(signal, "decision_correlation_id", route.get("decision_correlation_id") or str(uuid.uuid4()))
     return route
 
 
@@ -307,6 +329,8 @@ def _signal_payload(signal: Any, route: dict[str, Any], scan_type: str, **extra:
             "provider_native_symbol": route.get("provider_native_symbol"),
             "provider": route.get("provider"),
             "quote_verified": route.get("quote_verified") is True,
+            "source_capability": route.get("source_capability") or route.get("capability"),
+            "decision_correlation_id": getattr(signal, "decision_correlation_id", None) or route.get("decision_correlation_id"),
             "market_data_route": route,
         }
     )

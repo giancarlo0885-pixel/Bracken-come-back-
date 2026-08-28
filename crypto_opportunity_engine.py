@@ -244,6 +244,75 @@ def tactical_position_size(candidate: dict[str, Any], portfolio: dict[str, Any],
     }
 
 
+def crypto_core_rebalance_plan(
+    quotes: dict[str, dict[str, Any]],
+    portfolio: dict[str, Any],
+    positions: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    equity = max(0.0, _finite(portfolio.get("equity")))
+    cash = max(0.0, _finite(portfolio.get("cash")))
+    reserve = equity * CRYPTO_MIN_CASH_RESERVE_PCT
+    spendable = max(0.0, cash - reserve)
+    if equity <= 0 or spendable <= 0:
+        return []
+
+    current_core_values: dict[str, float] = {symbol: 0.0 for symbol in CRYPTO_CORE_WEIGHTS}
+    for position in positions:
+        symbol = _crypto_symbol(position.get("symbol"))
+        if symbol not in current_core_values:
+            continue
+        bucket = str(position.get("bucket") or position.get("strategy") or "").lower()
+        if "core" not in bucket:
+            continue
+        current_core_values[symbol] += max(0.0, _finite(position.get("market_value"), _finite(position.get("quantity")) * _finite(position.get("current_price"))))
+
+    rows: list[dict[str, Any]] = []
+    remaining = spendable
+    total_core_target = equity * CRYPTO_CORE_TARGET_PCT
+    for symbol, weight in sorted(CRYPTO_CORE_WEIGHTS.items(), key=lambda item: current_core_values.get(item[0], 0.0) - total_core_target * item[1]):
+        quote = dict(quotes.get(symbol) or {})
+        if not quote:
+            continue
+        candidate = {
+            **quote,
+            "symbol": symbol,
+            "market": "crypto",
+            "asset_class": "crypto",
+            "dollar_volume_24h": quote.get("dollar_volume_24h") or quote.get("liquidity") or CRYPTO_MIN_24H_DOLLAR_VOLUME,
+            "spread_pct": quote.get("spread_pct", 0.0),
+            "signals_supporting": quote.get("signals_supporting", 3),
+            "confidence": quote.get("confidence", 70),
+            "reward_risk_ratio": quote.get("reward_risk_ratio", 1.5),
+        }
+        data = live_data_status(candidate)
+        if data["blocks_execution"]:
+            continue
+        price = _finite(quote.get("price"))
+        if price <= 0:
+            continue
+        target_value = total_core_target * weight
+        deficit = max(0.0, target_value - current_core_values.get(symbol, 0.0))
+        if deficit <= 0 or remaining <= 0:
+            continue
+        amount = min(deficit, remaining)
+        if amount <= 0:
+            continue
+        rows.append(
+            {
+                "Asset": symbol,
+                "Bucket": "Core",
+                "Target Weight": f"{weight:.0%}",
+                "Current Core Value": round(current_core_values.get(symbol, 0.0), 2),
+                "Amount": round(amount, 2),
+                "Quantity": round(amount / price, 10),
+                "Reason": "Underweight verified crypto core holding above protected reserve.",
+                "Data Status": data["label"],
+            }
+        )
+        remaining -= amount
+    return rows
+
+
 def crypto_core_tactical_quantities(symbol: str, positions: list[dict[str, Any]]) -> dict[str, float]:
     symbol = _crypto_symbol(symbol)
     core = 0.0
@@ -302,6 +371,7 @@ def crypto_page_sections(
     provider_supports_symbol: Callable[[str, str], bool] | None = None,
 ) -> dict[str, Any]:
     universe = dynamic_crypto_universe(provider_assets or [], provider_supports_symbol)
+    quote_map = {_crypto_symbol(item.get("symbol")): dict(item) for item in candidates if _is_crypto_record(item)}
     eligible_rows = []
     rejected = []
     for candidate in candidates:
@@ -415,6 +485,7 @@ def crypto_page_sections(
         "rotations": rotations,
         "profit_sources": profit_sources,
         "core_allocation": [{"Asset": symbol, "Target Weight": f"{weight:.0%}"} for symbol, weight in CRYPTO_CORE_WEIGHTS.items()],
+        "core_deployment": crypto_core_rebalance_plan(quote_map, portfolio, positions),
         "waiting": rejected[:20],
         "universe": universe,
     }

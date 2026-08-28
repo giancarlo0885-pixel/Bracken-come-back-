@@ -134,6 +134,29 @@ def test_price_never_silently_becomes_zero_and_missing_price_rejects(monkeypatch
     missing = _quote("AAPL", price=None)
     assert oracle_bot.process_signals("cash", [_signal("AAPL", 0.0)], {"AAPL": missing}) == []
 
+
+def test_signal_price_cannot_substitute_for_missing_verified_provider_price():
+    import market_worker
+
+    history = pd.DataFrame(
+        {"Close": [float("nan"), float("nan")], "Volume": [1_000, 1_100]},
+        index=pd.date_range(datetime.now(timezone.utc) - timedelta(minutes=10), periods=2, freq="5min"),
+    )
+    history.attrs["provider_route"] = {
+        "requested_symbol": "AAPL",
+        "provider_symbol": "AAPL",
+        "provider": "unit-provider",
+        "quote_timestamp": datetime.now(timezone.utc).isoformat(),
+        "interval": "5m",
+        "quote_verified": True,
+    }
+    signal = _signal("AAPL", price=199.99)
+
+    quote = market_worker._quote_payload_from_history("AAPL", history, signal.price, scan_type="fast")
+
+    assert quote["price"] is None
+    assert market_worker._execution_quote_payload_from_history("AAPL", history, signal.price, scan_type="fast") is None
+
 def test_quote_payload_uses_observed_liquidity_and_verified_identity():
     import market_worker
 
