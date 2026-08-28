@@ -38,6 +38,7 @@ class MarketSnapshot:
     stale: bool = True
     spread_pct: float | None = None
     source_capability: str | None = None
+    correlation_id: str | None = None
     source_identity: str | None = None
     cache_identity: str | None = None
     ohlcv_fingerprint: str | None = None
@@ -60,6 +61,8 @@ class MarketSnapshot:
             "stale": self.stale,
             "spread_pct": self.spread_pct,
             "source_capability": self.source_capability,
+            "correlation_id": self.correlation_id,
+            "decision_correlation_id": self.correlation_id,
             "source_identity": self.source_identity,
             "cache_identity": self.cache_identity,
             "ohlcv_fingerprint": self.ohlcv_fingerprint,
@@ -296,6 +299,7 @@ def _snapshot_from_history(symbol: str, history: pd.DataFrame, interval: str) ->
         stale=not verified,
         spread_pct=finite_scalar(route.get("spread_pct")),
         source_capability=str(route.get("source_capability") or route.get("capability") or ("history_intraday" if interval not in {"1d", "daily"} else "history_daily")),
+        correlation_id=str(route.get("correlation_id") or route.get("decision_correlation_id") or ""),
         source_identity=source_identity,
         cache_identity=cache_identity,
         ohlcv_fingerprint=str(route.get("ohlcv_fingerprint") or _ohlcv_fingerprint(history)),
@@ -335,6 +339,7 @@ def _alpha_vantage_delayed_snapshot(symbol: str) -> MarketSnapshot | None:
         stale=True,
         spread_pct=None,
         source_capability="global_quote_eod_fallback",
+        correlation_id=str(quote.get("correlation_id") or ""),
         source_identity=f"Alpha Vantage:{requested}:GLOBAL_QUOTE:delayed",
         cache_identity=f"alpha_vantage_global_quote:{requested}",
     )

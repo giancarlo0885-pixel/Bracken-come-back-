@@ -226,6 +226,7 @@ def _quote_payload_from_history(symbol: str, history: Any, price: Any = None, *,
         and provider_symbol == normalized_symbol
     )
     avg_dollar_volume = _average_dollar_volume(history)
+    correlation_id = route.get("correlation_id") or route.get("decision_correlation_id") or str(uuid.uuid4())
     payload = {
         "symbol": normalized_symbol,
         "market": "crypto" if normalized_symbol.endswith("-USD") else "cash",
@@ -252,7 +253,8 @@ def _quote_payload_from_history(symbol: str, history: Any, price: Any = None, *,
         "source_identity": route.get("source_identity"),
         "cache_identity": route.get("cache_identity"),
         "ohlcv_fingerprint": route.get("ohlcv_fingerprint"),
-        "decision_correlation_id": route.get("decision_correlation_id") or str(uuid.uuid4()),
+        "correlation_id": correlation_id,
+        "decision_correlation_id": correlation_id,
     }
     payload["stale"] = not bool(_execution_quote_eligible({**payload, "asset_class": "crypto" if normalized_symbol.endswith("-USD") else "stock"}))
     return payload
@@ -273,14 +275,19 @@ def _execution_quote_payload_from_history(symbol: str, history: Any, price: Any 
         _v39_log_rejection(symbol, "QUOTE_STALE", {"scan_type": scan_type, "provider": payload.get("provider")})
         return None
     log.info(
-        "verified_quote_handoff | symbol=%s | provider=%s | scan_type=%s | provider_price=%s | normalized_price=%s | quote_timestamp=%s | correlation_id=%s",
+        "EXECUTION_QUOTE_HANDOFF | symbol=%s | market=%s | price=%s | bid=%s | ask=%s | timestamp=%s | provider=%s | verified=%s | stale=%s | spread_pct=%s | capability=%s | correlation_id=%s",
         str(symbol or "").upper(),
-        payload.get("provider"),
-        scan_type,
-        execution_price,
+        payload.get("market"),
         payload.get("price"),
+        payload.get("bid"),
+        payload.get("ask"),
         payload.get("quote_timestamp"),
-        payload.get("decision_correlation_id"),
+        payload.get("provider"),
+        payload.get("quote_verified"),
+        payload.get("stale"),
+        payload.get("spread_pct"),
+        payload.get("source_capability"),
+        payload.get("correlation_id"),
     )
     return payload
 
@@ -290,6 +297,9 @@ def _attach_execution_metadata(signal: Any, history: Any, scan_type: str) -> dic
     route["scan_type"] = scan_type
     route["source_interval"] = route.get("interval", "1d")
     route.setdefault("quote_age_seconds", _quote_age_seconds(route.get("quote_timestamp")))
+    correlation_id = route.get("correlation_id") or route.get("decision_correlation_id") or str(uuid.uuid4())
+    route["correlation_id"] = correlation_id
+    route["decision_correlation_id"] = correlation_id
     price = _execution_price_from_history(getattr(signal, "symbol", ""), history, getattr(signal, "price", None))
     if price is not None:
         route["price"] = price
@@ -311,7 +321,8 @@ def _attach_execution_metadata(signal: Any, history: Any, scan_type: str) -> dic
     setattr(signal, "quote_verified", route.get("quote_verified") is True)
     setattr(signal, "quote_age_seconds", route.get("quote_age_seconds"))
     setattr(signal, "source_capability", route.get("source_capability") or route.get("capability"))
-    setattr(signal, "decision_correlation_id", route.get("decision_correlation_id") or str(uuid.uuid4()))
+    setattr(signal, "correlation_id", correlation_id)
+    setattr(signal, "decision_correlation_id", correlation_id)
     return route
 
 
@@ -330,6 +341,7 @@ def _signal_payload(signal: Any, route: dict[str, Any], scan_type: str, **extra:
             "provider": route.get("provider"),
             "quote_verified": route.get("quote_verified") is True,
             "source_capability": route.get("source_capability") or route.get("capability"),
+            "correlation_id": getattr(signal, "correlation_id", None) or route.get("correlation_id"),
             "decision_correlation_id": getattr(signal, "decision_correlation_id", None) or route.get("decision_correlation_id"),
             "market_data_route": route,
         }

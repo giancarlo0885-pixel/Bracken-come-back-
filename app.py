@@ -450,13 +450,22 @@ def render_global_pit_section() -> None:
         st.info("No U.S. stock or ETF has passed verified quote, liquidity, risk, and portfolio checks right now.")
 
     st.markdown("**STRONGEST VERIFIED MOVERS**")
-    st.dataframe(pd.DataFrame(focus["movers"]), width="stretch", hide_index=True) if focus["movers"] else st.info("No liquid verified stock movers are available yet.")
+    if focus["movers"]:
+        st.dataframe(pd.DataFrame(focus["movers"]), width="stretch", hide_index=True)
+    else:
+        st.info("No liquid verified stock movers are available yet.")
 
     st.markdown("**ORACLE ACTION QUEUE**")
-    st.dataframe(pd.DataFrame(focus["action_queue"]), width="stretch", hide_index=True) if focus["action_queue"] else st.info("No stock action is queued.")
+    if focus["action_queue"]:
+        st.dataframe(pd.DataFrame(focus["action_queue"]), width="stretch", hide_index=True)
+    else:
+        st.info("No stock action is queued.")
 
     st.markdown("**WHAT THE ORACLE OWNS**")
-    st.dataframe(pd.DataFrame(focus["owned"]), width="stretch", hide_index=True) if focus["owned"] else st.info("No open stock positions are currently recorded.")
+    if focus["owned"]:
+        st.dataframe(pd.DataFrame(focus["owned"]), width="stretch", hide_index=True)
+    else:
+        st.info("No open stock positions are currently recorded.")
 
     st.markdown("**ROTATION OPPORTUNITIES**")
     rotation_rows = [
@@ -470,16 +479,28 @@ def render_global_pit_section() -> None:
         }
         for item in focus["rotations"]
     ]
-    st.dataframe(pd.DataFrame(rotation_rows), width="stretch", hide_index=True) if rotation_rows else st.info("No verified stock rotation currently clears the improvement threshold and execution checks.")
+    if rotation_rows:
+        st.dataframe(pd.DataFrame(rotation_rows), width="stretch", hide_index=True)
+    else:
+        st.info("No verified stock rotation currently clears the improvement threshold and execution checks.")
 
     st.markdown("**HOW STOCK PROFITS WERE CREATED**")
-    st.dataframe(pd.DataFrame(focus["profit_sources"]), width="stretch", hide_index=True) if focus["profit_sources"] else st.info("Stock profit attribution will appear after ledgered paper fills close or verified open marks are available.")
+    if focus["profit_sources"]:
+        st.dataframe(pd.DataFrame(focus["profit_sources"]), width="stretch", hide_index=True)
+    else:
+        st.info("Stock profit attribution will appear after ledgered paper fills close or verified open marks are available.")
 
     st.markdown("**LEADING WALL STREET SECTORS**")
-    st.dataframe(pd.DataFrame(focus["sectors"]), width="stretch", hide_index=True) if focus["sectors"] else st.info("Sector leadership will appear when qualified Wall Street candidates are available.")
+    if focus["sectors"]:
+        st.dataframe(pd.DataFrame(focus["sectors"]), width="stretch", hide_index=True)
+    else:
+        st.info("Sector leadership will appear when qualified Wall Street candidates are available.")
 
     with st.expander("REJECTED / WAITING"):
-        st.dataframe(pd.DataFrame(focus["rejected"]), width="stretch", hide_index=True) if focus["rejected"] else st.success("No rejected stock candidates are currently in the focus view.")
+        if focus["rejected"]:
+            st.dataframe(pd.DataFrame(focus["rejected"]), width="stretch", hide_index=True)
+        else:
+            st.success("No rejected stock candidates are currently in the focus view.")
 
     with st.expander("Provider Diagnostics"):
         st.caption("Provider diagnostics are secondary and shown here only to explain trade-impacting data limits. They do not override quote verification.")
@@ -492,7 +513,10 @@ def render_global_pit_section() -> None:
         st.dataframe(pd.DataFrame(policy_rows), width="stretch", hide_index=True)
         st.dataframe(pd.DataFrame([{"Activity": key, "Status": value} for key, value in activity.items()]), width="stretch", hide_index=True)
         diagnostics = provider_diagnostics()
-        st.dataframe(pd.DataFrame(diagnostics), width="stretch", hide_index=True) if diagnostics else st.info("No provider limitations are currently reported.")
+        if diagnostics:
+            st.dataframe(pd.DataFrame(diagnostics), width="stretch", hide_index=True)
+        else:
+            st.info("No provider limitations are currently reported.")
 
 
 def simple_portfolio_card(
@@ -763,32 +787,56 @@ elif page == "Crypto":
     st.caption("Crypto stays in paper mode and uses verified 24/7 quotes, liquidity, tier sizing, reserve protection, and core/tactical separation.")
 
     st.markdown("**WHAT I OWN NOW**")
-    st.dataframe(pd.DataFrame(crypto_focus["owned"]), width="stretch", hide_index=True) if crypto_focus["owned"] else st.info("No crypto positions are currently recorded.")
+    if crypto_focus["owned"]:
+        st.dataframe(pd.DataFrame(crypto_focus["owned"]), width="stretch", hide_index=True)
+    else:
+        st.info("No crypto positions are currently recorded.")
 
     st.markdown("**BEST CRYPTO TRADES NOW**")
-    st.dataframe(pd.DataFrame(crypto_focus["best_trades"]), width="stretch", hide_index=True) if crypto_focus["best_trades"] else st.info("No crypto trade has passed quote, liquidity, signal, tier, and portfolio checks right now.")
+    if crypto_focus["best_trades"]:
+        st.dataframe(pd.DataFrame(crypto_focus["best_trades"]), width="stretch", hide_index=True)
+    else:
+        st.info("No crypto trade has passed quote, liquidity, signal, tier, and portfolio checks right now.")
 
     st.markdown("**STRONGEST CRYPTO MOVERS**")
-    st.dataframe(pd.DataFrame(crypto_focus["movers"]), width="stretch", hide_index=True) if crypto_focus["movers"] else st.info("No verified crypto movers are available yet.")
+    if crypto_focus["movers"]:
+        st.dataframe(pd.DataFrame(crypto_focus["movers"]), width="stretch", hide_index=True)
+    else:
+        st.info("No verified crypto movers are available yet.")
 
     st.markdown("**ROTATION OPPORTUNITIES**")
-    st.dataframe(pd.DataFrame(crypto_focus["rotations"]), width="stretch", hide_index=True) if crypto_focus["rotations"] else st.info("No tactical crypto rotation clears the required score improvement.")
+    if crypto_focus["rotations"]:
+        st.dataframe(pd.DataFrame(crypto_focus["rotations"]), width="stretch", hide_index=True)
+    else:
+        st.info("No tactical crypto rotation clears the required score improvement.")
 
     st.markdown("**HOW CRYPTO PROFITS WERE CREATED**")
-    st.dataframe(pd.DataFrame(crypto_focus["profit_sources"]), width="stretch", hide_index=True) if crypto_focus["profit_sources"] else st.info("Crypto profit attribution will appear after ledgered paper fills close or verified open marks are available.")
+    if crypto_focus["profit_sources"]:
+        st.dataframe(pd.DataFrame(crypto_focus["profit_sources"]), width="stretch", hide_index=True)
+    else:
+        st.info("Crypto profit attribution will appear after ledgered paper fills close or verified open marks are available.")
 
     st.markdown("**CORE ALLOCATION**")
     st.dataframe(pd.DataFrame(crypto_focus["core_allocation"]), width="stretch", hide_index=True)
 
     st.markdown("**CORE DEPLOYMENT PLAN**")
-    st.dataframe(pd.DataFrame(crypto_focus["core_deployment"]), width="stretch", hide_index=True) if crypto_focus["core_deployment"] else st.info("No verified underweight crypto core allocation is available above the protected reserve right now.")
+    if crypto_focus["core_deployment"]:
+        st.dataframe(pd.DataFrame(crypto_focus["core_deployment"]), width="stretch", hide_index=True)
+    else:
+        st.info("No verified underweight crypto core allocation is available above the protected reserve right now.")
 
     with st.expander("WATCHLIST / WAITING"):
-        st.dataframe(pd.DataFrame(crypto_focus["waiting"]), width="stretch", hide_index=True) if crypto_focus["waiting"] else st.success("No crypto candidates are waiting on data or liquidity right now.")
+        if crypto_focus["waiting"]:
+            st.dataframe(pd.DataFrame(crypto_focus["waiting"]), width="stretch", hide_index=True)
+        else:
+            st.success("No crypto candidates are waiting on data or liquidity right now.")
     with st.expander("PROVIDER DIAGNOSTICS"):
         st.caption("Provider diagnostics do not override verified quote requirements.")
         diagnostics = provider_diagnostics()
-        st.dataframe(pd.DataFrame(diagnostics), width="stretch", hide_index=True) if diagnostics else st.info("No provider limitations are currently reported.")
+        if diagnostics:
+            st.dataframe(pd.DataFrame(diagnostics), width="stretch", hide_index=True)
+        else:
+            st.info("No provider limitations are currently reported.")
 
 elif page == "Dashboard":
     top = buy_decisions[0] if buy_decisions else (decisions[0] if decisions else None)
@@ -955,7 +1003,10 @@ elif page == "Dashboard":
             c3.metric("Daily Remaining", int(as_float(alpha.get("daily_remaining"))))
             c4.metric("Mode", str(alpha.get("mode") or "Historical / EOD / Delayed"))
             st.caption(f"Last Success: {alpha.get('last_success') or 'Waiting'}")
-        st.dataframe(pd.DataFrame(diagnostics), width="stretch", hide_index=True) if diagnostics else st.info("No provider limitations are currently reported.")
+        if diagnostics:
+            st.dataframe(pd.DataFrame(diagnostics), width="stretch", hide_index=True)
+        else:
+            st.info("No provider limitations are currently reported.")
 
     if alerts:
         st.markdown("<div class='section-title'>WHAT NEEDS ATTENTION</div>", unsafe_allow_html=True)
@@ -998,21 +1049,36 @@ elif page == "Dashboard":
             st.caption("Watchlist candidates continue to update from fixed watchlists and dynamic discovery.")
         with advisor_tabs[4]:
             scorecards = safe_rows("SELECT * FROM strategy_performance ORDER BY id DESC LIMIT 25")
-            st.dataframe(pd.DataFrame(scorecards), width="stretch", hide_index=True) if scorecards else st.info("Strategy scorecards will appear after enough paper or shadow observations.")
+            if scorecards:
+                st.dataframe(pd.DataFrame(scorecards), width="stretch", hide_index=True)
+            else:
+                st.info("Strategy scorecards will appear after enough paper or shadow observations.")
         with advisor_tabs[5]:
             validation = safe_rows("SELECT * FROM forecast_validation ORDER BY id DESC LIMIT 25")
-            st.dataframe(pd.DataFrame(validation), width="stretch", hide_index=True) if validation else st.info("Forecast accuracy records will appear as walk-forward outcomes mature.")
+            if validation:
+                st.dataframe(pd.DataFrame(validation), width="stretch", hide_index=True)
+            else:
+                st.info("Forecast accuracy records will appear as walk-forward outcomes mature.")
         with advisor_tabs[6]:
             diagnostics = provider_diagnostics()
             st.dataframe(pd.DataFrame(diagnostics), width="stretch", hide_index=True)
         with advisor_tabs[7]:
             risk_events = safe_rows("SELECT * FROM risk_events ORDER BY id DESC LIMIT 25")
-            st.dataframe(pd.DataFrame(risk_events), width="stretch", hide_index=True) if risk_events else st.success("No advisor risk events are currently recorded.")
+            if risk_events:
+                st.dataframe(pd.DataFrame(risk_events), width="stretch", hide_index=True)
+            else:
+                st.success("No advisor risk events are currently recorded.")
         with advisor_tabs[8]:
             audits = safe_rows("SELECT * FROM trade_audits ORDER BY id DESC LIMIT 25")
-            st.dataframe(pd.DataFrame(audits), width="stretch", hide_index=True) if audits else st.info("Historical audit records are non-destructive and appear here after review.")
+            if audits:
+                st.dataframe(pd.DataFrame(audits), width="stretch", hide_index=True)
+            else:
+                st.info("Historical audit records are non-destructive and appear here after review.")
         with advisor_tabs[9]:
-            st.dataframe(pd.DataFrame(workers), width="stretch", hide_index=True) if workers else st.info("Workers have not reported status yet.")
+            if workers:
+                st.dataframe(pd.DataFrame(workers), width="stretch", hide_index=True)
+            else:
+                st.info("Workers have not reported status yet.")
         with advisor_tabs[10]:
             st.caption("Execution switches default to disabled. Railway variables must be intentionally changed before any paper automation can run.")
             st.write(f"OpenAI enabled: {'Yes' if openai_available() else 'No'}")
@@ -1038,7 +1104,10 @@ elif page == "Dashboard":
                     }
                     for item in storage.get("largest_tables", [])
                 ]
-                st.dataframe(pd.DataFrame(table_rows_view), width="stretch", hide_index=True) if table_rows_view else st.info("No table size records are available yet.")
+                if table_rows_view:
+                    st.dataframe(pd.DataFrame(table_rows_view), width="stretch", hide_index=True)
+                else:
+                    st.info("No table size records are available yet.")
                 st.caption("Retention is conservative and never auto-deletes canonical financial, governance, migration, or execution history.")
             except Exception as exc:
                 st.warning(f"Database storage diagnostics unavailable: {exc}")

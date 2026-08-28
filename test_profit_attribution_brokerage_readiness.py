@@ -180,6 +180,10 @@ def test_live_kill_switch_blocks_even_manual_approval(monkeypatch):
     assert adapter.submitted == []
 
 
+def test_no_live_autonomous_broker_mode_is_available():
+    assert "live_autonomous" not in broker.LIVE_BROKER_MODES
+
+
 def test_changed_live_proposal_invalidates_manual_approval(monkeypatch):
     monkeypatch.setattr(broker, "LIVE_TRADING_KILL_SWITCH", False)
     monkeypatch.setattr(broker, "ENABLE_BROKER_SUBMISSION", True)
