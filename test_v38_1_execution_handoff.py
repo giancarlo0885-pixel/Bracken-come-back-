@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from types import SimpleNamespace
 
 import pandas as pd
@@ -26,10 +27,15 @@ def _history(symbol="AAPL", price=123.45, interval="5m", quote_timestamp=None, v
         "provider_symbol": symbol,
         "provider": "unit-provider",
         "price": price,
+        "bid": price - 0.02,
+        "ask": price + 0.02,
+        "spread_pct": 0.0003,
         "current_price": price,
         "quote_timestamp": quote_timestamp,
         "interval": interval,
         "quote_verified": verified,
+        "source_capability": "unit_verified_quote",
+        "correlation_id": f"corr-{symbol}-{interval}",
         "source_identity": f"unit:{symbol}:5d:{interval}",
         "cache_identity": f"cache:{symbol}:5d:{interval}",
         "ohlcv_fingerprint": f"ohlcv:{symbol}",
@@ -92,6 +98,10 @@ def test_verified_stock_quote_reaches_execution_with_price_above_zero(monkeypatc
     assert quote["requested_symbol"] == "AAPL"
     assert quote["provider_symbol"] == "AAPL"
     assert quote["scan_type"] == "fast"
+    assert quote["bid"] == 123.43
+    assert quote["ask"] == 123.47
+    assert quote["source_capability"] == "unit_verified_quote"
+    assert quote["correlation_id"] == "corr-AAPL-5m"
 
     captured = {}
     monkeypatch.setattr(oracle_bot, "ENABLE_AUTOTRADE", True)
@@ -116,6 +126,32 @@ def test_verified_stock_quote_reaches_execution_with_price_above_zero(monkeypatc
     assert captured["scan_type"] == "fast"
     assert captured["verified_quote"]["price"] == 123.45
     assert actions and actions[0]["price"] == 123.45
+
+
+def test_streamlit_toolbar_config_is_hardened():
+    config = Path(".streamlit/config.toml").read_text(encoding="utf-8")
+
+    assert 'toolbarMode = "minimal"' in config
+    assert "headless = true" in config
+    assert "gatherUsageStats = false" in config
+
+
+def test_correlation_and_quote_fields_survive_signal_payload_and_quote_payload():
+    import market_worker
+
+    history = _history("BTC-USD", 62_300, interval="5m")
+    signal = _signal("BTC-USD", price=0.0)
+    route = market_worker._attach_execution_metadata(signal, history, "fast")
+    payload = market_worker._signal_payload(signal, route, "fast")
+    quote = market_worker._quote_payload_from_history("BTC-USD", history, scan_type="fast")
+
+    assert signal.correlation_id == "corr-BTC-USD-5m"
+    assert payload["correlation_id"] == quote["correlation_id"] == "corr-BTC-USD-5m"
+    assert payload["source_capability"] == quote["source_capability"] == "unit_verified_quote"
+    assert quote["bid"] == 62299.98
+    assert quote["ask"] == 62300.02
+    assert quote["verified"] is True
+    assert quote["stale"] is False
 
 
 def test_price_never_silently_becomes_zero_and_missing_price_rejects(monkeypatch):

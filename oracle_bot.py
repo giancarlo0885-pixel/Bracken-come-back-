@@ -368,6 +368,14 @@ def _quote_identity_metadata(signal: Any) -> dict[str, Any]:
         "timestamp",
         "interval",
         "quote_verified",
+        "verified",
+        "stale",
+        "bid",
+        "ask",
+        "spread_pct",
+        "source_capability",
+        "correlation_id",
+        "decision_correlation_id",
         "source_identity",
         "cache_identity",
         "ohlcv_fingerprint",
@@ -2977,6 +2985,24 @@ def process_signals(
                 forecast_reason,
             )
             continue
+
+        log.info(
+            "EXECUTION_QUOTE_HANDOFF | symbol=%s | market=%s | price=%s | bid=%s | ask=%s | "
+            "timestamp=%s | provider=%s | verified=%s | stale=%s | spread_pct=%s | "
+            "capability=%s | correlation_id=%s",
+            symbol,
+            market,
+            quote.get("price"),
+            quote.get("bid"),
+            quote.get("ask"),
+            quote.get("quote_timestamp") or quote.get("timestamp"),
+            quote.get("provider"),
+            quote.get("quote_verified"),
+            quote.get("stale"),
+            quote.get("spread_pct"),
+            quote.get("source_capability"),
+            quote.get("correlation_id") or quote.get("decision_correlation_id"),
+        )
 
         # A BUY qualifies through either score or confidence. Only signals
         # that are weak on both measurements are rejected.
