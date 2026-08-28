@@ -23,6 +23,7 @@ from dashboard_helpers import (
     capital_allocation_rows,
     capital_deployment_status,
     compact_money_text,
+    format_quantity,
     format_asset_price,
     live_data_status,
     wall_street_market_focus,
@@ -46,6 +47,7 @@ from migrations import run_migrations
 from portfolio_advisor import analyze_portfolio, simulate_trade
 from paper_broker import build_account
 from prediction_engine import build_decisions
+from profit_attribution import profit_attribution_rows
 from provider_diagnostics import provider_diagnostics
 from realtime_runtime import status_age_seconds
 
@@ -538,7 +540,32 @@ def simple_portfolio_card(
             st.caption(scores["overall_explanation"])
 
 
-def portfolio_table(positions: list[dict[str, Any]]) -> pd.DataFrame:
+def portfolio_table(positions: list[dict[str, Any]], market: str = "") -> pd.DataFrame:
+    if market == "crypto":
+        equity = sum(as_float(p.get("quantity")) * as_float(p.get("current_price") or p.get("price")) for p in positions)
+        return pd.DataFrame(
+            [
+                {
+                    "Symbol": str(p.get("symbol") or "").upper(),
+                    "Bucket": p.get("bucket") or ("Core" if str(p.get("symbol") or "").upper() in {"BTC-USD", "ETH-USD", "XRP-USD", "SOL-USD", "BNB-USD", "DOGE-USD", "ADA-USD", "AVAX-USD", "LINK-USD"} else "Tactical"),
+                    "Quantity": format_quantity(p.get("quantity")),
+                    "Avg Cost": as_float(p.get("average_price") or p.get("entry_price")),
+                    "Current Price": as_float(p.get("current_price") or p.get("price")),
+                    "Market Value": as_float(p.get("quantity")) * as_float(p.get("current_price") or p.get("price")),
+                    "P/L $": (as_float(p.get("current_price") or p.get("price")) - as_float(p.get("average_price") or p.get("entry_price"))) * as_float(p.get("quantity")),
+                    "P/L %": (((as_float(p.get("current_price") or p.get("price")) / as_float(p.get("average_price") or p.get("entry_price"))) - 1) * 100 if as_float(p.get("average_price") or p.get("entry_price")) > 0 else 0.0),
+                    "Weight": ((as_float(p.get("quantity")) * as_float(p.get("current_price") or p.get("price"))) / equity * 100 if equity else 0.0),
+                    "Tier": p.get("tier") or "",
+                    "Strategy": p.get("strategy") or "",
+                    "Provider": p.get("quote_provider") or p.get("provider") or "Unknown",
+                    "Data Status": "VERIFIED" if p.get("quote_verified") is True else "NEEDS PRICE",
+                    "Entry Reason": p.get("entry_reason") or p.get("reason") or "",
+                    "Hold Reason": p.get("hold_reason") or "Open position",
+                }
+                for p in positions
+                if str(p.get("market") or "crypto").lower() == "crypto" or str(p.get("symbol") or "").upper().endswith("-USD")
+            ]
+        )
     equity = sum(as_float(p.get("quantity")) * as_float(p.get("current_price") or p.get("price")) for p in positions)
     stock_rows = holding_view_rows(positions, equity=equity)
     if stock_rows:
@@ -560,6 +587,8 @@ def portfolio_table(positions: list[dict[str, Any]]) -> pd.DataFrame:
                     "Strategy": item["strategy"] or "",
                     "Provider": item["quote_provider"] or "Unknown",
                     "Data Status": "VERIFIED" if item["quote_verified"] else "NEEDS PRICE",
+                    "Entry Reason": next((p.get("entry_reason") or p.get("reason") or "" for p in positions if str(p.get("symbol") or "").upper() == item["symbol"]), ""),
+                    "Hold Reason": next((p.get("hold_reason") or "Open position" for p in positions if str(p.get("symbol") or "").upper() == item["symbol"]), "Open position"),
                 }
                 for item in stock_rows
             ]
@@ -750,6 +779,9 @@ elif page == "Crypto":
 
     st.markdown("**CORE ALLOCATION**")
     st.dataframe(pd.DataFrame(crypto_focus["core_allocation"]), width="stretch", hide_index=True)
+
+    st.markdown("**CORE DEPLOYMENT PLAN**")
+    st.dataframe(pd.DataFrame(crypto_focus["core_deployment"]), width="stretch", hide_index=True) if crypto_focus["core_deployment"] else st.info("No verified underweight crypto core allocation is available above the protected reserve right now.")
 
     with st.expander("WATCHLIST / WAITING"):
         st.dataframe(pd.DataFrame(crypto_focus["waiting"]), width="stretch", hide_index=True) if crypto_focus["waiting"] else st.success("No crypto candidates are waiting on data or liquidity right now.")
@@ -1093,11 +1125,19 @@ elif page == "Portfolios":
                 st.warning("Paper leverage is elevated. New positions will be reduced or blocked as utilization approaches the hard limit.")
             else:
                 st.info(health.plain_summary)
-            holdings_tab, activity_tab, advice_tab = st.tabs(["What It Owns", "What It Bought & Sold", "Oracle Advice"])
+            holdings_tab, profit_tab, activity_tab, advice_tab = st.tabs([
+                "What I Own Now",
+                f"How {name} Profits Were Made",
+                f"{name} Trade History",
+                "Rotation / Next Move",
+            ])
             with holdings_tab:
-                frame = portfolio_table(positions)
+                frame = portfolio_table(positions, market)
                 if frame.empty:
-                    st.info(f"The {name.lower()} portfolio has no open positions.")
+                    st.info(
+                        f"The {name.lower()} portfolio has no open positions right now. "
+                        "The Oracle is waiting for verified prices, qualified signals, and portfolio-safe sizing before adding paper exposure."
+                    )
                 else:
                     formatters = {
                         key: value
@@ -1118,6 +1158,58 @@ elif page == "Portfolios":
                     st.dataframe(
                         frame.style.format(formatters),
                         width="stretch", hide_index=True,
+                    )
+            with profit_tab:
+                ledger = safe_rows("SELECT * FROM trade_ledger WHERE market=%s ORDER BY id DESC LIMIT 500", (market,))
+                attribution = profit_attribution_rows(
+                    positions=positions,
+                    ledger_rows=ledger,
+                    market=market,
+                    equity=metrics["equity"],
+                )
+                if not attribution:
+                    st.info(f"{name} profit attribution will appear after ledgered paper fills or verified open-position marks are available.")
+                else:
+                    attribution_frame = pd.DataFrame(
+                        [
+                            {
+                                "Symbol": row["symbol"],
+                                "Bucket": row.get("bucket") or "",
+                                "Strategy": row.get("strategy") or "",
+                                "Quantity": format_quantity(row.get("quantity")),
+                                "Entry Price": row.get("entry_price"),
+                                "Exit / Current": row.get("exit_or_current_price"),
+                                "Realized P/L": row.get("realized_pnl"),
+                                "Unrealized P/L": row.get("unrealized_pnl"),
+                                "Total P/L": row.get("total_pnl"),
+                                "Return %": row.get("return_pct"),
+                                "Portfolio Contribution %": row.get("contribution_to_portfolio_profit_pct"),
+                                "Tier": row.get("tier") or "",
+                                "Provider": row.get("quote_provider") or "",
+                                "Data Status": row.get("status") or "",
+                                "First Entry": row.get("first_entry_time") or "",
+                                "Latest Fill": row.get("latest_fill_time") or "",
+                                "Entry Reason": row.get("entry_reason") or "",
+                                "Exit / Hold Reason": row.get("exit_or_hold_reason") or "",
+                            }
+                            for row in attribution
+                        ]
+                    )
+                    st.dataframe(
+                        attribution_frame.style.format(
+                            {
+                                "Entry Price": "${:,.4f}",
+                                "Exit / Current": "${:,.4f}",
+                                "Realized P/L": "${:+,.2f}",
+                                "Unrealized P/L": "${:+,.2f}",
+                                "Total P/L": "${:+,.2f}",
+                                "Return %": "{:+.1f}%",
+                                "Portfolio Contribution %": "{:+.3f}%",
+                            },
+                            na_rep="Waiting",
+                        ),
+                        width="stretch",
+                        hide_index=True,
                     )
             with activity_tab:
                 trades = safe_rows("SELECT * FROM trades WHERE market=%s ORDER BY id DESC LIMIT 300", (market,))

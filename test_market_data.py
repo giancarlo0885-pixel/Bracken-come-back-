@@ -102,6 +102,21 @@ def test_snapshot_uses_latest_bar_timestamp_and_preserves_fetched_at():
     assert snapshot.fetched_at == "2026-08-01T12:00:00+00:00"
 
 
+def test_snapshot_does_not_fabricate_quote_timestamp_from_fetched_at():
+    history = _history([100, 101], [1000, 1100], "AAPL")
+    history.index = pd.Index(["bad-index-1", "bad-index-2"])
+    history.attrs["provider_route"] = {
+        "provider": "unit",
+        "requested_symbol": "AAPL",
+        "provider_symbol": "AAPL",
+        "fetched_at": "2026-08-01T12:00:00+00:00",
+        "interval": "5m",
+        "quote_verified": True,
+    }
+
+    assert _snapshot_from_history("AAPL", history, "5m") is None
+
+
 def test_gm_cannot_receive_driv_history():
     history = _history([88.59], [1000], "DRIV")
     assert _snapshot_from_history("GM", history, "1d") is None

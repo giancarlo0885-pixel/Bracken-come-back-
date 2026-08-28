@@ -330,3 +330,79 @@ def test_wall_street_focus_profit_sources_use_attribution_ledger():
 
     assert focus["profit_sources"][0]["Symbol"] == "AAPL"
     assert "ETH" not in str(focus["profit_sources"])
+
+
+def test_stock_profit_attribution_rows_include_realized_unrealized_and_total():
+    rows = pnl.profit_attribution_rows(
+        positions=[
+            {
+                "symbol": "AAPL",
+                "market": "cash",
+                "quantity": 5,
+                "average_price": 100,
+                "bucket": "Tactical",
+                "strategy": "Momentum",
+                "quote_provider": "polygon",
+            }
+        ],
+        ledger_rows=[
+            {
+                "symbol": "AAPL",
+                "market": "cash",
+                "bucket": "Tactical",
+                "strategy": "Momentum",
+                "side": "SELL",
+                "quantity": 2,
+                "entry_price": 90,
+                "exit_price": 110,
+                "net_pnl": 40,
+                "fees": 0,
+                "entry_time": "2026-08-01T14:00:00+00:00",
+                "exit_time": "2026-08-02T14:00:00+00:00",
+                "quote_provider": "polygon",
+                "decision_id": "buy-sig",
+                "status": "CLOSED",
+            }
+        ],
+        quotes={"AAPL": verified_quote("AAPL", 112)},
+        market="cash",
+        equity=10_000,
+    )
+
+    assert rows[0]["symbol"] == "AAPL"
+    assert rows[0]["realized_pnl"] == 40
+    assert rows[0]["unrealized_pnl"] == 60
+    assert rows[0]["total_pnl"] == 100
+    assert rows[0]["status"] == "VERIFIED"
+
+
+def test_crypto_profit_attribution_rows_are_separate_from_stocks():
+    rows = pnl.profit_attribution_rows(
+        positions=[
+            {"symbol": "BTC-USD", "market": "crypto", "quantity": 1, "average_price": 50_000},
+            {"symbol": "AAPL", "market": "cash", "quantity": 1, "average_price": 100},
+        ],
+        ledger_rows=[
+            {"symbol": "BTC-USD", "market": "crypto", "quantity": 1, "entry_price": 50_000, "exit_price": 55_000, "net_pnl": 5_000},
+            {"symbol": "AAPL", "market": "cash", "quantity": 1, "entry_price": 100, "exit_price": 110, "net_pnl": 10},
+        ],
+        quotes={"BTC-USD": verified_quote("BTC-USD", 60_000)},
+        market="crypto",
+        equity=100_000,
+    )
+
+    assert [row["symbol"] for row in rows] == ["BTC-USD"]
+    assert rows[0]["realized_pnl"] == 5_000
+    assert rows[0]["unrealized_pnl"] == 10_000
+
+
+def test_reconciliation_error_blocks_new_entries_when_equity_differs():
+    result = pnl.reconcile_portfolio(
+        cash=1_000,
+        positions=[{"symbol": "AAPL", "quantity": 2, "average_price": 100}],
+        quotes={"AAPL": verified_quote("AAPL", 125)},
+        broker_reported_equity=2_000,
+    )
+
+    assert result["status"] == "PORTFOLIO_RECONCILIATION_ERROR"
+    assert result["reconciled"] is False

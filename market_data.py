@@ -26,6 +26,8 @@ class MarketSnapshot:
     change_pct: float
     volume: float
     timestamp: str
+    bid: float | None = None
+    ask: float | None = None
     provider: str = "unknown"
     interval: str = "1d"
     fetched_at: str | None = None
@@ -33,6 +35,9 @@ class MarketSnapshot:
     provider_symbol: str | None = None
     provider_native_symbol: str | None = None
     quote_verified: bool = False
+    stale: bool = True
+    spread_pct: float | None = None
+    source_capability: str | None = None
     source_identity: str | None = None
     cache_identity: str | None = None
     ohlcv_fingerprint: str | None = None
@@ -45,9 +50,16 @@ class MarketSnapshot:
             "provider_native_symbol": self.provider_native_symbol,
             "provider": self.provider,
             "price": self.price,
+            "bid": self.bid,
+            "ask": self.ask,
             "quote_timestamp": self.timestamp,
+            "timestamp": self.timestamp,
             "interval": self.interval,
             "quote_verified": self.quote_verified,
+            "verified": self.quote_verified,
+            "stale": self.stale,
+            "spread_pct": self.spread_pct,
+            "source_capability": self.source_capability,
             "source_identity": self.source_identity,
             "cache_identity": self.cache_identity,
             "ohlcv_fingerprint": self.ohlcv_fingerprint,
@@ -262,20 +274,28 @@ def _snapshot_from_history(symbol: str, history: pd.DataFrame, interval: str) ->
         source_identity = f"{provider}:{requested_symbol}:{period}:{interval}"
     fetched_at = str(route.get("fetched_at") or datetime.now(timezone.utc).isoformat())
     latest_quote = latest_bar_timestamp(history, interval, symbol=symbol)
-    quote_timestamp = str(route.get("quote_timestamp") or (latest_quote.isoformat() if latest_quote else fetched_at))
+    quote_timestamp = str(route.get("quote_timestamp") or (latest_quote.isoformat() if latest_quote else ""))
+    if not quote_timestamp:
+        return None
+    verified = route.get("quote_verified") is True
     return MarketSnapshot(
         symbol=symbol,
         price=price,
         change_pct=change,
         volume=volume,
         timestamp=quote_timestamp,
+        bid=finite_scalar(route.get("bid")),
+        ask=finite_scalar(route.get("ask")),
         provider=provider,
         interval=interval,
         fetched_at=fetched_at,
         requested_symbol=requested_symbol,
         provider_symbol=provider_symbol,
         provider_native_symbol=provider_native_symbol,
-        quote_verified=route.get("quote_verified") is True,
+        quote_verified=verified,
+        stale=not verified,
+        spread_pct=finite_scalar(route.get("spread_pct")),
+        source_capability=str(route.get("source_capability") or route.get("capability") or ("history_intraday" if interval not in {"1d", "daily"} else "history_daily")),
         source_identity=source_identity,
         cache_identity=cache_identity,
         ohlcv_fingerprint=str(route.get("ohlcv_fingerprint") or _ohlcv_fingerprint(history)),
@@ -303,6 +323,8 @@ def _alpha_vantage_delayed_snapshot(symbol: str) -> MarketSnapshot | None:
         change_pct=float(quote.get("change_pct") or 0.0),
         volume=float(quote.get("volume") or 0.0),
         timestamp=latest_day,
+        bid=None,
+        ask=None,
         provider="Alpha Vantage",
         interval="1d",
         fetched_at=fetched_at,
@@ -310,6 +332,9 @@ def _alpha_vantage_delayed_snapshot(symbol: str) -> MarketSnapshot | None:
         provider_symbol=provider_symbol,
         provider_native_symbol=provider_symbol,
         quote_verified=False,
+        stale=True,
+        spread_pct=None,
+        source_capability="global_quote_eod_fallback",
         source_identity=f"Alpha Vantage:{requested}:GLOBAL_QUOTE:delayed",
         cache_identity=f"alpha_vantage_global_quote:{requested}",
     )
