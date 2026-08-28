@@ -6,10 +6,12 @@ import hashlib
 import json
 import logging
 import math
+import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from config import *
+from capital_allocator import adaptive_capital_allocation
 from database import connect, row, rows, utc_now
 from execution_policy import execution_policy
 from forecast_quality import model_execution_approved
@@ -74,9 +76,13 @@ MIN_TRADE_VALUE = float(
 MAX_TRADE_VALUE_PCT = float(
     globals().get("MAX_TRADE_VALUE_PCT", 0.35)
 )
+from profit_attribution import fifo_close_lots
 
 MAX_SECTOR_EXPOSURE_PCT = float(
     globals().get("MAX_SECTOR_EXPOSURE_PCT", 0.35)
+)
+MAX_STOCK_SECTOR_EXPOSURE_PCT = float(
+    globals().get("MAX_STOCK_SECTOR_EXPOSURE_PCT", MAX_SECTOR_EXPOSURE_PCT)
 )
 
 DEFAULT_STOP_LOSS_PCT = float(
@@ -1051,11 +1057,12 @@ def _paper_buy_safeguard(
     )
     if market == "cash" and not sector:
         return False, "paper buy safeguard requires verified stock sector metadata"
-    if sector_after is not None and sector_after > MAX_SECTOR_EXPOSURE_PCT:
+    sector_limit = MAX_STOCK_SECTOR_EXPOSURE_PCT if market == "cash" else MAX_SECTOR_EXPOSURE_PCT
+    if sector_after is not None and sector_after > sector_limit:
         return (
             False,
             f"paper buy safeguard rejected sector concentration "
-            f"{sector} ({sector_after:.2%}/{MAX_SECTOR_EXPOSURE_PCT:.2%})",
+            f"{sector} ({sector_after:.2%}/{sector_limit:.2%})",
         )
     return True, "paper buy safeguard approved"
 
@@ -1520,6 +1527,232 @@ def _close_position(
     return _execute_close_position(market, position, price, reason, quote_metadata=quote_metadata)
 
 
+def _quote_provider_name(quote_metadata: dict[str, Any] | None) -> str | None:
+    if not quote_metadata:
+        return None
+    provider = quote_metadata.get("provider") or quote_metadata.get("quote_provider") or quote_metadata.get("history_provider")
+    return safe_text(provider) or None
+
+
+def _lot_bucket_from_signal(signal: Any | None, market: str) -> str:
+    bucket = signal_value(signal, "bucket", signal_value(signal, "tier", ""))
+    if bucket:
+        return safe_text(bucket)
+    return "Crypto Core" if market == "crypto" else "Tactical"
+
+
+def _record_buy_attribution(
+    conn: Any,
+    *,
+    market: str,
+    symbol: str,
+    quantity: float,
+    price: float,
+    fees: float,
+    signal: Any | None,
+    quote_metadata: dict[str, Any] | None,
+    now: str,
+) -> None:
+    bucket = _lot_bucket_from_signal(signal, market)
+    strategy = safe_text(signal_value(signal, "strategy", signal_value(signal, "scan_type", "")))
+    decision_id = signal_value(signal, "signal_id", signal_value(signal, "id", None))
+    confidence = safe_float(signal_value(signal, "confidence", None), None) if signal is not None else None
+    score = safe_float(signal_value(signal, "score", None), None) if signal is not None else None
+    trade_id = f"ledger-buy:{uuid.uuid4()}"
+    lot_id = f"lot:{uuid.uuid4()}"
+    conn.execute(
+        """
+        INSERT INTO position_lots (
+            lot_id, symbol, market, bucket, strategy, opened_at, quantity_opened,
+            quantity_remaining, entry_price, entry_fees, decision_id,
+            broker_mode, account_environment, created_at
+        )
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'PAPER','PAPER',%s)
+        """,
+        (lot_id, symbol, market, bucket, strategy, now, quantity, quantity, price, fees, decision_id, now),
+    )
+    conn.execute(
+        """
+        INSERT INTO trade_ledger (
+            trade_id, symbol, market, bucket, strategy, side, quantity, entry_time,
+            entry_price, exit_time, exit_price, gross_pnl, fees, net_pnl,
+            return_pct, tier, confidence_score, weighted_signal_score,
+            quote_provider, decision_id, order_id, broker_mode,
+            account_environment, status, created_at, updated_at
+        )
+        VALUES (%s,%s,%s,%s,%s,'BUY',%s,%s,%s,NULL,NULL,0,%s,%s,0,%s,%s,%s,%s,%s,NULL,'PAPER','PAPER','OPEN',%s,%s)
+        """,
+        (
+            trade_id,
+            symbol,
+            market,
+            bucket,
+            strategy,
+            quantity,
+            now,
+            price,
+            fees,
+            -abs(fees),
+            bucket,
+            confidence,
+            score,
+            _quote_provider_name(quote_metadata),
+            decision_id,
+            now,
+            now,
+        ),
+    )
+
+
+def _record_sell_attribution(
+    conn: Any,
+    *,
+    market: str,
+    position: dict[str, Any],
+    price: float,
+    quantity: float,
+    fees: float,
+    reason: str,
+    quote_metadata: dict[str, Any] | None,
+    now: str,
+) -> None:
+    symbol = safe_text(position.get("symbol")).upper()
+    lot_rows = conn.execute(
+        """
+        SELECT *
+        FROM position_lots
+        WHERE market=%s AND symbol=%s AND quantity_remaining > 0
+        ORDER BY opened_at ASC, id ASC
+        FOR UPDATE
+        """,
+        (market, symbol),
+    ).fetchall()
+    if not lot_rows:
+        entry_price = safe_float(position.get("average_price", position.get("entry_price", price)), price)
+        opened_at = position.get("opened_at") or position.get("updated_at") or now
+        synthetic_lot = {
+            "lot_id": f"lot:synthetic:{symbol}:{uuid.uuid4()}",
+            "symbol": symbol,
+            "market": market,
+            "bucket": "Historical",
+            "strategy": "legacy_position",
+            "opened_at": opened_at,
+            "quantity_opened": quantity,
+            "quantity_remaining": quantity,
+            "entry_price": entry_price,
+            "entry_fees": 0.0,
+            "decision_id": None,
+            "broker_mode": "PAPER",
+            "account_environment": "PAPER",
+        }
+        conn.execute(
+            """
+            INSERT INTO position_lots (
+                lot_id, symbol, market, bucket, strategy, opened_at,
+                quantity_opened, quantity_remaining, entry_price, entry_fees,
+                decision_id, broker_mode, account_environment, created_at
+            )
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NULL,'PAPER','PAPER',%s)
+            """,
+            (
+                synthetic_lot["lot_id"],
+                symbol,
+                market,
+                synthetic_lot["bucket"],
+                synthetic_lot["strategy"],
+                synthetic_lot["opened_at"],
+                quantity,
+                quantity,
+                entry_price,
+                0.0,
+                now,
+            ),
+        )
+        lot_rows = [synthetic_lot]
+
+    from profit_attribution import PositionLot
+
+    lots = [
+        PositionLot(
+            lot_id=safe_text(lot.get("lot_id")),
+            symbol=safe_text(lot.get("symbol")).upper(),
+            market=safe_text(lot.get("market")).lower(),
+            bucket=safe_text(lot.get("bucket"), "Tactical"),
+            strategy=safe_text(lot.get("strategy")),
+            opened_at=_parse_utc(lot.get("opened_at")) or datetime.now(timezone.utc),
+            quantity_opened=safe_float(lot.get("quantity_opened")),
+            quantity_remaining=safe_float(lot.get("quantity_remaining")),
+            entry_price=safe_float(lot.get("entry_price")),
+            entry_fees=safe_float(lot.get("entry_fees")),
+            decision_id=lot.get("decision_id"),
+            broker_mode=safe_text(lot.get("broker_mode"), "PAPER"),
+            account_environment=safe_text(lot.get("account_environment"), "PAPER"),
+        )
+        for lot in lot_rows
+    ]
+    ledger_rows = fifo_close_lots(
+        lots,
+        quantity=quantity,
+        exit_price=price,
+        exit_time=now,
+        fees=fees,
+        tier=safe_text(position.get("tier") or "paper_exit"),
+        quote_provider=_quote_provider_name(quote_metadata),
+        order_id=safe_text(reason),
+    )
+    for lot in lots:
+        conn.execute(
+            """
+            UPDATE position_lots
+            SET quantity_remaining=%s
+            WHERE lot_id=%s
+            """,
+            (lot.quantity_remaining, lot.lot_id),
+        )
+    for ledger in ledger_rows:
+        data = ledger.to_dict()
+        conn.execute(
+            """
+            INSERT INTO trade_ledger (
+                trade_id, symbol, market, bucket, strategy, side, quantity,
+                entry_time, entry_price, exit_time, exit_price, gross_pnl,
+                fees, net_pnl, return_pct, tier, confidence_score,
+                weighted_signal_score, quote_provider, decision_id, order_id,
+                broker_mode, account_environment, status, created_at, updated_at
+            )
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            """,
+            (
+                data["trade_id"],
+                data["symbol"],
+                data["market"],
+                data["bucket"],
+                data["strategy"],
+                data["side"],
+                data["quantity"],
+                data["entry_time"],
+                data["entry_price"],
+                data["exit_time"],
+                data["exit_price"],
+                data["gross_pnl"],
+                data["fees"],
+                data["net_pnl"],
+                data["return_pct"],
+                data["tier"],
+                data["confidence_score"],
+                data["weighted_signal_score"],
+                data["quote_provider"],
+                data["decision_id"],
+                data["order_id"],
+                data["broker_mode"],
+                data["account_environment"],
+                data["status"],
+                now,
+                now,
+            ),
+        )
+
+
 def _execute_close_position(
     market: str,
     position: dict[str, Any],
@@ -1657,6 +1890,17 @@ def _execute_close_position(
                     reason,
                     now,
                 ),
+            )
+            _record_sell_attribution(
+                conn,
+                market=market,
+                position=position,
+                price=price,
+                quantity=quantity,
+                fees=0.0,
+                reason=reason,
+                quote_metadata=quote_metadata,
+                now=now,
             )
             _complete_execution_claim(conn, execution_key)
 
@@ -2300,6 +2544,55 @@ def _buy(
             trade_value = min(trade_value, current_available)
             if trade_value < MIN_TRADE_VALUE:
                 return False, f"buying power changed during execution; available={current_available:.2f}", None
+            existing_position_value = 0.0
+            for active in active_positions:
+                if safe_text(active.get("symbol")).upper() == symbol:
+                    existing_position_value += safe_float(active.get("quantity")) * safe_float(
+                        active.get("current_price", active.get("entry_price", price))
+                    )
+            stop_price = safe_float(
+                signal_value(
+                    signal,
+                    "stop_price",
+                    signal_value(signal, "stop_loss", signal_value(signal, "stop", price * (1.0 - DEFAULT_STOP_LOSS_PCT))),
+                )
+            )
+            tier = safe_text(signal_value(signal, "tier", signal_value(signal, "risk_tier", "B")), "B").upper()
+            if tier not in {"A", "B", "C"}:
+                tier = "B"
+            regime = safe_text(
+                signal_value(
+                    signal,
+                    "market_regime",
+                    signal_value(signal, "crypto_regime", signal_value(signal, "regime", "neutral")),
+                ),
+                "neutral",
+            )
+            allocator_volume = average_dollar_volume or safe_float(signal_value(signal, "dollar_volume_24h", 0.0))
+            allocation = adaptive_capital_allocation(
+                symbol=symbol,
+                market=market,
+                equity=account.equity,
+                cash=account.cash,
+                current_exposure=account.gross_exposure,
+                price=price,
+                stop_price=stop_price,
+                tier=tier,
+                confidence=confidence,
+                reward_risk=safe_float(signal_value(signal, "reward_risk_ratio", 1.5), 1.5),
+                market_regime=regime,
+                dollar_volume=allocator_volume,
+                spread_pct=safe_float(signal_value(signal, "spread_pct", 0.0)),
+                drawdown_pct=safe_float(equity_data.get("drawdown_pct", 0.0)),
+                existing_position_value=existing_position_value,
+                buying_power=account.buying_power,
+                buying_power_validated=True,
+            )
+            if not allocation.approved:
+                return False, f"adaptive capital sizing rejected: {allocation.reason}", None
+            trade_value = min(trade_value, allocation.calculated_notional)
+            if trade_value < MIN_TRADE_NOTIONAL:
+                return False, f"trade value too small={trade_value:.2f}; minimum={MIN_TRADE_NOTIONAL:.2f}", None
             safeguard_ok, safeguard_reason = _paper_buy_safeguard(
                 market=market,
                 symbol=symbol,
@@ -2398,6 +2691,17 @@ def _buy(
                         now,
                     ),
                 )
+                _record_sell_attribution(
+                    conn,
+                    market=market,
+                    position=dict(locked_rotation),
+                    price=exit_price,
+                    quantity=quantity_to_sell,
+                    fees=0.0,
+                    reason=safe_text(rotation_action.get("reason"), f"continuous_rotation_to_{symbol}"),
+                    quote_metadata=outgoing_quote,
+                    now=now,
+                )
                 _complete_execution_claim(conn, rotation_execution_key)
                 closed_memory = (
                     dict(locked_rotation),
@@ -2461,6 +2765,17 @@ def _buy(
                 ) VALUES (%s,%s,'BUY',%s,%s,%s,0,%s,%s,%s)
                 """,
                 (market, symbol, quantity, price, trade_value, score, reason_text, now),
+            )
+            _record_buy_attribution(
+                conn,
+                market=market,
+                symbol=symbol,
+                quantity=quantity,
+                price=price,
+                fees=0.0,
+                signal=signal,
+                quote_metadata=verified_quote,
+                now=now,
             )
             _complete_execution_claim(conn, execution_key)
 

@@ -5,7 +5,24 @@ import os
 from dataclasses import asdict, dataclass
 from typing import Any
 
-from config import PAPER_BROKER_MODE, PAPER_MAX_MARGIN_UTILIZATION_PCT
+from config import (
+    CRYPTO_MIN_CASH_RESERVE_PCT,
+    ENABLE_FRACTIONAL_CRYPTO,
+    ENABLE_FRACTIONAL_EQUITIES,
+    LARGE_ACCOUNT_THRESHOLD,
+    MARKET_REGIME_SIZE_MULTIPLIERS,
+    MAX_POSITION_VS_DAILY_DOLLAR_VOLUME_PCT,
+    MAX_PORTFOLIO_RISK_PER_TRADE,
+    MAX_SINGLE_CRYPTO_TACTICAL_POSITION_PCT,
+    MAX_SINGLE_STOCK_POSITION_PCT,
+    MAX_TOTAL_DEPLOYED_PCT,
+    MIN_TRADE_NOTIONAL,
+    PAPER_BROKER_MODE,
+    PAPER_MAX_MARGIN_UTILIZATION_PCT,
+    SMALL_ACCOUNT_THRESHOLD,
+    STOCK_MIN_CASH_RESERVE_PCT,
+    TIER_SIZE_MULTIPLIERS,
+)
 
 MAX_SINGLE_POSITION_PCT = min(0.25, max(0.02, float(os.getenv("CAPITAL_MAX_SINGLE_POSITION_PCT", "0.08"))))
 MAX_SECTOR_EXPOSURE_PCT = min(0.65, max(0.10, float(os.getenv("CAPITAL_MAX_SECTOR_EXPOSURE_PCT", "0.35"))))
@@ -55,6 +72,230 @@ class CapitalAllocationAssessment:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+@dataclass(frozen=True)
+class CapitalAllocationDecision:
+    symbol: str
+    market: str
+    validated_equity: float
+    risk_budget_dollars: float
+    max_position_dollars: float
+    calculated_notional: float
+    calculated_quantity: float
+    tier_multiplier: float
+    confidence_multiplier: float
+    regime_multiplier: float
+    liquidity_multiplier: float
+    drawdown_multiplier: float
+    cash_after_trade: float
+    reserve_required: float
+    approved: bool
+    reason: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+def risk_based_position_notional(
+    *,
+    equity: float,
+    price: float,
+    stop_price: float,
+    max_risk_pct: float,
+    max_position_pct: float,
+    tier_multiplier: float,
+) -> float:
+    equity = _num(equity)
+    price = _num(price)
+    stop_price = _num(stop_price)
+    if equity <= 0 or price <= 0 or stop_price <= 0:
+        return 0.0
+    stop_distance_pct = abs(price - stop_price) / price
+    if stop_distance_pct <= 0:
+        return 0.0
+    risk_budget = equity * max_risk_pct * tier_multiplier
+    risk_limited_notional = risk_budget / stop_distance_pct
+    concentration_limited_notional = equity * max_position_pct
+    return max(0.0, min(risk_limited_notional, concentration_limited_notional))
+
+
+def confidence_multiplier(confidence: float) -> float:
+    confidence = _num(confidence)
+    if confidence <= 1:
+        confidence *= 100
+    if confidence >= 90:
+        return 1.00
+    if confidence >= 80:
+        return 0.90
+    if confidence >= 70:
+        return 0.70
+    if confidence >= 62:
+        return 0.45
+    return 0.0
+
+
+def liquidity_multiplier(dollar_volume: float) -> float:
+    dollar_volume = _num(dollar_volume)
+    if dollar_volume >= 1_000_000_000:
+        return 1.00
+    if dollar_volume >= 250_000_000:
+        return 0.85
+    if dollar_volume >= 50_000_000:
+        return 0.60
+    if dollar_volume >= 20_000_000:
+        return 0.40
+    return 0.0
+
+
+def drawdown_risk_multiplier(drawdown_pct: float) -> float:
+    drawdown = abs(_num(drawdown_pct))
+    if drawdown < 0.05:
+        return 1.00
+    if drawdown < 0.10:
+        return 0.75
+    if drawdown < 0.15:
+        return 0.50
+    if drawdown < 0.20:
+        return 0.25
+    return 0.0
+
+
+def max_positions_for_equity(equity: float) -> int:
+    equity = _num(equity)
+    if equity < 250:
+        return 3
+    if equity < 1_000:
+        return 5
+    if equity < 5_000:
+        return 8
+    if equity < 25_000:
+        return 12
+    if equity < 100_000:
+        return 16
+    return 20
+
+
+def estimated_slippage_pct(*, spread_pct: float, notional: float, daily_dollar_volume: float) -> float:
+    spread = max(0.0, _num(spread_pct))
+    notional = max(0.0, _num(notional))
+    daily = max(0.0, _num(daily_dollar_volume))
+    participation = notional / daily if daily > 0 else 1.0
+    return max(spread / 2.0, min(0.02, participation * 5.0))
+
+
+def adaptive_capital_allocation(
+    *,
+    symbol: str,
+    market: str,
+    equity: float,
+    cash: float,
+    current_exposure: float,
+    price: float,
+    stop_price: float,
+    tier: str,
+    confidence: float,
+    reward_risk: float,
+    market_regime: str,
+    dollar_volume: float,
+    spread_pct: float = 0.0,
+    drawdown_pct: float = 0.0,
+    existing_position_value: float = 0.0,
+    buying_power: float | None = None,
+    buying_power_validated: bool = False,
+    fractional_equities: bool | None = None,
+    fractional_crypto: bool | None = None,
+) -> CapitalAllocationDecision:
+    market = str(market or "cash").lower()
+    equity = max(0.0, _num(equity))
+    cash = max(0.0, _num(cash))
+    price = _num(price)
+    stop_price = _num(stop_price)
+    if equity <= 0 or cash <= 0 or price <= 0 or stop_price <= 0:
+        return CapitalAllocationDecision(symbol, market, equity, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, cash, 0.0, False, "BROKER_CAPACITY_INVALID")
+
+    is_crypto = market == "crypto" or str(symbol).upper().endswith("-USD")
+    reserve_pct = CRYPTO_MIN_CASH_RESERVE_PCT if is_crypto else STOCK_MIN_CASH_RESERVE_PCT
+    max_position_pct = MAX_SINGLE_CRYPTO_TACTICAL_POSITION_PCT if is_crypto else MAX_SINGLE_STOCK_POSITION_PCT
+    fractional_allowed = ENABLE_FRACTIONAL_CRYPTO if is_crypto else ENABLE_FRACTIONAL_EQUITIES
+    if fractional_crypto is not None and is_crypto:
+        fractional_allowed = fractional_crypto
+    if fractional_equities is not None and not is_crypto:
+        fractional_allowed = fractional_equities
+
+    tier_mult = TIER_SIZE_MULTIPLIERS.get(str(tier or "").upper(), 0.0)
+    confidence_mult = confidence_multiplier(confidence)
+    regime_mult = MARKET_REGIME_SIZE_MULTIPLIERS.get(str(market_regime or "neutral").lower(), 0.60)
+    liquid_mult = liquidity_multiplier(dollar_volume)
+    drawdown_mult = drawdown_risk_multiplier(drawdown_pct)
+    if tier_mult <= 0 or confidence_mult <= 0 or liquid_mult <= 0 or drawdown_mult <= 0:
+        reason = "SEVERE_DRAWDOWN_BLOCKS_NEW_TRADE" if drawdown_mult <= 0 else "QUALITY_OR_LIQUIDITY_BELOW_THRESHOLD"
+        return CapitalAllocationDecision(symbol, market, equity, 0.0, equity * max_position_pct, 0.0, 0.0, tier_mult, confidence_mult, regime_mult, liquid_mult, drawdown_mult, cash, equity * reserve_pct, False, reason)
+    if _num(reward_risk) < 1.25:
+        return CapitalAllocationDecision(symbol, market, equity, 0.0, equity * max_position_pct, 0.0, 0.0, tier_mult, confidence_mult, regime_mult, liquid_mult, drawdown_mult, cash, equity * reserve_pct, False, "REWARD_RISK_BELOW_MINIMUM")
+
+    base_notional = risk_based_position_notional(
+        equity=equity,
+        price=price,
+        stop_price=stop_price,
+        max_risk_pct=MAX_PORTFOLIO_RISK_PER_TRADE,
+        max_position_pct=max_position_pct,
+        tier_multiplier=tier_mult,
+    )
+    base_risk_budget = equity * MAX_PORTFOLIO_RISK_PER_TRADE
+    adjusted_risk_budget = base_risk_budget * tier_mult * confidence_mult * regime_mult * liquid_mult * drawdown_mult
+    adjusted_notional = base_notional * confidence_mult * regime_mult * liquid_mult * drawdown_mult
+    reserve_required = equity * reserve_pct
+    spendable_cash = max(0.0, cash - reserve_required)
+    if buying_power_validated and buying_power is not None:
+        spendable_cash = min(spendable_cash, max(0.0, _num(buying_power)))
+    available_exposure_room = max(0.0, equity * MAX_TOTAL_DEPLOYED_PCT - max(0.0, _num(current_exposure)))
+    single_position_room = max(0.0, equity * max_position_pct - max(0.0, _num(existing_position_value)))
+    participation_cap = max(0.0, _num(dollar_volume)) * MAX_POSITION_VS_DAILY_DOLLAR_VOLUME_PCT
+    if equity < SMALL_ACCOUNT_THRESHOLD:
+        adjusted_notional *= 0.70
+    elif equity >= LARGE_ACCOUNT_THRESHOLD:
+        adjusted_notional = min(adjusted_notional, participation_cap)
+
+    notional = max(0.0, min(adjusted_notional, spendable_cash, available_exposure_room, single_position_room, participation_cap))
+    if notional < MIN_TRADE_NOTIONAL:
+        return CapitalAllocationDecision(symbol, market, equity, round(adjusted_risk_budget, 2), round(equity * max_position_pct, 2), 0.0, 0.0, tier_mult, confidence_mult, regime_mult, liquid_mult, drawdown_mult, cash, round(reserve_required, 2), False, "BELOW_MINIMUM_NOTIONAL")
+
+    quantity = notional / price
+    if not fractional_allowed:
+        quantity = math.floor(quantity)
+        notional = quantity * price
+        if quantity <= 0 or notional < MIN_TRADE_NOTIONAL:
+            return CapitalAllocationDecision(symbol, market, equity, round(adjusted_risk_budget, 2), round(equity * max_position_pct, 2), 0.0, 0.0, tier_mult, confidence_mult, regime_mult, liquid_mult, drawdown_mult, cash, round(reserve_required, 2), False, "BELOW_MINIMUM_NOTIONAL")
+
+    cash_after = cash - notional
+    if cash_after < reserve_required:
+        return CapitalAllocationDecision(symbol, market, equity, round(adjusted_risk_budget, 2), round(equity * max_position_pct, 2), 0.0, 0.0, tier_mult, confidence_mult, regime_mult, liquid_mult, drawdown_mult, cash_after, round(reserve_required, 2), False, "CASH_RESERVE_PROTECTED")
+    slippage = estimated_slippage_pct(spread_pct=spread_pct, notional=notional, daily_dollar_volume=dollar_volume)
+    reason = (
+        f"Base risk ${base_risk_budget:,.2f}; tier {str(tier).upper()} x{tier_mult:.2f}; "
+        f"confidence x{confidence_mult:.2f}; regime x{regime_mult:.2f}; "
+        f"liquidity x{liquid_mult:.2f}; drawdown x{drawdown_mult:.2f}; "
+        f"final risk budget ${adjusted_risk_budget:,.2f}; estimated slippage {slippage:.2%}."
+    )
+    return CapitalAllocationDecision(
+        symbol=str(symbol).upper(),
+        market=market,
+        validated_equity=round(equity, 2),
+        risk_budget_dollars=round(adjusted_risk_budget, 2),
+        max_position_dollars=round(equity * max_position_pct, 2),
+        calculated_notional=round(notional, 2),
+        calculated_quantity=round(quantity, 10),
+        tier_multiplier=tier_mult,
+        confidence_multiplier=confidence_mult,
+        regime_multiplier=regime_mult,
+        liquidity_multiplier=liquid_mult,
+        drawdown_multiplier=drawdown_mult,
+        cash_after_trade=round(cash_after, 2),
+        reserve_required=round(reserve_required, 2),
+        approved=True,
+        reason=reason,
+    )
 
 
 def assess_capital_allocation(

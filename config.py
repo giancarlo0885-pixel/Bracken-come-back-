@@ -137,6 +137,18 @@ ENABLE_OPENAI = os.getenv("ENABLE_OPENAI", "false").lower() == "true"
 GLOBAL_KILL_SWITCH = os.getenv("GLOBAL_KILL_SWITCH", "false").lower() == "true"
 LIVE_TRADING_ARMED = os.getenv("LIVE_TRADING_ARMED", "false").lower() == "true"
 LIVE_ORDER_APPROVAL_MODE = os.getenv("LIVE_ORDER_APPROVAL_MODE", "manual").strip().lower()
+BROKER_MODE = os.getenv("BROKER_MODE", "paper").strip().lower()
+LIVE_TRADING_KILL_SWITCH = os.getenv("LIVE_TRADING_KILL_SWITCH", "true").lower() == "true"
+LIVE_MAX_SINGLE_ORDER_DOLLARS = max(0.0, float(os.getenv("LIVE_MAX_SINGLE_ORDER_DOLLARS", "100")))
+LIVE_MAX_DAILY_NEW_EXPOSURE_DOLLARS = max(0.0, float(os.getenv("LIVE_MAX_DAILY_NEW_EXPOSURE_DOLLARS", "250")))
+LIVE_MAX_DAILY_LOSS_DOLLARS = max(0.0, float(os.getenv("LIVE_MAX_DAILY_LOSS_DOLLARS", "50")))
+LIVE_MAX_POSITION_PCT = max(0.0, min(1.0, float(os.getenv("LIVE_MAX_POSITION_PCT", "0.05"))))
+LIVE_MAX_TOTAL_DEPLOYED_PCT = max(0.0, min(1.0, float(os.getenv("LIVE_MAX_TOTAL_DEPLOYED_PCT", "0.25"))))
+PAPER_TAX_LOT_METHOD = os.getenv("PAPER_TAX_LOT_METHOD", "FIFO").strip().upper() or "FIFO"
+MAX_RECONCILIATION_DIFFERENCE_PCT = max(
+    0.0,
+    min(0.10, float(os.getenv("MAX_RECONCILIATION_DIFFERENCE_PCT", "0.005"))),
+)
 ROBINHOOD_CRYPTO_ENABLED = os.getenv("ROBINHOOD_CRYPTO_ENABLED", "false").lower() == "true"
 ROBINHOOD_CRYPTO_API_KEY = os.getenv("ROBINHOOD_CRYPTO_API_KEY", "").strip()
 ROBINHOOD_CRYPTO_PRIVATE_KEY_BASE64 = os.getenv("ROBINHOOD_CRYPTO_PRIVATE_KEY_BASE64", "").strip()
@@ -289,27 +301,116 @@ CASH_WATCHLIST = {
     "PHO": "Water Resources ETF",
 }
 
+CRYPTO_CORE_WEIGHTS = {
+    "BTC-USD": 0.40,
+    "ETH-USD": 0.25,
+    "XRP-USD": 0.10,
+    "SOL-USD": 0.10,
+    "BNB-USD": 0.05,
+    "DOGE-USD": 0.04,
+    "ADA-USD": 0.03,
+    "AVAX-USD": 0.02,
+    "LINK-USD": 0.01,
+}
+
 CRYPTO_WATCHLIST = {
     "BTC-USD": "Bitcoin",
     "ETH-USD": "Ethereum",
-    "SOL-USD": "Solana",
     "XRP-USD": "XRP",
+    "SOL-USD": "Solana",
+    "BNB-USD": "BNB",
     "DOGE-USD": "Dogecoin",
     "ADA-USD": "Cardano",
     "AVAX-USD": "Avalanche",
     "LINK-USD": "Chainlink",
     "LTC-USD": "Litecoin",
     "DOT-USD": "Polkadot",
-    "UNI-USD": "Uniswap",
-    "AAVE-USD": "Aave",
     "ATOM-USD": "Cosmos",
     "NEAR-USD": "NEAR Protocol",
+    "AAVE-USD": "Aave",
+    "UNI-USD": "Uniswap",
+    "BCH-USD": "Bitcoin Cash",
+    "ETC-USD": "Ethereum Classic",
+    "FIL-USD": "Filecoin",
+    "ARB-USD": "Arbitrum",
+    "OP-USD": "Optimism",
+    "INJ-USD": "Injective",
+    "SUI-USD": "Sui",
+    "APT-USD": "Aptos",
+    "RENDER-USD": "Render",
+    "FET-USD": "Fetch.ai",
+    "ICP-USD": "Internet Computer",
+    "HBAR-USD": "Hedera",
+    "ALGO-USD": "Algorand",
+    "MATIC-USD": "Polygon",
+    "PEPE-USD": "Pepe",
+    "SHIB-USD": "Shiba Inu",
 }
 
 WATCHLISTS = {
     "cash": CASH_WATCHLIST,
     "crypto": CRYPTO_WATCHLIST,
 }
+
+CRYPTO_ALWAYS_INVESTED = os.getenv("CRYPTO_ALWAYS_INVESTED", "true").lower() == "true"
+CRYPTO_CORE_TARGET_PCT = max(0.0, min(1.0, float(os.getenv("CRYPTO_CORE_TARGET_PCT", "0.30"))))
+CRYPTO_TACTICAL_MAX_PCT = max(0.0, min(1.0, float(os.getenv("CRYPTO_TACTICAL_MAX_PCT", "0.60"))))
+CRYPTO_MIN_CASH_RESERVE_PCT = max(0.0, min(1.0, float(os.getenv("CRYPTO_MIN_CASH_RESERVE_PCT", "0.10"))))
+CRYPTO_DYNAMIC_UNIVERSE_SIZE = max(0, int(os.getenv("CRYPTO_DYNAMIC_UNIVERSE_SIZE", "40")))
+CRYPTO_MAX_ACTIVE_SCAN_SYMBOLS = max(1, int(os.getenv("CRYPTO_MAX_ACTIVE_SCAN_SYMBOLS", "50")))
+CRYPTO_MIN_24H_DOLLAR_VOLUME = max(0.0, float(os.getenv("CRYPTO_MIN_24H_DOLLAR_VOLUME", "25000000")))
+CRYPTO_MAX_SPREAD_PCT = max(0.0, float(os.getenv("CRYPTO_MAX_SPREAD_PCT", "0.02")))
+MAX_SINGLE_CRYPTO_TACTICAL_POSITION_PCT = max(
+    0.0,
+    min(1.0, float(os.getenv("MAX_SINGLE_CRYPTO_TACTICAL_POSITION_PCT", "0.12"))),
+)
+CRYPTO_ROTATION_MIN_SCORE_IMPROVEMENT = max(0.0, float(os.getenv("CRYPTO_ROTATION_MIN_SCORE_IMPROVEMENT", "7")))
+CRYPTO_FULL_SCAN_SECONDS = max(30, int(os.getenv("CRYPTO_FULL_SCAN_SECONDS", "120")))
+CRYPTO_SYMBOL_COOLDOWN_MINUTES = max(0, int(os.getenv("CRYPTO_SYMBOL_COOLDOWN_MINUTES", "20")))
+CRYPTO_ROTATION_COOLDOWN_MINUTES = max(0, int(os.getenv("CRYPTO_ROTATION_COOLDOWN_MINUTES", "30")))
+CRYPTO_STOP_OUT_COOLDOWN_MINUTES = max(0, int(os.getenv("CRYPTO_STOP_OUT_COOLDOWN_MINUTES", "60")))
+CRYPTO_BREAKEVEN_TRIGGER_R = max(0.0, float(os.getenv("CRYPTO_BREAKEVEN_TRIGGER_R", "1.0")))
+CRYPTO_TRAILING_STOP_TRIGGER_R = max(0.0, float(os.getenv("CRYPTO_TRAILING_STOP_TRIGGER_R", "1.5")))
+CRYPTO_TIER_SIZE_MULTIPLIERS = {"A": 1.00, "B": 0.60, "C": 0.30}
+CRYPTO_REGIMES = {"risk_on", "neutral", "risk_off", "high_volatility"}
+MAX_PORTFOLIO_RISK_PER_TRADE = max(0.0, min(0.10, float(os.getenv("MAX_PORTFOLIO_RISK_PER_TRADE", "0.01"))))
+MAX_TOTAL_DEPLOYED_PCT = max(0.0, min(1.0, float(os.getenv("MAX_TOTAL_DEPLOYED_PCT", "0.90"))))
+MIN_TRADE_NOTIONAL = max(0.0, float(os.getenv("MIN_TRADE_NOTIONAL", "2.00")))
+ENABLE_FRACTIONAL_EQUITIES = os.getenv("ENABLE_FRACTIONAL_EQUITIES", "true").lower() == "true"
+ENABLE_FRACTIONAL_CRYPTO = os.getenv("ENABLE_FRACTIONAL_CRYPTO", "true").lower() == "true"
+SMALL_ACCOUNT_THRESHOLD = max(0.0, float(os.getenv("SMALL_ACCOUNT_THRESHOLD", "500")))
+LARGE_ACCOUNT_THRESHOLD = max(SMALL_ACCOUNT_THRESHOLD, float(os.getenv("LARGE_ACCOUNT_THRESHOLD", "100000")))
+MAX_POSITION_VS_DAILY_DOLLAR_VOLUME_PCT = max(
+    0.0,
+    min(0.05, float(os.getenv("MAX_POSITION_VS_DAILY_DOLLAR_VOLUME_PCT", "0.001"))),
+)
+MAX_SINGLE_STOCK_POSITION_PCT = max(0.0, min(1.0, float(os.getenv("MAX_SINGLE_STOCK_POSITION_PCT", "0.12"))))
+STOCK_MIN_CASH_RESERVE_PCT = max(0.0, min(1.0, float(os.getenv("STOCK_MIN_CASH_RESERVE_PCT", "0.15"))))
+STOCK_ALWAYS_INVESTED = os.getenv("STOCK_ALWAYS_INVESTED", "true").lower() == "true"
+STOCK_CORE_TARGET_PCT = max(0.0, min(1.0, float(os.getenv("STOCK_CORE_TARGET_PCT", "0.30"))))
+STOCK_TACTICAL_MAX_PCT = max(0.0, min(1.0, float(os.getenv("STOCK_TACTICAL_MAX_PCT", "0.55"))))
+STOCK_CORE_WEIGHTS = {
+    "SPY": max(0.0, float(os.getenv("STOCK_CORE_SPY_WEIGHT", "0.45"))),
+    "QQQ": max(0.0, float(os.getenv("STOCK_CORE_QQQ_WEIGHT", "0.35"))),
+    "IWM": max(0.0, float(os.getenv("STOCK_CORE_IWM_WEIGHT", "0.10"))),
+    "DIA": max(0.0, float(os.getenv("STOCK_CORE_DIA_WEIGHT", "0.10"))),
+}
+MAX_STOCK_TACTICAL_POSITIONS = max(1, int(os.getenv("MAX_STOCK_TACTICAL_POSITIONS", "8")))
+MAX_STOCK_SECTOR_EXPOSURE_PCT = max(
+    0.0,
+    min(1.0, float(os.getenv("MAX_STOCK_SECTOR_EXPOSURE_PCT", os.getenv("MAX_SECTOR_EXPOSURE_PCT", "0.30")))),
+)
+MIN_STOCK_PRICE = max(0.0, float(os.getenv("MIN_STOCK_PRICE", "3.00")))
+MIN_AVG_DOLLAR_VOLUME = max(0.0, float(os.getenv("MIN_AVG_DOLLAR_VOLUME", "20000000")))
+MIN_AVG_VOLUME = max(0.0, float(os.getenv("MIN_AVG_VOLUME", "500000")))
+MAX_STOCK_SPREAD_PCT = max(0.0, float(os.getenv("MAX_STOCK_SPREAD_PCT", os.getenv("MAX_SPREAD_PCT", "0.015"))))
+STOCK_ROTATION_MIN_SCORE_IMPROVEMENT = max(0.0, float(os.getenv("STOCK_ROTATION_MIN_SCORE_IMPROVEMENT", "8")))
+MAX_ENTRY_EXTENSION_FROM_VWAP_PCT = max(0.0, float(os.getenv("MAX_ENTRY_EXTENSION_FROM_VWAP_PCT", "0.06")))
+MAX_SINGLE_BAR_SPIKE_PCT = max(0.0, float(os.getenv("MAX_SINGLE_BAR_SPIKE_PCT", "0.08")))
+ENABLE_STOCK_REGULAR_HOURS = os.getenv("ENABLE_STOCK_REGULAR_HOURS", "true").lower() == "true"
+ENABLE_STOCK_EXTENDED_HOURS = os.getenv("ENABLE_STOCK_EXTENDED_HOURS", "true").lower() == "true"
+TIER_SIZE_MULTIPLIERS = {"A": 1.00, "B": 0.60, "C": 0.30}
+MARKET_REGIME_SIZE_MULTIPLIERS = {"risk_on": 1.00, "neutral": 0.75, "risk_off": 0.40, "high_volatility": 0.35}
 
 # Aggressive simulated-trading defaults. Railway environment variables can
 # override every value without another code change.

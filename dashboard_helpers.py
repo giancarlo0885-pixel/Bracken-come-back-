@@ -5,7 +5,14 @@ from datetime import datetime, timezone
 from typing import Any
 
 from config import DECISION_CRYPTO_MAX_AGE_MINUTES, DECISION_STOCK_MAX_AGE_MINUTES
+from capital_allocator import adaptive_capital_allocation, max_positions_for_equity
 from market_sessions import quote_is_fresh
+from stock_best_movers import (
+    holding_quality_score,
+    holding_view_rows,
+    is_allowed_us_stock as stock_scope_allowed,
+    should_rotate,
+)
 
 
 def as_float(value: Any, default: float = 0.0) -> float:
@@ -695,6 +702,78 @@ def simple_portfolio_builder_plan(
     return plan
 
 
+def capital_allocation_rows(
+    opportunities: list[dict[str, Any]],
+    metrics: dict[str, Any],
+    positions: list[dict[str, Any]],
+    *,
+    market: str,
+    limit: int = 8,
+) -> list[dict[str, Any]]:
+    equity = as_float(metrics.get("equity"))
+    cash = as_float(metrics.get("cash"))
+    current_exposure = as_float(metrics.get("invested") or metrics.get("gross_exposure"))
+    rows: list[dict[str, Any]] = []
+    for item in opportunities[: max(0, int(limit))]:
+        symbol = str(item.get("symbol") or "").upper()
+        existing = sum(
+            _position_value(position)
+            for position in positions
+            if str(position.get("symbol") or "").upper() == symbol
+        )
+        price = as_float(item.get("price"))
+        stop = as_float(item.get("stop") or item.get("stop_loss") or price * 0.94)
+        decision = adaptive_capital_allocation(
+            symbol=symbol,
+            market=market,
+            equity=equity,
+            cash=cash,
+            current_exposure=current_exposure,
+            price=price,
+            stop_price=stop,
+            tier=str(item.get("tier") or item.get("risk_tier") or "B"),
+            confidence=item.get("confidence"),
+            reward_risk=as_float(item.get("reward_risk_ratio"), 1.5),
+            market_regime=str(item.get("market_regime") or item.get("crypto_regime") or "neutral"),
+            dollar_volume=as_float(item.get("avg_dollar_volume") or item.get("dollar_volume_24h") or item.get("liquidity")),
+            spread_pct=as_float(item.get("spread_pct")),
+            drawdown_pct=as_float(metrics.get("drawdown_pct") or metrics.get("drawdown")),
+            existing_position_value=existing,
+            buying_power=metrics.get("buying_power"),
+            buying_power_validated=metrics.get("buying_power_validated") is True,
+        )
+        rows.append(
+            {
+                "Symbol": symbol,
+                "Tier": str(item.get("tier") or item.get("risk_tier") or "B").upper(),
+                "Confidence": f"{normalized_confidence(item.get('confidence')):.0f}%",
+                "Base Risk $": money_text(equity * 0.01),
+                "Adjusted Risk $": money_text(decision.risk_budget_dollars),
+                "Position Size $": money_text(decision.calculated_notional),
+                "Quantity": format_quantity(decision.calculated_quantity),
+                "Portfolio Weight": f"{(decision.calculated_notional / equity * 100 if equity else 0):.1f}%",
+                "Why This Size": decision.reason,
+                "Approved": decision.approved,
+            }
+        )
+    if not rows:
+        rows.append(
+            {
+                "Symbol": "CASH",
+                "Tier": "",
+                "Confidence": "",
+                "Base Risk $": money_text(equity * 0.01),
+                "Adjusted Risk $": "$0.00",
+                "Position Size $": "$0.00",
+                "Quantity": "0",
+                "Portfolio Weight": "0.0%",
+                "Why This Size": f"Waiting for qualified opportunities. Max open positions for this equity: {max_positions_for_equity(equity)}.",
+                "Approved": False,
+            }
+        )
+    return rows
+
+
 def simple_mode_visible_text(samples: list[str]) -> str:
     """Normalize simple-mode copy for tests that guard against technical leakage."""
     return "\n".join(str(item) for item in samples)
@@ -738,6 +817,279 @@ def readable_trade_rows(trades: list[dict[str, Any]], limit: int = 50) -> list[d
             }
         )
     return output
+
+
+def is_us_crypto_scope(record: dict[str, Any]) -> bool:
+    symbol = str(record.get("symbol") or "").upper().strip()
+    asset_class = str(record.get("asset_class") or record.get("market") or "").lower().strip()
+    exchange = str(record.get("exchange") or "").upper().strip()
+    region = str(record.get("region") or record.get("country") or "").lower().strip()
+    if asset_class == "crypto" or symbol.endswith("-USD"):
+        return True
+    if asset_class not in {"stock", "equity", "etf", "cash", ""}:
+        return False
+    if any(symbol.endswith(suffix) for suffix in (".L", ".TO", ".T", ".HK", ".DE", ".PA", ".AS", ".MI", ".MC", ".NS", ".AX")):
+        return False
+    if region and region not in {"us", "usa", "united states", "united states of america"}:
+        return False
+    if exchange and exchange in {"LSE", "XLON", "TSX", "XTSE", "XETRA", "XETR", "TSE", "JPX", "HKEX", "ASX", "NSE"}:
+        return False
+    return True
+
+
+def entry_quality_action(record: dict[str, Any]) -> str:
+    action = str(record.get("action") or "WAIT").upper()
+    entry_actions = {"BUY", "STRONG_BUY", "ACCUMULATE", "LONG"}
+    if action not in entry_actions:
+        return action if action in {"SELL", "HOLD", "WAIT", "REDUCE"} else "WAIT"
+    data = live_data_status(record)
+    if data["blocks_execution"]:
+        return "WAIT FOR VERIFIED PRICE"
+    extended_pct = as_float(record.get("extension_pct") or record.get("distance_from_support_pct"))
+    if extended_pct >= 12:
+        return "WAIT FOR PULLBACK" if clean_market(record.get("market") or record.get("asset_class")) == "stock" else "WAIT"
+    return "BUY" if action in {"BUY", "STRONG_BUY", "LONG"} else "ACCUMULATE"
+
+
+def market_focus_sections(candidates: list[dict[str, Any]], positions: list[dict[str, Any]] | None = None) -> dict[str, list[dict[str, Any]]]:
+    positions = positions or []
+    scoped = [dict(item) for item in candidates if is_us_crypto_scope(item)]
+    stocks: list[dict[str, Any]] = []
+    crypto: list[dict[str, Any]] = []
+    waiting: list[dict[str, Any]] = []
+    for item in scoped:
+        action = entry_quality_action(item)
+        view = {**item, "display_action": action}
+        engine = "crypto" if clean_market(item.get("market") or item.get("asset_class")) == "crypto" or str(item.get("symbol") or "").upper().endswith("-USD") else "stock"
+        if action in {"BUY", "ACCUMULATE"} and not live_data_status(item)["blocks_execution"]:
+            (crypto if engine == "crypto" else stocks).append(view)
+        else:
+            waiting.append(view)
+    key = lambda row: as_float(row.get("opportunity_score") or row.get("score"))
+    ownership = [
+        {
+            "symbol": str(position.get("symbol") or "").upper(),
+            "market": clean_market(position.get("market") or ("crypto" if str(position.get("symbol") or "").upper().endswith("-USD") else "cash")),
+            "quantity": format_quantity(position.get("quantity")),
+            "value": money_text(_position_value(position)),
+        }
+        for position in positions
+        if is_us_crypto_scope(position)
+    ]
+    return {
+        "wall_street": sorted(stocks, key=key, reverse=True),
+        "crypto": sorted(crypto, key=key, reverse=True),
+        "waiting": sorted(waiting, key=key, reverse=True),
+        "ownership": ownership,
+    }
+
+
+def is_allowed_us_stock(record: dict[str, Any]) -> bool:
+    return stock_scope_allowed(record)
+
+
+def wall_street_quality_score(record: dict[str, Any]) -> float:
+    data = live_data_status(record)
+    if data["blocks_execution"]:
+        return 0.0
+    liquidity = min(as_float(record.get("avg_dollar_volume") or record.get("liquidity")) / 50_000_000, 1.0) * 100
+    trend = normalized_score(record.get("momentum_score") or record.get("trend_score") or record.get("score"))
+    relative_volume = min(as_float(record.get("relative_volume"), 1.0) / 3.0, 1.0) * 100
+    catalyst = normalized_score(record.get("catalyst_score") or (75 if record.get("catalyst") else 40))
+    regime = normalized_score(record.get("regime_alignment_score") or record.get("market_regime_score") or 60)
+    reward_risk = min(as_float(record.get("reward_risk_ratio"), 1.0) / 3.0, 1.0) * 100
+    confidence = normalized_confidence(record.get("confidence"))
+    entry_quality = 100.0 if entry_quality_label(record) == "GOOD ENTRY" else 45.0
+    return round(
+        liquidity * 0.18
+        + trend * 0.17
+        + relative_volume * 0.13
+        + catalyst * 0.11
+        + regime * 0.11
+        + reward_risk * 0.12
+        + confidence * 0.12
+        + entry_quality * 0.06,
+        2,
+    )
+
+
+def entry_quality_label(record: dict[str, Any]) -> str:
+    extension = as_float(record.get("extension_pct") or record.get("distance_from_vwap_pct") or record.get("distance_from_support_pct"))
+    if extension >= 18:
+        return "TOO EXTENDED"
+    if extension >= 10:
+        return "WAIT FOR PULLBACK"
+    return "GOOD ENTRY"
+
+
+def wall_street_market_focus(
+    candidates: list[dict[str, Any]],
+    positions: list[dict[str, Any]] | None = None,
+    ledger_rows: list[dict[str, Any]] | None = None,
+    *,
+    max_trades: int = 15,
+) -> dict[str, list[dict[str, Any]]]:
+    positions = positions or []
+    ledger_rows = ledger_rows or []
+    best: list[dict[str, Any]] = []
+    movers: list[dict[str, Any]] = []
+    rejected: list[dict[str, Any]] = []
+    for raw in candidates:
+        item = dict(raw)
+        if not is_allowed_us_stock(item):
+            continue
+        data = live_data_status(item)
+        action = entry_quality_action(item)
+        quality = wall_street_quality_score(item)
+        if data["blocks_execution"]:
+            rejected.append({"Symbol": str(item.get("symbol") or "").upper(), "Reason": data["label"], "Details": data["detail"]})
+            continue
+        if action == "WAIT FOR PULLBACK":
+            rejected.append({"Symbol": str(item.get("symbol") or "").upper(), "Reason": "OVEREXTENDED", "Details": "Entry is stretched beyond the pullback threshold."})
+        if action in {"BUY", "ACCUMULATE"}:
+            best.append(
+                {
+                    "Rank": 0,
+                    "Symbol": str(item.get("symbol") or "").upper(),
+                    "Company": item.get("company") or item.get("name") or "",
+                    "Price": format_asset_price(item.get("price"), item.get("symbol"), "cash"),
+                    "Session Change %": f"{as_float(item.get('session_change_pct') or item.get('change_pct') or item.get('change_1d_pct')):+.1f}%",
+                    "Relative Volume": f"{as_float(item.get('relative_volume'), 1.0):.2f}x",
+                    "Mover Score": quality,
+                    "Trend/Momentum": round(normalized_score(item.get("momentum_score") or item.get("trend_score") or item.get("score")), 1),
+                    "Volume/Liquidity": compact_money_text(item.get("avg_dollar_volume") or item.get("liquidity")),
+                    "Catalyst": item.get("catalyst") or item.get("catalyst_summary") or "No catalyst supplied",
+                    "Market Regime": str(item.get("market_regime") or "NEUTRAL").upper(),
+                    "Risk/Reward": f"{as_float(item.get('reward_risk_ratio'), 0.0):.2f}",
+                    "Signals Supporting": int(as_float(item.get("signals_supporting") or item.get("signals_agree") or 0)),
+                    "Confidence": f"{normalized_confidence(item.get('confidence')):.0f}%",
+                    "Tier": str(item.get("tier") or item.get("risk_tier") or ""),
+                    "Entry": format_asset_price(item.get("entry") or item.get("price"), item.get("symbol"), "cash"),
+                    "Stop": format_asset_price(item.get("stop") or item.get("stop_loss"), item.get("symbol"), "cash"),
+                    "Target": format_asset_price(item.get("target") or item.get("target_price"), item.get("symbol"), "cash"),
+                    "Action": "ADD" if item.get("existing_position") else ("ROTATE INTO" if item.get("rotation_candidate") else "BUY"),
+                    "Data Status": data["label"],
+                    "_score": quality,
+                }
+            )
+        movers.append(
+            {
+                "Symbol": str(item.get("symbol") or "").upper(),
+                "5m %": f"{as_float(item.get('change_5m_pct')):+.1f}%",
+                "15m %": f"{as_float(item.get('change_15m_pct')):+.1f}%",
+                "1h %": f"{as_float(item.get('change_1h_pct')):+.1f}%",
+                "Session %": f"{as_float(item.get('session_change_pct') or item.get('change_pct') or item.get('change_1d_pct')):+.1f}%",
+                "Relative Volume": f"{as_float(item.get('relative_volume'), 1.0):.2f}x",
+                "Dollar Volume": compact_money_text(item.get("avg_dollar_volume") or item.get("liquidity")),
+                "Distance From VWAP": f"{as_float(item.get('distance_from_vwap_pct')):+.1f}%",
+                "Mover Score": quality,
+                "Entry Quality": entry_quality_label(item),
+            }
+        )
+
+    best = sorted(best, key=lambda row: as_float(row.get("_score")), reverse=True)[:max_trades]
+    for index, row in enumerate(best, start=1):
+        row["Rank"] = index
+        row.pop("_score", None)
+
+    equity = sum(_position_value(position) for position in positions)
+    owned = []
+    for view in holding_view_rows(positions, equity=equity):
+        data_label = "VERIFIED" if view["quote_verified"] else "NEEDS PRICE"
+        h_score = holding_quality_score(
+            weighted_signal_score=next((position.get("weighted_signal_score") or position.get("score") or 50 for position in positions if str(position.get("symbol") or "").upper() == view["symbol"]), 50),
+            confidence=next((position.get("confidence") or 50 for position in positions if str(position.get("symbol") or "").upper() == view["symbol"]), 50),
+            rr=next((position.get("reward_risk_ratio") or 1.5 for position in positions if str(position.get("symbol") or "").upper() == view["symbol"]), 1.5),
+            relative_strength=next((position.get("relative_strength") or position.get("holding_score") or position.get("score") or 50 for position in positions if str(position.get("symbol") or "").upper() == view["symbol"]), 50),
+        )
+        owned.append(
+            {
+                "Symbol": view["symbol"],
+                "Company": view["name"],
+                "Bucket": view["bucket"],
+                "Shares": format_quantity(view["shares"]),
+                "Avg Cost": money_text(view["avg_cost"]),
+                "Current Price": money_text(view["current_price"]),
+                "Market Value": money_text(view["market_value"]),
+                "P/L $": signed_money_text(view["unrealized_pnl"]),
+                "P/L %": f"{view['unrealized_pnl_pct']:+.1f}%",
+                "Weight": f"{view['portfolio_weight_pct']:.1f}%",
+                "Sector": view["sector"] or "Unknown",
+                "Tier": view["trade_tier"] or "",
+                "Strategy": view["strategy"] or "",
+                "Provider": view["quote_provider"] or "Unknown",
+                "Data Status": data_label,
+                "Holding Score": h_score,
+                "Action": "HOLD",
+            }
+        )
+
+    action_queue = [
+        {
+            "Action": f"{row['Action']} {row['Symbol']}",
+            "Why": row["Catalyst"],
+            "Confidence": row["Confidence"],
+            "Tier": row["Tier"],
+            "Risk": row["Risk/Reward"],
+            "Data Status": row["Data Status"],
+        }
+        for row in best[:10]
+    ]
+
+    sectors: dict[str, dict[str, Any]] = {}
+    for row in best:
+        sector = str(next((c.get("sector") for c in candidates if str(c.get("symbol") or "").upper() == row["Symbol"]), "") or "Unknown")
+        bucket = sectors.setdefault(sector, {"Sector": sector, "Trend": "NEUTRAL", "Relative Strength": 0.0, "Momentum": 0.0, "Oracle Exposure": "$0.00", "Qualified Candidates": 0})
+        bucket["Qualified Candidates"] += 1
+        bucket["Relative Strength"] = max(bucket["Relative Strength"], as_float(row["Mover Score"]))
+        bucket["Momentum"] = max(bucket["Momentum"], as_float(row["Trend/Momentum"]))
+
+    profit_sources = []
+    for row in ledger_rows:
+        if not is_allowed_us_stock(row):
+            continue
+        realized = as_float(row.get("net_pnl"))
+        profit_sources.append(
+            {
+                "Symbol": str(row.get("symbol") or "").upper(),
+                "Strategy": row.get("strategy") or "",
+                "Entry": money_text(row.get("entry_price")),
+                "Exit / Current": money_text(row.get("exit_price") or row.get("current_price")),
+                "Qty": format_quantity(row.get("quantity")),
+                "Realized P/L": signed_money_text(realized),
+                "Unrealized P/L": row.get("unrealized_pnl") if row.get("unrealized_pnl") is not None else "WAITING FOR VERIFIED PRICE",
+                "Net Contribution": signed_money_text(realized + as_float(row.get("unrealized_pnl"))),
+            }
+        )
+
+    rotations = []
+    tactical_owned = [row for row in owned if row.get("Bucket") == "TACTICAL"]
+    if tactical_owned and best:
+        weakest = min(tactical_owned, key=lambda row: as_float(row.get("Holding Score"), 50.0))
+        strongest = best[0]
+        improvement = as_float(strongest.get("Mover Score")) - as_float(weakest.get("Holding Score"))
+        if should_rotate(incoming_score=strongest.get("Mover Score"), held_score=weakest.get("Holding Score")):
+            rotations.append(
+                {
+                    "current_holding": weakest["Symbol"],
+                    "holding_score": weakest["Holding Score"],
+                    "incoming_candidate": strongest["Symbol"],
+                    "candidate_score": strongest["Mover Score"],
+                    "score_improvement": round(improvement, 1),
+                    "recommended_action": "ROTATE INTO",
+                }
+            )
+
+    return {
+        "best_trades": best,
+        "movers": sorted(movers, key=lambda row: as_float(row.get("Mover Score")), reverse=True)[:15],
+        "action_queue": action_queue,
+        "owned": owned,
+        "rotations": rotations,
+        "profit_sources": profit_sources,
+        "sectors": sorted(sectors.values(), key=lambda row: as_float(row.get("Relative Strength")), reverse=True),
+        "rejected": rejected[:20],
+    }
 
 
 def trade_summary(trades: list[dict[str, Any]]) -> dict[str, Any]:
