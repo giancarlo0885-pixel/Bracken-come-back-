@@ -27,7 +27,7 @@ from config import (
     MIN_CORE_SIGNALS_AGREE,
     MIN_REWARD_RISK_RATIO,
 )
-from market_sessions import market_session_state, quote_freshness_seconds, quote_is_fresh
+from market_sessions import market_session_state, parse_utc, quote_freshness_seconds, quote_is_fresh
 
 SUPPORTED_EXECUTION_ASSETS = {"stock", "equity", "etf", "crypto"}
 INTELLIGENCE_ONLY_ASSETS = {
@@ -102,6 +102,9 @@ def _quote_identity_matches(asset: dict[str, Any]) -> bool:
     return bool(symbol and requested and provider and symbol == requested == provider)
 
 
+_EXECUTION_QUOTE_CLOCK_SKEW_TOLERANCE_SECONDS = 30
+
+
 def _execution_quote_eligible(asset: dict[str, Any], now: datetime | None = None) -> bool:
     if asset.get("quote_verified") is not True or not _quote_identity_matches(asset):
         return False
@@ -110,6 +113,19 @@ def _execution_quote_eligible(asset: dict[str, Any], now: datetime | None = None
     if not interval or not asset.get("quote_timestamp"):
         return False
     cls = _asset_class(asset.get("asset_class"))
+    # Daily crypto history is EOD data reused throughout the day by market_worker;
+    # it is never realtime and must never be treated as an execution-fresh quote,
+    # regardless of how recent its timestamp looks.
+    if cls == "crypto" and str(asset.get("source_capability") or "").strip().lower() == "history_daily":
+        return False
+    quote_dt = parse_utc(asset.get("quote_timestamp"))
+    if quote_dt is None:
+        return False
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    if (quote_dt - current.astimezone(timezone.utc)).total_seconds() > _EXECUTION_QUOTE_CLOCK_SKEW_TOLERANCE_SECONDS:
+        return False
     max_age_seconds = (
         DECISION_CRYPTO_MAX_AGE_MINUTES if cls == "crypto" else DECISION_STOCK_MAX_AGE_MINUTES
     ) * 60

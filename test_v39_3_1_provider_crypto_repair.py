@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 
+import global_pit_engine
 import market_data
 import market_worker
 import oracle_bot
@@ -291,3 +292,85 @@ def test_wrong_provider_identity_is_rejected():
     }
 
     assert oracle_bot._verified_quote_for("BTC-USD", {"BTC-USD": quote}, "crypto") is None
+
+
+def _crypto_asset(**overrides):
+    now = datetime.now(timezone.utc)
+    base = {
+        "symbol": "BTC-USD",
+        "requested_symbol": "BTC-USD",
+        "provider_symbol": "BTC-USD",
+        "asset_class": "crypto",
+        "quote_verified": True,
+        "quote_timestamp": now.isoformat(),
+        "interval": "1m",
+        "source_interval": "1m",
+        "source_capability": "history_intraday",
+    }
+    base.update(overrides)
+    return base
+
+
+def test_crypto_daily_history_never_eligible():
+    now = datetime.now(timezone.utc)
+    asset = _crypto_asset(
+        quote_timestamp=now.isoformat(),
+        interval="1d",
+        source_interval="1d",
+        source_capability="history_daily",
+        quote_verified=True,
+    )
+
+    assert global_pit_engine._execution_quote_eligible(asset, now=now) is False
+
+
+def test_crypto_intraday_fresh_eligible():
+    now = datetime.now(timezone.utc)
+    asset = _crypto_asset(
+        quote_timestamp=(now - timedelta(seconds=10)).isoformat(),
+        interval="1m",
+        source_interval="1m",
+        source_capability="history_intraday",
+        quote_verified=True,
+    )
+
+    assert global_pit_engine._execution_quote_eligible(asset, now=now) is True
+
+
+def test_future_timestamp_rejected():
+    now = datetime.now(timezone.utc)
+    asset = _crypto_asset(
+        quote_timestamp=(now + timedelta(seconds=60)).isoformat(),
+        interval="1m",
+        source_interval="1m",
+        source_capability="history_intraday",
+        quote_verified=True,
+    )
+
+    assert global_pit_engine._execution_quote_eligible(asset, now=now) is False
+
+
+def test_stale_intraday_rejected():
+    now = datetime.now(timezone.utc)
+    asset = _crypto_asset(
+        quote_timestamp=(now - timedelta(hours=24)).isoformat(),
+        interval="1m",
+        source_interval="1m",
+        source_capability="history_intraday",
+        quote_verified=True,
+    )
+
+    assert global_pit_engine._execution_quote_eligible(asset, now=now) is False
+
+
+def test_unverified_research_stays_ineligible():
+    now = datetime.now(timezone.utc)
+    asset = _crypto_asset(
+        quote_timestamp=now.isoformat(),
+        interval="1d",
+        source_interval="1d",
+        source_capability="history_daily",
+        quote_verified=False,
+    )
+
+    assert global_pit_engine._execution_quote_eligible(asset, now=now) is False
