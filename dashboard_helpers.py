@@ -439,9 +439,18 @@ def balanced_money_bar(metrics: dict[str, Any], trades: list[dict[str, Any]], no
     ]
 
 
-def balanced_opportunity_rows(decisions: list[dict[str, Any]], limit: int = 10) -> list[dict[str, Any]]:
+def balanced_opportunity_rows(
+    decisions: list[dict[str, Any]],
+    limit: int = 10,
+    *,
+    hide_rejected: bool = True,
+    return_hidden: bool = False,
+) -> list[dict[str, Any]] | tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     rows: list[dict[str, Any]] = []
-    for item in decisions[: max(0, int(limit))]:
+    hidden_rows: list[dict[str, Any]] = []
+    for item in decisions:
+        if len(rows) >= max(0, int(limit)):
+            break
         price = as_float(item.get("price"))
         target = as_float(item.get("target"))
         expected = as_float(item.get("expected_return"))
@@ -456,20 +465,25 @@ def balanced_opportunity_rows(decisions: list[dict[str, Any]], limit: int = 10) 
             action_label = {"BUY": "GREEN BUY", "SELL": "RED SELL", "HOLD": "YELLOW HOLD", "WAIT": "YELLOW WAIT"}.get(action, "YELLOW WAIT")
         is_diagnostic = bool(action == "WAIT" or action == "HOLD" or item.get("trade_eligible") is False)
         section = "diagnostics" if is_diagnostic else "primary"
-        rows.append(
-            {
-                "Action": action_label,
-                "Symbol": str(item.get("symbol") or "").upper(),
-                "Price": money_text(price),
-                "Target": money_text(target),
-                "Possible Gain %": f"{expected:+.1f}%",
-                "Confidence": f"{normalized_confidence(item.get('confidence')):.0f}%",
-                "Risk": str(item.get("risk") or "Medium").title(),
-                "Data Age": data_age_label(item),
-                "section": section,
-                "visible": not is_diagnostic,
-            }
-        )
+        row = {
+            "Action": action_label,
+            "Symbol": str(item.get("symbol") or "").upper(),
+            "Price": money_text(price),
+            "Target": money_text(target),
+            "Possible Gain %": f"{expected:+.1f}%",
+            "Confidence": f"{normalized_confidence(item.get('confidence')):.0f}%",
+            "Risk": str(item.get("risk") or "Medium").title(),
+            "Data Age": data_age_label(item),
+            "section": section,
+            "visible": not is_diagnostic,
+            "is_diagnostic": is_diagnostic,
+        }
+        if row.get("is_diagnostic") and hide_rejected is True:
+            hidden_rows.append(row)
+            continue
+        rows.append(row)
+    if return_hidden is True:
+        return rows, hidden_rows
     return rows
 
 
