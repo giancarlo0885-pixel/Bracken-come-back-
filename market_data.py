@@ -367,11 +367,16 @@ def get_live_snapshot(symbol: str) -> MarketSnapshot | None:
         if research_fallback is None:
             research_fallback = snapshot
 
+    # Preserve the best history result for research callers. Execution callers
+    # still enforce snapshot_is_verified() in get_many_snapshots, so this does
+    # not weaken identity/freshness gates. Alpha's delayed quote is only used
+    # when every history route failed to produce a snapshot at all.
+    if research_fallback is not None:
+        return research_fallback
     try:
-        delayed_fallback = _alpha_vantage_delayed_snapshot(symbol)
+        return _alpha_vantage_delayed_snapshot(symbol)
     except Exception:
-        delayed_fallback = None
-    return research_fallback or delayed_fallback
+        return None
 
 
 def get_snapshot(symbol: str) -> MarketSnapshot | None:
