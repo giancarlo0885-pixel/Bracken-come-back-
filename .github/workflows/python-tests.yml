@@ -23,8 +23,8 @@ jobs:
       ENABLE_BROKER_SUBMISSION: "false"
       DATABASE_URL: ""
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
       - name: Install dependencies
@@ -60,8 +60,8 @@ jobs:
       ENABLE_BROKER_SUBMISSION: "false"
       DATABASE_URL: "postgresql://oracle_test:oracle_test@localhost:5432/garibaldi_test"
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
       - name: Install dependencies
