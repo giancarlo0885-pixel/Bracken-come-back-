@@ -496,13 +496,13 @@ def render_global_pit_section() -> None:
     else:
         st.info("Sector leadership will appear when qualified Wall Street candidates are available.")
 
-    with st.expander("REJECTED / WAITING"):
+    with st.expander("REJECTED / WAITING", expanded=False):
         if focus["rejected"]:
             st.dataframe(pd.DataFrame(focus["rejected"]), width="stretch", hide_index=True)
         else:
             st.success("No rejected stock candidates are currently in the focus view.")
 
-    with st.expander("Provider Diagnostics"):
+    with st.expander("Provider Diagnostics", expanded=False):
         st.caption("Provider diagnostics are secondary and shown here only to explain trade-impacting data limits. They do not override quote verification.")
         policy_rows = [
             {"Switch": "Stock Entries", "Enabled": stock_entry_policy.allowed, "Reason": stock_entry_policy.reason},
@@ -825,12 +825,12 @@ elif page == "Crypto":
     else:
         st.info("No verified underweight crypto core allocation is available above the protected reserve right now.")
 
-    with st.expander("WATCHLIST / WAITING"):
+    with st.expander("WATCHLIST / WAITING", expanded=False):
         if crypto_focus["waiting"]:
             st.dataframe(pd.DataFrame(crypto_focus["waiting"]), width="stretch", hide_index=True)
         else:
             st.success("No crypto candidates are waiting on data or liquidity right now.")
-    with st.expander("PROVIDER DIAGNOSTICS"):
+    with st.expander("PROVIDER DIAGNOSTICS", expanded=False):
         st.caption("Provider diagnostics do not override verified quote requirements.")
         diagnostics = provider_diagnostics()
         if diagnostics:
