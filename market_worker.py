@@ -274,7 +274,22 @@ def _execution_quote_payload_from_history(symbol: str, history: Any, price: Any 
     if payload.get("quote_timestamp") in (None, ""):
         _v39_log_rejection(symbol, "QUOTE_STALE", {"scan_type": scan_type, "provider": payload.get("provider")})
         return None
-    log.info(
+    normalized_symbol = str(payload.get("symbol") or symbol or "").upper().strip()
+    requested_symbol = str(payload.get("requested_symbol") or "").upper().strip()
+    provider_symbol = str(payload.get("provider_symbol") or "").upper().strip()
+    identity_verified = bool(
+        normalized_symbol
+        and requested_symbol == normalized_symbol
+        and provider_symbol == normalized_symbol
+    )
+    execution_eligible = bool(
+        execution_price is not None
+        and payload.get("quote_verified") is True
+        and payload.get("stale") is False
+        and identity_verified
+    )
+    log_fn = log.info if execution_eligible else log.debug
+    log_fn(
         "EXECUTION_QUOTE_HANDOFF | symbol=%s | market=%s | price=%s | bid=%s | ask=%s | timestamp=%s | provider=%s | verified=%s | stale=%s | spread_pct=%s | capability=%s | correlation_id=%s",
         str(symbol or "").upper(),
         payload.get("market"),
