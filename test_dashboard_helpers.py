@@ -372,9 +372,25 @@ def test_balanced_top_opportunity_table_output_is_compact():
         "Confidence": "82%",
         "Risk": "Medium",
         "Data Age": "8 sec",
+        "section": "primary",
+        "visible": True,
     }
     assert rows[1]["Action"] == "YELLOW HOLD"
     assert rows[1]["Data Age"] == "Old"
+
+
+def test_balanced_opportunity_rows_tags_rejections_as_diagnostics():
+    rows = balanced_opportunity_rows([
+        {"symbol": "BUY_ME", "action": "BUY", "price": 20, "target": 25, "confidence": 90, "risk": "LOW", "trade_eligible": True, "quote_verified": True, "quote_age_seconds": 5},
+        {"symbol": "WAIT_ME", "action": "WAIT", "price": 15, "target": 15, "confidence": 50, "risk": "MEDIUM", "trade_eligible": False},
+    ])
+
+    green = rows[0]
+    wait = rows[1]
+
+    assert green.get("section") == "primary"
+    assert wait.get("section") == "diagnostics"
+    assert wait.get("visible") is False or wait.get("collapsed") is True
 
 
 def test_balanced_portfolio_table_rows_show_status_without_raw_quantity():

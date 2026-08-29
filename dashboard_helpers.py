@@ -454,6 +454,8 @@ def balanced_opportunity_rows(decisions: list[dict[str, Any]], limit: int = 10) 
             action_label = "YELLOW WATCH"
         else:
             action_label = {"BUY": "GREEN BUY", "SELL": "RED SELL", "HOLD": "YELLOW HOLD", "WAIT": "YELLOW WAIT"}.get(action, "YELLOW WAIT")
+        is_diagnostic = bool(action == "WAIT" or action == "HOLD" or item.get("trade_eligible") is False)
+        section = "diagnostics" if is_diagnostic else "primary"
         rows.append(
             {
                 "Action": action_label,
@@ -464,6 +466,8 @@ def balanced_opportunity_rows(decisions: list[dict[str, Any]], limit: int = 10) 
                 "Confidence": f"{normalized_confidence(item.get('confidence')):.0f}%",
                 "Risk": str(item.get("risk") or "Medium").title(),
                 "Data Age": data_age_label(item),
+                "section": section,
+                "visible": not is_diagnostic,
             }
         )
     return rows
