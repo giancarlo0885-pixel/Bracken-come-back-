@@ -12,7 +12,13 @@ import yfinance as yf
 
 from alpha_vantage_provider import global_quote as alpha_global_quote
 from asset_routing import infer_asset_class
-from config import LIVE_POSITION_PRICE_WORKERS
+from config import (
+    DECISION_CRYPTO_MAX_AGE_MINUTES,
+    DECISION_STOCK_MAX_AGE_MINUTES,
+    EXECUTION_MODE,
+    LIVE_POSITION_PRICE_WORKERS,
+    PAPER_BROKER_MODE,
+)
 from provider_router import normalize_symbol, route_history, verify_frame_symbol
 from market_sessions import latest_valid_bar_timestamp, quote_is_fresh
 
@@ -42,6 +48,9 @@ class MarketSnapshot:
     source_identity: str | None = None
     cache_identity: str | None = None
     ohlcv_fingerprint: str | None = None
+    provider_quote_verified: bool = False
+    paper_reference_verified: bool = False
+    verification_basis: str | None = None
 
     def to_quote_payload(self) -> dict[str, object]:
         return {
@@ -66,6 +75,9 @@ class MarketSnapshot:
             "source_identity": self.source_identity,
             "cache_identity": self.cache_identity,
             "ohlcv_fingerprint": self.ohlcv_fingerprint,
+            "provider_quote_verified": self.provider_quote_verified,
+            "paper_reference_verified": self.paper_reference_verified,
+            "verification_basis": self.verification_basis,
         }
 
 
@@ -149,6 +161,53 @@ def finite_scalar(value: object) -> float | None:
     return result if math.isfinite(result) else None
 
 
+def _is_intraday_interval(interval: str) -> bool:
+    text = str(interval or "").lower().strip()
+    return bool(text) and not text.endswith("d") and text not in {"1wk", "1mo", "3mo", "1w", "weekly", "monthly"}
+
+
+def _decision_max_age_seconds(symbol: str) -> int:
+    minutes = DECISION_CRYPTO_MAX_AGE_MINUTES if infer_asset_class(symbol) == "crypto" else DECISION_STOCK_MAX_AGE_MINUTES
+    return max(60, int(minutes) * 60)
+
+
+def _paper_market_reference_eligible(
+    *,
+    symbol: str,
+    interval: str,
+    provider: str,
+    requested_symbol: str,
+    provider_symbol: str,
+    price: object,
+    quote_time: datetime | None,
+) -> bool:
+    """Allow a fresh Yahoo intraday mark for paper execution only.
+
+    Primary execution-grade providers still win in provider_router. This path is
+    intentionally limited to simulated paper trading and never upgrades daily
+    bars or live-broker execution. Identity, positive price, and freshness must
+    all pass before the fallback can be used.
+    """
+    if not PAPER_BROKER_MODE or str(EXECUTION_MODE or "").lower() != "paper":
+        return False
+    if str(provider or "").strip().lower() != "yahoo finance":
+        return False
+    if not _is_intraday_interval(interval):
+        return False
+    requested = normalize_symbol(symbol)
+    if not requested or normalize_symbol(requested_symbol) != requested or normalize_symbol(provider_symbol) != requested:
+        return False
+    numeric_price = finite_scalar(price)
+    if numeric_price is None or numeric_price <= 0 or quote_time is None:
+        return False
+    return quote_is_fresh(
+        quote_time.isoformat(),
+        interval,
+        max_intraday_age_seconds=_decision_max_age_seconds(requested),
+        symbol=requested,
+    )
+
+
 def _column(frame: pd.DataFrame, column: str) -> pd.Series:
     value = frame[column]
     if isinstance(value, pd.DataFrame):
@@ -213,6 +272,7 @@ def get_history(symbol: str, period: str = "1y", interval: str = "1d") -> pd.Dat
     frame = routed.frame.copy(deep=True)
     route_metadata = routed.metadata()
     latest_close = finite_scalar(_column(frame, "Close")) if "Close" in frame.columns else None
+    provider_verified = frame.attrs.get("quote_verified") is True
     route_metadata.update(
         {
             "requested_symbol": normalize_symbol(symbol),
@@ -225,12 +285,44 @@ def get_history(symbol: str, period: str = "1y", interval: str = "1d") -> pd.Dat
             "source_identity": frame.attrs.get("source_identity"),
             "cache_identity": frame.attrs.get("cache_identity"),
             "ohlcv_fingerprint": _ohlcv_fingerprint(frame),
-            "quote_verified": frame.attrs.get("quote_verified") is True,
+            "quote_verified": provider_verified,
+            "provider_quote_verified": provider_verified,
+            "paper_reference_verified": False,
+            "verification_basis": "provider" if provider_verified else "unverified",
         }
     )
     quote_time = latest_bar_timestamp(frame, interval, symbol=symbol)
     if quote_time is not None and not route_metadata.get("quote_timestamp"):
         route_metadata["quote_timestamp"] = quote_time.isoformat()
+
+    if _paper_market_reference_eligible(
+        symbol=symbol,
+        interval=interval,
+        provider=str(route_metadata.get("provider") or ""),
+        requested_symbol=str(route_metadata.get("requested_symbol") or ""),
+        provider_symbol=str(route_metadata.get("provider_symbol") or ""),
+        price=latest_close,
+        quote_time=quote_time,
+    ):
+        route_metadata.update(
+            {
+                "quote_verified": True,
+                "paper_reference_verified": True,
+                "verification_basis": "paper:fresh_identity_matched_yahoo",
+                "source_mode": "paper_market_reference",
+                "source_capability": "history_intraday",
+            }
+        )
+        frame.attrs["quote_verified"] = True
+        frame.attrs["paper_reference_verified"] = True
+        frame.attrs["provider_quote_verified"] = False
+        frame.attrs["verification_basis"] = route_metadata["verification_basis"]
+        frame.attrs["source_mode"] = route_metadata["source_mode"]
+    else:
+        frame.attrs["provider_quote_verified"] = provider_verified
+        frame.attrs["paper_reference_verified"] = False
+        frame.attrs["verification_basis"] = route_metadata["verification_basis"]
+
     frame.attrs["provider_route"] = route_metadata
     return frame
 
@@ -303,6 +395,9 @@ def _snapshot_from_history(symbol: str, history: pd.DataFrame, interval: str) ->
         source_identity=source_identity,
         cache_identity=cache_identity,
         ohlcv_fingerprint=str(route.get("ohlcv_fingerprint") or _ohlcv_fingerprint(history)),
+        provider_quote_verified=route.get("provider_quote_verified") is True,
+        paper_reference_verified=route.get("paper_reference_verified") is True,
+        verification_basis=str(route.get("verification_basis") or ""),
     )
 
 
@@ -342,6 +437,9 @@ def _alpha_vantage_delayed_snapshot(symbol: str) -> MarketSnapshot | None:
         correlation_id=str(quote.get("correlation_id") or ""),
         source_identity=f"Alpha Vantage:{requested}:GLOBAL_QUOTE:delayed",
         cache_identity=f"alpha_vantage_global_quote:{requested}",
+        provider_quote_verified=False,
+        paper_reference_verified=False,
+        verification_basis="delayed_fallback",
     )
 
 
@@ -402,6 +500,7 @@ def snapshot_is_verified(snapshot: MarketSnapshot | None, symbol: str) -> bool:
     return quote_is_fresh(
         snapshot.timestamp,
         snapshot.interval,
+        max_intraday_age_seconds=_decision_max_age_seconds(requested),
         symbol=requested,
     )
 
