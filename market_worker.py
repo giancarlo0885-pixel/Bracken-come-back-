@@ -98,7 +98,7 @@ def _v39_log_rejection(symbol: str, reason: str, details: dict[str, Any] | None 
         for k, v in (details or {}).items()
         if str(k).lower() not in {"apikey", "api_key", "token", "authorization", "signature"}
     }
-    log.info(
+    log.debug(
         "execution_candidate_rejected | symbol=%s | reason=%s | details=%s",
         key[0],
         key[1],
