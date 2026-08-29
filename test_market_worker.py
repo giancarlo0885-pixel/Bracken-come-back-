@@ -46,6 +46,16 @@ def _handoff_records(records):
     return [r for r in records if "EXECUTION_QUOTE_HANDOFF" in r.getMessage()]
 
 
+def _handoff_fields(message: str) -> dict[str, str]:
+    parts = [part.strip() for part in message.split("|")]
+    assert parts[0] == "EXECUTION_QUOTE_HANDOFF"
+    fields: dict[str, str] = {}
+    for part in parts[1:]:
+        key, value = part.split("=", 1)
+        fields[key.strip()] = value.strip()
+    return fields
+
+
 def test_execution_eligible_quote_logs_handoff_at_info(caplog):
     import market_worker
 
@@ -104,7 +114,6 @@ def test_zero_price_rejects_before_handoff_log(caplog):
     history.attrs["provider_route"].pop("current_price")
     history.attrs["provider_route"]["bid"] = None
     history.attrs["provider_route"]["ask"] = None
-    # Ensure the underlying close prices cannot be used as a fallback either.
     history["Close"] = [float("nan"), float("nan"), float("nan")]
 
     with caplog.at_level(logging.DEBUG, logger="market-worker"):
@@ -126,18 +135,31 @@ def test_missing_quote_timestamp_rejects_before_handoff_log(caplog):
     assert _handoff_records(caplog.records) == []
 
 
-def test_handoff_message_content_matches_between_info_and_debug(caplog):
+def test_handoff_message_schema_matches_between_info_and_debug(caplog):
     import market_worker
 
     eligible_history = _history("AAPL", 123.45, interval="5m", verified=True)
     with caplog.at_level(logging.DEBUG, logger="market-worker"):
         market_worker._execution_quote_payload_from_history("AAPL", eligible_history, 123.45, scan_type="fast")
-    info_message = _handoff_records(caplog.records)[0].getMessage()
+    info_record = _handoff_records(caplog.records)[0]
+    info_fields = _handoff_fields(info_record.getMessage())
     caplog.clear()
 
     unverified_history = _history("AAPL", 123.45, interval="5m", verified=False)
     with caplog.at_level(logging.DEBUG, logger="market-worker"):
         market_worker._execution_quote_payload_from_history("AAPL", unverified_history, 123.45, scan_type="fast")
-    debug_message = _handoff_records(caplog.records)[0].getMessage()
+    debug_record = _handoff_records(caplog.records)[0]
+    debug_fields = _handoff_fields(debug_record.getMessage())
 
-    assert info_message == debug_message
+    assert info_record.levelno == logging.INFO
+    assert debug_record.levelno == logging.DEBUG
+    assert set(info_fields) == set(debug_fields)
+
+    for field in ("symbol", "market", "price", "bid", "ask", "provider", "spread_pct", "capability", "correlation_id"):
+        assert info_fields[field] == debug_fields[field]
+
+    assert info_fields["verified"] == "True"
+    assert info_fields["stale"] == "False"
+    assert debug_fields["verified"] == "False"
+    assert debug_fields["stale"] == "True"
+    assert info_fields["timestamp"] != debug_fields["timestamp"]
