@@ -400,10 +400,14 @@ def profit_attribution_rows(
         item["entry_price"] = item["entry_price"] or avg_cost
         item["exit_or_current_price"] = current or item["exit_or_current_price"]
         if mark["status"] == "VERIFIED":
-            item["unrealized_pnl"] += _finite(mark.get("unrealized_pnl"))
+            item["unrealized_pnl"] = _finite(item.get("unrealized_pnl")) + _finite(mark.get("unrealized_pnl"))
             item["return_pct"] = _finite(mark.get("unrealized_return_pct"))
             item["status"] = "VERIFIED"
-        elif item.get("status") not in {"VERIFIED", "CLOSED"}:
+        else:
+            # An open position without a verified quote has unknown mark-to-market
+            # P/L. Preserve that unknown state instead of converting it to $0.00.
+            item["unrealized_pnl"] = None
+            item["return_pct"] = None
             item["status"] = mark["status"]
         for key in ("bucket", "strategy", "tier"):
             if position.get(key):
@@ -418,8 +422,14 @@ def profit_attribution_rows(
     output = []
     for item in by_symbol.values():
         item["realized_pnl"] = round(_finite(item.get("realized_pnl")), 10)
-        item["unrealized_pnl"] = round(_finite(item.get("unrealized_pnl")), 10)
-        item["total_pnl"] = round(item["realized_pnl"] + item["unrealized_pnl"], 10)
-        item["contribution_to_portfolio_profit_pct"] = round((item["total_pnl"] / equity * 100.0), 6) if equity else 0.0
+        if item.get("unrealized_pnl") is None:
+            item["unrealized_pnl"] = None
+            item["total_pnl"] = None
+            item["return_pct"] = None
+            item["contribution_to_portfolio_profit_pct"] = None
+        else:
+            item["unrealized_pnl"] = round(_finite(item.get("unrealized_pnl")), 10)
+            item["total_pnl"] = round(item["realized_pnl"] + item["unrealized_pnl"], 10)
+            item["contribution_to_portfolio_profit_pct"] = round((item["total_pnl"] / equity * 100.0), 6) if equity else 0.0
         output.append(item)
     return sorted(output, key=lambda row: _finite(row.get("total_pnl")), reverse=True)

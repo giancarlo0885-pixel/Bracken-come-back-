@@ -346,26 +346,32 @@ def _alpha_vantage_delayed_snapshot(symbol: str) -> MarketSnapshot | None:
 
 
 def get_live_snapshot(symbol: str) -> MarketSnapshot | None:
-    """Get the freshest practical quote, with graceful fallbacks.
+    """Return the freshest verified quote available, with a safe research fallback.
 
-    Intraday providers are attempted first. If an account plan does not expose
-    intraday candles, the function falls back to slower candles rather than
-    failing the worker pulse.
+    A provider route may legitimately return an unverified research-only snapshot
+    (for example Yahoo Finance). Do not let that result short-circuit later
+    intervals that can still produce a verified execution-grade quote.
     """
     attempts = (("1d", "1m"), ("5d", "5m"), ("1mo", "1h"), ("5d", "1d"))
+    research_fallback: MarketSnapshot | None = None
     for period, interval in attempts:
         try:
             history = get_history(symbol, period, interval)
             snapshot = _snapshot_from_history(symbol, history, interval)
-            if snapshot is not None:
-                return snapshot
         except Exception:
             continue
+        if snapshot is None:
+            continue
+        if snapshot_is_verified(snapshot, symbol):
+            return snapshot
+        if research_fallback is None:
+            research_fallback = snapshot
+
     try:
-        return _alpha_vantage_delayed_snapshot(symbol)
+        delayed_fallback = _alpha_vantage_delayed_snapshot(symbol)
     except Exception:
-        return None
-    return None
+        delayed_fallback = None
+    return research_fallback or delayed_fallback
 
 
 def get_snapshot(symbol: str) -> MarketSnapshot | None:
