@@ -361,6 +361,7 @@ def test_balanced_top_opportunity_table_output_is_compact():
             {"symbol": "WAIT", "action": "HOLD", "price": 10, "target": 10, "confidence": 55, "risk": "low", "trade_eligible": False, "data_status": "stale"},
         ],
         limit=2,
+        hide_rejected=False,
     )
 
     assert rows[0] == {
@@ -375,6 +376,37 @@ def test_balanced_top_opportunity_table_output_is_compact():
     }
     assert rows[1]["Action"] == "YELLOW HOLD"
     assert rows[1]["Data Age"] == "Old"
+
+
+def test_balanced_opportunity_rows_hides_rejected_by_default():
+    rows = balanced_opportunity_rows(
+        [
+            {"symbol": "SEA", "action": "BUY", "price": 19.79, "target": 20.72, "expected_return": 4.7, "confidence": 82, "risk": "medium", "trade_eligible": True, "quote_verified": True, "quote_age_seconds": 8},
+            {"symbol": "WAIT", "action": "HOLD", "price": 10, "target": 10, "confidence": 55, "risk": "low", "trade_eligible": False, "data_status": "stale"},
+        ],
+        limit=10,
+    )
+
+    assert len(rows) == 1
+    assert rows[0]["Symbol"] == "SEA"
+    assert all(row["Symbol"] != "WAIT" for row in rows)
+
+
+def test_balanced_opportunity_rows_returns_hidden_items_when_requested():
+    rows, hidden = balanced_opportunity_rows(
+        [
+            {"symbol": "SEA", "action": "BUY", "price": 19.79, "target": 20.72, "expected_return": 4.7, "confidence": 82, "risk": "medium", "trade_eligible": True, "quote_verified": True, "quote_age_seconds": 8},
+            {"symbol": "WAIT", "action": "HOLD", "price": 10, "target": 10, "confidence": 55, "risk": "low", "trade_eligible": False, "data_status": "stale"},
+        ],
+        limit=10,
+        hide_rejected=True,
+        return_hidden=True,
+    )
+
+    assert len(rows) == 1
+    assert rows[0]["Symbol"] == "SEA"
+    assert len(hidden) == 1
+    assert hidden[0]["Symbol"] == "WAIT"
 
 
 def test_balanced_portfolio_table_rows_show_status_without_raw_quantity():

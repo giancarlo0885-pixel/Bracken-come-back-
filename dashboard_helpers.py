@@ -439,9 +439,18 @@ def balanced_money_bar(metrics: dict[str, Any], trades: list[dict[str, Any]], no
     ]
 
 
-def balanced_opportunity_rows(decisions: list[dict[str, Any]], limit: int = 10) -> list[dict[str, Any]]:
+def balanced_opportunity_rows(
+    decisions: list[dict[str, Any]],
+    limit: int = 10,
+    *,
+    hide_rejected: bool = True,
+    return_hidden: bool = False,
+) -> list[dict[str, Any]] | tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     rows: list[dict[str, Any]] = []
-    for item in decisions[: max(0, int(limit))]:
+    hidden_rows: list[dict[str, Any]] = []
+    for item in decisions:
+        if len(rows) >= max(0, int(limit)):
+            break
         price = as_float(item.get("price"))
         target = as_float(item.get("target"))
         expected = as_float(item.get("expected_return"))
@@ -454,18 +463,23 @@ def balanced_opportunity_rows(decisions: list[dict[str, Any]], limit: int = 10) 
             action_label = "YELLOW WATCH"
         else:
             action_label = {"BUY": "GREEN BUY", "SELL": "RED SELL", "HOLD": "YELLOW HOLD", "WAIT": "YELLOW WAIT"}.get(action, "YELLOW WAIT")
-        rows.append(
-            {
-                "Action": action_label,
-                "Symbol": str(item.get("symbol") or "").upper(),
-                "Price": money_text(price),
-                "Target": money_text(target),
-                "Possible Gain %": f"{expected:+.1f}%",
-                "Confidence": f"{normalized_confidence(item.get('confidence')):.0f}%",
-                "Risk": str(item.get("risk") or "Medium").title(),
-                "Data Age": data_age_label(item),
-            }
-        )
+        row = {
+            "Action": action_label,
+            "Symbol": str(item.get("symbol") or "").upper(),
+            "Price": money_text(price),
+            "Target": money_text(target),
+            "Possible Gain %": f"{expected:+.1f}%",
+            "Confidence": f"{normalized_confidence(item.get('confidence')):.0f}%",
+            "Risk": str(item.get("risk") or "Medium").title(),
+            "Data Age": data_age_label(item),
+        }
+        is_rejected_or_waiting = action in {"WAIT", "HOLD"} and execution_blocked
+        if hide_rejected and is_rejected_or_waiting:
+            hidden_rows.append(row)
+            continue
+        rows.append(row)
+    if return_hidden:
+        return rows, hidden_rows
     return rows
 
 

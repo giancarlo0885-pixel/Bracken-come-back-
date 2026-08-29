@@ -98,7 +98,7 @@ def _v39_log_rejection(symbol: str, reason: str, details: dict[str, Any] | None 
         for k, v in (details or {}).items()
         if str(k).lower() not in {"apikey", "api_key", "token", "authorization", "signature"}
     }
-    log.info(
+    log.debug(
         "execution_candidate_rejected | symbol=%s | reason=%s | details=%s",
         key[0],
         key[1],
@@ -274,7 +274,14 @@ def _execution_quote_payload_from_history(symbol: str, history: Any, price: Any 
     if payload.get("quote_timestamp") in (None, ""):
         _v39_log_rejection(symbol, "QUOTE_STALE", {"scan_type": scan_type, "provider": payload.get("provider")})
         return None
-    log.info(
+    is_execution_eligible = (
+        payload.get("quote_verified") is True
+        and payload.get("stale") is False
+        and _finite_positive(payload.get("price")) is not None
+        and bool(payload.get("requested_symbol") and payload.get("provider_symbol") and payload.get("requested_symbol") == payload.get("provider_symbol"))
+    )
+    log_level = log.info if is_execution_eligible else log.debug
+    log_level(
         "EXECUTION_QUOTE_HANDOFF | symbol=%s | market=%s | price=%s | bid=%s | ask=%s | timestamp=%s | provider=%s | verified=%s | stale=%s | spread_pct=%s | capability=%s | correlation_id=%s",
         str(symbol or "").upper(),
         payload.get("market"),
@@ -1472,7 +1479,10 @@ def run_worker(market: str) -> None:
                         actions_last_cycle=last_deep_actions,
                         cycle_errors=consecutive_errors,
                     )
-                    log.info(message)
+                    if completed_actions or deep_error:
+                        log.info(message)
+                    else:
+                        log.debug(message)
 
                 completed_fast, fast_error = _future_result(fast_future, f"{label} fast scan")
                 if completed_fast is not None:
@@ -1500,7 +1510,10 @@ def run_worker(market: str) -> None:
                         fast_actions_last_cycle=last_fast_actions,
                         cycle_errors=consecutive_errors,
                     )
-                    log.info(fast_message)
+                    if completed_fast or fast_error:
+                        log.info(fast_message)
+                    else:
+                        log.debug(fast_message)
 
                 if deep_future is None and now_monotonic >= next_deep_due:
                     deep_future = deep_executor.submit(scan_market, market)
