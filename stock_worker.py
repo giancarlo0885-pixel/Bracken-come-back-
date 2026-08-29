@@ -1,10 +1,12 @@
 import logging
 import os
 
-from market_worker import run_worker
+import market_worker
+from portfolio_valuation import install_closed_market_valuation_pulse
 from structured_logging import configure_structured_logging
 
 configure_structured_logging(os.getenv("LOG_LEVEL", "INFO"))
+install_closed_market_valuation_pulse(market_worker)
 
 if __name__ == "__main__":
-    run_worker("cash")
+    market_worker.run_worker("cash")
