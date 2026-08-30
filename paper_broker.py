@@ -10,6 +10,7 @@ from config import (
     CRYPTO_PAPER_LEVERAGE,
     CRYPTO_STARTING_BALANCE,
     PAPER_BROKER_MODE,
+    PAPER_BROKER_PROFILE,
     STOCK_MARGIN_INTEREST_APR,
     STOCK_MAINTENANCE_MARGIN_PCT,
     STOCK_PAPER_LEVERAGE,
@@ -25,6 +26,11 @@ def _number(value: Any, default: float = 0.0) -> float:
         return default
 
 
+def _small_account_profile(profile: Any | None = None) -> bool:
+    text = str(profile if profile is not None else PAPER_BROKER_PROFILE).strip().lower()
+    return text.startswith("small-account") or text in {"cash-paper", "robinhood-cash-paper"}
+
+
 def market_starting_capital(market: str) -> float:
     return float(CRYPTO_STARTING_BALANCE if str(market).lower() == "crypto" else STOCK_STARTING_BALANCE)
 
@@ -32,7 +38,13 @@ def market_starting_capital(market: str) -> float:
 def market_leverage_limit(market: str) -> float:
     if not PAPER_BROKER_MODE:
         return 1.0
-    return float(CRYPTO_PAPER_LEVERAGE if str(market).lower() == "crypto" else STOCK_PAPER_LEVERAGE)
+    configured = float(CRYPTO_PAPER_LEVERAGE if str(market).lower() == "crypto" else STOCK_PAPER_LEVERAGE)
+    # The small-account simulation is deliberately cash-only.  This prevents
+    # stale Railway leverage variables from silently restoring institutional
+    # 2x/4x buying power after the portfolio was reset to $2,000.
+    if _small_account_profile():
+        return 1.0
+    return max(1.0, configured)
 
 
 def market_maintenance_margin_pct(market: str) -> float:
@@ -98,7 +110,9 @@ def build_account(
     )
     gross_exposure = positions_value
     equity = cash + positions_value - margin_debt
-    leverage_limit = max(1.0, _number(portfolio.get("leverage_limit"), market_leverage_limit(market)))
+    configured_leverage = max(1.0, _number(portfolio.get("leverage_limit"), market_leverage_limit(market)))
+    broker_profile = str(portfolio.get("broker_profile") or PAPER_BROKER_PROFILE)
+    leverage_limit = 1.0 if _small_account_profile(broker_profile) else configured_leverage
     leverage_used = gross_exposure / equity if equity > 0 else leverage_limit
     buying_power = max(0.0, equity * leverage_limit - gross_exposure) if equity > 0 else 0.0
     maintenance_requirement = gross_exposure * market_maintenance_margin_pct(market)
@@ -112,7 +126,7 @@ def build_account(
 
     return PaperBrokerAccount(
         market=market,
-        broker_profile=str(portfolio.get("broker_profile") or "institutional-paper"),
+        broker_profile=broker_profile,
         starting_capital=round(starting_capital, 8),
         cash=round(cash, 8),
         positions_value=round(positions_value, 8),
