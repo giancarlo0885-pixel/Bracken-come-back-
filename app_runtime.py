@@ -9,7 +9,13 @@ from typing import Any, Callable
 # can still explicitly opt in with UI_AUTO_REFRESH=true.
 os.environ.setdefault("UI_AUTO_REFRESH", "false")
 
+import database
+import dashboard_helpers
 from database import database_ready
+from web_trade_accounting import (
+    install_readable_trade_fee_column,
+    install_web_trade_accounting,
+)
 
 
 def database_preflight(
@@ -68,6 +74,14 @@ def main() -> None:
     if not health.get("ok"):
         render_database_block(health)
         return
+
+    # Install web-only financial presentation adapters before app.py imports
+    # ``rows`` and human-readable trade helpers. This keeps canonical Postgres
+    # records unchanged while ensuring dashboard totals include explicit BUY
+    # fees and trade history shows those fees clearly.
+    install_web_trade_accounting(database)
+    install_readable_trade_fee_column(dashboard_helpers)
+
     # Execute the ordinary Streamlit app only after canonical storage is known
     # to be reachable. app.py remains the single UI implementation.
     runpy.run_path("app.py", run_name="__main__")
