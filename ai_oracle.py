@@ -7,6 +7,8 @@ from functools import lru_cache
 from typing import Any
 
 from openai import OpenAI
+
+from gemini_oracle import call_gemini, gemini_available
 from security import safe_exception
 
 log = logging.getLogger("garibaldi-ai-oracle")
@@ -18,10 +20,27 @@ ENABLE_OPENAI = os.getenv("ENABLE_OPENAI", "true").strip().lower() in {
 }
 OPENAI_TIMEOUT_SECONDS = float(os.getenv("OPENAI_TIMEOUT_SECONDS", "30"))
 OPENAI_MAX_INPUT_CHARS = int(os.getenv("OPENAI_MAX_INPUT_CHARS", "30000"))
+AI_PROVIDER_MODE = os.getenv("AI_PROVIDER_MODE", "auto").strip().lower() or "auto"
 
 
 def openai_available() -> bool:
     return ENABLE_OPENAI and bool(OPENAI_API_KEY)
+
+
+def ai_provider_name() -> str:
+    if AI_PROVIDER_MODE in {"gemini", "google"}:
+        return "Google Gemini" if gemini_available() else "Unavailable"
+    if AI_PROVIDER_MODE == "openai":
+        return "OpenAI" if openai_available() else "Unavailable"
+    if openai_available():
+        return "OpenAI"
+    if gemini_available():
+        return "Google Gemini"
+    return "Unavailable"
+
+
+def ai_available() -> bool:
+    return ai_provider_name() != "Unavailable"
 
 
 def _openai_safe_error(exc: Exception) -> str:
@@ -102,8 +121,48 @@ def _call_openai(
         text = (response.output_text or "").strip()
         return text or "OpenAI returned no readable explanation."
     except Exception as exc:
-        log.exception("OpenAI request failed")
-        return f"OpenAI analysis temporarily unavailable: {exc}"
+        message = _openai_safe_error(exc)
+        log.warning("OpenAI request failed: %s", message)
+        return f"OpenAI analysis temporarily unavailable: {message}"
+
+
+def _call_ai(
+    *,
+    instructions: str,
+    data: Any,
+    request: str,
+    max_output_tokens: int = 700,
+) -> str:
+    mode = AI_PROVIDER_MODE
+    if mode in {"gemini", "google"}:
+        return call_gemini(
+            instructions=instructions,
+            data=data,
+            request=request,
+            max_output_tokens=max_output_tokens,
+        )
+    if mode == "openai":
+        return _call_openai(
+            instructions=instructions,
+            data=data,
+            request=request,
+            max_output_tokens=max_output_tokens,
+        )
+    if openai_available():
+        return _call_openai(
+            instructions=instructions,
+            data=data,
+            request=request,
+            max_output_tokens=max_output_tokens,
+        )
+    if gemini_available():
+        return call_gemini(
+            instructions=instructions,
+            data=data,
+            request=request,
+            max_output_tokens=max_output_tokens,
+        )
+    return "AI analysis is unavailable because neither OpenAI nor Google Gemini is configured."
 
 
 def test_openai_connection() -> dict[str, Any]:
@@ -146,7 +205,7 @@ def test_openai_connection() -> dict[str, Any]:
 
 
 def explain_trade(signal: dict[str, Any]) -> str:
-    return _call_openai(
+    return _call_ai(
         instructions="""
 You are the plain-English explanation engine for GARIBALDI MARKET ORACLE.
 Use only the supplied application data.
@@ -161,7 +220,7 @@ would invalidate the setup. Never guarantee profit. Keep it under 150 words.
 
 
 def explain_risk(trade: dict[str, Any]) -> str:
-    return _call_openai(
+    return _call_ai(
         instructions="""
 You are the risk specialist for GARIBALDI MARKET ORACLE.
 Use only supplied data. Explain position size, cash exposure, stop loss,
@@ -175,7 +234,7 @@ Never promise success. Keep the answer under 180 words.
 
 
 def oracle_council(symbol: str, market_data: dict[str, Any]) -> str:
-    return _call_openai(
+    return _call_ai(
         instructions="""
 You are the GARIBALDI ORACLE COUNCIL.
 Review the opportunity through these specialists:
@@ -201,7 +260,7 @@ def market_briefing(
     market_snapshot: dict[str, Any],
     briefing_type: str = "market",
 ) -> str:
-    return _call_openai(
+    return _call_ai(
         instructions="""
 Write an executive market briefing for GARIBALDI MARKET ORACLE.
 Use only supplied data. Cover market direction, strongest assets or sectors,
@@ -217,7 +276,7 @@ Use short headings and readable language.
 
 
 def summarize_watchlist(watchlist_results: list[dict[str, Any]]) -> str:
-    return _call_openai(
+    return _call_ai(
         instructions="""
 Summarize a GARIBALDI MARKET ORACLE watchlist scan.
 Use only supplied data. Group symbols into:
@@ -238,7 +297,7 @@ def portfolio_coach(
     positions: list[dict[str, Any]],
     analytics: dict[str, Any] | None = None,
 ) -> str:
-    return _call_openai(
+    return _call_ai(
         instructions="""
 You are the portfolio coach for GARIBALDI MARKET ORACLE.
 Use only supplied data. Review cash level, concentration, gains and losses,
@@ -264,7 +323,7 @@ def answer_market_question(
     if not question:
         return "Enter a market question first."
 
-    return _call_openai(
+    return _call_ai(
         instructions="""
 You are the in-app assistant for GARIBALDI MARKET ORACLE.
 Answer using only supplied application data. Never claim live information that
@@ -283,7 +342,7 @@ def opportunity_comparison(
     limit: int = 5,
 ) -> str:
     selected = opportunities[: max(1, min(limit, 10))]
-    return _call_openai(
+    return _call_ai(
         instructions="""
 Compare ranked market opportunities for GARIBALDI MARKET ORACLE.
 Use only supplied data. Explain why the top candidate ranks above the others,
