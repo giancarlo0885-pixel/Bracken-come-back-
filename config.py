@@ -5,16 +5,16 @@ import os
 APP_NAME = "GARIBALDI MARKET ORACLE™"
 DATABASE_PATH = os.getenv("DATABASE_PATH", "oracle.db")
 MARKET_SCOPE = os.getenv("MARKET_SCOPE", "US_CRYPTO").strip().upper() or "US_CRYPTO"
-# Institutional paper-broker capital. These are simulated balances only.
-# Existing paper portfolios are upgraded in place while preserving their P/L.
-STARTING_BALANCE = float(os.getenv("STARTING_BALANCE", "10000000"))
-STOCK_STARTING_BALANCE = float(os.getenv("STOCK_STARTING_BALANCE", "10000000"))
-CRYPTO_STARTING_BALANCE = float(os.getenv("CRYPTO_STARTING_BALANCE", "5000000"))
+# Small-account paper capital. Railway may override these values explicitly,
+# but a clean deployment must never silently bootstrap institutional balances.
+STARTING_BALANCE = float(os.getenv("STARTING_BALANCE", "2000"))
+STOCK_STARTING_BALANCE = float(os.getenv("STOCK_STARTING_BALANCE", "2000"))
+CRYPTO_STARTING_BALANCE = float(os.getenv("CRYPTO_STARTING_BALANCE", "2000"))
 PAPER_BROKER_MODE = os.getenv("PAPER_BROKER_MODE", "true").lower() == "true"
 PAPER_CAPITAL_UPGRADE = os.getenv("PAPER_CAPITAL_UPGRADE", "false").lower() == "true"
-PAPER_BROKER_PROFILE = os.getenv("PAPER_BROKER_PROFILE", "institutional-paper")
-STOCK_PAPER_LEVERAGE = max(1.0, min(6.0, float(os.getenv("STOCK_PAPER_LEVERAGE", "4.0"))))
-CRYPTO_PAPER_LEVERAGE = max(1.0, min(3.0, float(os.getenv("CRYPTO_PAPER_LEVERAGE", "2.0"))))
+PAPER_BROKER_PROFILE = os.getenv("PAPER_BROKER_PROFILE", "small-account-paper")
+STOCK_PAPER_LEVERAGE = max(1.0, min(6.0, float(os.getenv("STOCK_PAPER_LEVERAGE", "1.0"))))
+CRYPTO_PAPER_LEVERAGE = max(1.0, min(3.0, float(os.getenv("CRYPTO_PAPER_LEVERAGE", "1.0"))))
 STOCK_MAINTENANCE_MARGIN_PCT = max(0.15, min(0.60, float(os.getenv("STOCK_MAINTENANCE_MARGIN_PCT", "0.25"))))
 CRYPTO_MAINTENANCE_MARGIN_PCT = max(0.25, min(0.80, float(os.getenv("CRYPTO_MAINTENANCE_MARGIN_PCT", "0.50"))))
 STOCK_MARGIN_INTEREST_APR = max(0.0, float(os.getenv("STOCK_MARGIN_INTEREST_APR", "0.065")))
