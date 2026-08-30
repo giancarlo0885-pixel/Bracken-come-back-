@@ -1,12 +1,14 @@
 import logging
 import os
 
-from market_worker import run_worker
+import market_worker
+from crypto_execution_guard import install_crypto_execution_quote_guard
 from structured_logging import configure_structured_logging
 
 
 configure_structured_logging(os.getenv("LOG_LEVEL", "INFO"))
+install_crypto_execution_quote_guard(market_worker)
 
 
 if __name__ == "__main__":
-    run_worker("crypto")
+    market_worker.run_worker("crypto")
