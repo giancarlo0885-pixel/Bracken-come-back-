@@ -39,9 +39,9 @@ def market_leverage_limit(market: str) -> float:
     if not PAPER_BROKER_MODE:
         return 1.0
     configured = float(CRYPTO_PAPER_LEVERAGE if str(market).lower() == "crypto" else STOCK_PAPER_LEVERAGE)
-    # The small-account simulation is deliberately cash-only.  This prevents
-    # stale Railway leverage variables from silently restoring institutional
-    # 2x/4x buying power after the portfolio was reset to $2,000.
+    # New small-account portfolios inherit the configured profile and are
+    # deliberately cash-only. Existing explicit institutional profiles retain
+    # their configured leverage semantics.
     if _small_account_profile():
         return 1.0
     return max(1.0, configured)
@@ -111,8 +111,12 @@ def build_account(
     gross_exposure = positions_value
     equity = cash + positions_value - margin_debt
     configured_leverage = max(1.0, _number(portfolio.get("leverage_limit"), market_leverage_limit(market)))
-    broker_profile = str(portfolio.get("broker_profile") or PAPER_BROKER_PROFILE)
-    leverage_limit = 1.0 if _small_account_profile(broker_profile) else configured_leverage
+    explicit_profile = str(portfolio.get("broker_profile") or "").strip()
+    broker_profile = explicit_profile or "institutional-paper"
+    # Only an explicit persisted small-account profile can override an existing
+    # account's leverage. This preserves generic/legacy account calculations
+    # while keeping production's persisted small-account-paper rows cash-only.
+    leverage_limit = 1.0 if explicit_profile and _small_account_profile(explicit_profile) else configured_leverage
     leverage_used = gross_exposure / equity if equity > 0 else leverage_limit
     buying_power = max(0.0, equity * leverage_limit - gross_exposure) if equity > 0 else 0.0
     maintenance_requirement = gross_exposure * market_maintenance_margin_pct(market)
