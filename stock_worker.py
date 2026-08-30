@@ -4,6 +4,7 @@ import os
 import market_worker
 from paper_execution_accounting import install_paper_execution_accounting
 from paper_execution_reality import install_paper_execution_reality
+from paper_fee_policy import install_fee_aware_fifo_policy
 from portfolio_valuation import install_closed_market_valuation_pulse
 from stock_execution_repair import install_stock_execution_quote_repair
 from structured_logging import configure_structured_logging
@@ -14,6 +15,7 @@ install_stock_execution_quote_repair(market_worker)
 if os.getenv("EXECUTION_MODE", "paper").strip().lower() == "paper":
     install_paper_execution_reality(market_worker)
     install_paper_execution_accounting(market_worker)
+    install_fee_aware_fifo_policy()
 
 if __name__ == "__main__":
     market_worker.run_worker("cash")
