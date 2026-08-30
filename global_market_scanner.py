@@ -12,6 +12,7 @@ from datetime import datetime, timedelta, timezone
 import json
 import logging
 import os
+import re
 from typing import Any
 
 import pandas as pd
@@ -107,6 +108,20 @@ QUALIFIED_PENNY_EXCHANGES = {
 EXCHANGES: dict[str, dict[str, str]] = {
     "US": {"region": "North America", "suffix": ""},
 }
+
+_SUPPORTED_EQUITY_SYMBOL = re.compile(r"^[A-Z][A-Z0-9.-]{0,14}$")
+_NON_COMMON_SECURITY_TERMS = ("warrant", "rights", "unit", "preferred")
+
+
+def supported_common_equity_candidate(symbol: str, *, name: str = "", security_type: str = "") -> bool:
+    """Reject provider-discovery instruments the paper engine cannot price safely."""
+    normalized = normalize_symbol(symbol)
+    descriptor = f"{name} {security_type}".lower()
+    if not _SUPPORTED_EQUITY_SYMBOL.fullmatch(normalized):
+        return False
+    if any(term in descriptor for term in _NON_COMMON_SECURITY_TERMS):
+        return False
+    return not normalized.endswith((".WS", ".WT", ".W", "-WS", "-WT"))
 
 
 @dataclass
@@ -248,7 +263,11 @@ def _load_universe() -> list[dict[str, str]]:
                 continue
             for item in matches[:15]:
                 symbol = normalize_symbol(item.get("symbol"))
-                if not symbol or len(symbol) > 24:
+                if not supported_common_equity_candidate(
+                    symbol,
+                    name=str(item.get("name") or ""),
+                    security_type=str(item.get("type") or ""),
+                ):
                     continue
                 if not is_in_market_scope(symbol, exchange=item.get("region"), region=item.get("region")):
                     continue
@@ -271,7 +290,11 @@ def _load_universe() -> list[dict[str, str]]:
             if item_type and not any(token in item_type for token in ("common", "stock", "ordinary")):
                 continue
             symbol = _to_yahoo_symbol(item.get("Code") or item.get("code"), exchange)
-            if not symbol or len(symbol) > 24:
+            if not supported_common_equity_candidate(
+                symbol,
+                name=str(item.get("Name") or item.get("name") or ""),
+                security_type=item_type,
+            ):
                 continue
             if not is_in_market_scope(symbol, exchange=exchange, region=meta["region"]):
                 continue
