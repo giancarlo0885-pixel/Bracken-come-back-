@@ -31,11 +31,12 @@ def _live_execution_mode() -> bool:
 
 
 def _paper_yahoo_reference(quote: dict[str, Any]) -> bool:
-    provider = str(quote.get("provider") or "").strip().lower()
-    basis = str(quote.get("verification_basis") or "").strip().lower()
-    return provider == "yahoo finance" and (
-        quote.get("paper_reference_verified") is True or basis.startswith("paper:")
-    )
+    # The execution normalizer intentionally emits a compact quote payload and
+    # may omit internal paper-reference flags. In provider_router Yahoo is never
+    # a provider-verified execution source; it becomes execution-eligible only
+    # through the explicit paper fallback. Therefore provider identity alone is
+    # the durable boundary here.
+    return str(quote.get("provider") or "").strip().lower() == "yahoo finance"
 
 
 def _coinbase_quote(symbol: str) -> tuple[dict[str, Any] | None, str | None]:
