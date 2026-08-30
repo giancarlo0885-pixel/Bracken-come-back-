@@ -5,10 +5,10 @@ from pathlib import Path
 
 import paper_broker
 from paper_execution_accounting import (
-    _fee_aware_fifo_close_lots,
     _fill_capacity,
     _simulate_fill_explicit_fee,
 )
+from paper_fee_policy import fee_aware_fifo_close_lots
 from profit_attribution import PositionLot
 
 
@@ -49,7 +49,7 @@ def test_fifo_return_includes_entry_and_exit_fees_without_double_counting_ledger
         entry_price=100.0,
         entry_fees=2.0,
     )
-    rows = _fee_aware_fifo_close_lots(
+    rows = fee_aware_fifo_close_lots(
         [lot],
         quantity=10.0,
         exit_price=110.0,
