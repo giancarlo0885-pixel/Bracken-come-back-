@@ -11,7 +11,7 @@ def main() -> None:
         "-m",
         "streamlit",
         "run",
-        "app.py",
+        "app_runtime.py",
         "--server.address=0.0.0.0",
         f"--server.port={port}",
         "--server.headless=true",
