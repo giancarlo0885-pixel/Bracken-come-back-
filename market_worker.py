@@ -56,7 +56,7 @@ from database import (
 from execution_policy import execution_policy
 from engine import analyze_market
 from forecasting import forecast_price
-from global_market_scanner import active_global_watchlist
+from global_market_scanner import active_global_watchlist, supported_common_equity_candidate
 from global_pit_engine import _execution_quote_eligible, build_global_universe, persist_global_pit_state, rank_global_opportunities
 from global_adaptive_engine import (
     adaptive_portfolio_optimizer,
@@ -933,9 +933,13 @@ def _latest_ranked_symbols(market: str, limit: int) -> list[str]:
                 SELECT DISTINCT ON (symbol) symbol, opportunity_score, created_at
                 FROM opportunity_rankings
                 WHERE market = %s
+                  AND symbol NOT IN (
+                      SELECT symbol FROM invalid_symbol_quarantine
+                      WHERE retry_after > %s
+                  )
                 ORDER BY symbol, created_at DESC
                 """,
-                (market,),
+                (market, utc_now()),
             ).fetchall()
         records = sorted(
             records,
@@ -946,6 +950,20 @@ def _latest_ranked_symbols(market: str, limit: int) -> list[str]:
     except Exception as exc:
         log.debug("%s fast ranking lookup unavailable: %s", market, exc)
         return []
+
+
+def _active_quarantined_symbols() -> set[str]:
+    """Return symbols that must not reach a market-data provider yet."""
+    try:
+        with connect() as conn:
+            records = conn.execute(
+                "SELECT DISTINCT symbol FROM invalid_symbol_quarantine WHERE retry_after > %s",
+                (utc_now(),),
+            ).fetchall()
+        return {str(item.get("symbol") or "").upper() for item in records if item.get("symbol")}
+    except Exception as exc:
+        log.debug("Invalid-symbol quarantine lookup unavailable: %s", exc)
+        return set()
 
 
 def _fast_candidate_batch(market: str) -> list[tuple[str, str]]:
@@ -1111,6 +1129,17 @@ def scan_market(market: str) -> list[Any]:
         if global_movers:
             watchlist.update(global_movers)
             log.info("Worldwide scanner promoted %s movers.", len(global_movers))
+
+    quarantined = _active_quarantined_symbols()
+    watchlist = {
+        symbol: name for symbol, name in watchlist.items()
+        if symbol.upper() not in quarantined
+        and (
+            market != "cash"
+            or symbol in WATCHLISTS[market]
+            or supported_common_equity_candidate(symbol, name=name)
+        )
+    }
 
     preliminary: list[tuple[Any, str]] = []
     histories: dict[str, Any] = {}

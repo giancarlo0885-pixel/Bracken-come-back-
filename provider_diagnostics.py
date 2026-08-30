@@ -210,6 +210,24 @@ def provider_diagnostics(*, force: bool = False) -> list[dict[str, Any]]:
                     "cooldown_remaining_seconds": item["cooldown_remaining_seconds"],
                 }
             )
+    try:
+        from database import connect
+
+        with connect() as conn:
+            runtime_rows = conn.execute(
+                """SELECT provider,configured,status,latency_ms,message,checked_at
+                   FROM provider_health ORDER BY checked_at DESC"""
+            ).fetchall()
+        runtime_by_provider = {str(item.get("provider")): dict(item) for item in runtime_rows}
+        if runtime_by_provider:
+            records = [
+                runtime_by_provider.get(str(item.get("provider")), item)
+                for item in records
+            ]
+            known = {str(item.get("provider")) for item in records}
+            records.extend(item for key, item in runtime_by_provider.items() if key not in known)
+    except Exception:
+        pass
     return records
 
 

@@ -25,8 +25,9 @@ NEWSAPI_URL = "https://newsapi.org/v2/everything"
 GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.7-flash").strip() or "gemini-3.7-flash"
 GOOGLE_GROUNDED_INTELLIGENCE_ENABLED = os.getenv("GOOGLE_GROUNDED_INTELLIGENCE_ENABLED", "true").lower() == "true"
-GEMINI_MAX_REQUESTS_PER_12H = max(1, int(os.getenv("GEMINI_MAX_REQUESTS_PER_12H", "20")))
+GEMINI_MAX_REQUESTS_PER_12H = max(1, int(os.getenv("GEMINI_MAX_REQUESTS_PER_12H", "8")))
 GEMINI_RATE_LIMIT_COOLDOWN_SECONDS = max(60, int(os.getenv("GEMINI_RATE_LIMIT_COOLDOWN_SECONDS", "900")))
+GEMINI_MIN_REQUEST_INTERVAL_SECONDS = max(0, int(os.getenv("GEMINI_MIN_REQUEST_INTERVAL_SECONDS", "120")))
 GEMINI_TIMEOUT_SECONDS = max(5, min(60, int(os.getenv("GEMINI_TIMEOUT_SECONDS", "20"))))
 GEMINI_MAX_GROUNDED_SOURCES = max(3, min(12, int(os.getenv("GEMINI_MAX_GROUNDED_SOURCES", "8"))))
 
@@ -52,6 +53,7 @@ _gemini_window_started = time.time()
 _gemini_window_requests = 0
 _gemini_cooldown_until = 0.0
 _gemini_last_cooldown_log = 0.0
+_gemini_last_request_at = 0.0
 
 
 def _score(text: str) -> float:
@@ -116,7 +118,7 @@ def _budget_allows_request() -> bool:
 
 
 def _gemini_budget_allows_request() -> bool:
-    global _gemini_window_started, _gemini_window_requests
+    global _gemini_window_started, _gemini_window_requests, _gemini_last_request_at
     now = time.time()
     with _lock:
         if now < _gemini_cooldown_until:
@@ -126,8 +128,31 @@ def _gemini_budget_allows_request() -> bool:
             _gemini_window_requests = 0
         if _gemini_window_requests >= GEMINI_MAX_REQUESTS_PER_12H:
             return False
+        if now - _gemini_last_request_at < GEMINI_MIN_REQUEST_INTERVAL_SECONDS:
+            return False
         _gemini_window_requests += 1
+        _gemini_last_request_at = now
         return True
+
+
+def _record_gemini_health(status: str, message: str) -> None:
+    """Share worker-observed Gemini health with the web dashboard."""
+    try:
+        from database import connect, utc_now
+
+        with connect() as conn:
+            conn.execute(
+                """INSERT INTO provider_health(provider,configured,status,message,checked_at)
+                   VALUES ('GEMINI_API_KEY',TRUE,%s,%s,%s)
+                   ON CONFLICT(provider) DO UPDATE SET
+                       configured=EXCLUDED.configured,
+                       status=EXCLUDED.status,
+                       message=EXCLUDED.message,
+                       checked_at=EXCLUDED.checked_at""",
+                (status, str(message)[:260], utc_now()),
+            )
+    except Exception as exc:
+        log.debug("Could not persist Gemini health: %s", exc)
 
 
 def _activate_cooldown(reason: str) -> None:
@@ -148,6 +173,7 @@ def _activate_gemini_cooldown(reason: str) -> None:
         if now - _gemini_last_cooldown_log > 300:
             log.warning("Gemini grounded intelligence paused for %s seconds: %s", GEMINI_RATE_LIMIT_COOLDOWN_SECONDS, reason)
             _gemini_last_cooldown_log = now
+    _record_gemini_health("rate_limited", "Gemini quota is temporarily exhausted; news fallback remains active.")
 
 
 def provider_state() -> dict[str, float | int | bool | str]:
@@ -322,6 +348,7 @@ def get_news_sentiment(query: str, *, priority: bool = True) -> NewsResult:
     if GOOGLE_GROUNDED_INTELLIGENCE_ENABLED and gemini_key and _gemini_budget_allows_request():
         try:
             result = _fetch_gemini_grounded(clean, gemini_key)
+            _record_gemini_health("healthy", "Gemini grounded intelligence responded successfully.")
             set_value(key, result, NEWS_CACHE_TTL_SECONDS)
             log.info(
                 "News ready | provider=Google Gemini Grounded Search | query=%s | sources=%d",

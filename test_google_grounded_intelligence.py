@@ -103,3 +103,17 @@ def test_news_pipeline_skips_grounded_provider_without_key(monkeypatch):
 
     result = ni.get_news_sentiment("Example Corp EXM")
     assert result is expected
+
+
+def test_gemini_budget_enforces_minimum_spacing(monkeypatch):
+    monkeypatch.setattr(ni, "_gemini_window_started", 1_000.0)
+    monkeypatch.setattr(ni, "_gemini_window_requests", 0)
+    monkeypatch.setattr(ni, "_gemini_cooldown_until", 0.0)
+    monkeypatch.setattr(ni, "_gemini_last_request_at", 0.0)
+    monkeypatch.setattr(ni, "GEMINI_MIN_REQUEST_INTERVAL_SECONDS", 120)
+    monkeypatch.setattr(ni.time, "time", lambda: 2_000.0)
+
+    assert ni._gemini_budget_allows_request() is True
+    assert ni._gemini_budget_allows_request() is False
+    monkeypatch.setattr(ni.time, "time", lambda: 2_121.0)
+    assert ni._gemini_budget_allows_request() is True
