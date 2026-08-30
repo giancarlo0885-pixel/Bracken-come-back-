@@ -521,7 +521,14 @@ def balanced_portfolio_rows(positions: list[dict[str, Any]], equity: Any) -> lis
 
 def balanced_data_status(stocks_online: bool, crypto_online: bool, provider_rows: list[dict[str, Any]] | None = None) -> list[dict[str, str]]:
     provider_rows = provider_rows or []
-    limited = any(str(row.get("status") or row.get("severity") or "").lower() in {"limited", "degraded", "cooldown", "warning"} for row in provider_rows)
+    limited = any(
+        str(row.get("status") or row.get("severity") or "").lower()
+        in {
+            "limited", "degraded", "cooldown", "warning", "rate_limited",
+            "plan_limited", "capability_cooldown", "quota_exhausted",
+        }
+        for row in provider_rows
+    )
     return [
         {"Area": "STOCKS", "Status": "GREEN" if stocks_online else "RED"},
         {"Area": "CRYPTO", "Status": "GREEN" if crypto_online else "RED"},
