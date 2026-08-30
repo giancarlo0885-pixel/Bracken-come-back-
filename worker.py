@@ -8,7 +8,8 @@ from __future__ import annotations
 import logging
 import os
 
-from market_worker import run_worker
+import market_worker
+from portfolio_valuation import install_closed_market_valuation_pulse
 
 
 logging.basicConfig(
@@ -20,4 +21,6 @@ logging.basicConfig(
 if __name__ == "__main__":
     requested = os.getenv("WORKER_MARKET", "cash").strip().lower()
     market = "cash" if requested in {"cash", "stock", "stocks"} else "crypto"
-    run_worker(market)
+    if market == "cash":
+        install_closed_market_valuation_pulse(market_worker)
+    market_worker.run_worker(market)

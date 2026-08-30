@@ -178,3 +178,77 @@ def test_live_arming_gates_default_disarmed_and_no_secret_logging():
 def test_crypto_priority_weight_controls_analysis_not_capital():
     assert market_worker.analysis_priority_weight("crypto") == 0.70
     assert market_worker.analysis_priority_weight("cash") == 0.30
+
+
+def test_broker_market_reference_requires_symbol_spread_and_price_agreement():
+    good = rh.validate_broker_market_reference(
+        "BTC-USD",
+        100.05,
+        {"symbol": "BTC-USD", "bid": "99.90", "ask": "100.10"},
+        max_price_difference_pct="0.50",
+        max_spread_pct="0.50",
+    )
+    assert good["ok"] is True
+    assert good["reason"] == "BROKER_PRICE_CONFIRMED"
+
+    mismatch = rh.validate_broker_market_reference(
+        "BTC-USD",
+        100.0,
+        {"symbol": "ETH-USD", "bid": "99.90", "ask": "100.10"},
+    )
+    assert mismatch["reason"] == "BROKER_SYMBOL_MISMATCH"
+
+    divergence = rh.validate_broker_market_reference(
+        "BTC-USD",
+        105.0,
+        {"symbol": "BTC-USD", "bid": "99.90", "ask": "100.10"},
+        max_price_difference_pct="0.50",
+    )
+    assert divergence["reason"] == "BROKER_PRICE_DIVERGENCE"
+
+
+def test_robinhood_preflight_requires_account_buying_power_and_live_quote(monkeypatch):
+    class Client:
+        def configured(self):
+            return {"ok": True}
+
+        def trading_pairs(self):
+            return [
+                rh.parse_trading_pair(
+                    {
+                        "symbol": "BTC-USD",
+                        "status": "tradable",
+                        "is_api_tradable": True,
+                        "min_order_amount": "1",
+                        "max_order_size": "10",
+                    }
+                )
+            ]
+
+        def account_details(self):
+            return {"status": "active", "buying_power": "250.00", "buying_power_currency": "USD"}
+
+        def best_bid_ask_quotes(self, *symbols):
+            return [{"symbol": "BTC-USD", "bid": "99.90", "ask": "100.10"}]
+
+    monkeypatch.setattr(rh, "ENABLE_AUTOTRADE", True)
+    monkeypatch.setattr(rh, "ENABLE_CRYPTO_AUTOTRADE", True)
+    monkeypatch.setattr(rh, "ENABLE_BROKER_SUBMISSION", True)
+    monkeypatch.setattr(rh, "LIVE_TRADING_ARMED", True)
+    monkeypatch.setattr(rh, "GLOBAL_KILL_SWITCH", False)
+    monkeypatch.setattr(rh, "LIVE_ORDER_APPROVAL_MODE", "preauthorized")
+
+    result = rh.preflight(Client(), rh.OrderJournal())
+    assert result["ROBINHOOD AUTH"] == "PASS"
+    assert result["ACCOUNT STATUS"] == "PASS"
+    assert result["BUYING POWER CHECK"] == "PASS"
+    assert result["QUOTE CHECK"] == "PASS"
+    assert result["LIVE TRADING ARMED/DISARMED"] == "ARMED"
+
+    class NoBuyingPower(Client):
+        def account_details(self):
+            return {"status": "active", "buying_power": "0", "buying_power_currency": "USD"}
+
+    blocked = rh.preflight(NoBuyingPower(), rh.OrderJournal())
+    assert blocked["BUYING POWER CHECK"] == "FAIL"
+    assert blocked["LIVE TRADING ARMED/DISARMED"] == "DISARMED"

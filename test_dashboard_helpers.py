@@ -159,6 +159,7 @@ def test_unknown_freshness_never_displays_live():
     assert status["label"] == "FRESHNESS UNKNOWN"
     assert status["blocks_execution"] is True
 
+
 def test_trade_eligible_never_substitutes_for_quote_verification():
     status = live_data_status({"trade_eligible": True, "quote_age_seconds": 5})
 
@@ -363,18 +364,55 @@ def test_balanced_top_opportunity_table_output_is_compact():
         limit=2,
     )
 
-    assert rows[0] == {
-        "Action": "GREEN BUY",
-        "Symbol": "SEA",
-        "Price": "$19.79",
-        "Target": "$20.72",
-        "Possible Gain %": "+4.7%",
-        "Confidence": "82%",
-        "Risk": "Medium",
-        "Data Age": "8 sec",
-    }
-    assert rows[1]["Action"] == "YELLOW HOLD"
-    assert rows[1]["Data Age"] == "Old"
+    assert rows == [
+        {
+            "Action": "GREEN BUY",
+            "Symbol": "SEA",
+            "Price": "$19.79",
+            "Target": "$20.72",
+            "Possible Gain %": "+4.7%",
+            "Confidence": "82%",
+            "Risk": "Medium",
+            "Data Age": "8 sec",
+            "section": "primary",
+            "visible": True,
+            "is_diagnostic": False,
+        }
+    ]
+
+
+def test_balanced_opportunity_rows_tags_rejections_as_diagnostics_when_unhidden():
+    rows = balanced_opportunity_rows(
+        [
+            {"symbol": "BUY_ME", "action": "BUY", "price": 20, "target": 25, "confidence": 90, "risk": "LOW", "trade_eligible": True, "quote_verified": True, "quote_age_seconds": 5},
+            {"symbol": "WAIT_ME", "action": "WAIT", "price": 15, "target": 15, "confidence": 50, "risk": "MEDIUM", "trade_eligible": False},
+        ],
+        hide_rejected=False,
+    )
+
+    green = rows[0]
+    wait = rows[1]
+
+    assert green.get("section") == "primary"
+    assert wait.get("section") == "diagnostics"
+    assert wait.get("visible") is False
+    assert wait.get("is_diagnostic") is True
+
+
+def test_balanced_opportunity_rows_hides_rejections_and_can_return_them():
+    visible, hidden = balanced_opportunity_rows(
+        [
+            {"symbol": "WAIT_ME", "action": "WAIT", "price": 15, "target": 15, "confidence": 50, "risk": "MEDIUM", "trade_eligible": False},
+            {"symbol": "BUY_ME", "action": "BUY", "price": 20, "target": 25, "confidence": 90, "risk": "LOW", "trade_eligible": True, "quote_verified": True, "quote_age_seconds": 5},
+        ],
+        limit=1,
+        return_hidden=True,
+    )
+
+    assert [row["Symbol"] for row in visible] == ["BUY_ME"]
+    assert [row["Symbol"] for row in hidden] == ["WAIT_ME"]
+    assert hidden[0]["section"] == "diagnostics"
+    assert hidden[0]["visible"] is False
 
 
 def test_balanced_portfolio_table_rows_show_status_without_raw_quantity():

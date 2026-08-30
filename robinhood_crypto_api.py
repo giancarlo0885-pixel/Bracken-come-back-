@@ -9,6 +9,7 @@ import re
 import time
 import uuid
 from typing import Any, Callable
+from urllib.parse import urlencode
 
 import requests
 
@@ -40,6 +41,8 @@ ORDER_STATES = {
     "UNKNOWN_RECONCILE_REQUIRED",
 }
 SECRET_KEYS = {"api_key", "private_key", "signature", "authorization", "x-api-key", "x-signature"}
+DEFAULT_BROKER_PRICE_TOLERANCE_PCT = Decimal("0.75")
+DEFAULT_BROKER_MAX_SPREAD_PCT = Decimal("1.50")
 
 
 def _redact(value: Any) -> str:
@@ -47,7 +50,11 @@ def _redact(value: Any) -> str:
     for secret in (ROBINHOOD_CRYPTO_API_KEY, ROBINHOOD_CRYPTO_PRIVATE_KEY_BASE64):
         if secret:
             text = text.replace(secret, "[REDACTED]")
-    text = re.sub(r"(?i)(api[_-]?key|apikey|private[_-]?key|signature|authorization|x-api-key|x-signature)=([^&\s]+)", r"\1=[REDACTED]", text)
+    text = re.sub(
+        r"(?i)(api[_-]?key|apikey|private[_-]?key|signature|authorization|x-api-key|x-signature)=([^&\s]+)",
+        r"\1=[REDACTED]",
+        text,
+    )
     return text
 
 
@@ -63,7 +70,11 @@ def signing_message(api_key: str, timestamp: str, path: str, method: str, body: 
     return f"{api_key}{timestamp}{path}{method.upper()}{_json_body(body)}".encode("utf-8")
 
 
-def sign_message(private_key_base64: str, message: bytes, signer: Callable[[bytes, bytes], bytes] | None = None) -> str:
+def sign_message(
+    private_key_base64: str,
+    message: bytes,
+    signer: Callable[[bytes, bytes], bytes] | None = None,
+) -> str:
     try:
         private_key = base64.b64decode(private_key_base64, validate=True)
     except Exception as exc:
@@ -81,7 +92,16 @@ def sign_message(private_key_base64: str, message: bytes, signer: Callable[[byte
     return base64.b64encode(signature).decode("ascii")
 
 
-def signed_headers(api_key: str, private_key_base64: str, path: str, method: str, body: Any = "", *, now: float | None = None, signer: Callable[[bytes, bytes], bytes] | None = None) -> dict[str, str]:
+def signed_headers(
+    api_key: str,
+    private_key_base64: str,
+    path: str,
+    method: str,
+    body: Any = "",
+    *,
+    now: float | None = None,
+    signer: Callable[[bytes, bytes], bytes] | None = None,
+) -> dict[str, str]:
     timestamp = str(int(now if now is not None else time.time()))
     message = signing_message(api_key, timestamp, path, method, body)
     return {
@@ -118,7 +138,7 @@ def parse_trading_pair(raw: dict[str, Any]) -> dict[str, Any]:
         "is_api_tradable": is_api_tradable,
         "asset_increment": str(raw.get("asset_increment") or "0.00000001"),
         "quote_increment": str(raw.get("quote_increment") or "0.01"),
-        "min_order_amount": Decimal(str(raw.get("min_order_amount") or "0")),
+        "min_order_amount": Decimal(str(raw.get("min_order_amount") or raw.get("min_order_size") or "0")),
         "max_order_size": Decimal(str(raw.get("max_order_size") or "0")),
         "raw": raw,
         "tradable": bool(symbol and status in {"tradable", "active"} and is_api_tradable),
@@ -136,6 +156,65 @@ def best_bid_ask(quote: dict[str, Any]) -> dict[str, Decimal] | None:
     mid = (bid + ask) / Decimal("2")
     spread_pct = ((ask - bid) / mid) * Decimal("100") if mid > 0 else Decimal("100")
     return {"bid": bid, "ask": ask, "mid": mid, "spread_pct": spread_pct}
+
+
+def validate_broker_market_reference(
+    symbol: str,
+    oracle_price: Any,
+    quote: dict[str, Any],
+    *,
+    max_price_difference_pct: Any = DEFAULT_BROKER_PRICE_TOLERANCE_PCT,
+    max_spread_pct: Any = DEFAULT_BROKER_MAX_SPREAD_PCT,
+) -> dict[str, Any]:
+    """Fail closed when the Oracle mark disagrees with Robinhood's executable market.
+
+    This is a read-only pre-trade integrity gate. It does not submit an order.
+    """
+    requested = str(symbol or "").upper().strip()
+    quote_symbol = str(quote.get("symbol") or "").upper().strip()
+    if not requested or quote_symbol != requested:
+        return {"ok": False, "reason": "BROKER_SYMBOL_MISMATCH"}
+
+    book = best_bid_ask(quote)
+    if book is None:
+        return {"ok": False, "reason": "BROKER_QUOTE_INVALID"}
+
+    try:
+        reference = Decimal(str(oracle_price))
+        price_tolerance = Decimal(str(max_price_difference_pct))
+        spread_limit = Decimal(str(max_spread_pct))
+    except Exception:
+        return {"ok": False, "reason": "BROKER_REFERENCE_INVALID"}
+
+    if reference <= 0 or price_tolerance < 0 or spread_limit < 0:
+        return {"ok": False, "reason": "BROKER_REFERENCE_INVALID"}
+
+    difference_pct = abs(book["mid"] - reference) / book["mid"] * Decimal("100")
+    if book["spread_pct"] > spread_limit:
+        return {
+            "ok": False,
+            "reason": "BROKER_SPREAD_TOO_WIDE",
+            "difference_pct": float(difference_pct),
+            "spread_pct": float(book["spread_pct"]),
+            "broker_mid": float(book["mid"]),
+        }
+    if difference_pct > price_tolerance:
+        return {
+            "ok": False,
+            "reason": "BROKER_PRICE_DIVERGENCE",
+            "difference_pct": float(difference_pct),
+            "spread_pct": float(book["spread_pct"]),
+            "broker_mid": float(book["mid"]),
+        }
+    return {
+        "ok": True,
+        "reason": "BROKER_PRICE_CONFIRMED",
+        "difference_pct": float(difference_pct),
+        "spread_pct": float(book["spread_pct"]),
+        "broker_mid": float(book["mid"]),
+        "bid": float(book["bid"]),
+        "ask": float(book["ask"]),
+    }
 
 
 def validate_order_amount(pair: dict[str, Any], amount: Any, quantity: Any | None = None) -> dict[str, Any]:
@@ -213,13 +292,18 @@ def mark_submit_timeout(journal: OrderJournal, client_order_id: str) -> dict[str
     return journal.transition(client_order_id, "UNKNOWN_RECONCILE_REQUIRED", reason="submit timeout; reconcile before retry")
 
 
-def reconcile_unfinished_orders(journal: OrderJournal, lookup: Callable[[str], dict[str, Any] | None]) -> list[dict[str, Any]]:
+def reconcile_unfinished_orders(
+    journal: OrderJournal,
+    lookup: Callable[[str], dict[str, Any] | None],
+) -> list[dict[str, Any]]:
     reconciled = []
     for record in journal.unfinished():
         client_order_id = str(record.get("client_order_id") or "")
         remote = lookup(client_order_id)
         if not remote:
-            reconciled.append(journal.transition(client_order_id, "UNKNOWN_RECONCILE_REQUIRED", reason="remote order not found"))
+            reconciled.append(
+                journal.transition(client_order_id, "UNKNOWN_RECONCILE_REQUIRED", reason="remote order not found")
+            )
             continue
         remote_state = str(remote.get("state") or remote.get("status") or "").upper()
         state = remote_state if remote_state in ORDER_STATES else "UNKNOWN_RECONCILE_REQUIRED"
@@ -259,16 +343,62 @@ class RobinhoodCryptoClient:
         payload = _json_body(body)
         headers = signed_headers(self.api_key, self.private_key_base64, path, method, payload, signer=self.signer)
         try:
-            response = self.session.request(method.upper(), f"{self.base_url}{path}", data=payload or None, headers=headers, timeout=15)
+            response = self.session.request(
+                method.upper(),
+                f"{self.base_url}{path}",
+                data=payload or None,
+                headers=headers,
+                timeout=15,
+            )
             response.raise_for_status()
             return response.json()
         except Exception as exc:
             raise RuntimeError(_redact(exc)) from exc
 
     def trading_pairs(self) -> list[dict[str, Any]]:
-        data = self.request("GET", "/api/v2/crypto/trading_pairs/")
+        data = self.request("GET", "/api/v2/crypto/trading/trading_pairs/")
         records = data.get("results", data) if isinstance(data, dict) else data
         return [parse_trading_pair(item) for item in (records or []) if isinstance(item, dict)]
+
+    def account_details(self) -> dict[str, Any]:
+        data = self.request("GET", "/api/v1/crypto/trading/accounts/")
+        if isinstance(data, dict):
+            records = data.get("results")
+            if isinstance(records, list):
+                return records[0] if records else {}
+            return data
+        if isinstance(data, list):
+            return data[0] if data else {}
+        return {}
+
+    def best_bid_ask_quotes(self, *symbols: str) -> list[dict[str, Any]]:
+        normalized = [str(symbol or "").upper().strip() for symbol in symbols if str(symbol or "").strip()]
+        query = urlencode([("symbol", symbol) for symbol in normalized])
+        path = "/api/v2/crypto/marketdata/best_bid_ask/"
+        if query:
+            path = f"{path}?{query}"
+        data = self.request("GET", path)
+        records = data.get("results", data) if isinstance(data, dict) else data
+        return [item for item in (records or []) if isinstance(item, dict)]
+
+    def estimated_price(self, symbol: str, side: str, quantity: Any) -> list[dict[str, Any]]:
+        params = [
+            ("symbol", str(symbol or "").upper().strip()),
+            ("side", str(side or "").lower().strip()),
+            ("quantity", str(quantity)),
+        ]
+        path = f"/api/v2/crypto/trading/estimated_price/?{urlencode(params)}"
+        data = self.request("GET", path)
+        records = data.get("results", data) if isinstance(data, dict) else data
+        return [item for item in (records or []) if isinstance(item, dict)]
+
+
+def _buying_power_ok(account: dict[str, Any]) -> bool:
+    try:
+        value = Decimal(str(account.get("buying_power") or "0"))
+    except Exception:
+        return False
+    return value > 0
 
 
 def preflight(client: RobinhoodCryptoClient | None = None, journal: OrderJournal | None = None) -> dict[str, Any]:
@@ -290,13 +420,47 @@ def preflight(client: RobinhoodCryptoClient | None = None, journal: OrderJournal
     }
     if not configured["ok"]:
         return result
+
     try:
         pairs = client.trading_pairs()
+        tradable_pairs = [pair for pair in pairs if pair["tradable"]]
         result["ROBINHOOD AUTH"] = "PASS"
-        result["CRYPTO STATUS"] = "PASS"
-        result["TRADABLE PAIR COUNT"] = len([pair for pair in pairs if pair["tradable"]])
+        result["CRYPTO STATUS"] = "PASS" if tradable_pairs else "FAIL"
+        result["TRADABLE PAIR COUNT"] = len(tradable_pairs)
+
+        account = client.account_details()
+        account_status = str(account.get("status") or "").lower()
+        result["ACCOUNT STATUS"] = "PASS" if account_status == "active" else "FAIL"
+        result["BUYING POWER CHECK"] = "PASS" if _buying_power_ok(account) else "FAIL"
+
+        if tradable_pairs:
+            preferred = next((pair for pair in tradable_pairs if pair["symbol"] == "BTC-USD"), tradable_pairs[0])
+            quotes = client.best_bid_ask_quotes(preferred["symbol"])
+            quote = next(
+                (
+                    item
+                    for item in quotes
+                    if str(item.get("symbol") or "").upper().strip() == preferred["symbol"]
+                ),
+                None,
+            )
+            result["QUOTE CHECK"] = "PASS" if quote and best_bid_ask(quote) is not None else "FAIL"
+        else:
+            result["QUOTE CHECK"] = "FAIL"
     except Exception as exc:
         result["ROBINHOOD AUTH"] = "FAIL"
         result["reason"] = _redact(exc)
-    result["LIVE TRADING ARMED/DISARMED"] = "ARMED" if live_arming_status(result["ROBINHOOD AUTH"] == "PASS")["armed"] else "DISARMED"
+
+    preflight_passed = all(
+        result[key] == "PASS"
+        for key in (
+            "ROBINHOOD AUTH",
+            "ACCOUNT STATUS",
+            "CRYPTO STATUS",
+            "QUOTE CHECK",
+            "BUYING POWER CHECK",
+            "ORDER JOURNAL",
+        )
+    )
+    result["LIVE TRADING ARMED/DISARMED"] = "ARMED" if live_arming_status(preflight_passed)["armed"] else "DISARMED"
     return result

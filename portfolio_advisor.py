@@ -81,6 +81,8 @@ def analyze_portfolio(
 
     risk = "Low" if health >= 82 and margin_utilization_pct < 55 else "Moderate" if health >= 65 and margin_utilization_pct < 75 else "High"
     issues: list[str] = []
+    if invested <= 0 or count == 0:
+        issues.append("no capital is currently deployed")
     if cash_pct < 2 and leverage_limit <= 1.0:
         issues.append("cash is very low")
     elif cash_pct > 40 and invested > 0:
