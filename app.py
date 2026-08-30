@@ -839,7 +839,9 @@ elif page == "Crypto":
             st.info("No provider limitations are currently reported.")
 
 elif page == "Dashboard":
-    top = buy_decisions[0] if buy_decisions else (decisions[0] if decisions else None)
+    # The headline must never promote stale or unverified data. Ready decisions
+    # may include HOLD/SELL risk actions, but all have passed the same quote gate.
+    top = buy_decisions[0] if buy_decisions else (ready_decisions[0] if ready_decisions else None)
     stock_scores = simple_portfolio_scores(stock_metrics, stock_positions, len([d for d in buy_decisions if d.get("market") == "cash"]))
     crypto_scores = simple_portfolio_scores(crypto_metrics, crypto_positions, len([d for d in buy_decisions if d.get("market") == "crypto"]))
     combined_metrics = {
@@ -881,7 +883,7 @@ elif page == "Dashboard":
         st.info("Oracle right now: WAITING FOR BETTER SETUPS. No investment has passed every safety check yet.")
 
     st.markdown("<div class='section-title'>TOP OPPORTUNITIES</div>", unsafe_allow_html=True)
-    table_decisions = buy_decisions[:10] if buy_decisions else decisions[:10]
+    table_decisions = buy_decisions[:10] if buy_decisions else ready_decisions[:10]
     if table_decisions:
         opportunity_rows = pd.DataFrame(balanced_opportunity_rows(table_decisions, limit=10))
 

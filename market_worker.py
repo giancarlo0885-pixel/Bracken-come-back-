@@ -933,9 +933,13 @@ def _latest_ranked_symbols(market: str, limit: int) -> list[str]:
                 SELECT DISTINCT ON (symbol) symbol, opportunity_score, created_at
                 FROM opportunity_rankings
                 WHERE market = %s
+                  AND symbol NOT IN (
+                      SELECT symbol FROM invalid_symbol_quarantine
+                      WHERE retry_after > %s
+                  )
                 ORDER BY symbol, created_at DESC
                 """,
-                (market,),
+                (market, utc_now()),
             ).fetchall()
         records = sorted(
             records,
