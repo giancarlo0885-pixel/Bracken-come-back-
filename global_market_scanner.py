@@ -121,6 +121,10 @@ def supported_common_equity_candidate(symbol: str, *, name: str = "", security_t
         return False
     if any(term in descriptor for term in _NON_COMMON_SECURITY_TERMS):
         return False
+    # Provider feeds commonly encode warrants as a five-or-more character
+    # ticker ending in W, even when a cached descriptor is incomplete.
+    if len(normalized) >= 5 and normalized.endswith("W"):
+        return False
     return not normalized.endswith((".WS", ".WT", ".W", "-WS", "-WT"))
 
 
@@ -309,7 +313,15 @@ def _load_universe() -> list[dict[str, str]]:
 
 
 def global_universe() -> list[dict[str, str]]:
-    return cached_call("global_equity_universe", GLOBAL_UNIVERSE_TTL_SECONDS, _load_universe)
+    universe = cached_call("global_equity_universe", GLOBAL_UNIVERSE_TTL_SECONDS, _load_universe)
+    return [
+        item for item in universe
+        if supported_common_equity_candidate(
+            str(item.get("symbol") or ""),
+            name=str(item.get("name") or ""),
+            security_type=str(item.get("type") or item.get("security_type") or ""),
+        )
+    ]
 
 
 def _now_iso() -> str:
@@ -875,7 +887,14 @@ def scan_global_markets() -> list[dict[str, Any]]:
     etf_meta = [x for x in universe if x.get("symbol") in ETF_SEEDS][:GLOBAL_ETF_SYMBOLS_PER_CYCLE]
     rotating_count = max(1, GLOBAL_SCAN_SYMBOLS_PER_CYCLE - len(seed_meta) - len(core_meta) - len(etf_meta))
     rotating = [universe[(cursor + i) % len(universe)] for i in range(rotating_count)]
-    batch = merge_candidate_metadata(seed_meta + core_meta + etf_meta + rotating + discovered_meta)
+    batch = [
+        item for item in merge_candidate_metadata(seed_meta + core_meta + etf_meta + rotating + discovered_meta)
+        if supported_common_equity_candidate(
+            str(item.get("symbol") or ""),
+            name=str(item.get("name") or ""),
+            security_type=str(item.get("type") or item.get("security_type") or ""),
+        )
+    ]
     found: list[GlobalCandidate] = []
     for meta in batch:
         try:
@@ -948,7 +967,15 @@ def scan_global_markets() -> list[dict[str, Any]]:
 def active_global_watchlist() -> dict[str, str]:
     try:
         candidates = scan_global_markets()
-        return {str(x["symbol"]): str(x.get("name") or x["symbol"]) for x in candidates}
+        return {
+            str(x["symbol"]): str(x.get("name") or x["symbol"])
+            for x in candidates
+            if supported_common_equity_candidate(
+                str(x.get("symbol") or ""),
+                name=str(x.get("name") or ""),
+                security_type=str(x.get("type") or x.get("security_type") or ""),
+            )
+        }
     except Exception as exc:
         log.exception("U.S./crypto scan failed: %s", exc)
         return {}
