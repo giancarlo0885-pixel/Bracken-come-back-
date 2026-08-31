@@ -148,6 +148,35 @@ def test_v2_trading_pair_parsing_and_order_limits():
     assert rh.validate_order_amount(pair, "10.00", quantity="1")["ok"] is True
 
 
+def test_robinhood_read_only_methods_use_documented_v2_paths(monkeypatch):
+    client = rh.RobinhoodCryptoClient(api_key="unit", private_key_base64="unit")
+    calls = []
+
+    def request(method, path, body=None):
+        calls.append((method, path))
+        if path == "/api/v2/crypto/trading/accounts/":
+            return {"results": [{"account_number": "acct", "status": "active", "buying_power": "1", "buying_power_currency": "USD"}]}
+        return {"results": []}
+
+    monkeypatch.setattr(client, "request", request)
+    assert client.account_details()["account_number"] == "acct"
+    assert client.holdings("acct") == []
+    assert client.orders("acct") == []
+    assert calls == [
+        ("GET", "/api/v2/crypto/trading/accounts/"),
+        ("GET", "/api/v2/crypto/trading/holdings/?account_number=acct"),
+        ("GET", "/api/v2/crypto/trading/orders/?account_number=acct"),
+    ]
+
+
+def test_buying_power_state_distinguishes_zero_missing_invalid_and_positive():
+    assert rh.buying_power_state({"buying_power": "10.50"}) == "POSITIVE"
+    assert rh.buying_power_state({"buying_power": "0"}) == "ZERO"
+    assert rh.buying_power_state({}) == "MISSING"
+    assert rh.buying_power_state({"buying_power": "not-a-number"}) == "INVALID"
+    assert rh.buying_power_state({"buying_power": "-1"}) == "INVALID"
+
+
 def test_best_bid_ask_estimated_price_spread_and_slippage_inputs():
     quote = rh.best_bid_ask({"bid_price": "99.00", "ask_price": "101.00"})
     assert quote is not None
@@ -207,7 +236,7 @@ def test_broker_market_reference_requires_symbol_spread_and_price_agreement():
     assert divergence["reason"] == "BROKER_PRICE_DIVERGENCE"
 
 
-def test_robinhood_preflight_requires_account_buying_power_and_live_quote(monkeypatch):
+def test_robinhood_preflight_requires_account_buying_power_visibility_and_live_quote(monkeypatch):
     class Client:
         def configured(self):
             return {"ok": True}
@@ -226,7 +255,15 @@ def test_robinhood_preflight_requires_account_buying_power_and_live_quote(monkey
             ]
 
         def account_details(self):
-            return {"status": "active", "buying_power": "250.00", "buying_power_currency": "USD"}
+            return {"account_number": "acct", "status": "active", "buying_power": "250.00", "buying_power_currency": "USD"}
+
+        def holdings(self, account_number):
+            assert account_number == "acct"
+            return []
+
+        def orders(self, account_number):
+            assert account_number == "acct"
+            return []
 
         def best_bid_ask_quotes(self, *symbols):
             return [{"symbol": "BTC-USD", "bid": "99.90", "ask": "100.10"}]
@@ -242,13 +279,18 @@ def test_robinhood_preflight_requires_account_buying_power_and_live_quote(monkey
     assert result["ROBINHOOD AUTH"] == "PASS"
     assert result["ACCOUNT STATUS"] == "PASS"
     assert result["BUYING POWER CHECK"] == "PASS"
+    assert result["BUYING POWER STATE"] == "POSITIVE"
+    assert result["BUYING POWER CURRENCY"] == "USD"
+    assert result["HOLDINGS CHECK"] == "PASS"
+    assert result["ORDERS CHECK"] == "PASS"
     assert result["QUOTE CHECK"] == "PASS"
     assert result["LIVE TRADING ARMED/DISARMED"] == "ARMED"
 
     class NoBuyingPower(Client):
         def account_details(self):
-            return {"status": "active", "buying_power": "0", "buying_power_currency": "USD"}
+            return {"account_number": "acct", "status": "active", "buying_power": "0", "buying_power_currency": "USD"}
 
     blocked = rh.preflight(NoBuyingPower(), rh.OrderJournal())
     assert blocked["BUYING POWER CHECK"] == "FAIL"
+    assert blocked["BUYING POWER STATE"] == "ZERO"
     assert blocked["LIVE TRADING ARMED/DISARMED"] == "DISARMED"
