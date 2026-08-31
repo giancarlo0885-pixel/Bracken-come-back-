@@ -6,6 +6,7 @@ from typing import Any
 
 from quant_trade_standard import QuantTradeAssessment, assess_trade
 from market_memory import assess_market_memory, feature_vector, load_trade_memory
+from crypto_history_memory import crypto_history_context
 from scenario_engine import assess_scenarios
 from capital_allocator import assess_capital_allocation
 from global_intelligence import assess_global_intelligence
@@ -44,6 +45,7 @@ class OracleDecision:
     risk_reward_ratio: float
     quant: dict[str, Any]
     memory: dict[str, Any]
+    crypto_history: dict[str, Any]
     scenario: dict[str, Any]
     capital: dict[str, Any]
     global_intelligence: dict[str, Any]
@@ -89,6 +91,9 @@ def evaluate_opportunity(
     if use_market_memory and records is None:
         records = load_trade_memory(market, symbol)
     memory = assess_market_memory(signal, records) if use_market_memory else assess_market_memory(signal, [])
+    # Historical crypto knowledge is reasoning context only. It deliberately
+    # contributes no score, probability, sizing, veto, or execution authority.
+    crypto_history = crypto_history_context(signal, market=market)
     base_quality = assessment.trade_quality
     global_intelligence = assess_global_intelligence(signal, global_context, market=market)
     radar = assess_opportunity_radar(signal, market=market)
@@ -227,6 +232,7 @@ def evaluate_opportunity(
         risk_reward_ratio=round(rr, 2),
         quant={**assessment.to_dict(), "approved": bool(assessment.approved and memory_approved and scenario_approved and global_approved and radar_approved)},
         memory=memory.to_dict(),
+        crypto_history=crypto_history,
         scenario=scenario.to_dict(),
         capital=capital.to_dict(),
         global_intelligence=global_intelligence.to_dict(),
