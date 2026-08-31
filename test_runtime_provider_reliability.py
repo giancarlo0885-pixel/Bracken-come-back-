@@ -99,16 +99,21 @@ def test_successful_yahoo_reference_preserves_exact_identity_and_clears_cooldown
     assert reliability._cooldown_active(key) is False
 
 
-def test_yahoo_provider_name_alone_is_not_paper_execution_proof():
+def test_yahoo_provider_name_without_execution_eligibility_is_not_consensus_candidate():
+    quote = {"provider": "Yahoo Finance", "price": 100.0}
+    assert crypto_guard._paper_yahoo_reference(quote) is False
+
+
+def test_legacy_yahoo_execution_candidate_is_always_sent_to_consensus():
     quote = {
         "provider": "Yahoo Finance",
         "quote_verified": True,
         "price": 100.0,
     }
-    assert crypto_guard._paper_yahoo_reference(quote) is False
+    assert crypto_guard._paper_yahoo_reference(quote) is True
 
 
-def test_explicit_yahoo_paper_reference_is_recognized_but_never_provider_verified():
+def test_explicit_yahoo_paper_reference_is_consensus_candidate_even_with_new_metadata():
     quote = {
         "provider": "Yahoo Finance",
         "quote_verified": True,
@@ -118,8 +123,10 @@ def test_explicit_yahoo_paper_reference_is_recognized_but_never_provider_verifie
         "price": 100.0,
     }
     assert crypto_guard._paper_yahoo_reference(quote) is True
+    # Even if a malformed/legacy payload incorrectly claims provider verification,
+    # Yahoo still must go through Coinbase rather than bypassing consensus.
     quote["provider_quote_verified"] = True
-    assert crypto_guard._paper_yahoo_reference(quote) is False
+    assert crypto_guard._paper_yahoo_reference(quote) is True
 
 
 def test_crypto_railway_config_uses_key_normalizing_entrypoint():
