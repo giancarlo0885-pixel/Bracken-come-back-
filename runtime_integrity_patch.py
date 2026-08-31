@@ -35,14 +35,26 @@ def _install_small_account_position_cap(oracle_bot_module: Any) -> int | None:
 
 
 def _verification_metadata(route: dict[str, Any], payload: dict[str, Any]) -> None:
-    provider_verified = _truthy(route.get("provider_quote_verified"))
-    paper_reference_verified = _truthy(route.get("paper_reference_verified"))
+    """Expose verification types without changing legacy execution eligibility.
+
+    `quote_verified`/`verified` are retained as the historical generic eligibility
+    aliases because existing execution code relies on them. Explicit fields now
+    distinguish a provider-verified quote from a paper-reference fallback.
+    """
     quote_eligible = _truthy(payload.get("quote_verified"))
+    paper_reference_verified = _truthy(route.get("paper_reference_verified"))
+
+    if "provider_quote_verified" in route:
+        provider_verified = _truthy(route.get("provider_quote_verified"))
+    else:
+        # Backward-compatible provider/unit routes historically supplied only
+        # quote_verified. Never use this fallback for a marked paper reference.
+        provider_verified = bool(quote_eligible and not paper_reference_verified)
 
     payload["provider_quote_verified"] = provider_verified
     payload["paper_reference_verified"] = paper_reference_verified
     payload["execution_quote_eligible"] = quote_eligible
-    payload["verified"] = provider_verified
+    payload["verified"] = quote_eligible
     payload["verification_basis"] = str(route.get("verification_basis") or "unverified")
     if provider_verified:
         payload["verification_kind"] = "provider"
@@ -65,10 +77,9 @@ def _verification_metadata(route: dict[str, Any], payload: dict[str, Any]) -> No
 def install_runtime_integrity_patch(market_worker_module: Any) -> None:
     """Install fail-closed runtime corrections for paper workers.
 
-    `quote_verified` remains the existing internal eligibility flag so paper
-    behavior is not silently changed. Human-facing `verified` and logs now mean
-    provider verification only, while Yahoo paper-reference eligibility is
-    exposed separately.
+    Legacy `quote_verified`/`verified` keep their existing generic execution-
+    eligibility meaning. New explicit metadata and log fields make provider
+    verification and Yahoo paper-reference verification unambiguous.
     """
     global _INSTALLED
     if _INSTALLED:
@@ -130,7 +141,7 @@ def install_runtime_integrity_patch(market_worker_module: Any) -> None:
         handoff_log = market_worker_module.log.info if handoff_eligible else market_worker_module.log.debug
         handoff_log(
             "EXECUTION_QUOTE_HANDOFF | symbol=%s | market=%s | price=%s | bid=%s | ask=%s | "
-            "timestamp=%s | provider=%s | quote_eligible=%s | provider_verified=%s | "
+            "timestamp=%s | provider=%s | verified=%s | quote_eligible=%s | provider_verified=%s | "
             "paper_reference_verified=%s | verification_kind=%s | stale=%s | spread_pct=%s | "
             "capability=%s | correlation_id=%s",
             str(symbol or "").upper(),
@@ -140,6 +151,7 @@ def install_runtime_integrity_patch(market_worker_module: Any) -> None:
             payload.get("ask"),
             payload.get("quote_timestamp"),
             payload.get("provider"),
+            payload.get("verified"),
             payload.get("quote_verified"),
             payload.get("provider_quote_verified"),
             payload.get("paper_reference_verified"),
