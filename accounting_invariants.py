@@ -4,7 +4,7 @@ from dataclasses import dataclass, asdict
 import math
 from typing import Any
 
-from database import row, rows
+from database import row
 
 
 @dataclass(frozen=True)
@@ -57,8 +57,8 @@ def _market_invariant(market: str, tolerance_pct: float) -> MarketAccountingInva
             COUNT(*) FILTER (
                 WHERE quantity < -1e-10
                    OR current_price <= 0
-                   OR NOT isfinite(quantity)
-                   OR NOT isfinite(current_price)
+                   OR quantity IS NULL
+                   OR current_price IS NULL
             )::int AS invalid_positions
         FROM positions WHERE market=%s
         """,
