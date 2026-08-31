@@ -50,10 +50,10 @@ def test_yahoo_paper_reference_is_not_mislabeled_provider_verified():
     patch._verification_metadata(route, payload)
 
     assert payload["quote_verified"] is True
+    assert payload["verified"] is True  # legacy generic eligibility alias
     assert payload["execution_quote_eligible"] is True
     assert payload["provider_quote_verified"] is False
     assert payload["paper_reference_verified"] is True
-    assert payload["verified"] is False
     assert payload["verification_kind"] == "paper_reference"
     assert payload["correlation_id"]
     assert payload["decision_correlation_id"] == payload["correlation_id"]
@@ -75,6 +75,18 @@ def test_provider_verified_quote_remains_explicitly_verified():
     assert payload["paper_reference_verified"] is False
     assert payload["verification_kind"] == "provider"
     assert payload["correlation_id"] == "corr-123"
+
+
+def test_legacy_provider_route_infers_provider_verification_without_paper_marker():
+    route = {"verification_basis": "legacy-provider"}
+    payload = {"quote_verified": True}
+
+    patch._verification_metadata(route, payload)
+
+    assert payload["verified"] is True
+    assert payload["provider_quote_verified"] is True
+    assert payload["paper_reference_verified"] is False
+    assert payload["verification_kind"] == "provider"
 
 
 def test_unverified_quote_does_not_gain_verification():
