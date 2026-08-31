@@ -293,3 +293,18 @@ Safe deployment procedure:
 5. Use `GLOBAL_KILL_SWITCH=true` or leave the market-specific switches false for emergency shutdown.
 
 Future brokerage integration requires a new audited adapter implementation, external broker credentials in environment variables only, order reconciliation, duplicate-order protection, and separate human approval before live submission can ever be considered.
+
+
+## Bitcoin settlement integrity
+
+Oracle separates centralized-exchange trading from Bitcoin on-chain settlement. Broker fills, quotes, and portfolio positions are not blockchain confirmations and must not be represented as such.
+
+The `bitcoin_settlement_integrity.py` boundary applies the transaction, chain, and security principles described in *Mastering Bitcoin* (3rd edition) and *Programming Bitcoin* without implementing a custom wallet or holding private keys. It provides:
+
+- strict canonical transaction-ID validation;
+- best-chain confirmation-depth calculation;
+- explicit mempool, replaceable, conflicting-spend, and reorganization-risk states;
+- configurable confirmation requirements; and
+- a fail-closed credit gate that allows future deposits or transfers to settle only after required confirmation depth.
+
+Chain observations must come from an independently verified Bitcoin node or an explicitly trusted provider. Network congestion and confirmation state are operational settlement inputs; they do not override quote verification, portfolio risk, brokerage controls, or trading signals.
