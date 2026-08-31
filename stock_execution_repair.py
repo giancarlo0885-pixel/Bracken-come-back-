@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import time
+import uuid
 from typing import Any
 
 log = logging.getLogger("stock-execution-repair")
@@ -44,6 +45,19 @@ def _verified_payload(worker: Any, symbol: str, history: Any, scan_type: str) ->
         return None
 
     payload = dict(snapshot.to_quote_payload())
+    quote_eligible = payload.get("quote_verified") is True
+    paper_reference_verified = payload.get("paper_reference_verified") is True
+    if "provider_quote_verified" in payload:
+        provider_verified = payload.get("provider_quote_verified") is True
+    else:
+        provider_verified = bool(quote_eligible and not paper_reference_verified)
+
+    correlation_id = str(
+        payload.get("correlation_id")
+        or payload.get("decision_correlation_id")
+        or uuid.uuid4()
+    ).strip()
+
     payload.update(
         {
             "symbol": _symbol(symbol),
@@ -52,9 +66,21 @@ def _verified_payload(worker: Any, symbol: str, history: Any, scan_type: str) ->
             "source_interval": payload.get("interval"),
             "quote_verified": True,
             "verified": True,
+            "execution_quote_eligible": True,
+            "provider_quote_verified": provider_verified,
+            "paper_reference_verified": paper_reference_verified,
+            "verification_kind": (
+                "provider"
+                if provider_verified
+                else "paper_reference"
+                if paper_reference_verified
+                else "unverified"
+            ),
             "stale": False,
             "tradeable": True,
             "execution_source": "verified_live_snapshot",
+            "correlation_id": correlation_id,
+            "decision_correlation_id": correlation_id,
         }
     )
 
@@ -73,10 +99,11 @@ def _verified_payload(worker: Any, symbol: str, history: Any, scan_type: str) ->
 def install_stock_execution_quote_repair(worker: Any) -> None:
     """Separate stock research history from execution pricing.
 
-    Daily history remains the analysis/forecast source. A fresh verified intraday
-    snapshot is independently required for execution. Missing execution quotes
-    are filtered before ``process_signals`` so they are never represented as a
-    synthetic $0.00 candidate.
+    Daily history remains the analysis/forecast source. A fresh eligible intraday
+    snapshot is independently required for paper execution. Provider verification
+    and paper-reference verification remain explicitly distinguished in payloads
+    and logs. Missing execution quotes are filtered before ``process_signals`` so
+    they are never represented as a synthetic $0.00 candidate.
     """
     if getattr(worker, "_stock_execution_quote_repair_installed", False):
         return
@@ -102,7 +129,8 @@ def install_stock_execution_quote_repair(worker: Any) -> None:
         if live_payload is not None:
             worker.log.info(
                 "EXECUTION_QUOTE_HANDOFF | symbol=%s | market=cash | price=%s | bid=%s | ask=%s | "
-                "timestamp=%s | provider=%s | verified=True | stale=False | spread_pct=%s | "
+                "timestamp=%s | provider=%s | verified=%s | quote_eligible=%s | provider_verified=%s | "
+                "paper_reference_verified=%s | verification_kind=%s | stale=%s | spread_pct=%s | "
                 "capability=%s | correlation_id=%s",
                 normalized,
                 live_payload.get("price"),
@@ -110,9 +138,15 @@ def install_stock_execution_quote_repair(worker: Any) -> None:
                 live_payload.get("ask"),
                 live_payload.get("quote_timestamp") or live_payload.get("timestamp"),
                 live_payload.get("provider"),
+                live_payload.get("verified"),
+                live_payload.get("execution_quote_eligible"),
+                live_payload.get("provider_quote_verified"),
+                live_payload.get("paper_reference_verified"),
+                live_payload.get("verification_kind"),
+                live_payload.get("stale"),
                 live_payload.get("spread_pct"),
                 live_payload.get("source_capability"),
-                live_payload.get("correlation_id") or live_payload.get("decision_correlation_id"),
+                live_payload.get("correlation_id"),
             )
             return live_payload
 
