@@ -9,6 +9,7 @@ import pytest
 
 from accounting_invariants import equity_equation
 from broker_order_journal import PersistentOrderJournal, normalize_remote_state
+from broker_reconciliation import reconcile_persistent_journal
 from capital_model_governance import assess_model_evidence
 from oracle_readiness import determine_overall_status
 from shadow_broker import record_shadow_order
@@ -144,11 +145,28 @@ def test_postgres_persistent_order_journal_survives_restart_and_reconciles():
     assert persisted is not None
     assert persisted["state"] == "UNKNOWN_RECONCILE_REQUIRED"
 
-    result = restarted.reconcile(
-        [{"client_order_id": "capital-readiness-restart-1", "id": "broker-1", "state": "filled", "filled_quantity": "0.001", "average_price": "100000"}]
+    result = reconcile_persistent_journal(
+        restarted,
+        [{"client_order_id": "capital-readiness-restart-1", "id": "broker-1", "state": "filled", "filled_quantity": "0.001", "average_price": "100000"}],
     )
     assert result["status"] == "PASS"
     assert restarted.get("capital-readiness-restart-1")["state"] == "FILLED"
+
+
+@pytest.mark.skipif(not os.getenv("DATABASE_URL"), reason="PostgreSQL integration only")
+def test_postgres_presubmission_order_does_not_become_ambiguous_on_restart():
+    from migrations import run_migrations
+    from database import connect
+
+    run_migrations()
+    with connect() as conn:
+        conn.execute("DELETE FROM broker_order_journal WHERE client_order_id='capital-readiness-local-only-1'")
+    journal = PersistentOrderJournal()
+    journal.create(client_order_id="capital-readiness-local-only-1", symbol="BTC-USD", side="BUY", quantity=0.001, notional=100.0)
+    result = reconcile_persistent_journal(journal, [])
+    assert result["status"] == "PASS"
+    assert result["local_only_pre_submission"] == 1
+    assert journal.get("capital-readiness-local-only-1")["state"] == "CREATED"
 
 
 @pytest.mark.skipif(not os.getenv("DATABASE_URL"), reason="PostgreSQL integration only")
