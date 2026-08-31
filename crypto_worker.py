@@ -31,6 +31,7 @@ def run_robinhood_startup_preflight() -> None:
     reconciliation_status = "NOT_RUN"
     try:
         from broker_order_journal import PersistentOrderJournal
+        from broker_reconciliation import reconcile_persistent_journal
         from robinhood_crypto_api import RobinhoodCryptoClient, preflight
 
         client = RobinhoodCryptoClient()
@@ -42,7 +43,11 @@ def run_robinhood_startup_preflight() -> None:
             account_number = str(account.get("account_number") or "").strip()
             if account_number:
                 remote_orders = client.orders(account_number)
-                reconciliation = journal.reconcile(remote_orders, account_number_present=True)
+                reconciliation = reconcile_persistent_journal(
+                    journal,
+                    remote_orders,
+                    account_number_present=True,
+                )
                 reconciliation_status = str(reconciliation.get("status") or "UNKNOWN")
                 if reconciliation_status != "PASS":
                     result["ORDER JOURNAL"] = "FAIL"
