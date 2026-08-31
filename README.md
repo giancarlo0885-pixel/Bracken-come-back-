@@ -308,3 +308,12 @@ The `bitcoin_settlement_integrity.py` boundary applies the transaction, chain, a
 - a fail-closed credit gate that allows future deposits or transfers to settle only after required confirmation depth.
 
 Chain observations must come from an independently verified Bitcoin node or an explicitly trusted provider. Network congestion and confirmation state are operational settlement inputs; they do not override quote verification, portfolio risk, brokerage controls, or trading signals.
+
+
+## Crypto historical memory
+
+Oracle includes a versioned `crypto_history_memory.py` catalog for its crypto research and reasoning layer. It retrieves relevant completed events for Bitcoin protocol history, halvings, institutional adoption, exchange and custody failures, stablecoin failures, sovereign policy, and U.S. regulation. Every event includes a date, category, affected assets, durable lesson, and source.
+
+Historical retrieval is point-in-time safe: an `as_of` cutoff prevents future events from leaking into historical analysis or backtests. The resulting context is exposed on crypto Oracle decisions as `crypto_history`.
+
+This catalog is contextual memory only. It has `influences_decision=false` and `score_adjustment=0.0`; it cannot change forecasts, opportunity scores, probability, position size, vetoes, execution, or brokerage approval. Current verified market data and the existing deterministic risk pipeline remain authoritative.
