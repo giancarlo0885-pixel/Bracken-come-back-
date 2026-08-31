@@ -2,6 +2,7 @@ import logging
 import os
 
 import market_worker
+from capital_readiness_runtime import prepare_capital_readiness_runtime
 from crypto_execution_guard import install_crypto_execution_quote_guard
 from paper_execution_accounting import install_paper_execution_accounting
 from paper_execution_reality import install_paper_execution_reality
@@ -22,30 +23,46 @@ if os.getenv("EXECUTION_MODE", "paper").strip().lower() == "paper":
 
 
 def run_robinhood_startup_preflight() -> None:
-    """Run a strictly read-only broker connectivity check without exposing secrets."""
+    """Run read-only broker connectivity plus durable restart reconciliation."""
     if os.getenv("ROBINHOOD_CRYPTO_ENABLED", "false").strip().lower() != "true":
         logger.info("ROBINHOOD PREFLIGHT | connection=DISABLED | live_trading=DISARMED")
         return
 
+    reconciliation_status = "NOT_RUN"
     try:
-        from robinhood_crypto_api import preflight
+        from broker_order_journal import PersistentOrderJournal
+        from robinhood_crypto_api import RobinhoodCryptoClient, preflight
 
-        result = preflight()
+        client = RobinhoodCryptoClient()
+        journal = PersistentOrderJournal()
+        result = preflight(client, journal)
+
+        if result.get("ROBINHOOD AUTH") == "PASS" and result.get("ACCOUNT STATUS") == "PASS":
+            account = client.account_details()
+            account_number = str(account.get("account_number") or "").strip()
+            if account_number:
+                remote_orders = client.orders(account_number)
+                reconciliation = journal.reconcile(remote_orders, account_number_present=True)
+                reconciliation_status = str(reconciliation.get("status") or "UNKNOWN")
+                if reconciliation_status != "PASS":
+                    result["ORDER JOURNAL"] = "FAIL"
+            else:
+                reconciliation_status = "FAIL_CLOSED"
+                result["ORDER JOURNAL"] = "FAIL"
     except Exception as exc:
         logger.warning(
-            "ROBINHOOD PREFLIGHT | connection=ERROR | auth=FAIL | live_trading=DISARMED | reason=%s",
+            "ROBINHOOD PREFLIGHT | connection=ERROR | auth=FAIL | reconciliation=FAIL_CLOSED | "
+            "live_trading=DISARMED | reason=%s",
             exc.__class__.__name__,
         )
         return
 
-    # Do not fetch the account twice. preflight already performed the authenticated
-    # v2 account read and returns only a non-numeric buying-power classification.
     buying_power_state = str(result.get("BUYING POWER STATE") or "NOT_CHECKED")
 
     logger.info(
         "ROBINHOOD PREFLIGHT | connection=%s | auth=%s | account=%s | crypto=%s | "
         "pairs=%s | quote=%s | buying_power=%s | buying_power_state=%s | holdings=%s | "
-        "orders=%s | journal=%s | live_trading=%s | reason=%s",
+        "orders=%s | journal=%s | reconciliation=%s | live_trading=%s | reason=%s",
         result.get("ROBINHOOD CONNECTION", "UNKNOWN"),
         result.get("ROBINHOOD AUTH", "UNKNOWN"),
         result.get("ACCOUNT STATUS", "UNKNOWN"),
@@ -57,11 +74,13 @@ def run_robinhood_startup_preflight() -> None:
         result.get("HOLDINGS CHECK", "UNKNOWN"),
         result.get("ORDERS CHECK", "UNKNOWN"),
         result.get("ORDER JOURNAL", "UNKNOWN"),
+        reconciliation_status,
         result.get("LIVE TRADING ARMED/DISARMED", "DISARMED"),
         str(result.get("reason") or "")[:240],
     )
 
 
 if __name__ == "__main__":
+    prepare_capital_readiness_runtime(market_worker, "crypto")
     run_robinhood_startup_preflight()
     market_worker.run_worker("crypto")
