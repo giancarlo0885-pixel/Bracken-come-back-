@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import math
 from typing import Any, Iterable
 
 from config import (
@@ -12,6 +13,14 @@ from database import rows
 from forecast_calibration import CalibrationMetrics, evaluate_probability_calibration
 from model_registry import ModelStatus, model_status
 from provider_router import normalize_symbol
+
+
+def _finite(value: Any, default: float = 0.0) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return default
+    return number if math.isfinite(number) else default
 
 
 @dataclass
@@ -39,6 +48,12 @@ class ForecastValidationSummary:
     calibration_intercept: float | None = None
     calibration_slope: float | None = None
     reliability_bins: list[dict[str, Any]] = field(default_factory=list)
+    forecast_interval_coverage: float | None = None
+    effective_sample_size: float = 0.0
+
+    @property
+    def reliability_buckets(self) -> list[dict[str, Any]]:
+        return self.reliability_bins
 
     @property
     def calibration_status(self) -> str:
@@ -79,7 +94,19 @@ class ForecastValidationSummary:
 
 
 def _empirical_calibration(items: list[dict[str, Any]]) -> CalibrationMetrics:
-    return evaluate_probability_calibration(items, bins=10)
+    normalized: list[dict[str, Any]] = []
+    for item in items:
+        row = dict(item)
+        probability = row.get("probability_up")
+        try:
+            value = float(probability)
+        except (TypeError, ValueError):
+            value = float("nan")
+        if math.isfinite(value) and value > 1.0:
+            value /= 100.0
+        row["probability_up"] = value if math.isfinite(value) else None
+        normalized.append(row)
+    return evaluate_probability_calibration(normalized, bins=10)
 
 
 def summarize_validation(records: Iterable[dict[str, Any]]) -> ForecastValidationSummary:
@@ -89,10 +116,22 @@ def summarize_validation(records: Iterable[dict[str, Any]]) -> ForecastValidatio
 
     count = len(items)
     correct = sum(1 for item in items if bool(item.get("direction_correct")))
-    mape = sum(float(item.get("mape") or 0.0) for item in items) / count
-    predicted = [float(item.get("predicted_move_pct") or 0.0) for item in items]
-    realized = [float(item.get("realized_move_pct") or 0.0) for item in items]
+    mape = sum(_finite(item.get("mape")) for item in items) / count
+    predicted = [_finite(item.get("predicted_move_pct")) for item in items]
+    realized = [_finite(item.get("realized_move_pct")) for item in items]
     empirical = _empirical_calibration(items)
+    coverage_items = [
+        item
+        for item in items
+        if item.get("low_move_pct") is not None and item.get("high_move_pct") is not None
+    ]
+    coverage = None
+    if coverage_items:
+        coverage = sum(
+            1
+            for item in coverage_items
+            if _finite(item.get("low_move_pct")) <= _finite(item.get("realized_move_pct")) <= _finite(item.get("high_move_pct"))
+        ) / len(coverage_items)
     first = items[0]
 
     # calibration_error remains the compatibility field consumed elsewhere,
@@ -123,6 +162,8 @@ def summarize_validation(records: Iterable[dict[str, Any]]) -> ForecastValidatio
         calibration_intercept=empirical.calibration_intercept,
         calibration_slope=empirical.calibration_slope,
         reliability_bins=[item.to_dict() for item in empirical.bins],
+        forecast_interval_coverage=coverage,
+        effective_sample_size=float(empirical.sample_count),
     )
 
 

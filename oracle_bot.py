@@ -17,7 +17,7 @@ from execution_policy import execution_policy
 from forecast_quality import model_execution_approved
 from quant_trade_standard import assess_trade
 from oracle_intelligence import evaluate_opportunity
-from market_memory import record_closed_trade_memory
+from market_memory import feature_vector, record_closed_trade_memory
 from market_data import MarketSnapshot
 from provider_router import normalize_symbol
 from risk_engine import ExecutionSwitches, pre_trade_risk_checks
@@ -1542,6 +1542,71 @@ def _quote_provider_name(quote_metadata: dict[str, Any] | None) -> str | None:
     return safe_text(provider) or None
 
 
+def _json_snapshot(value: Any) -> str:
+    if isinstance(value, str):
+        try:
+            json.loads(value)
+            return value
+        except Exception:
+            return json.dumps({"value": value})
+    if isinstance(value, dict):
+        return json.dumps(value, default=str)
+    return json.dumps({})
+
+
+def _entry_provenance(
+    *,
+    signal: Any | None,
+    quote_metadata: dict[str, Any] | None,
+    now: str,
+    risk_snapshot: dict[str, Any] | None = None,
+    portfolio_snapshot: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    quote_metadata = quote_metadata or {}
+    signal_id = signal_value(signal, "signal_id", signal_value(signal, "id", None))
+    forecast_id = signal_value(signal, "forecast_id", None)
+    entry_decision_id = (
+        signal_value(signal, "entry_decision_id", None)
+        or signal_value(signal, "decision_id", None)
+        or signal_value(signal, "oracle_decision_id", None)
+        or signal_value(signal, "recommendation_id", None)
+        or signal_id
+    )
+    feature_snapshot = signal_value(signal, "feature_snapshot", None)
+    if not isinstance(feature_snapshot, dict):
+        try:
+            feature_snapshot = feature_vector(signal) if signal is not None else {}
+        except Exception:
+            feature_snapshot = {}
+    return {
+        "entry_decision_id": safe_text(entry_decision_id) or None,
+        "entry_signal_id": safe_text(signal_id) or None,
+        "entry_forecast_id": safe_text(forecast_id) or None,
+        "entry_quote_id": safe_text(
+            quote_metadata.get("quote_id")
+            or quote_metadata.get("source_identity")
+            or quote_metadata.get("cache_identity")
+        ) or None,
+        "decision_correlation_id": safe_text(
+            quote_metadata.get("correlation_id")
+            or quote_metadata.get("decision_correlation_id")
+            or signal_value(signal, "decision_correlation_id", None)
+            or signal_value(signal, "correlation_id", None)
+        ) or None,
+        "model": safe_text(signal_value(signal, "model", signal_value(signal, "forecast_model", None))) or None,
+        "model_version": safe_text(signal_value(signal, "model_version", signal_value(signal, "forecast_model_version", None))) or None,
+        "provider": _quote_provider_name(quote_metadata),
+        "provider_symbol": safe_text(quote_metadata.get("provider_symbol") or quote_metadata.get("provider_native_symbol")) or None,
+        "quote_timestamp": safe_text(quote_metadata.get("quote_timestamp") or quote_metadata.get("timestamp")) or None,
+        "decision_timestamp": safe_text(
+            signal_value(signal, "decision_timestamp", signal_value(signal, "created_at", None))
+        ) or now,
+        "feature_snapshot": feature_snapshot if isinstance(feature_snapshot, dict) else {},
+        "risk_snapshot": risk_snapshot or {},
+        "portfolio_snapshot": portfolio_snapshot or {},
+    }
+
+
 def _lot_bucket_from_signal(signal: Any | None, market: str) -> str:
     bucket = signal_value(signal, "bucket", signal_value(signal, "tier", ""))
     if bucket:
@@ -1564,6 +1629,7 @@ def _record_buy_attribution(
     bucket = _lot_bucket_from_signal(signal, market)
     strategy = safe_text(signal_value(signal, "strategy", signal_value(signal, "scan_type", "")))
     decision_id = signal_value(signal, "signal_id", signal_value(signal, "id", None))
+    provenance = _entry_provenance(signal=signal, quote_metadata=quote_metadata, now=now)
     confidence = safe_float(signal_value(signal, "confidence", None), None) if signal is not None else None
     score = safe_float(signal_value(signal, "score", None), None) if signal is not None else None
     trade_id = f"ledger-buy:{uuid.uuid4()}"
@@ -1573,11 +1639,27 @@ def _record_buy_attribution(
         INSERT INTO position_lots (
             lot_id, symbol, market, bucket, strategy, opened_at, quantity_opened,
             quantity_remaining, entry_price, entry_fees, decision_id,
-            broker_mode, account_environment, created_at
+            broker_mode, account_environment, created_at,
+            entry_decision_id, entry_signal_id, entry_forecast_id, entry_quote_id,
+            decision_correlation_id, model, model_version, provider, provider_symbol,
+            quote_timestamp, decision_timestamp, feature_snapshot, risk_snapshot,
+            portfolio_snapshot
         )
-        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'PAPER','PAPER',%s)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'PAPER','PAPER',%s,
+                %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s::jsonb,%s::jsonb)
         """,
-        (lot_id, symbol, market, bucket, strategy, now, quantity, quantity, price, fees, decision_id, now),
+        (
+            lot_id, symbol, market, bucket, strategy, now, quantity, quantity, price,
+            fees, decision_id, now,
+            provenance["entry_decision_id"], provenance["entry_signal_id"],
+            provenance["entry_forecast_id"], provenance["entry_quote_id"],
+            provenance["decision_correlation_id"], provenance["model"],
+            provenance["model_version"], provenance["provider"],
+            provenance["provider_symbol"], provenance["quote_timestamp"],
+            provenance["decision_timestamp"], _json_snapshot(provenance["feature_snapshot"]),
+            _json_snapshot(provenance["risk_snapshot"]),
+            _json_snapshot(provenance["portfolio_snapshot"]),
+        ),
     )
     conn.execute(
         """
@@ -1586,9 +1668,14 @@ def _record_buy_attribution(
             entry_price, exit_time, exit_price, gross_pnl, fees, net_pnl,
             return_pct, tier, confidence_score, weighted_signal_score,
             quote_provider, decision_id, order_id, broker_mode,
-            account_environment, status, created_at, updated_at
+            account_environment, status, created_at, updated_at,
+            entry_decision_id, entry_signal_id, entry_forecast_id, entry_quote_id,
+            decision_correlation_id, model, model_version, provider, provider_symbol,
+            quote_timestamp, decision_timestamp, feature_snapshot, risk_snapshot,
+            portfolio_snapshot
         )
-        VALUES (%s,%s,%s,%s,%s,'BUY',%s,%s,%s,NULL,NULL,0,%s,%s,0,%s,%s,%s,%s,%s,NULL,'PAPER','PAPER','OPEN',%s,%s)
+        VALUES (%s,%s,%s,%s,%s,'BUY',%s,%s,%s,NULL,NULL,0,%s,%s,0,%s,%s,%s,%s,%s,NULL,'PAPER','PAPER','OPEN',%s,%s,
+                %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s::jsonb,%s::jsonb)
         """,
         (
             trade_id,
@@ -1608,6 +1695,20 @@ def _record_buy_attribution(
             decision_id,
             now,
             now,
+            provenance["entry_decision_id"],
+            provenance["entry_signal_id"],
+            provenance["entry_forecast_id"],
+            provenance["entry_quote_id"],
+            provenance["decision_correlation_id"],
+            provenance["model"],
+            provenance["model_version"],
+            provenance["provider"],
+            provenance["provider_symbol"],
+            provenance["quote_timestamp"],
+            provenance["decision_timestamp"],
+            _json_snapshot(provenance["feature_snapshot"]),
+            _json_snapshot(provenance["risk_snapshot"]),
+            _json_snapshot(provenance["portfolio_snapshot"]),
         ),
     )
 
@@ -1623,7 +1724,7 @@ def _record_sell_attribution(
     reason: str,
     quote_metadata: dict[str, Any] | None,
     now: str,
-) -> None:
+) -> list[dict[str, Any]]:
     symbol = safe_text(position.get("symbol")).upper()
     lot_rows = conn.execute(
         """
@@ -1652,6 +1753,20 @@ def _record_sell_attribution(
             "decision_id": None,
             "broker_mode": "PAPER",
             "account_environment": "PAPER",
+            "entry_decision_id": None,
+            "entry_signal_id": None,
+            "entry_forecast_id": None,
+            "entry_quote_id": None,
+            "decision_correlation_id": None,
+            "model": None,
+            "model_version": None,
+            "provider": None,
+            "provider_symbol": None,
+            "quote_timestamp": None,
+            "decision_timestamp": opened_at,
+            "feature_snapshot": {},
+            "risk_snapshot": {},
+            "portfolio_snapshot": {},
         }
         conn.execute(
             """
@@ -1695,6 +1810,20 @@ def _record_sell_attribution(
             decision_id=lot.get("decision_id"),
             broker_mode=safe_text(lot.get("broker_mode"), "PAPER"),
             account_environment=safe_text(lot.get("account_environment"), "PAPER"),
+            entry_decision_id=lot.get("entry_decision_id") or lot.get("decision_id"),
+            entry_signal_id=lot.get("entry_signal_id"),
+            entry_forecast_id=lot.get("entry_forecast_id"),
+            entry_quote_id=lot.get("entry_quote_id"),
+            decision_correlation_id=lot.get("decision_correlation_id"),
+            model=lot.get("model"),
+            model_version=lot.get("model_version"),
+            provider=lot.get("provider"),
+            provider_symbol=lot.get("provider_symbol"),
+            quote_timestamp=lot.get("quote_timestamp"),
+            decision_timestamp=lot.get("decision_timestamp"),
+            feature_snapshot=lot.get("feature_snapshot") if isinstance(lot.get("feature_snapshot"), dict) else {},
+            risk_snapshot=lot.get("risk_snapshot") if isinstance(lot.get("risk_snapshot"), dict) else {},
+            portfolio_snapshot=lot.get("portfolio_snapshot") if isinstance(lot.get("portfolio_snapshot"), dict) else {},
         )
         for lot in lot_rows
     ]
@@ -1726,9 +1855,14 @@ def _record_sell_attribution(
                 entry_time, entry_price, exit_time, exit_price, gross_pnl,
                 fees, net_pnl, return_pct, tier, confidence_score,
                 weighted_signal_score, quote_provider, decision_id, order_id,
-                broker_mode, account_environment, status, created_at, updated_at
+                broker_mode, account_environment, status, created_at, updated_at,
+                entry_decision_id, entry_signal_id, entry_forecast_id, entry_quote_id,
+                decision_correlation_id, model, model_version, provider, provider_symbol,
+                quote_timestamp, decision_timestamp, feature_snapshot, risk_snapshot,
+                portfolio_snapshot
             )
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
+                    %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s::jsonb,%s::jsonb)
             """,
             (
                 data["trade_id"],
@@ -1757,8 +1891,23 @@ def _record_sell_attribution(
                 data["status"],
                 now,
                 now,
+                data.get("entry_decision_id"),
+                data.get("entry_signal_id"),
+                data.get("entry_forecast_id"),
+                data.get("entry_quote_id"),
+                data.get("decision_correlation_id"),
+                data.get("model"),
+                data.get("model_version"),
+                data.get("provider"),
+                data.get("provider_symbol"),
+                data.get("quote_timestamp"),
+                data.get("decision_timestamp"),
+                _json_snapshot(data.get("feature_snapshot")),
+                _json_snapshot(data.get("risk_snapshot")),
+                _json_snapshot(data.get("portfolio_snapshot")),
             ),
         )
+    return [ledger.to_dict() for ledger in ledger_rows]
 
 
 def _execute_close_position(
@@ -1899,7 +2048,7 @@ def _execute_close_position(
                     now,
                 ),
             )
-            _record_sell_attribution(
+            sell_attribution = _record_sell_attribution(
                 conn,
                 market=market,
                 position=position,
@@ -1912,15 +2061,16 @@ def _execute_close_position(
             )
             _complete_execution_claim(conn, execution_key)
 
-        record_closed_trade_memory(
-            market=market,
-            symbol=symbol,
-            position=position,
-            exit_price=price,
-            pnl=realized_pnl,
-            exit_reason=reason,
-            quantity=quantity,
-        )
+            record_closed_trade_memory(
+                market=market,
+                symbol=symbol,
+                position=position,
+                exit_price=price,
+                pnl=realized_pnl,
+                exit_reason=reason,
+                quantity=quantity,
+                entry_provenance=sell_attribution[0] if sell_attribution else None,
+            )
         log.info(
             "%s SELL %s quantity=%.8f price=%.6f margin_repaid=%.2f reason=%s",
             market.upper(),
@@ -2436,7 +2586,7 @@ def _buy(
         return False, f"trade value too small={trade_value:.2f}; minimum={MIN_TRADE_VALUE:.2f}", None
 
     now = utc_now()
-    closed_memory: tuple[dict[str, Any], float, float, float, str] | None = None
+    closed_memory: tuple[dict[str, Any], float, float, float, str, dict[str, Any] | None] | None = None
 
     try:
         with connect() as conn:
@@ -2699,7 +2849,7 @@ def _buy(
                         now,
                     ),
                 )
-                _record_sell_attribution(
+                rotation_sell_attribution = _record_sell_attribution(
                     conn,
                     market=market,
                     position=dict(locked_rotation),
@@ -2717,6 +2867,7 @@ def _buy(
                     realized_pnl,
                     quantity_to_sell,
                     safe_text(rotation_action.get("reason"), f"continuous_rotation_to_{symbol}"),
+                    rotation_sell_attribution[0] if rotation_sell_attribution else None,
                 )
             if existing:
                 old_quantity = safe_float(existing.get("quantity"))
@@ -2793,7 +2944,7 @@ def _buy(
             market.upper(), symbol, quantity, price, trade_value, borrowed, score, confidence,
         )
         if closed_memory is not None:
-            closed_position, exit_price, realized_pnl, closed_quantity, exit_reason = closed_memory
+            closed_position, exit_price, realized_pnl, closed_quantity, exit_reason, entry_provenance = closed_memory
             record_closed_trade_memory(
                 market=market,
                 symbol=safe_text(closed_position.get("symbol")).upper(),
@@ -2802,6 +2953,7 @@ def _buy(
                 pnl=realized_pnl,
                 exit_reason=exit_reason,
                 quantity=closed_quantity,
+                entry_provenance=entry_provenance,
             )
             log.info(
                 "%s | CONTINUOUS ROTATION | sold=%s incoming=%s margin_repaid=%.2f",

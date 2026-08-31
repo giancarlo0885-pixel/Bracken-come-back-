@@ -138,14 +138,15 @@ def test_missing_quote_timestamp_rejects_before_handoff_log(caplog):
 def test_handoff_message_schema_matches_between_info_and_debug(caplog):
     import market_worker
 
-    eligible_history = _history("AAPL", 123.45, interval="5m", verified=True)
+    quote_time = datetime.now(timezone.utc)
+    eligible_history = _history("AAPL", 123.45, interval="5m", quote_timestamp=quote_time.isoformat(), verified=True)
     with caplog.at_level(logging.DEBUG, logger="market-worker"):
         market_worker._execution_quote_payload_from_history("AAPL", eligible_history, 123.45, scan_type="fast")
     info_record = _handoff_records(caplog.records)[0]
     info_fields = _handoff_fields(info_record.getMessage())
     caplog.clear()
 
-    unverified_history = _history("AAPL", 123.45, interval="5m", verified=False)
+    unverified_history = _history("AAPL", 123.45, interval="5m", quote_timestamp=(quote_time - timedelta(minutes=30)).isoformat(), verified=False)
     with caplog.at_level(logging.DEBUG, logger="market-worker"):
         market_worker._execution_quote_payload_from_history("AAPL", unverified_history, 123.45, scan_type="fast")
     debug_record = _handoff_records(caplog.records)[0]

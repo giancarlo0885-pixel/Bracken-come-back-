@@ -15,6 +15,7 @@ from oracle_decision_identity import (
     build_oracle_judgment,
     guard_oracle_action,
 )
+from probability_evidence import probability_metadata
 from portfolio_optimizer import PortfolioConstraints, portfolio_fit_score
 from provider_router import normalize_symbol
 from strategy_engine import StrategySignal, ensemble_score, evaluate_strategies
@@ -71,6 +72,7 @@ class AdvisorRecommendation:
     recommendation_expiration_timestamp: str
     labels: dict[str, str]
     oracle_decision: dict[str, Any]
+    probability_evidence: dict[str, Any]
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -100,6 +102,16 @@ def _finite_positive(value: Any) -> bool:
         return math.isfinite(number) and number > 0.0
     except (TypeError, ValueError):
         return False
+
+
+def _nonnegative_int(value: Any) -> int:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return 0
+    if not math.isfinite(number):
+        return 0
+    return max(0, int(number))
 
 
 def _verified_quote(candidate: dict[str, Any], symbol: str) -> tuple[dict[str, Any], list[str]]:
@@ -272,6 +284,17 @@ def generate_recommendation(
         relative_rank=candidate.get("relative_rank"),
         alternatives_count=candidate.get("alternatives_count"),
     )
+    probability_info = probability_metadata(
+        field_name="confidence",
+        value=confidence,
+        source="advisor_engine.generate_recommendation",
+        calibrated=False,
+        model_backed=approved_forecast,
+        sample_count=_nonnegative_int(candidate.get("validation_sample_count")),
+        model=str(candidate.get("model") or ""),
+        model_version=str(candidate.get("model_version") or ""),
+        notes="Advisor confidence is a heuristic confidence score unless a separate calibrated probability field is supplied.",
+    )
     return AdvisorRecommendation(
         recommendation_id=rec_id,
         symbol=symbol,
@@ -311,4 +334,5 @@ def generate_recommendation(
             "confidence_kind": str(candidate.get("confidence_kind") or "HEURISTIC_SCORE").upper(),
         },
         oracle_decision=oracle_decision,
+        probability_evidence=probability_info,
     )

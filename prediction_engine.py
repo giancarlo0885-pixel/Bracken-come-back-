@@ -12,6 +12,7 @@ from config import (
     MIN_ACTIONABLE_MOVE_STOCK_PCT,
     REQUIRE_TARGET_FOR_BUY,
 )
+from probability_evidence import probability_metadata
 
 
 def _f(v: Any, default: float = 0.0) -> float:
@@ -55,11 +56,24 @@ def _timestamp(value: Any) -> datetime | None:
     return parsed.astimezone(timezone.utc)
 
 
-def _age_minutes(value: Any) -> float | None:
+def _age_minutes(value: Any, reference: datetime | None = None) -> float | None:
     parsed = _timestamp(value)
     if parsed is None:
         return None
-    return max(0.0, (datetime.now(timezone.utc) - parsed).total_seconds() / 60.0)
+    reference = reference or datetime.now(timezone.utc)
+    return max(0.0, (reference - parsed).total_seconds() / 60.0)
+
+
+def _known_at(record: dict[str, Any], as_of: datetime | None, fields: tuple[str, ...]) -> bool:
+    if as_of is None:
+        return True
+    for field in fields:
+        if field not in record or record.get(field) in (None, ""):
+            continue
+        parsed = _timestamp(record.get(field))
+        if parsed is not None and parsed > as_of:
+            return False
+    return True
 
 
 def normalize_action(action: Any, score: float = 0.0) -> str:
@@ -86,14 +100,15 @@ def _data_gate(
     expected_return: float,
     signal_time: Any,
     forecast_time: Any,
+    reference_time: datetime | None = None,
 ) -> tuple[str, bool, str, float | None, float | None]:
     """Return final action, execution-readiness, plain status, and age.
 
     This gate prevents stale opportunity-ranking records from appearing as
     current BUY recommendations. It does not fabricate missing prices or targets.
     """
-    signal_age = _age_minutes(signal_time)
-    forecast_age = _age_minutes(forecast_time)
+    signal_age = _age_minutes(signal_time, reference_time)
+    forecast_age = _age_minutes(forecast_time, reference_time)
     max_age = DECISION_CRYPTO_MAX_AGE_MINUTES if market == "crypto" else DECISION_STOCK_MAX_AGE_MINUTES
     min_move = MIN_ACTIONABLE_MOVE_CRYPTO_PCT if market == "crypto" else MIN_ACTIONABLE_MOVE_STOCK_PCT
 
@@ -129,13 +144,19 @@ def build_decisions(
     signals: Iterable[dict[str, Any]],
     forecasts: Iterable[dict[str, Any]],
     limit: int = 30,
+    decision_timestamp: Any | None = None,
 ) -> list[dict[str, Any]]:
+    as_of = _timestamp(decision_timestamp)
     latest_signal: dict[tuple[str, str], dict[str, Any]] = {}
     latest_forecasts: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for item in signals:
         enriched = dict(item)
         details = _payload(enriched.get("details"))
         route = _payload(details.get("market_data_route"))
+        if not _known_at(enriched, as_of, ("created_at", "timestamp", "quote_timestamp", "source_quote_timestamp", "fetched_at")):
+            continue
+        if not _known_at(route, as_of, ("quote_timestamp", "timestamp", "fetched_at", "provider_fetched_at")):
+            continue
         for field in (
             "scan_type",
             "source_interval",
@@ -152,8 +173,13 @@ def build_decisions(
         if enriched.get("source_interval") in (None, ""):
             enriched["source_interval"] = route.get("interval")
         key = (str(enriched.get("market", "cash")), str(enriched.get("symbol", "")).upper())
-        latest_signal.setdefault(key, enriched)
+        existing = latest_signal.get(key)
+        if existing is None or (_timestamp(enriched.get("created_at")) or datetime.min.replace(tzinfo=timezone.utc)) > (_timestamp(existing.get("created_at")) or datetime.min.replace(tzinfo=timezone.utc)):
+            latest_signal[key] = enriched
     for item in forecasts:
+        item = dict(item)
+        if not _known_at(item, as_of, ("created_at", "source_quote_timestamp", "quote_timestamp", "fetched_at")):
+            continue
         key = (str(item.get("market", "cash")), str(item.get("symbol", "")).upper())
         latest_forecasts.setdefault(key, []).append(item)
 
@@ -195,6 +221,8 @@ def build_decisions(
 
     results: list[dict[str, Any]] = []
     for op in opportunities:
+        if not _known_at(op, as_of, ("created_at", "timestamp", "fetched_at")):
+            continue
         market = str(op.get("market", "cash")).lower()
         symbol = str(op.get("symbol", "")).upper()
         score = _f(op.get("opportunity_score"))
@@ -209,9 +237,33 @@ def build_decisions(
         target = _f(fc.get("target_price"), _f(payload.get("target_price")))
         low = _f(fc.get("low_price"), _f(payload.get("low_price")))
         high = _f(fc.get("high_price"), _f(payload.get("high_price")))
-        prob_up = _f(fc.get("probability_up"), confidence)
-        if prob_up <= 1:
-            prob_up *= 100
+        raw_probability_up = fc.get("probability_up")
+        if raw_probability_up is not None:
+            prob_up = _f(raw_probability_up)
+            if prob_up <= 1:
+                prob_up *= 100
+            probability_info = probability_metadata(
+                field_name="probability_up",
+                value=raw_probability_up,
+                source="prediction_engine.forecast",
+                calibrated=False,
+                model_backed=bool(fc),
+                sample_count=fc.get("validation_sample_count") or 0,
+                model=str(fc.get("model") or ""),
+                model_version=str(fc.get("model_version") or ""),
+                notes="Forecast probability_up is a model estimate unless linked calibration evidence explicitly upgrades it.",
+            )
+        else:
+            prob_up = None
+            probability_info = probability_metadata(
+                field_name="confidence",
+                value=confidence,
+                source="prediction_engine.signal_confidence",
+                calibrated=False,
+                model_backed=False,
+                sample_count=0,
+                notes="No forecast probability_up was supplied; signal confidence remains a heuristic score.",
+            )
         expected = ((target / price) - 1) * 100 if _positive(price) and _positive(target) else _f(payload.get("expected_return"))
         requested_action = normalize_action(sig.get("action") or payload.get("action"), score)
         signal_time = sig.get("created_at")
@@ -224,6 +276,7 @@ def build_decisions(
             expected_return=expected,
             signal_time=signal_time,
             forecast_time=forecast_time,
+            reference_time=as_of,
         )
         details = _payload(sig.get("details"))
         reason = str(payload.get("reason") or details.get("reason") or sig.get("details") or "Ranked by the Oracle's combined market evidence.")
@@ -245,7 +298,8 @@ def build_decisions(
             "target": target,
             "low": low,
             "high": high,
-            "probability_up": round(max(0.0, min(100.0, prob_up)), 1),
+            "probability_up": round(max(0.0, min(100.0, prob_up)), 1) if prob_up is not None else None,
+            "probability_evidence": probability_info,
             "expected_return": round(expected, 1),
             "risk": risk,
             "reason": reason,

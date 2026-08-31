@@ -424,17 +424,78 @@ def _weighted_entry_summary(entries: list[dict[str, Any]]) -> dict[str, Any]:
 def record_closed_trade_memory(
     *, market: str, symbol: str, position: dict[str, Any], exit_price: float,
     pnl: float, exit_reason: str, quantity: float,
+    entry_provenance: dict[str, Any] | None = None,
 ) -> bool:
     """Persist completed Trade DNA only when exact entry provenance is provable."""
     try:
         from database import connect
         with connect() as conn:
+            entry_provenance = entry_provenance or {}
             entries = _exact_entry_lot_snapshots(
                 conn,
                 market=market,
                 symbol=symbol,
                 opened_at=position.get("opened_at"),
             )
+
+            explicit_entry_id = (
+                entry_provenance.get("entry_decision_id")
+                or entry_provenance.get("decision_id")
+                or position.get("entry_decision_id")
+                or position.get("decision_id")
+            )
+            if not entries and explicit_entry_id not in (None, ""):
+                payload = {}
+                audit = conn.execute(
+                    """SELECT payload, opportunity_score, created_at FROM oracle_decision_audit
+                       WHERE market=%s AND symbol=%s AND approved=TRUE
+                         AND (
+                            id::text=%s
+                            OR payload->>'decision_id'=%s
+                            OR payload->>'entry_decision_id'=%s
+                            OR payload->>'signal_id'=%s
+                            OR payload->>'id'=%s
+                         )
+                       ORDER BY created_at ASC, id ASC LIMIT 1""",
+                    (
+                        market,
+                        symbol,
+                        str(explicit_entry_id),
+                        str(explicit_entry_id),
+                        str(explicit_entry_id),
+                        str(explicit_entry_id),
+                        str(explicit_entry_id),
+                    ),
+                ).fetchone() or {}
+                payload = _json_object(audit.get("payload"))
+                features = entry_provenance.get("feature_snapshot")
+                if not isinstance(features, dict):
+                    features = _json_object(payload.get("features"))
+                if not features:
+                    return False
+                entries = [
+                    {
+                        "lot_id": entry_provenance.get("lot_id"),
+                        "signal_id": (
+                            entry_provenance.get("entry_signal_id")
+                            or entry_provenance.get("signal_id")
+                            or explicit_entry_id
+                        ),
+                        "forecast_id": entry_provenance.get("entry_forecast_id") or payload.get("forecast_id"),
+                        "quote_id": entry_provenance.get("entry_quote_id") or payload.get("quote_id"),
+                        "correlation_id": entry_provenance.get("decision_correlation_id") or payload.get("decision_correlation_id"),
+                        "model": entry_provenance.get("model") or payload.get("model"),
+                        "model_version": entry_provenance.get("model_version") or payload.get("model_version"),
+                        "quote_timestamp": entry_provenance.get("quote_timestamp") or payload.get("quote_timestamp"),
+                        "provider": entry_provenance.get("provider") or payload.get("provider"),
+                        "opened_at": position.get("opened_at"),
+                        "quantity_opened": max(0.0, _num(quantity, 0.0)),
+                        "entry_price": _num(position.get("average_price") or position.get("entry_price"), exit_price),
+                        "features": {k: _num(v) for k, v in features.items()},
+                        "oracle_decision": payload,
+                    }
+                ]
+
             if not entries:
                 return False
             summary = _weighted_entry_summary(entries)
@@ -461,6 +522,7 @@ def record_closed_trade_memory(
                 }
                 for item in entries
             ]
+            primary = provenance[0] if provenance else {}
             dna_payload = {
                 "provenance_status": EXACT_PROVENANCE_STATUS,
                 "entry_value": entry_value,
@@ -476,8 +538,9 @@ def record_closed_trade_memory(
                    (market,symbol,entry_time,exit_time,market_regime,alpha_score,execution_score,
                     risk_score,relative_value_score,trade_quality,expected_value_pct,estimated_cost_pct,
                     adverse_selection_score,probability_of_profit,risk_reward_ratio,entry_reason,exit_reason,
-                    pnl,holding_minutes,payload,created_at)
-                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s)""",
+                    pnl,holding_minutes,payload,created_at,entry_decision_id,entry_signal_id,
+                    entry_forecast_id,entry_quote_id,decision_correlation_id)
+                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s,%s,%s,%s,%s)""",
                 (
                     market,
                     symbol,
@@ -500,6 +563,11 @@ def record_closed_trade_memory(
                     None,
                     json.dumps(dna_payload),
                     now,
+                    primary.get("signal_id"),
+                    primary.get("signal_id"),
+                    primary.get("forecast_id"),
+                    primary.get("quote_id"),
+                    primary.get("correlation_id"),
                 ),
             )
             return True

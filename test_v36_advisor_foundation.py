@@ -27,6 +27,13 @@ from oracle_decision_identity import (
     build_oracle_decision_identity,
     canonical_oracle_judgment,
 )
+from probability_evidence import (
+    CALIBRATED_PROBABILITY,
+    HEURISTIC_SCORE,
+    MODEL_ESTIMATE,
+    classify_probability_field,
+    probability_metadata,
+)
 
 
 def _quote(symbol: str = "AAPL", price: float = 100.0) -> dict:
@@ -90,6 +97,8 @@ def test_advisor_recommendation_has_required_structure_and_warnings():
     assert {item["type"] for item in rec.evidence_used} >= {"information", "forecast", "opinion", "risk_warning"}
     assert "guarantee" not in rec.investment_thesis.lower()
     assert rec.oracle_decision["final_judgment"] in {"STRONG BUY", "BUY"}
+    assert rec.probability_evidence["classification"] == HEURISTIC_SCORE
+    assert rec.probability_evidence["calibrated"] is False
     assert set(rec.oracle_decision) >= {
         "what_is_happening",
         "why_might_it_continue",
@@ -203,6 +212,32 @@ def test_oracle_ten_question_payload_uses_supplied_evidence_without_optimistic_b
     assert payload["thesis_invalidation"] == ["price closes below support"]
     assert payload["relative_opportunity"] == "Ranked 1 of 7 currently supplied alternatives."
     assert payload["final_judgment"] == "BUY"
+
+
+def test_probability_metadata_distinguishes_scores_from_calibrated_probabilities():
+    confidence = probability_metadata(
+        field_name="confidence",
+        value=82,
+        source="unit",
+        calibrated=True,
+        model_backed=True,
+    )
+    probability = probability_metadata(
+        field_name="probability_up",
+        value=0.64,
+        source="walk_forward",
+        calibrated=True,
+        model_backed=True,
+        sample_count=200,
+    )
+    model_estimate = classify_probability_field("probability_of_profit", model_backed=True)
+
+    assert confidence["classification"] == HEURISTIC_SCORE
+    assert confidence["calibrated"] is False
+    assert probability["classification"] == CALIBRATED_PROBABILITY
+    assert probability["calibrated"] is True
+    assert probability["value"] == 0.64
+    assert model_estimate == MODEL_ESTIMATE
 
 
 def test_premium_strategy_data_is_not_fabricated():
