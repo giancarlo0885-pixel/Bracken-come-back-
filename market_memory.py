@@ -13,6 +13,7 @@ MEMORY_MAX_ADJUSTMENT = max(0.0, float(os.getenv("MEMORY_MAX_ADJUSTMENT", "8.0")
 MEMORY_LOOKBACK_LIMIT = max(25, int(os.getenv("MEMORY_LOOKBACK_LIMIT", "300")))
 MEMORY_VETO_WIN_RATE = min(0.5, max(0.0, float(os.getenv("MEMORY_VETO_WIN_RATE", "0.30"))))
 MEMORY_VETO_MIN_ANALOGS = max(MEMORY_MIN_ANALOGS, int(os.getenv("MEMORY_VETO_MIN_ANALOGS", "10")))
+EXACT_PROVENANCE_STATUS = "EXACT_ENTRY_LOTS"
 
 
 def _num(value: Any, default: float = 0.0) -> float:
@@ -34,6 +35,18 @@ def _clip(value: float, low: float, high: float) -> float:
 def _normalized_score(value: Any) -> float:
     n = _num(value)
     return n * 100.0 if abs(n) <= 1.0 else n
+
+
+def _json_object(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return dict(value)
+    if isinstance(value, str) and value.strip():
+        try:
+            decoded = json.loads(value)
+        except Exception:
+            return {}
+        return dict(decoded) if isinstance(decoded, dict) else {}
+    return {}
 
 
 def feature_vector(signal: Any) -> dict[str, float]:
@@ -97,13 +110,8 @@ class MarketMemoryAssessment:
 
 
 def _record_vector(record: dict[str, Any]) -> dict[str, float]:
-    payload = record.get("payload")
-    if isinstance(payload, str):
-        try:
-            payload = json.loads(payload)
-        except Exception:
-            payload = {}
-    if isinstance(payload, dict) and isinstance(payload.get("features"), dict):
+    payload = _json_object(record.get("payload"))
+    if isinstance(payload.get("features"), dict):
         return {k: _num(v) for k, v in payload["features"].items()}
     return {
         "alpha": _num(record.get("alpha_score")) / 100.0,
@@ -197,21 +205,27 @@ def assess_market_memory(signal: Any, historical_records: Iterable[dict[str, Any
 
 
 def load_trade_memory(market: str, symbol: str | None = None, limit: int = MEMORY_LOOKBACK_LIMIT) -> list[dict[str, Any]]:
-    """Load completed Trade DNA. Failure is neutral so workers never crash for missing history."""
+    """Load only completed Trade DNA with exact immutable entry provenance.
+
+    Historical rows written by older builds are intentionally neutral until they
+    can prove the exact entry decision. This avoids learning from a potentially
+    newer decision that was created after the trade opened.
+    """
     try:
         from database import connect
         with connect() as conn:
+            provenance_filter = "COALESCE(payload->>'provenance_status','')=%s"
             if symbol:
                 return list(conn.execute(
-                    """SELECT *, CASE WHEN payload ? 'entry_value' THEN (payload->>'entry_value')::double precision ELSE NULL END AS entry_value,
+                    f"""SELECT *, CASE WHEN payload ? 'entry_value' THEN (payload->>'entry_value')::double precision ELSE NULL END AS entry_value,
                               CASE WHEN payload ? 'return_pct' THEN (payload->>'return_pct')::double precision ELSE NULL END AS return_pct
-                       FROM trade_dna WHERE market=%s AND pnl IS NOT NULL
+                       FROM trade_dna WHERE market=%s AND pnl IS NOT NULL AND {provenance_filter}
                        ORDER BY (symbol=%s) DESC, created_at DESC LIMIT %s""",
-                    (market, symbol, limit),
+                    (market, EXACT_PROVENANCE_STATUS, symbol, limit),
                 ).fetchall())
             return list(conn.execute(
-                "SELECT * FROM trade_dna WHERE market=%s AND pnl IS NOT NULL ORDER BY created_at DESC LIMIT %s",
-                (market, limit),
+                f"SELECT * FROM trade_dna WHERE market=%s AND pnl IS NOT NULL AND {provenance_filter} ORDER BY created_at DESC LIMIT %s",
+                (market, EXACT_PROVENANCE_STATUS, limit),
             ).fetchall())
     except Exception:
         return []
@@ -238,39 +252,225 @@ def record_decision_observation(market: str, signal: Any, decision: dict[str, An
         return
 
 
+def _exact_entry_lot_snapshots(
+    conn: Any,
+    *,
+    market: str,
+    symbol: str,
+    opened_at: Any,
+) -> list[dict[str, Any]]:
+    """Resolve immutable entry evidence for the lots belonging to one position.
+
+    Never substitute a later decision for a missing entry decision. If any current
+    lot cannot prove its exact entry signal/features, the entire memory write is
+    rejected so contaminated learning cannot enter Trade DNA.
+    """
+    if opened_at in (None, ""):
+        return []
+    lots = list(
+        conn.execute(
+            """SELECT id,lot_id,opened_at,quantity_opened,entry_price,decision_id,
+                      entry_signal_id,entry_forecast_id,entry_quote_id,entry_model,
+                      entry_model_version,entry_quote_timestamp,entry_provider,
+                      entry_correlation_id,entry_feature_snapshot,entry_decision_snapshot
+               FROM position_lots
+               WHERE market=%s AND symbol=%s AND opened_at >= %s
+                 AND COALESCE(NULLIF(entry_signal_id,''), NULLIF(decision_id,'')) IS NOT NULL
+               ORDER BY opened_at ASC, id ASC""",
+            (market, symbol, opened_at),
+        ).fetchall()
+    )
+    if not lots:
+        return []
+
+    resolved: list[dict[str, Any]] = []
+    for lot in lots:
+        signal_id = str(lot.get("entry_signal_id") or lot.get("decision_id") or "").strip()
+        if not signal_id:
+            return []
+        snapshot = _json_object(lot.get("entry_decision_snapshot"))
+        decision = _json_object(snapshot.get("oracle_decision"))
+        if not decision:
+            audit = conn.execute(
+                """SELECT payload,opportunity_score,created_at
+                   FROM oracle_decision_audit
+                   WHERE market=%s AND symbol=%s AND approved=TRUE
+                     AND payload->>'signal_id'=%s
+                   ORDER BY id ASC LIMIT 1""",
+                (market, symbol, signal_id),
+            ).fetchone() or {}
+            decision = _json_object(audit.get("payload"))
+        if not decision or str(decision.get("signal_id") or "").strip() != signal_id:
+            return []
+
+        features = _json_object(lot.get("entry_feature_snapshot"))
+        if not features:
+            features = _json_object(snapshot.get("features"))
+        if not features:
+            features = _json_object(decision.get("features"))
+        if not features:
+            return []
+
+        forecast_id = str(
+            lot.get("entry_forecast_id")
+            or snapshot.get("forecast_id")
+            or decision.get("forecast_id")
+            or ""
+        ).strip()
+        resolved.append(
+            {
+                "lot_id": lot.get("lot_id"),
+                "signal_id": signal_id,
+                "forecast_id": forecast_id or None,
+                "quote_id": lot.get("entry_quote_id") or snapshot.get("quote_id") or decision.get("decision_correlation_id"),
+                "correlation_id": lot.get("entry_correlation_id") or snapshot.get("correlation_id") or decision.get("decision_correlation_id"),
+                "model": lot.get("entry_model") or snapshot.get("model"),
+                "model_version": lot.get("entry_model_version") or snapshot.get("model_version"),
+                "quote_timestamp": lot.get("entry_quote_timestamp") or snapshot.get("quote_timestamp") or decision.get("quote_timestamp"),
+                "provider": lot.get("entry_provider") or snapshot.get("provider") or decision.get("provider"),
+                "opened_at": lot.get("opened_at"),
+                "quantity_opened": max(0.0, _num(lot.get("quantity_opened"), 0.0)),
+                "entry_price": _num(lot.get("entry_price"), 0.0),
+                "features": {k: _num(v) for k, v in features.items()},
+                "oracle_decision": decision,
+            }
+        )
+    return resolved
+
+
+def _weighted_entry_summary(entries: list[dict[str, Any]]) -> dict[str, Any]:
+    total_weight = sum(max(0.0, _num(item.get("quantity_opened"), 0.0)) for item in entries)
+    if total_weight <= 0:
+        return {}
+
+    def weighted(values: Iterable[tuple[Any, float]]) -> float | None:
+        pairs = [(float(value), weight) for value, weight in values if _num(value, float("nan")) == _num(value, float("nan")) and weight > 0]
+        if not pairs:
+            return None
+        denom = sum(weight for _, weight in pairs)
+        return sum(value * weight for value, weight in pairs) / denom if denom > 0 else None
+
+    feature_keys = sorted({key for item in entries for key in item.get("features", {})})
+    features: dict[str, float] = {}
+    for key in feature_keys:
+        numerator = 0.0
+        denominator = 0.0
+        for item in entries:
+            value = _num(item.get("features", {}).get(key), float("nan"))
+            weight = max(0.0, _num(item.get("quantity_opened"), 0.0))
+            if math.isfinite(value) and weight > 0:
+                numerator += value * weight
+                denominator += weight
+        if denominator > 0:
+            features[key] = numerator / denominator
+
+    quant_fields = (
+        "alpha_score",
+        "execution_score",
+        "risk_score",
+        "relative_value_score",
+        "trade_quality",
+        "net_expected_value_pct",
+        "estimated_cost_pct",
+        "adverse_selection_score",
+    )
+    quant: dict[str, float | None] = {}
+    for field in quant_fields:
+        values = []
+        for item in entries:
+            weight = max(0.0, _num(item.get("quantity_opened"), 0.0))
+            decision_quant = _json_object(item.get("oracle_decision", {}).get("quant"))
+            value = decision_quant.get(field)
+            number = _num(value, float("nan"))
+            if math.isfinite(number) and weight > 0:
+                values.append((number, weight))
+        quant[field] = weighted(values)
+
+    opportunity_values = []
+    probability_values = []
+    rr_values = []
+    regimes: list[str] = []
+    reasons: list[str] = []
+    for item in entries:
+        weight = max(0.0, _num(item.get("quantity_opened"), 0.0))
+        decision = item.get("oracle_decision", {})
+        for target, field in (
+            (opportunity_values, "opportunity_score"),
+            (probability_values, "probability_of_profit"),
+            (rr_values, "risk_reward_ratio"),
+        ):
+            number = _num(decision.get(field), float("nan"))
+            if math.isfinite(number) and weight > 0:
+                target.append((number, weight))
+        regime = str(decision.get("market_regime") or decision.get("regime") or "").strip()
+        if regime:
+            regimes.append(regime)
+        reason = str(decision.get("reason") or "").strip()
+        if reason:
+            reasons.append(reason)
+
+    unique_regimes = list(dict.fromkeys(regimes))
+    return {
+        "features": features,
+        "quant": quant,
+        "opportunity_score": weighted(opportunity_values),
+        "probability_of_profit": weighted(probability_values),
+        "risk_reward_ratio": weighted(rr_values),
+        "market_regime": unique_regimes[0] if len(unique_regimes) == 1 else ("mixed" if unique_regimes else "unknown"),
+        "entry_reason": reasons[0] if len(set(reasons)) == 1 and reasons else "multiple exact entry decisions" if reasons else None,
+    }
+
+
 def record_closed_trade_memory(
     *, market: str, symbol: str, position: dict[str, Any], exit_price: float,
     pnl: float, exit_reason: str, quantity: float,
-) -> None:
-    """Persist a completed trade fingerprint for future analog matching."""
+) -> bool:
+    """Persist completed Trade DNA only when exact entry provenance is provable."""
     try:
         from database import connect
         with connect() as conn:
-            audit = conn.execute(
-                """SELECT payload, opportunity_score, created_at FROM oracle_decision_audit
-                   WHERE market=%s AND symbol=%s AND approved=TRUE
-                   ORDER BY id DESC LIMIT 1""",
-                (market, symbol),
-            ).fetchone() or {}
-            payload = audit.get("payload") or {}
-            if isinstance(payload, str):
-                try:
-                    payload = json.loads(payload)
-                except Exception:
-                    payload = {}
-            quant = payload.get("quant", {}) if isinstance(payload, dict) else {}
+            entries = _exact_entry_lot_snapshots(
+                conn,
+                market=market,
+                symbol=symbol,
+                opened_at=position.get("opened_at"),
+            )
+            if not entries:
+                return False
+            summary = _weighted_entry_summary(entries)
+            features = summary.get("features") or {}
+            if not features:
+                return False
+            quant = summary.get("quant") or {}
             entry_price = _num(position.get("average_price") or position.get("entry_price"), exit_price)
             entry_value = abs(entry_price * quantity)
             return_pct = pnl / entry_value if entry_value > 0 else 0.0
-            features = payload.get("features") if isinstance(payload, dict) else None
-            if not isinstance(features, dict):
-                features = {}
+            provenance = [
+                {
+                    "lot_id": item.get("lot_id"),
+                    "signal_id": item.get("signal_id"),
+                    "forecast_id": item.get("forecast_id"),
+                    "quote_id": item.get("quote_id"),
+                    "correlation_id": item.get("correlation_id"),
+                    "model": item.get("model"),
+                    "model_version": item.get("model_version"),
+                    "quote_timestamp": item.get("quote_timestamp"),
+                    "provider": item.get("provider"),
+                    "opened_at": item.get("opened_at"),
+                    "quantity_opened": item.get("quantity_opened"),
+                }
+                for item in entries
+            ]
             dna_payload = {
+                "provenance_status": EXACT_PROVENANCE_STATUS,
                 "entry_value": entry_value,
                 "return_pct": return_pct,
                 "features": features,
-                "oracle_decision": payload,
+                "entry_provenance": provenance,
+                "entry_signal_ids": [item.get("signal_id") for item in provenance],
+                "entry_forecast_ids": [item.get("forecast_id") for item in provenance if item.get("forecast_id")],
             }
+            now = datetime.now(timezone.utc).isoformat()
             conn.execute(
                 """INSERT INTO trade_dna
                    (market,symbol,entry_time,exit_time,market_regime,alpha_score,execution_score,
@@ -279,19 +479,32 @@ def record_closed_trade_memory(
                     pnl,holding_minutes,payload,created_at)
                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s)""",
                 (
-                    market, symbol, position.get("opened_at"), datetime.now(timezone.utc).isoformat(),
-                    payload.get("market_regime", "neutral") if isinstance(payload, dict) else "neutral",
-                    quant.get("alpha_score"), quant.get("execution_score"), quant.get("risk_score"),
-                    quant.get("relative_value_score"), payload.get("opportunity_score") if isinstance(payload, dict) else audit.get("opportunity_score"),
-                    quant.get("net_expected_value_pct"), quant.get("estimated_cost_pct"),
-                    quant.get("adverse_selection_score"), payload.get("probability_of_profit") if isinstance(payload, dict) else None,
-                    payload.get("risk_reward_ratio") if isinstance(payload, dict) else None,
-                    payload.get("reason") if isinstance(payload, dict) else None, exit_reason, pnl,
-                    None, json.dumps(dna_payload), datetime.now(timezone.utc).isoformat(),
+                    market,
+                    symbol,
+                    position.get("opened_at"),
+                    now,
+                    summary.get("market_regime", "unknown"),
+                    quant.get("alpha_score"),
+                    quant.get("execution_score"),
+                    quant.get("risk_score"),
+                    quant.get("relative_value_score"),
+                    summary.get("opportunity_score") if summary.get("opportunity_score") is not None else quant.get("trade_quality"),
+                    quant.get("net_expected_value_pct"),
+                    quant.get("estimated_cost_pct"),
+                    quant.get("adverse_selection_score"),
+                    summary.get("probability_of_profit"),
+                    summary.get("risk_reward_ratio"),
+                    summary.get("entry_reason"),
+                    exit_reason,
+                    pnl,
+                    None,
+                    json.dumps(dna_payload),
+                    now,
                 ),
             )
+            return True
     except Exception:
-        return
+        return False
 
 
 def memory_dashboard_summary(limit: int = 500) -> dict[str, Any]:
@@ -301,10 +514,7 @@ def memory_dashboard_summary(limit: int = 500) -> dict[str, Any]:
     returns = []
     groups: dict[str, list[float]] = {}
     for r in records:
-        payload = r.get("payload") or {}
-        if isinstance(payload, str):
-            try: payload = json.loads(payload)
-            except Exception: payload = {}
+        payload = _json_object(r.get("payload"))
         ret = payload.get("return_pct") if isinstance(payload, dict) else None
         if ret is None:
             ret = _num(r.get("pnl")) / max(abs(_num(payload.get("entry_value"))) if isinstance(payload, dict) else 0.0, 1e-9)

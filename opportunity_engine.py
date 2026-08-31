@@ -13,7 +13,10 @@ def rank_opportunities(signals: list[Any], limit: int = 12, market: str | None =
     """Rank opportunities with the same quant standard used by execution.
 
     This removes the former mismatch where the dashboard used a simplified
-    score while the worker approved trades with a different formula.
+    score while the worker approved trades with a different formula. Ranked
+    payloads also carry immutable signal/forecast/quote provenance so later
+    learning can link a closed trade to the exact entry evidence rather than a
+    newer decision for the same symbol.
     """
     ranked: list[dict] = []
     for signal in signals:
@@ -34,8 +37,20 @@ def rank_opportunities(signals: list[Any], limit: int = 12, market: str | None =
         )
         payload = decision.to_dict()
         route = _value(signal, "market_data_route", {}) or {}
+        signal_id = _value(signal, "signal_id", None)
+        forecast_id = _value(signal, "forecast_id", None)
+        correlation_id = (
+            _value(signal, "decision_correlation_id", None)
+            or _value(signal, "correlation_id", None)
+            or route.get("decision_correlation_id")
+            or route.get("correlation_id")
+        )
         payload.update(
             {
+                "signal_id": signal_id,
+                "forecast_id": forecast_id,
+                "entry_decision_id": f"signal:{signal_id}" if signal_id not in (None, "") else None,
+                "decision_correlation_id": correlation_id,
                 "scan_type": _value(signal, "scan_type", "") or route.get("scan_type"),
                 "source_interval": _value(signal, "source_interval", "") or route.get("interval"),
                 "source_quote_timestamp": _value(signal, "source_quote_timestamp", "") or route.get("quote_timestamp"),
@@ -51,6 +66,7 @@ def rank_opportunities(signals: list[Any], limit: int = 12, market: str | None =
         payload["features"] = feature_vector(signal)
         payload["council_score"] = round(float(_value(signal, "score", 0.0)) * (100 if float(_value(signal, "score", 0.0)) <= 1 else 1), 2)
         payload["confidence"] = round(float(_value(signal, "confidence", 0.0)) * (100 if float(_value(signal, "confidence", 0.0)) <= 1 else 1), 2)
+        payload["confidence_kind"] = str(_value(signal, "confidence_kind", "HEURISTIC_SCORE") or "HEURISTIC_SCORE").upper()
         payload["approved"] = bool(decision.quant.get("approved"))
         ranked.append(payload)
 
