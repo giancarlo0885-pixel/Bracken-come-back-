@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 import pandas as pd
 
+import crypto_execution_guard as crypto_guard
 import runtime_provider_reliability as reliability
 
 
@@ -96,6 +97,29 @@ def test_successful_yahoo_reference_preserves_exact_identity_and_clears_cooldown
     assert result.attrs["requested_symbol"] == "BTC-USD"
     assert result.attrs["provider_symbol"] == "BTC-USD"
     assert reliability._cooldown_active(key) is False
+
+
+def test_yahoo_provider_name_alone_is_not_paper_execution_proof():
+    quote = {
+        "provider": "Yahoo Finance",
+        "quote_verified": True,
+        "price": 100.0,
+    }
+    assert crypto_guard._paper_yahoo_reference(quote) is False
+
+
+def test_explicit_yahoo_paper_reference_is_recognized_but_never_provider_verified():
+    quote = {
+        "provider": "Yahoo Finance",
+        "quote_verified": True,
+        "execution_quote_eligible": True,
+        "paper_reference_verified": True,
+        "provider_quote_verified": False,
+        "price": 100.0,
+    }
+    assert crypto_guard._paper_yahoo_reference(quote) is True
+    quote["provider_quote_verified"] = True
+    assert crypto_guard._paper_yahoo_reference(quote) is False
 
 
 def test_crypto_railway_config_uses_key_normalizing_entrypoint():
