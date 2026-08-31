@@ -95,5 +95,6 @@ jobs:
           test_v39_global_adaptive_engine.py::test_postgres_v39_sector_enrichment_and_decision_ledger_persistence
           test_v39_global_adaptive_engine.py::test_postgres_v39_provider_budget_shared_ledger_exhausts_once
           test_capital_readiness_suite.py::test_postgres_persistent_order_journal_survives_restart_and_reconciles
+          test_capital_readiness_suite.py::test_postgres_presubmission_order_does_not_become_ambiguous_on_restart
           test_capital_readiness_suite.py::test_postgres_order_journal_rejects_changed_idempotent_intent
           test_capital_readiness_suite.py::test_postgres_shadow_fill_identity_is_unique
