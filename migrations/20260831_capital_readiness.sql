@@ -50,6 +50,7 @@ CREATE INDEX IF NOT EXISTS idx_broker_reconciliation_created
 
 CREATE TABLE IF NOT EXISTS shadow_broker_orders (
     shadow_order_id TEXT PRIMARY KEY,
+    paper_fill_id TEXT,
     decision_id TEXT,
     proposal_id TEXT,
     symbol TEXT NOT NULL,
@@ -73,6 +74,10 @@ CREATE TABLE IF NOT EXISTS shadow_broker_orders (
     created_at TEXT NOT NULL,
     evaluated_at TEXT
 );
+ALTER TABLE shadow_broker_orders ADD COLUMN IF NOT EXISTS paper_fill_id TEXT;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_shadow_broker_paper_fill
+    ON shadow_broker_orders(paper_fill_id)
+    WHERE paper_fill_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_shadow_broker_status
     ON shadow_broker_orders(status, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_shadow_broker_symbol
