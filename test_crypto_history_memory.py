@@ -1,10 +1,6 @@
 from datetime import date
 
-from crypto_history_memory import (
-    CATALOG_VERSION,
-    SettlementState if False else CATALOG_VERSION,
-)
-from crypto_history_memory import crypto_history_context
+from crypto_history_memory import CATALOG_VERSION, crypto_history_context
 
 
 def test_bitcoin_context_contains_protocol_cycle_and_institutional_history():
