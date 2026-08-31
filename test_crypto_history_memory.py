@@ -55,3 +55,35 @@ def test_non_crypto_market_gets_no_history_context():
     assert context["enabled"] is False
     assert context["events"] == []
     assert context["influences_decision"] is False
+
+
+def test_oracle_exposes_history_without_granting_execution_authority():
+    from oracle_intelligence import evaluate_opportunity
+
+    signal = {
+        "symbol": "BTC-USD",
+        "action": "BUY",
+        "score": 0.91,
+        "confidence": 0.88,
+        "momentum_5d": 0.05,
+        "momentum_20d": 0.11,
+        "trend_strength": 0.06,
+        "volume_ratio": 1.7,
+        "volatility_20d": 0.22,
+        "atr_pct": 0.018,
+        "news_sentiment": 0.6,
+        "relative_strength": 0.12,
+        "spread_pct": 0.0005,
+        "estimated_slippage_pct": 0.0004,
+        "event_risk_score": 10,
+    }
+    decision = evaluate_opportunity(
+        signal,
+        market="crypto",
+        historical_records=[],
+        use_market_memory=False,
+    )
+    assert decision.crypto_history["enabled"] is True
+    assert decision.crypto_history["events"]
+    assert decision.crypto_history["influences_decision"] is False
+    assert decision.crypto_history["score_adjustment"] == 0.0
