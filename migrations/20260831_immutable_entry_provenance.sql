@@ -17,22 +17,23 @@ RETURNS TRIGGER
 LANGUAGE plpgsql
 AS $$
 DECLARE
-    signal_payload JSONB;
     decision_payload JSONB;
-    forecast_record RECORD;
+    forecast_id_value TEXT;
+    forecast_model_value TEXT;
+    forecast_model_version_value TEXT;
+    forecast_quote_timestamp_value TEXT;
 BEGIN
+    -- decision_id is the existing paper-attribution field and currently carries
+    -- the exact signal id. Copy it into an explicit immutable provenance field.
     NEW.entry_signal_id := COALESCE(NULLIF(NEW.entry_signal_id, ''), NULLIF(NEW.decision_id, ''));
     IF NEW.entry_signal_id IS NULL THEN
         RETURN NEW;
     END IF;
 
-    SELECT s.payload
-      INTO signal_payload
-      FROM signals s
-     WHERE s.id::TEXT = NEW.entry_signal_id
-     ORDER BY s.id ASC
-     LIMIT 1;
-
+    -- The ranked Oracle payload is the canonical immutable feature/decision
+    -- snapshot. An absent audit row must NEVER block the paper order itself;
+    -- it only means the eventual trade is ineligible for learning until exact
+    -- provenance can be proven.
     SELECT oda.payload
       INTO decision_payload
       FROM oracle_decision_audit oda
@@ -42,8 +43,8 @@ BEGIN
      ORDER BY oda.id ASC
      LIMIT 1;
 
-    SELECT f.forecast_id, f.model, f.model_version, f.source_quote_timestamp, f.provider_symbol
-      INTO forecast_record
+    SELECT f.forecast_id::TEXT, f.model::TEXT, f.model_version::TEXT, f.source_quote_timestamp::TEXT
+      INTO forecast_id_value, forecast_model_value, forecast_model_version_value, forecast_quote_timestamp_value
       FROM forecasts f
      WHERE f.market = NEW.market
        AND f.symbol = NEW.symbol
@@ -51,56 +52,53 @@ BEGIN
      ORDER BY f.id ASC
      LIMIT 1;
 
-    IF forecast_record IS NOT NULL THEN
-        NEW.entry_forecast_id := COALESCE(NULLIF(NEW.entry_forecast_id, ''), forecast_record.forecast_id::TEXT);
-        NEW.entry_model := COALESCE(NULLIF(NEW.entry_model, ''), forecast_record.model::TEXT);
-        NEW.entry_model_version := COALESCE(NULLIF(NEW.entry_model_version, ''), forecast_record.model_version::TEXT);
-        NEW.entry_quote_timestamp := COALESCE(NULLIF(NEW.entry_quote_timestamp, ''), forecast_record.source_quote_timestamp::TEXT);
-    END IF;
-
+    NEW.entry_forecast_id := COALESCE(NULLIF(NEW.entry_forecast_id, ''), NULLIF(forecast_id_value, ''));
+    NEW.entry_model := COALESCE(NULLIF(NEW.entry_model, ''), NULLIF(forecast_model_value, ''));
+    NEW.entry_model_version := COALESCE(NULLIF(NEW.entry_model_version, ''), NULLIF(forecast_model_version_value, ''));
+    NEW.entry_quote_timestamp := COALESCE(
+        NULLIF(NEW.entry_quote_timestamp, ''),
+        NULLIF(forecast_quote_timestamp_value, ''),
+        decision_payload->>'quote_timestamp',
+        decision_payload->>'source_quote_timestamp'
+    );
     NEW.entry_quote_id := COALESCE(
         NULLIF(NEW.entry_quote_id, ''),
         decision_payload->>'decision_correlation_id',
-        decision_payload->>'correlation_id',
-        signal_payload->>'decision_correlation_id',
-        signal_payload->>'correlation_id'
+        decision_payload->>'correlation_id'
     );
     NEW.entry_correlation_id := COALESCE(NULLIF(NEW.entry_correlation_id, ''), NEW.entry_quote_id);
     NEW.entry_provider := COALESCE(
         NULLIF(NEW.entry_provider, ''),
-        decision_payload->>'provider',
-        signal_payload->>'provider'
-    );
-    NEW.entry_quote_timestamp := COALESCE(
-        NULLIF(NEW.entry_quote_timestamp, ''),
-        decision_payload->>'quote_timestamp',
-        decision_payload->>'source_quote_timestamp',
-        signal_payload->>'quote_timestamp',
-        signal_payload->>'source_quote_timestamp'
+        decision_payload->>'provider'
     );
     NEW.entry_feature_snapshot := COALESCE(
         NEW.entry_feature_snapshot,
-        CASE WHEN decision_payload ? 'features' THEN decision_payload->'features' ELSE NULL END
+        CASE
+            WHEN decision_payload IS NOT NULL AND decision_payload ? 'features'
+            THEN decision_payload->'features'
+            ELSE NULL
+        END
     );
 
-    NEW.entry_decision_snapshot := COALESCE(
-        NEW.entry_decision_snapshot,
-        jsonb_strip_nulls(
-            jsonb_build_object(
-                'signal_id', NEW.entry_signal_id,
-                'forecast_id', NEW.entry_forecast_id,
-                'quote_id', NEW.entry_quote_id,
-                'correlation_id', NEW.entry_correlation_id,
-                'model', NEW.entry_model,
-                'model_version', NEW.entry_model_version,
-                'quote_timestamp', NEW.entry_quote_timestamp,
-                'provider', NEW.entry_provider,
-                'features', NEW.entry_feature_snapshot,
-                'signal', signal_payload,
-                'oracle_decision', decision_payload
+    IF decision_payload IS NOT NULL OR NEW.entry_forecast_id IS NOT NULL OR NEW.entry_feature_snapshot IS NOT NULL THEN
+        NEW.entry_decision_snapshot := COALESCE(
+            NEW.entry_decision_snapshot,
+            jsonb_strip_nulls(
+                jsonb_build_object(
+                    'signal_id', NEW.entry_signal_id,
+                    'forecast_id', NEW.entry_forecast_id,
+                    'quote_id', NEW.entry_quote_id,
+                    'correlation_id', NEW.entry_correlation_id,
+                    'model', NEW.entry_model,
+                    'model_version', NEW.entry_model_version,
+                    'quote_timestamp', NEW.entry_quote_timestamp,
+                    'provider', NEW.entry_provider,
+                    'features', NEW.entry_feature_snapshot,
+                    'oracle_decision', decision_payload
+                )
             )
-        )
-    );
+        );
+    END IF;
 
     RETURN NEW;
 END;
