@@ -355,21 +355,26 @@ class RobinhoodCryptoClient:
         except Exception as exc:
             raise RuntimeError(_redact(exc)) from exc
 
-    def trading_pairs(self) -> list[dict[str, Any]]:
-        data = self.request("GET", "/api/v2/crypto/trading/trading_pairs/")
+    @staticmethod
+    def _results(data: Any) -> list[dict[str, Any]]:
         records = data.get("results", data) if isinstance(data, dict) else data
-        return [parse_trading_pair(item) for item in (records or []) if isinstance(item, dict)]
+        return [item for item in (records or []) if isinstance(item, dict)]
+
+    def trading_pairs(self) -> list[dict[str, Any]]:
+        return [parse_trading_pair(item) for item in self._results(self.request("GET", "/api/v2/crypto/trading/trading_pairs/"))]
 
     def account_details(self) -> dict[str, Any]:
-        data = self.request("GET", "/api/v1/crypto/trading/accounts/")
-        if isinstance(data, dict):
-            records = data.get("results")
-            if isinstance(records, list):
-                return records[0] if records else {}
-            return data
-        if isinstance(data, list):
-            return data[0] if data else {}
-        return {}
+        """Read the first v2 crypto account using Robinhood's documented account schema."""
+        records = self._results(self.request("GET", "/api/v2/crypto/trading/accounts/"))
+        return records[0] if records else {}
+
+    def holdings(self, account_number: str) -> list[dict[str, Any]]:
+        query = urlencode({"account_number": str(account_number or "").strip()})
+        return self._results(self.request("GET", f"/api/v2/crypto/trading/holdings/?{query}"))
+
+    def orders(self, account_number: str) -> list[dict[str, Any]]:
+        query = urlencode({"account_number": str(account_number or "").strip()})
+        return self._results(self.request("GET", f"/api/v2/crypto/trading/orders/?{query}"))
 
     def best_bid_ask_quotes(self, *symbols: str) -> list[dict[str, Any]]:
         normalized = [str(symbol or "").upper().strip() for symbol in symbols if str(symbol or "").strip()]
@@ -377,9 +382,7 @@ class RobinhoodCryptoClient:
         path = "/api/v2/crypto/marketdata/best_bid_ask/"
         if query:
             path = f"{path}?{query}"
-        data = self.request("GET", path)
-        records = data.get("results", data) if isinstance(data, dict) else data
-        return [item for item in (records or []) if isinstance(item, dict)]
+        return self._results(self.request("GET", path))
 
     def estimated_price(self, symbol: str, side: str, quantity: Any) -> list[dict[str, Any]]:
         params = [
@@ -388,17 +391,27 @@ class RobinhoodCryptoClient:
             ("quantity", str(quantity)),
         ]
         path = f"/api/v2/crypto/trading/estimated_price/?{urlencode(params)}"
-        data = self.request("GET", path)
-        records = data.get("results", data) if isinstance(data, dict) else data
-        return [item for item in (records or []) if isinstance(item, dict)]
+        return self._results(self.request("GET", path))
+
+
+def buying_power_state(account: dict[str, Any]) -> str:
+    """Classify buying power without logging or returning the numeric balance."""
+    raw = account.get("buying_power")
+    if raw in (None, ""):
+        return "MISSING"
+    try:
+        value = Decimal(str(raw))
+    except Exception:
+        return "INVALID"
+    if not value.is_finite() or value < 0:
+        return "INVALID"
+    if value == 0:
+        return "ZERO"
+    return "POSITIVE"
 
 
 def _buying_power_ok(account: dict[str, Any]) -> bool:
-    try:
-        value = Decimal(str(account.get("buying_power") or "0"))
-    except Exception:
-        return False
-    return value > 0
+    return buying_power_state(account) == "POSITIVE"
 
 
 def preflight(client: RobinhoodCryptoClient | None = None, journal: OrderJournal | None = None) -> dict[str, Any]:
@@ -413,6 +426,10 @@ def preflight(client: RobinhoodCryptoClient | None = None, journal: OrderJournal
         "TRADABLE PAIR COUNT": 0,
         "QUOTE CHECK": "NOT_RUN",
         "BUYING POWER CHECK": "NOT_RUN",
+        "BUYING POWER STATE": "NOT_CHECKED",
+        "BUYING POWER CURRENCY": "UNKNOWN",
+        "HOLDINGS CHECK": "NOT_RUN",
+        "ORDERS CHECK": "NOT_RUN",
         "ORDER PREVIEW CAPABILITY": "DIRECT_API_NO_PREVIEW",
         "LIVE TRADING ARMED/DISARMED": "DISARMED",
         "ORDER JOURNAL": "PASS" if journal is not None else "MISSING",
@@ -430,8 +447,21 @@ def preflight(client: RobinhoodCryptoClient | None = None, journal: OrderJournal
 
         account = client.account_details()
         account_status = str(account.get("status") or "").lower()
-        result["ACCOUNT STATUS"] = "PASS" if account_status == "active" else "FAIL"
-        result["BUYING POWER CHECK"] = "PASS" if _buying_power_ok(account) else "FAIL"
+        account_number = str(account.get("account_number") or "").strip()
+        result["ACCOUNT STATUS"] = "PASS" if account_status == "active" and account_number else "FAIL"
+        bp_state = buying_power_state(account)
+        result["BUYING POWER STATE"] = bp_state
+        result["BUYING POWER CHECK"] = "PASS" if bp_state == "POSITIVE" else "FAIL"
+        result["BUYING POWER CURRENCY"] = str(account.get("buying_power_currency") or "UNKNOWN").upper()
+
+        if account_number:
+            client.holdings(account_number)
+            result["HOLDINGS CHECK"] = "PASS"
+            client.orders(account_number)
+            result["ORDERS CHECK"] = "PASS"
+        else:
+            result["HOLDINGS CHECK"] = "FAIL"
+            result["ORDERS CHECK"] = "FAIL"
 
         if tradable_pairs:
             preferred = next((pair for pair in tradable_pairs if pair["symbol"] == "BTC-USD"), tradable_pairs[0])
@@ -459,6 +489,8 @@ def preflight(client: RobinhoodCryptoClient | None = None, journal: OrderJournal
             "CRYPTO STATUS",
             "QUOTE CHECK",
             "BUYING POWER CHECK",
+            "HOLDINGS CHECK",
+            "ORDERS CHECK",
             "ORDER JOURNAL",
         )
     )
