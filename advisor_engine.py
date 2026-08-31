@@ -8,13 +8,21 @@ from typing import Any
 
 from config import ADVISOR_MODEL_VERSION, ADVISOR_RECOMMENDATION_TTL_MINUTES
 from market_sessions import quote_is_fresh
+from oracle_decision_identity import (
+    ENTRY_ACTIONS as ORACLE_ENTRY_ACTIONS,
+    ORACLE_ACTIONS,
+    build_oracle_judgment,
+    guard_oracle_action,
+)
 from portfolio_optimizer import PortfolioConstraints, portfolio_fit_score
 from provider_router import normalize_symbol
 from strategy_engine import StrategySignal, ensemble_score, evaluate_strategies
 
 
-ADVISOR_ACTIONS = {"STRONG BUY", "BUY", "ACCUMULATE", "HOLD", "REDUCE", "SELL", "AVOID", "WATCH"}
-ENTRY_ACTIONS = {"STRONG BUY", "BUY", "ACCUMULATE"}
+# Legacy aliases remain accepted by the upstream scoring function, but every
+# recommendation returned to the application is normalized by the shared Oracle guard.
+ADVISOR_ACTIONS = set(ORACLE_ACTIONS) | {"ACCUMULATE", "WATCH"}
+ENTRY_ACTIONS = set(ORACLE_ENTRY_ACTIONS) | {"ACCUMULATE"}
 
 
 @dataclass
@@ -57,6 +65,7 @@ class AdvisorRecommendation:
     data_quality_score: float
     model_version: str
     evidence_used: list[dict[str, Any]]
+    oracle_judgment: dict[str, Any]
     generated_timestamp: str
     recommendation_expiration_timestamp: str
     labels: dict[str, str]
@@ -156,15 +165,52 @@ def generate_recommendation(
     missing = list(quote_missing)
     if data_quality < 50:
         missing.append("data quality is low")
-    if not candidate.get("liquidity_value") and not candidate.get("avg_dollar_volume") and not candidate.get("volume"):
+    liquidity_available = bool(
+        candidate.get("liquidity_value")
+        or candidate.get("avg_dollar_volume")
+        or candidate.get("volume")
+    )
+    if not liquidity_available:
         missing.append("liquidity evidence is unavailable")
     validation_status = str(candidate.get("validation_status") or candidate.get("forecast_validation_status") or "shadow").lower()
     approved_forecast = validation_status == "approved" or bool(candidate.get("forecast_approved"))
     if not approved_forecast:
         missing.append("forecast is experimental or shadow-only")
-    action = _action(opportunity, confidence, missing + ([] if fit >= 50 else fit_reasons), restricted)
-    if action in ENTRY_ACTIONS and missing:
-        action = "WATCH" if quote_missing or data_quality < 50 else "HOLD"
+
+    proposed_action = _action(opportunity, confidence, missing + ([] if fit >= 50 else fit_reasons), restricted)
+    guard_gaps = list(missing)
+    if fit < 50:
+        guard_gaps.extend(fit_reasons or ["portfolio fit is below the advisor evidence floor"])
+    positive_evidence: list[str] = []
+    if not quote_missing:
+        positive_evidence.append("Current price identity and freshness are verified.")
+    if approved_forecast:
+        positive_evidence.append("Forecast evidence is approved for advisor entry use.")
+    if data_quality >= 50:
+        positive_evidence.append("Data quality passes the advisor evidence floor.")
+    if liquidity_available:
+        positive_evidence.append("Liquidity evidence is available.")
+    if fit >= 50:
+        positive_evidence.append("Portfolio fit is not rejected by the optimizer.")
+
+    guarded = guard_oracle_action(
+        proposed_action,
+        expected_return=expected_return,
+        expected_downside=downside,
+        risk_reward_ratio=risk_reward,
+        opportunity_score=opportunity,
+        confidence=confidence,
+        quote_verified=not quote_missing and quote.get("quote_verified") is True,
+        forecast_approved=approved_forecast,
+        data_quality_score=data_quality,
+        minimum_data_quality=50.0,
+        liquidity_available=liquidity_available,
+        restricted=restricted,
+        evidence_gaps=guard_gaps,
+        positive_evidence=positive_evidence,
+    )
+    action = guarded.action
+
     entry_low = price * 0.995 if price > 0 else 0.0
     entry_high = price * 1.005 if price > 0 else 0.0
     now = datetime.now(timezone.utc)
@@ -177,6 +223,26 @@ def generate_recommendation(
     ]
     for item in missing:
         evidence.append({"type": "missing_data", "summary": item})
+
+    invalidation_conditions = list(
+        candidate.get("thesis_invalidation_conditions")
+        or ["Verified data becomes stale, price breaks risk level, or catalyst evidence disappears."]
+    )
+    risk_factors = list(candidate.get("risk_factors") or missing or ["Market risk and forecast uncertainty."])
+    oracle_judgment = build_oracle_judgment(
+        action_result=guarded,
+        market_state=candidate.get("market_state") or candidate.get("regime"),
+        continuation_case=candidate.get("continuation_case") or candidate.get("catalyst") or candidate.get("investment_thesis"),
+        supporting_evidence=positive_evidence,
+        contradicting_evidence=risk_factors,
+        expected_upside_pct=expected_return,
+        expected_downside_pct=downside,
+        confidence=confidence,
+        confidence_kind=str(candidate.get("confidence_kind") or "HEURISTIC_SCORE"),
+        invalidation_conditions=invalidation_conditions,
+        relative_opportunity=candidate.get("relative_opportunity") or f"opportunity={opportunity:.1f}/100; portfolio_fit={fit:.1f}/100",
+    )
+
     return AdvisorRecommendation(
         recommendation_id=rec_id,
         symbol=symbol,
@@ -199,11 +265,12 @@ def generate_recommendation(
         suggested_position_size=float(candidate.get("suggested_position_size") or min(profile.available_capital * 0.05, profile.available_capital)),
         catalyst=str(candidate.get("catalyst") or "No confirmed catalyst supplied."),
         investment_thesis=str(candidate.get("investment_thesis") or "Evidence supports monitoring until verified price, forecast, and risk gates agree."),
-        risk_factors=list(candidate.get("risk_factors") or missing or ["Market risk and forecast uncertainty."]),
-        thesis_invalidation_conditions=list(candidate.get("thesis_invalidation_conditions") or ["Verified data becomes stale, price breaks risk level, or catalyst evidence disappears."]),
+        risk_factors=risk_factors,
+        thesis_invalidation_conditions=invalidation_conditions,
         data_quality_score=data_quality,
         model_version=ADVISOR_MODEL_VERSION,
         evidence_used=evidence,
+        oracle_judgment=oracle_judgment,
         generated_timestamp=now.isoformat(),
         recommendation_expiration_timestamp=(now + timedelta(minutes=ADVISOR_RECOMMENDATION_TTL_MINUTES)).isoformat(),
         labels={
@@ -212,5 +279,6 @@ def generate_recommendation(
             "data_quality": f"{data_quality:.0f}/100",
             "forecast_quality": "approved" if approved_forecast else "shadow-only",
             "portfolio_fit": f"{fit:.0f}/100",
+            "confidence_kind": str(candidate.get("confidence_kind") or "HEURISTIC_SCORE").upper(),
         },
     )
