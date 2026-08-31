@@ -1,0 +1,1 @@
+Read-only Robinhood startup preflight added. No live-order permissions are enabled by this change.
