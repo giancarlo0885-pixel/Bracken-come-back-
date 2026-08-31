@@ -220,3 +220,186 @@ def build_oracle_judgment(
             "reason_codes": action_result.reason_codes,
         },
     }
+
+
+PRIMARY_JUDGMENTS = tuple(action for action in ORACLE_ACTIONS if action != "HOLD")
+ENTRY_JUDGMENTS = ENTRY_ACTIONS
+UNKNOWN_MARKERS = (
+    "missing",
+    "unavailable",
+    "unknown",
+    "insufficient",
+    "cannot verify",
+    "unverified",
+)
+
+
+def _text(value: Any, fallback: str = "") -> str:
+    text = str(value or "").strip()
+    return text or fallback
+
+
+def _number(value: Any, default: float = 0.0) -> float:
+    result = _finite(value)
+    return result if result is not None else default
+
+
+def canonical_oracle_judgment(action: Any) -> str:
+    """Compatibility alias for the Oracle's canonical user-facing vocabulary."""
+    value = canonical_oracle_action(action)
+    return "WAIT" if value == "HOLD" else value
+
+
+def buy_identity_failures(
+    *,
+    opportunity_score: Any,
+    confidence: Any,
+    expected_upside_pct: Any,
+    expected_downside_pct: Any,
+    risk_reward_ratio: Any,
+    data_quality_score: Any,
+    evidence_gaps: list[str] | None = None,
+    min_opportunity_score: float = 62.0,
+    min_confidence: float = 55.0,
+    min_data_quality: float = 50.0,
+    min_risk_reward: float = 1.15,
+) -> list[str]:
+    """Return the reasons an entry judgment is not yet a positive opportunity."""
+    gaps = [str(item) for item in evidence_gaps or [] if str(item or "").strip()]
+    failures: list[str] = []
+    upside = _number(expected_upside_pct)
+    downside = abs(_number(expected_downside_pct))
+    rr = _number(risk_reward_ratio)
+    if upside <= 0:
+        failures.append("estimated upside is not positive")
+    if downside <= 0:
+        failures.append("estimated downside is unavailable")
+    if rr < min_risk_reward:
+        failures.append("risk/reward is not asymmetric enough")
+    if _number(opportunity_score) < min_opportunity_score:
+        failures.append("opportunity score is below the Oracle entry standard")
+    if _number(confidence) < min_confidence:
+        failures.append("validated confidence is too low")
+    if _number(data_quality_score) < min_data_quality:
+        failures.append("data quality is too weak")
+    if gaps:
+        failures.extend(gaps)
+    return failures
+
+
+def action_preserves_oracle_buy_identity(
+    action: Any,
+    *,
+    opportunity_score: Any,
+    confidence: Any,
+    expected_upside_pct: Any,
+    expected_downside_pct: Any,
+    risk_reward_ratio: Any,
+    data_quality_score: Any,
+    evidence_gaps: list[str] | None = None,
+) -> tuple[bool, list[str]]:
+    judgment = canonical_oracle_judgment(action)
+    if judgment not in ENTRY_JUDGMENTS:
+        return True, []
+    failures = buy_identity_failures(
+        opportunity_score=opportunity_score,
+        confidence=confidence,
+        expected_upside_pct=expected_upside_pct,
+        expected_downside_pct=expected_downside_pct,
+        risk_reward_ratio=risk_reward_ratio,
+        data_quality_score=data_quality_score,
+        evidence_gaps=evidence_gaps,
+    )
+    return not failures, failures
+
+
+def build_oracle_decision_identity(
+    *,
+    symbol: Any,
+    action: Any,
+    opportunity_score: Any,
+    confidence: Any,
+    expected_upside_pct: Any,
+    expected_downside_pct: Any,
+    risk_reward_ratio: Any,
+    data_quality_score: Any,
+    catalyst: Any = None,
+    thesis: Any = None,
+    risk_factors: list[str] | None = None,
+    invalidation_conditions: list[str] | None = None,
+    evidence_used: list[dict[str, Any]] | None = None,
+    evidence_gaps: list[str] | None = None,
+    relative_rank: Any = None,
+    alternatives_count: Any = None,
+) -> dict[str, Any]:
+    """Build the legacy ten-question decision payload from guarded evidence."""
+    gaps = [str(item) for item in evidence_gaps or [] if str(item or "").strip()]
+    guarded = guard_oracle_action(
+        action,
+        expected_return=expected_upside_pct,
+        expected_downside=expected_downside_pct,
+        risk_reward_ratio=risk_reward_ratio,
+        opportunity_score=opportunity_score,
+        confidence=confidence,
+        quote_verified=not any("quote" in gap.lower() for gap in gaps),
+        forecast_approved=not any("forecast" in gap.lower() for gap in gaps),
+        data_quality_score=data_quality_score,
+        liquidity_available=not any("liquidity" in gap.lower() for gap in gaps),
+        evidence_gaps=gaps,
+        contradicting_evidence=risk_factors,
+    )
+    judgment = canonical_oracle_judgment(guarded.action)
+    if gaps and any(any(marker in gap.lower() for marker in UNKNOWN_MARKERS) for gap in gaps):
+        if judgment in {"WAIT", "BUY", "STRONG BUY"}:
+            judgment = "UNKNOWN"
+
+    support = []
+    if _number(expected_upside_pct) > 0:
+        support.append(f"Estimated upside is {_number(expected_upside_pct):.2f}%.")
+    if _number(risk_reward_ratio) >= 1.15:
+        support.append(f"Risk/reward is {_number(risk_reward_ratio):.2f} to 1.")
+    if _number(opportunity_score) >= 62:
+        support.append(f"Opportunity score is {_number(opportunity_score):.1f}/100.")
+    if _number(confidence) >= 55:
+        support.append(f"Validated confidence is {_number(confidence):.1f}%.")
+    for item in evidence_used or []:
+        summary = _text(item.get("summary") if isinstance(item, dict) else item)
+        evidence_type = _text(item.get("type") if isinstance(item, dict) else "")
+        if summary and evidence_type not in {"risk_warning", "missing_data"}:
+            support.append(summary)
+
+    contradictions = list(risk_factors or [])
+    contradictions.extend(gaps)
+    contradictions.extend(guarded.contradictions)
+    contradictions.extend(guarded.unknowns)
+    if not contradictions:
+        contradictions.append("No material contradiction was supplied by the current evidence set.")
+
+    invalidation = list(invalidation_conditions or [])
+    if not invalidation:
+        invalidation = [
+            "Verified quote freshness is lost.",
+            "The expected move or risk/reward turns negative.",
+            "A stronger alternative displaces this setup.",
+        ]
+
+    rank_text = "Alternative ranking evidence was not supplied."
+    rank = _number(relative_rank)
+    count = int(_number(alternatives_count))
+    if rank > 0 and count > 0:
+        rank_text = f"Ranked {int(rank)} of {count} currently supplied alternatives."
+
+    return {
+        "vocabulary": list(PRIMARY_JUDGMENTS),
+        "symbol": _text(symbol),
+        "what_is_happening": _text(catalyst, "UNKNOWN"),
+        "why_might_it_continue": _text(thesis, "UNKNOWN"),
+        "supporting_evidence": _clean(support),
+        "contradicting_evidence": _clean(contradictions),
+        "estimated_upside": f"{_number(expected_upside_pct):.2f}%",
+        "estimated_downside": f"{abs(_number(expected_downside_pct)):.2f}%",
+        "certainty": f"{_number(confidence):.1f}% confidence, data quality {_number(data_quality_score):.1f}/100",
+        "thesis_invalidation": _clean(invalidation),
+        "relative_opportunity": rank_text,
+        "final_judgment": judgment,
+    }

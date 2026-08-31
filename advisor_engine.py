@@ -11,6 +11,7 @@ from market_sessions import quote_is_fresh
 from oracle_decision_identity import (
     ENTRY_ACTIONS as ORACLE_ENTRY_ACTIONS,
     ORACLE_ACTIONS,
+    build_oracle_decision_identity,
     build_oracle_judgment,
     guard_oracle_action,
 )
@@ -69,6 +70,7 @@ class AdvisorRecommendation:
     generated_timestamp: str
     recommendation_expiration_timestamp: str
     labels: dict[str, str]
+    oracle_decision: dict[str, Any]
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -252,7 +254,24 @@ def generate_recommendation(
         invalidation_conditions=invalidation_conditions,
         relative_opportunity=candidate.get("relative_opportunity") or f"opportunity={opportunity:.1f}/100; portfolio_fit={fit:.1f}/100",
     )
-
+    oracle_decision = build_oracle_decision_identity(
+        symbol=symbol,
+        action=action,
+        opportunity_score=opportunity,
+        confidence=confidence,
+        expected_upside_pct=expected_return,
+        expected_downside_pct=downside,
+        risk_reward_ratio=risk_reward,
+        data_quality_score=data_quality,
+        catalyst=candidate.get("catalyst") or "No confirmed catalyst supplied.",
+        thesis=candidate.get("investment_thesis") or "Evidence supports monitoring until verified price, forecast, and risk gates agree.",
+        risk_factors=list(candidate.get("risk_factors") or []),
+        invalidation_conditions=list(candidate.get("thesis_invalidation_conditions") or []),
+        evidence_used=evidence,
+        evidence_gaps=missing + ([] if fit >= 50 else fit_reasons),
+        relative_rank=candidate.get("relative_rank"),
+        alternatives_count=candidate.get("alternatives_count"),
+    )
     return AdvisorRecommendation(
         recommendation_id=rec_id,
         symbol=symbol,
@@ -291,4 +310,5 @@ def generate_recommendation(
             "portfolio_fit": f"{fit:.0f}/100",
             "confidence_kind": str(candidate.get("confidence_kind") or "HEURISTIC_SCORE").upper(),
         },
+        oracle_decision=oracle_decision,
     )

@@ -22,6 +22,11 @@ from risk_engine import ExecutionSwitches, pre_trade_risk_checks
 from security import redact_headers, redact_url, safe_exception
 from shadow_trading import simulate_shadow_order
 from strategy_engine import evaluate_strategies, ensemble_score
+from oracle_decision_identity import (
+    action_preserves_oracle_buy_identity,
+    build_oracle_decision_identity,
+    canonical_oracle_judgment,
+)
 
 
 def _quote(symbol: str = "AAPL", price: float = 100.0) -> dict:
@@ -84,6 +89,120 @@ def test_advisor_recommendation_has_required_structure_and_warnings():
     assert payload["risk_reward_ratio"] == pytest.approx(2.0)
     assert {item["type"] for item in rec.evidence_used} >= {"information", "forecast", "opinion", "risk_warning"}
     assert "guarantee" not in rec.investment_thesis.lower()
+    assert rec.oracle_decision["final_judgment"] in {"STRONG BUY", "BUY"}
+    assert set(rec.oracle_decision) >= {
+        "what_is_happening",
+        "why_might_it_continue",
+        "supporting_evidence",
+        "contradicting_evidence",
+        "estimated_upside",
+        "estimated_downside",
+        "certainty",
+        "thesis_invalidation",
+        "relative_opportunity",
+        "final_judgment",
+    }
+
+
+def test_oracle_identity_blocks_buy_without_positive_asymmetric_opportunity():
+    rec = generate_recommendation(
+        {
+            "symbol": "AAPL",
+            "name": "Apple",
+            "market": "cash",
+            "exchange": "NASDAQ",
+            "currency": "USD",
+            "price": 200,
+            "verified_quote": _quote("AAPL", 200),
+            "confidence": 95,
+            "opportunity_score": 95,
+            "expected_return": -1,
+            "expected_downside": 2,
+            "data_quality_score": 95,
+            "liquidity_value": 1_000_000,
+            "validation_status": "approved",
+            "catalyst": "momentum is strong but upside model is negative",
+        },
+        AdvisorProfile(available_capital=10_000),
+    )
+
+    assert rec.action == "HOLD"
+    assert rec.oracle_decision["final_judgment"] == "WAIT"
+    assert any("estimated upside is not positive" in item for item in rec.oracle_decision["contradicting_evidence"])
+
+
+def test_oracle_identity_maps_missing_evidence_to_wait_not_generic_buy():
+    rec = generate_recommendation(
+        {
+            "symbol": "AAPL",
+            "market": "cash",
+            "verified_quote": _quote("AAPL", 200),
+            "confidence": 95,
+            "opportunity_score": 95,
+            "expected_return": 8,
+            "expected_downside": 2,
+            "data_quality_score": 90,
+        },
+        AdvisorProfile(available_capital=10_000),
+    )
+
+    assert rec.action in {"HOLD", "WATCH"}
+    assert rec.oracle_decision["final_judgment"] == "UNKNOWN"
+    assert any("forecast" in item.lower() for item in rec.oracle_decision["contradicting_evidence"])
+
+
+def test_oracle_decision_vocabulary_covers_buy_wait_avoid_sell_reduce_unknown_paths():
+    assert canonical_oracle_judgment("STRONG_BUY") == "STRONG BUY"
+    assert canonical_oracle_judgment("ACCUMULATE") == "BUY"
+    assert canonical_oracle_judgment("HOLD") == "WAIT"
+    assert canonical_oracle_judgment("AVOID") == "AVOID"
+    assert canonical_oracle_judgment("SELL") == "SELL"
+    assert canonical_oracle_judgment("REDUCE") == "REDUCE"
+    assert canonical_oracle_judgment("INSUFFICIENT EVIDENCE") == "UNKNOWN"
+
+
+def test_oracle_buy_identity_rejects_weak_negative_or_unknown_evidence():
+    ok, failures = action_preserves_oracle_buy_identity(
+        "STRONG BUY",
+        opportunity_score=95,
+        confidence=95,
+        expected_upside_pct=0,
+        expected_downside_pct=2,
+        risk_reward_ratio=0,
+        data_quality_score=90,
+        evidence_gaps=["forecast evidence is unavailable"],
+    )
+
+    assert ok is False
+    assert "estimated upside is not positive" in failures
+    assert "forecast evidence is unavailable" in failures
+
+
+def test_oracle_ten_question_payload_uses_supplied_evidence_without_optimistic_buy():
+    payload = build_oracle_decision_identity(
+        symbol="MSFT",
+        action="BUY",
+        opportunity_score=91,
+        confidence=88,
+        expected_upside_pct=5,
+        expected_downside_pct=2,
+        risk_reward_ratio=2.5,
+        data_quality_score=92,
+        catalyst="confirmed earnings acceleration",
+        thesis="buyers are defending rising volume support",
+        risk_factors=["valuation is elevated"],
+        invalidation_conditions=["price closes below support"],
+        evidence_used=[{"type": "forecast", "summary": "approved walk-forward model is positive"}],
+        relative_rank=1,
+        alternatives_count=7,
+    )
+
+    assert payload["what_is_happening"] == "confirmed earnings acceleration"
+    assert payload["why_might_it_continue"] == "buyers are defending rising volume support"
+    assert "valuation is elevated" in payload["contradicting_evidence"]
+    assert payload["thesis_invalidation"] == ["price closes below support"]
+    assert payload["relative_opportunity"] == "Ranked 1 of 7 currently supplied alternatives."
+    assert payload["final_judgment"] == "BUY"
 
 
 def test_premium_strategy_data_is_not_fabricated():

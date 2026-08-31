@@ -38,6 +38,10 @@ It continuously performs **simulated trades** in PostgreSQL. It does not send re
 
 The application does not rewrite its own source code while running. It continuously updates its market evidence and recommendations. The existing Market Memory module records completed trade outcomes and uses market-history analogs to improve later quality scores without profiling the user's personal trading behavior.
 
+## Oracle decision identity
+
+GARIBALDI MARKET ORACLE is an evidence-first opportunity engine, not a generic trading bot. For each candidate it should explain what is happening, why the move might continue, what supports or contradicts the setup, estimated upside and downside, certainty, thesis invalidation, whether the opportunity is superior to current alternatives, and a final judgment: `STRONG BUY`, `BUY`, `WAIT`, `AVOID`, `SELL`, `REDUCE`, or `UNKNOWN`. A `BUY` must represent positive asymmetric expected opportunity after verified data, forecast, portfolio, and risk gates agree.
+
 ## Railway deployment
 
 Keep four Railway resources:
