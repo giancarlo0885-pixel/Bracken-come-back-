@@ -19,8 +19,8 @@ from provider_router import normalize_symbol
 from strategy_engine import StrategySignal, ensemble_score, evaluate_strategies
 
 
-# Legacy aliases remain accepted by the upstream scoring function, but every
-# recommendation returned to the application is normalized by the shared Oracle guard.
+# Legacy aliases remain accepted by the upstream scoring function, while the
+# embedded Oracle judgment uses the shared canonical decision vocabulary.
 ADVISOR_ACTIONS = set(ORACLE_ACTIONS) | {"ACCUMULATE", "WATCH"}
 ENTRY_ACTIONS = set(ORACLE_ENTRY_ACTIONS) | {"ACCUMULATE"}
 
@@ -209,7 +209,17 @@ def generate_recommendation(
         evidence_gaps=guard_gaps,
         positive_evidence=positive_evidence,
     )
-    action = guarded.action
+
+    # Keep the existing public advisor API stable: WATCH/HOLD remain valid display
+    # states, while oracle_judgment.final_judgment records the canonical WAIT.
+    # This is a presentation compatibility mapping only; it cannot promote an entry.
+    if guarded.action == "WAIT":
+        if proposed_action == "WATCH" or quote_missing or data_quality < 50:
+            action = "WATCH"
+        else:
+            action = "HOLD"
+    else:
+        action = guarded.action
 
     entry_low = price * 0.995 if price > 0 else 0.0
     entry_high = price * 1.005 if price > 0 else 0.0
