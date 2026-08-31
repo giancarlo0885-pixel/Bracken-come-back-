@@ -2,6 +2,7 @@ import logging
 import os
 
 import market_worker
+from capital_readiness_runtime import prepare_capital_readiness_runtime
 from paper_execution_accounting import install_paper_execution_accounting
 from paper_execution_reality import install_paper_execution_reality
 from paper_fee_policy import install_fee_aware_fifo_policy
@@ -20,4 +21,5 @@ if os.getenv("EXECUTION_MODE", "paper").strip().lower() == "paper":
     install_fee_aware_fifo_policy()
 
 if __name__ == "__main__":
+    prepare_capital_readiness_runtime(market_worker, "cash")
     market_worker.run_worker("cash")
