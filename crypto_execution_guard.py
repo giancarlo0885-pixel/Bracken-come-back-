@@ -31,17 +31,17 @@ def _live_execution_mode() -> bool:
 
 
 def _paper_yahoo_reference(quote: dict[str, Any]) -> bool:
-    """Return True only for an explicitly verified Yahoo paper reference.
+    """Identify a Yahoo execution candidate that must receive Coinbase consensus.
 
-    Yahoo is never provider-verified execution truth. The market-data layer must
-    first prove exact symbol identity/freshness and mark the quote specifically
-    as a paper reference. Only then may this guard seek independent Coinbase
-    consensus. Provider identity alone is intentionally insufficient.
+    This is deliberately not a statement that Yahoo is provider-verified. The
+    legacy execution contract uses ``quote_verified`` as generic execution
+    eligibility, while newer payloads may expose ``execution_quote_eligible``.
+    Any eligible Yahoo candidate is routed into the independent Coinbase gate,
+    even if an older compact payload omitted the explicit paper-reference marker.
+    Yahoo therefore never bypasses consensus because of metadata-version drift.
     """
     return bool(
         str(quote.get("provider") or "").strip().lower() == "yahoo finance"
-        and quote.get("paper_reference_verified") is True
-        and quote.get("provider_quote_verified") is not True
         and (
             quote.get("execution_quote_eligible") is True
             or quote.get("quote_verified") is True
@@ -180,8 +180,8 @@ def _broker_quote_map(symbols: list[str]) -> tuple[dict[str, dict[str, Any]], st
 def install_crypto_execution_quote_guard(worker: Any) -> None:
     """Fail closed when execution price truth is not independently defensible.
 
-    Paper mode keeps provider-verified quotes unchanged. Explicit Yahoo paper
-    references must also agree with Coinbase Exchange when they reach execution.
+    Paper mode keeps provider-verified quotes unchanged. Every execution-eligible
+    Yahoo crypto fallback must independently agree with Coinbase Exchange.
     Future live mode then adds Robinhood's own best bid/ask as the final broker
     truth. This guard never submits an order.
     """
@@ -222,15 +222,17 @@ def install_crypto_execution_quote_guard(worker: Any) -> None:
                 ",".join(skipped[:8]),
             )
 
-        # Yahoo is a paper fallback, never a self-validating execution source.
-        # Explicit paper-reference proof plus an independent public exchange book
-        # are both required before such a signal may proceed.
+        # Yahoo remains a paper fallback, never a self-validating provider source.
+        # Older compact payloads may omit paper_reference_verified, so generic
+        # execution eligibility is sufficient to send Yahoo into Coinbase
+        # consensus. It is never sufficient to skip Coinbase.
         consensus_pairs: list[tuple[Any, str, dict[str, Any]]] = []
         consensus_blocked: dict[str, list[str]] = defaultdict(list)
         for signal, symbol, oracle_quote in verified_pairs:
-            if str(oracle_quote.get("provider") or "").strip().lower() == "yahoo finance":
+            is_yahoo = str(oracle_quote.get("provider") or "").strip().lower() == "yahoo finance"
+            if is_yahoo:
                 if not _paper_yahoo_reference(oracle_quote):
-                    consensus_blocked["YAHOO_PAPER_REFERENCE_NOT_VERIFIED"].append(symbol)
+                    consensus_blocked["YAHOO_REFERENCE_NOT_EXECUTION_ELIGIBLE"].append(symbol)
                     continue
                 validation = _coinbase_reference_validation(symbol, oracle_quote.get("price"))
                 if not validation.get("ok"):
