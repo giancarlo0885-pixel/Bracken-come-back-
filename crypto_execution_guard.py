@@ -31,12 +31,22 @@ def _live_execution_mode() -> bool:
 
 
 def _paper_yahoo_reference(quote: dict[str, Any]) -> bool:
-    # The execution normalizer intentionally emits a compact quote payload and
-    # may omit internal paper-reference flags. In provider_router Yahoo is never
-    # a provider-verified execution source; it becomes execution-eligible only
-    # through the explicit paper fallback. Therefore provider identity alone is
-    # the durable boundary here.
-    return str(quote.get("provider") or "").strip().lower() == "yahoo finance"
+    """Identify a Yahoo execution candidate that must receive Coinbase consensus.
+
+    This is deliberately not a statement that Yahoo is provider-verified. The
+    legacy execution contract uses ``quote_verified`` as generic execution
+    eligibility, while newer payloads may expose ``execution_quote_eligible``.
+    Any eligible Yahoo candidate is routed into the independent Coinbase gate,
+    even if an older compact payload omitted the explicit paper-reference marker.
+    Yahoo therefore never bypasses consensus because of metadata-version drift.
+    """
+    return bool(
+        str(quote.get("provider") or "").strip().lower() == "yahoo finance"
+        and (
+            quote.get("execution_quote_eligible") is True
+            or quote.get("quote_verified") is True
+        )
+    )
 
 
 def _coinbase_quote(symbol: str) -> tuple[dict[str, Any] | None, str | None]:
@@ -170,8 +180,8 @@ def _broker_quote_map(symbols: list[str]) -> tuple[dict[str, dict[str, Any]], st
 def install_crypto_execution_quote_guard(worker: Any) -> None:
     """Fail closed when execution price truth is not independently defensible.
 
-    Paper mode keeps provider-verified quotes unchanged. Yahoo paper fallback
-    quotes must also agree with Coinbase Exchange when they reach execution.
+    Paper mode keeps provider-verified quotes unchanged. Every execution-eligible
+    Yahoo crypto fallback must independently agree with Coinbase Exchange.
     Future live mode then adds Robinhood's own best bid/ask as the final broker
     truth. This guard never submits an order.
     """
@@ -207,28 +217,32 @@ def install_crypto_execution_quote_guard(worker: Any) -> None:
 
         if skipped:
             worker.log.info(
-                "CRYPTO | EXECUTION SKIP | no verified live quote | affected_symbols=%d | sample=%s",
+                "CRYPTO | EXECUTION SKIP | no execution-eligible fresh quote | affected_symbols=%d | sample=%s",
                 len(skipped),
                 ",".join(skipped[:8]),
             )
 
-        # Yahoo is a paper fallback, never a self-validating execution source.
-        # Require an independent public exchange quote before allowing it through.
+        # Yahoo remains a paper fallback, never a self-validating provider source.
+        # Older compact payloads may omit paper_reference_verified, so generic
+        # execution eligibility is sufficient to send Yahoo into Coinbase
+        # consensus. It is never sufficient to skip Coinbase.
         consensus_pairs: list[tuple[Any, str, dict[str, Any]]] = []
         consensus_blocked: dict[str, list[str]] = defaultdict(list)
         for signal, symbol, oracle_quote in verified_pairs:
-            if not _paper_yahoo_reference(oracle_quote):
-                consensus_pairs.append((signal, symbol, oracle_quote))
-                continue
-            validation = _coinbase_reference_validation(symbol, oracle_quote.get("price"))
-            if not validation.get("ok"):
-                consensus_blocked[str(validation.get("reason") or "COINBASE_REFERENCE_REJECTED")].append(symbol)
-                continue
-            oracle_quote["price_consensus_verified"] = True
-            oracle_quote["reference_provider"] = validation["reference_provider"]
-            oracle_quote["reference_price"] = validation["reference_price"]
-            oracle_quote["reference_timestamp"] = validation["reference_timestamp"]
-            oracle_quote["reference_difference_pct"] = validation["difference_pct"]
+            is_yahoo = str(oracle_quote.get("provider") or "").strip().lower() == "yahoo finance"
+            if is_yahoo:
+                if not _paper_yahoo_reference(oracle_quote):
+                    consensus_blocked["YAHOO_REFERENCE_NOT_EXECUTION_ELIGIBLE"].append(symbol)
+                    continue
+                validation = _coinbase_reference_validation(symbol, oracle_quote.get("price"))
+                if not validation.get("ok"):
+                    consensus_blocked[str(validation.get("reason") or "COINBASE_REFERENCE_REJECTED")].append(symbol)
+                    continue
+                oracle_quote["price_consensus_verified"] = True
+                oracle_quote["reference_provider"] = validation["reference_provider"]
+                oracle_quote["reference_price"] = validation["reference_price"]
+                oracle_quote["reference_timestamp"] = validation["reference_timestamp"]
+                oracle_quote["reference_difference_pct"] = validation["difference_pct"]
             consensus_pairs.append((signal, symbol, oracle_quote))
 
         for reason, affected in consensus_blocked.items():
