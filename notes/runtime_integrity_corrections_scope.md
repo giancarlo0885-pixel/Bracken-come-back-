@@ -1,0 +1,1 @@
+Scope is limited to runtime correctness/observability and paper small-account position concurrency. No providers are removed, no BUY/HOLD thresholds are lowered, no risk gates are bypassed, no credentials are touched, and no live order path is armed.
