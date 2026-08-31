@@ -21,6 +21,7 @@ def _finite(value: Any, default: float = 0.0) -> float:
 @dataclass(frozen=True)
 class ShadowBrokerRecord:
     shadow_order_id: str
+    paper_fill_id: str | None
     decision_id: str | None
     proposal_id: str | None
     symbol: str
@@ -48,6 +49,7 @@ def record_shadow_order(
     quantity: float,
     oracle_reference_price: float,
     broker_quote: dict[str, Any],
+    paper_fill_id: str | None = None,
     decision_id: str | None = None,
     proposal_id: str | None = None,
     paper_fill_price: float | None = None,
@@ -85,6 +87,7 @@ def record_shadow_order(
     shadow_id = f"shadow:{uuid.uuid4()}"
     record = ShadowBrokerRecord(
         shadow_order_id=shadow_id,
+        paper_fill_id=str(paper_fill_id) if paper_fill_id else None,
         decision_id=str(decision_id) if decision_id else None,
         proposal_id=str(proposal_id) if proposal_id else None,
         symbol=symbol,
@@ -108,15 +111,16 @@ def record_shadow_order(
         conn.execute(
             """
             INSERT INTO shadow_broker_orders (
-                shadow_order_id, decision_id, proposal_id, symbol, market, side,
+                shadow_order_id, paper_fill_id, decision_id, proposal_id, symbol, market, side,
                 quantity, notional, oracle_reference_price, paper_fill_price,
                 broker_bid, broker_ask, broker_mid, broker_spread_pct,
                 broker_quote_at, hypothetical_fill_price, paper_vs_broker_error_pct,
                 status, payload, created_at
-            ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'OPEN',%s::jsonb,%s)
+            ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'OPEN',%s::jsonb,%s)
             """,
             (
                 record.shadow_order_id,
+                record.paper_fill_id,
                 record.decision_id,
                 record.proposal_id,
                 record.symbol,
