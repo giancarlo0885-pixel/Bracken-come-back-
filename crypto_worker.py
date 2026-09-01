@@ -10,6 +10,7 @@ from core_rebalance_score_compat import install_core_rebalance_score_compat
 from crypto_execution_guard import install_crypto_execution_quote_guard
 from crypto_forecast_runtime import install_crypto_short_horizon_forecast
 from crypto_quote_readiness_sampler import install_v39_quote_verification_sampler
+from crypto_v39_risk_bridge import install_crypto_v39_risk_bridge
 from crypto_v39_spread_bridge import install_crypto_v39_spread_bridge
 from live_broker_capital import install_live_broker_capital_sizing
 from paper_execution_accounting import install_paper_execution_accounting
@@ -35,6 +36,7 @@ install_crypto_execution_quote_guard(market_worker)
 install_v39_quote_verification_sampler(market_worker)
 install_live_broker_capital_sizing()
 install_crypto_short_horizon_forecast(market_worker)
+install_crypto_v39_risk_bridge(market_worker)
 install_core_rebalance_optimizer_trace(market_worker)
 install_core_rebalance_observability(market_worker)
 if os.getenv("EXECUTION_MODE", "paper").strip().lower() == "paper":
