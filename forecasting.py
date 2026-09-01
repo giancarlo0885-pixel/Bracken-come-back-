@@ -346,7 +346,9 @@ def forecast_price(
     selected_model = str(model or "log-return diffusion")
     selected_version = str(model_version or FORECAST_MODEL_VERSION)
     causal_prediction = None
-    if asset == "crypto" and selected_model in {"log-return diffusion", CRYPTO_CAUSAL_MODEL}:
+    short_horizon_crypto = asset == "crypto" and interval_minutes(interval) <= 15.0 and minutes <= 30.0
+    causal_requested = selected_model == CRYPTO_CAUSAL_MODEL
+    if asset == "crypto" and (causal_requested or (selected_model == "log-return diffusion" and short_horizon_crypto)):
         causal_prediction = _causal_crypto_prediction(close, bars)
         if causal_prediction is not None:
             selected_model = CRYPTO_CAUSAL_MODEL
