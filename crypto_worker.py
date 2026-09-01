@@ -5,6 +5,7 @@ import market_worker
 from binance_us_adapter import install_binance_us_reference_fallback
 from capital_readiness_runtime import prepare_capital_readiness_runtime
 from core_rebalance_observability import install_core_rebalance_observability
+from core_rebalance_score_compat import install_core_rebalance_score_compat
 from crypto_execution_guard import install_crypto_execution_quote_guard
 from crypto_forecast_runtime import install_crypto_short_horizon_forecast
 from crypto_quote_readiness_sampler import install_v39_quote_verification_sampler
@@ -25,6 +26,7 @@ logger = logging.getLogger("crypto-worker")
 
 install_yahoo_runtime_reliability()
 install_runtime_integrity_patch(market_worker)
+install_core_rebalance_score_compat()
 install_binance_us_reference_fallback()
 install_robinhood_quote_compat()
 install_crypto_v39_spread_bridge(market_worker)
