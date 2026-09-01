@@ -39,6 +39,34 @@ def test_position_cap_does_not_touch_nonpaper_runtime(monkeypatch):
     assert module.EXTRA_OPEN_POSITIONS == 6
 
 
+def test_hold_without_core_rebalance_intent_stays_non_entry():
+    signal = SimpleNamespace(action="HOLD")
+
+    normalized = patch._normalize_core_rebalance_action(signal)
+
+    assert normalized.action == "HOLD"
+    assert not hasattr(normalized, "v39_normalization_reason")
+
+
+def test_hold_with_core_rebalance_buy_becomes_accumulate_before_optimizer():
+    signal = SimpleNamespace(action="HOLD", rebalance_intent="CORE_REBALANCE_BUY")
+
+    normalized = patch._normalize_core_rebalance_action(signal)
+
+    assert normalized.action == "ACCUMULATE"
+    assert normalized.v39_original_action == "HOLD"
+    assert normalized.v39_normalization_reason == "CORE_REBALANCE_BUY"
+
+
+def test_core_rebalance_intent_never_overrides_existing_directional_action():
+    signal = SimpleNamespace(action="SELL", rebalance_intent="CORE_REBALANCE_BUY")
+
+    normalized = patch._normalize_core_rebalance_action(signal)
+
+    assert normalized.action == "SELL"
+    assert not hasattr(normalized, "v39_normalization_reason")
+
+
 def test_yahoo_paper_reference_is_not_mislabeled_provider_verified():
     route = {
         "provider_quote_verified": False,
@@ -99,6 +127,39 @@ def test_unverified_quote_does_not_gain_verification():
     assert payload["provider_quote_verified"] is False
     assert payload["paper_reference_verified"] is False
     assert payload["verification_kind"] == "unverified"
+
+
+def test_fast_quarantine_filter_removes_nonheld_candidate():
+    worker = SimpleNamespace(
+        _fast_candidate_batch=lambda market: [
+            ("BTC-USD", "Bitcoin"),
+            ("ARB-USD", "Arbitrum"),
+        ],
+        _active_quarantined_symbols=lambda: {"ARB-USD"},
+        _held_symbols=lambda market: set(),
+    )
+
+    patch._install_fast_quarantine_filter(worker)
+
+    assert worker._fast_candidate_batch("crypto") == [("BTC-USD", "Bitcoin")]
+
+
+def test_fast_quarantine_filter_keeps_held_symbol_for_risk_monitoring():
+    worker = SimpleNamespace(
+        _fast_candidate_batch=lambda market: [
+            ("BTC-USD", "Bitcoin"),
+            ("ARB-USD", "Arbitrum"),
+        ],
+        _active_quarantined_symbols=lambda: {"ARB-USD"},
+        _held_symbols=lambda market: {"ARB-USD"},
+    )
+
+    patch._install_fast_quarantine_filter(worker)
+
+    assert worker._fast_candidate_batch("crypto") == [
+        ("BTC-USD", "Bitcoin"),
+        ("ARB-USD", "Arbitrum"),
+    ]
 
 
 def test_workers_install_integrity_patch():

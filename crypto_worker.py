@@ -7,6 +7,7 @@ from crypto_execution_guard import install_crypto_execution_quote_guard
 from paper_execution_accounting import install_paper_execution_accounting
 from paper_execution_reality import install_paper_execution_reality
 from paper_fee_policy import install_fee_aware_fifo_policy
+from readiness_observability import emit_capital_readiness_report
 from runtime_integrity_patch import install_runtime_integrity_patch
 from runtime_provider_reliability import install_yahoo_runtime_reliability
 from structured_logging import configure_structured_logging
@@ -90,4 +91,5 @@ def run_robinhood_startup_preflight() -> None:
 if __name__ == "__main__":
     prepare_capital_readiness_runtime(market_worker, "crypto")
     run_robinhood_startup_preflight()
+    emit_capital_readiness_report(logger)
     market_worker.run_worker("crypto")
