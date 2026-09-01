@@ -39,6 +39,34 @@ def test_position_cap_does_not_touch_nonpaper_runtime(monkeypatch):
     assert module.EXTRA_OPEN_POSITIONS == 6
 
 
+def test_hold_without_core_rebalance_intent_stays_non_entry():
+    signal = SimpleNamespace(action="HOLD")
+
+    normalized = patch._normalize_core_rebalance_action(signal)
+
+    assert normalized.action == "HOLD"
+    assert not hasattr(normalized, "v39_normalization_reason")
+
+
+def test_hold_with_core_rebalance_buy_becomes_accumulate_before_optimizer():
+    signal = SimpleNamespace(action="HOLD", rebalance_intent="CORE_REBALANCE_BUY")
+
+    normalized = patch._normalize_core_rebalance_action(signal)
+
+    assert normalized.action == "ACCUMULATE"
+    assert normalized.v39_original_action == "HOLD"
+    assert normalized.v39_normalization_reason == "CORE_REBALANCE_BUY"
+
+
+def test_core_rebalance_intent_never_overrides_existing_directional_action():
+    signal = SimpleNamespace(action="SELL", rebalance_intent="CORE_REBALANCE_BUY")
+
+    normalized = patch._normalize_core_rebalance_action(signal)
+
+    assert normalized.action == "SELL"
+    assert not hasattr(normalized, "v39_normalization_reason")
+
+
 def test_yahoo_paper_reference_is_not_mislabeled_provider_verified():
     route = {
         "provider_quote_verified": False,
