@@ -12,6 +12,7 @@ from crypto_execution_guard import (
     _quote_verification_record,
     _symbol,
 )
+from shadow_forward_sampler import maintain_passive_shadow_evidence
 
 
 def _sample_limit() -> int:
@@ -108,6 +109,16 @@ def install_v39_quote_verification_sampler(worker: Any) -> None:
                 # stays fail-closed if evidence cannot be sampled or persisted.
                 worker.log.warning(
                     "CRYPTO | V39 QUOTE VERIFICATION EVIDENCE UNAVAILABLE | error=%s",
+                    exc.__class__.__name__,
+                )
+            try:
+                maintain_passive_shadow_evidence(worker, signals, prices)
+            except Exception as exc:
+                # Passive shadow sampling is read-only against Robinhood and
+                # never changes the tactical signal or paper portfolio. Missing
+                # evidence simply keeps capital readiness fail-closed.
+                worker.log.warning(
+                    "CRYPTO | PASSIVE SHADOW EVIDENCE UNAVAILABLE | error=%s",
                     exc.__class__.__name__,
                 )
         return original(market, signals, prices, ranked, scan_type, *args, **kwargs)

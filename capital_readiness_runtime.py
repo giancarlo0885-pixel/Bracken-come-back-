@@ -118,15 +118,17 @@ def prepare_capital_readiness_runtime(worker: Any, market: str) -> dict[str, Any
     """Prepare capital-readiness infrastructure and fail closed for live startup.
 
     Paper/shadow workers retain best-effort preparation behavior. If any live or
-    broker-submission switch is requested, migrations, governance preparation,
-    runtime configuration, capital evidence, broker readiness, reconciliation,
-    and explicit human approval become mandatory before the worker may start.
-    This function never changes live-trading switches or submits broker orders.
+    broker-submission switch is requested, migrations, historical walk-forward
+    evidence, governance preparation, runtime configuration, capital evidence,
+    broker readiness, reconciliation, and explicit human approval become
+    mandatory before the worker may start. This function never changes live-
+    trading switches or submits broker orders.
     """
     live_requested = _live_capital_requested()
     result: dict[str, Any] = {
         "market": str(market or "").lower(),
         "migrations": [],
+        "model_evidence": [],
         "governance": [],
         "shadow": "NOT_APPLICABLE",
         "live_capital_requested": live_requested,
@@ -143,6 +145,24 @@ def prepare_capital_readiness_runtime(worker: Any, market: str) -> dict[str, Any
             ) from exc
         log.warning("Capital readiness migrations unavailable: %s", exc.__class__.__name__)
         return result
+
+    # The governance code already knew how to judge walk-forward/calibration
+    # evidence, but production previously had no path that generated it. Build
+    # bounded, deduplicated historical out-of-sample evidence before governance.
+    # A weak model still fails its real metrics; nothing here lowers thresholds.
+    if result["market"] == "crypto":
+        try:
+            from capital_model_evidence_runtime import refresh_capital_model_evidence
+
+            result["model_evidence"] = refresh_capital_model_evidence()
+        except Exception as exc:
+            result["model_evidence_error"] = exc.__class__.__name__
+            if live_requested:
+                result["live_capital_gate"] = "BLOCKED_MODEL_EVIDENCE"
+                raise LiveCapitalSafetyError(
+                    f"Live-capital startup blocked: model evidence refresh unavailable ({exc.__class__.__name__})"
+                ) from exc
+            log.warning("Capital model evidence refresh unavailable: %s", exc.__class__.__name__)
 
     try:
         assessments = apply_registered_model_governance()
