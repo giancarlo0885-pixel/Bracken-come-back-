@@ -5,8 +5,7 @@ ALTER TABLE forecast_validation ADD COLUMN IF NOT EXISTS horizon_bars INTEGER;
 ALTER TABLE forecast_validation ADD COLUMN IF NOT EXISTS run_id TEXT;
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_forecast_validation_evidence_key
-    ON forecast_validation(evidence_key)
-    WHERE evidence_key IS NOT NULL;
+    ON forecast_validation(evidence_key);
 
 CREATE INDEX IF NOT EXISTS idx_forecast_validation_model_created
     ON forecast_validation(model, model_version, created_at DESC);
