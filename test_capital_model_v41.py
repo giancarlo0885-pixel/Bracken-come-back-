@@ -44,21 +44,18 @@ def _block_reversal_history(periods: int = 900) -> pd.DataFrame:
     return frame
 
 
-def test_v41_selector_uses_active_identity_and_short_horizon() -> None:
+def test_short_horizon_forecast_uses_current_causal_model() -> None:
     history = _block_reversal_history()
     forecast = forecast_price(history, None, market="crypto", source_interval="5m", horizon_minutes=15)
     assert forecast is not None
-    assert forecast.model == CRYPTO_CAUSAL_MODEL == "crypto nested adaptive selector"
-    assert forecast.model_version == CRYPTO_CAUSAL_MODEL_VERSION == "v41-nested-selector"
+    assert forecast.model == CRYPTO_CAUSAL_MODEL
+    assert forecast.model_version == CRYPTO_CAUSAL_MODEL_VERSION
     assert forecast.horizon_bars == 3
     assert forecast.horizon_minutes == 15
     assert active_crypto_model_identity() == (CRYPTO_CAUSAL_MODEL, CRYPTO_CAUSAL_MODEL_VERSION)
 
 
 def test_v41_nested_selector_learns_reversal_without_outer_future() -> None:
-    # End on a positive three-bar block. The constructed history repeatedly
-    # reverses after each three-bar block, so a learned short-horizon predictor
-    # should assign the next move more probability to down than up.
     history = _block_reversal_history(903)
     prediction = predict_crypto_direction(history, 3)
     assert prediction is not None
@@ -85,6 +82,7 @@ def test_v41_evidence_runner_keeps_5m_to_15m_outer_scope(monkeypatch) -> None:
     calls: list[dict] = []
     monkeypatch.setattr(v41, "_evidence_current", lambda *args: False)
     monkeypatch.setattr(v41, "register_model", lambda *args, **kwargs: None)
+    monkeypatch.setattr(v41, "active_crypto_model_identity", lambda: ("crypto nested adaptive selector", "v41-nested-selector"))
     monkeypatch.setattr(
         v41,
         "_build_symbol_evidence",
@@ -116,6 +114,8 @@ def test_v41_evidence_runner_keeps_5m_to_15m_outer_scope(monkeypatch) -> None:
     result = v41.refresh_v41_crypto_evidence(force=True)
     assert result[0]["eligible_for_approval"] is True
     assert len(calls) == 3
+    assert all(item["model"] == "crypto nested adaptive selector" for item in calls)
+    assert all(item["version"] == "v41-nested-selector" for item in calls)
     assert all(item["period"] == "30d" for item in calls)
     assert all(item["interval"] == "5m" for item in calls)
     assert all(item["horizon_bars"] == 3 for item in calls)
