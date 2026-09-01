@@ -51,6 +51,7 @@ def _market_data_stub(ticker_factory):
             {
                 "requested_symbol": requested_symbol,
                 "provider_symbol": provider_symbol,
+                "provider_native_symbol": provider_symbol,
                 "provider": provider,
                 "interval": interval,
             }
@@ -96,7 +97,50 @@ def test_successful_yahoo_reference_preserves_exact_identity_and_clears_cooldown
     assert result.attrs["provider"] == "Yahoo Finance"
     assert result.attrs["requested_symbol"] == "BTC-USD"
     assert result.attrs["provider_symbol"] == "BTC-USD"
+    assert result.attrs["provider_native_symbol"] == "BTC-USD"
     assert reliability._cooldown_active(key) is False
+
+
+def test_arbitrum_uses_yahoo_native_alias_but_keeps_canonical_identity():
+    requested_tickers: list[str] = []
+
+    def ticker_factory(symbol: str):
+        requested_tickers.append(symbol)
+        return _WorkingTicker()
+
+    module = _market_data_stub(ticker_factory)
+    result = reliability.yahoo_reference_history(module, "ARB-USD", "5d", "5m")
+
+    assert requested_tickers == ["ARB11841-USD"]
+    assert reliability.yahoo_native_symbol("ARB-USD") == "ARB11841-USD"
+    assert result.attrs["requested_symbol"] == "ARB-USD"
+    assert result.attrs["provider_symbol"] == "ARB-USD"
+    assert result.attrs["provider_native_symbol"] == "ARB11841-USD"
+
+
+def test_arbitrum_strict_yahoo_path_preserves_native_alias(monkeypatch):
+    import provider_router
+
+    requested_tickers: list[str] = []
+
+    def ticker_factory(symbol: str):
+        requested_tickers.append(symbol)
+        return _WorkingTicker()
+
+    module = _market_data_stub(ticker_factory)
+    frame = reliability.yahoo_reference_history(module, "ARB-USD", "5d", "5m")
+    original = provider_router._strict_yahoo_history
+    monkeypatch.setattr(provider_router, "_strict_yahoo_history", original)
+    reliability._install_yahoo_strict_alias_preservation()
+
+    result = provider_router._strict_yahoo_history(frame, "ARB-USD", "5d", "5m")
+
+    assert requested_tickers == ["ARB11841-USD"]
+    assert not result.empty
+    assert result.attrs["requested_symbol"] == "ARB-USD"
+    assert result.attrs["provider_symbol"] == "ARB-USD"
+    assert result.attrs["provider_native_symbol"] == "ARB11841-USD"
+    assert result.attrs["quote_verified"] is False
 
 
 def test_yahoo_provider_name_without_execution_eligibility_is_not_consensus_candidate():
