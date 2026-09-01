@@ -42,6 +42,12 @@ def _candidate(**overrides):
     return SimpleNamespace(**values)
 
 
+def test_quant_safety_is_inverted_to_v39_risk_burden():
+    assert bridge._quant_safety_to_v39_risk(87.9) == 12.099999999999994
+    assert bridge._quant_safety_to_v39_risk(100.0) == 0.0
+    assert bridge._quant_safety_to_v39_risk(0.0) == 100.0
+
+
 def test_canonical_quant_risk_is_attached_for_measured_core_candidate():
     worker = _worker()
     signal = _candidate()
@@ -51,7 +57,8 @@ def test_canonical_quant_risk_is_attached_for_measured_core_candidate():
 
     assert isinstance(signal.risk_score, float)
     assert 0.0 <= signal.risk_score <= 100.0
-    assert signal.v39_risk_source == "quant_trade_standard"
+    assert signal.v39_risk_source == "quant_trade_standard:inverse_safety"
+    assert signal.risk_score == 100.0 - signal.v39_quant_safety_score
     assert result["qualified_for_capital"] is True
 
 
