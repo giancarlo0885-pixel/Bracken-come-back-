@@ -11,6 +11,7 @@ from paper_execution_accounting import install_paper_execution_accounting
 from paper_execution_reality import install_paper_execution_reality
 from paper_fee_policy import install_fee_aware_fifo_policy
 from readiness_observability import emit_capital_readiness_report
+from robinhood_quote_compat import install_robinhood_quote_compat
 from runtime_integrity_patch import install_runtime_integrity_patch
 from runtime_provider_reliability import install_yahoo_runtime_reliability
 from structured_logging import configure_structured_logging
@@ -22,6 +23,7 @@ logger = logging.getLogger("crypto-worker")
 install_yahoo_runtime_reliability()
 install_runtime_integrity_patch(market_worker)
 install_binance_us_reference_fallback()
+install_robinhood_quote_compat()
 install_crypto_execution_quote_guard(market_worker)
 install_v39_quote_verification_sampler(market_worker)
 install_live_broker_capital_sizing()
@@ -75,7 +77,7 @@ def run_robinhood_startup_preflight() -> None:
 
     logger.info(
         "ROBINHOOD PREFLIGHT | connection=%s | auth=%s | account=%s | crypto=%s | "
-        "pairs=%s | quote=%s | buying_power=%s | buying_power_state=%s | holdings=%s | "
+        "pairs=%s | quote=%s | quote_reason=%s | buying_power=%s | buying_power_state=%s | holdings=%s | "
         "orders=%s | journal=%s | reconciliation=%s | live_trading=%s | reason=%s",
         result.get("ROBINHOOD CONNECTION", "UNKNOWN"),
         result.get("ROBINHOOD AUTH", "UNKNOWN"),
@@ -83,6 +85,7 @@ def run_robinhood_startup_preflight() -> None:
         result.get("CRYPTO STATUS", "UNKNOWN"),
         result.get("TRADABLE PAIR COUNT", 0),
         result.get("QUOTE CHECK", "UNKNOWN"),
+        result.get("QUOTE CHECK REASON", "DIRECT_BTC_OR_PRIMARY_PAIR"),
         result.get("BUYING POWER CHECK", "UNKNOWN"),
         buying_power_state,
         result.get("HOLDINGS CHECK", "UNKNOWN"),
