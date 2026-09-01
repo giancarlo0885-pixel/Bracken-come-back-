@@ -27,6 +27,9 @@ INTERVAL_MINUTES = {
     "1mo": 43200,
 }
 
+CRYPTO_CAUSAL_MODEL = "crypto causal adaptive"
+CRYPTO_CAUSAL_MODEL_VERSION = "v40-causal-adaptive"
+
 
 @dataclass
 class Forecast:
@@ -92,6 +95,11 @@ def bars_per_year(source_interval: Any, asset_class: str = "stock") -> float:
     return 252.0
 
 
+def active_crypto_model_identity() -> tuple[str, str]:
+    """Return the model identity that currently governs crypto capital evidence."""
+    return CRYPTO_CAUSAL_MODEL, CRYPTO_CAUSAL_MODEL_VERSION
+
+
 def _horizon(
     *,
     source_interval: str,
@@ -151,6 +159,145 @@ def _quality_score(close: pd.Series, returns: pd.Series) -> float:
     return round(max(0.0, min(100.0, 45.0 * completeness + 35.0 * finite + 20.0 * volatility_ok)), 2)
 
 
+def _safe_sigmoid(value: float) -> float:
+    value = max(-30.0, min(30.0, float(value)))
+    return 1.0 / (1.0 + math.exp(-value))
+
+
+def _weighted_mean(values: np.ndarray, weights: np.ndarray) -> float:
+    denom = float(np.sum(weights))
+    if denom <= 0:
+        return float(np.mean(values))
+    return float(np.sum(values * weights) / denom)
+
+
+def _causal_crypto_features(close: pd.Series) -> pd.DataFrame:
+    """Build features that are available at the decision bar and never from its future."""
+    values = pd.to_numeric(close, errors="coerce")
+    log_close = np.log(values.where(values > 0))
+    r1 = log_close.diff(1)
+    vol12 = r1.rolling(12, min_periods=8).std(ddof=0)
+    vol48 = r1.rolling(48, min_periods=24).std(ddof=0)
+    eps = 1e-9
+    prior_mean20 = log_close.shift(1).rolling(20, min_periods=16).mean()
+    prior_std20 = log_close.shift(1).rolling(20, min_periods=16).std(ddof=0)
+
+    r1_z = r1 / (vol12 + eps)
+    r3_z = log_close.diff(3) / (vol12 * math.sqrt(3.0) + eps)
+    price_z20 = (log_close - prior_mean20) / (prior_std20 + eps)
+    momentum16 = log_close.diff(16) / (vol48 * math.sqrt(16.0) + eps)
+    momentum48 = log_close.diff(48) / (vol48 * math.sqrt(48.0) + eps)
+    vol_ratio = (vol12 / (vol48 + eps)) - 1.0
+    shock_curve = r1_z * r1_z.abs()
+
+    return pd.DataFrame(
+        {
+            "r1_z": r1_z,
+            "r3_z": r3_z,
+            "price_z20": price_z20,
+            "momentum16": momentum16,
+            "momentum48": momentum48,
+            "vol_ratio": vol_ratio,
+            "shock_curve": shock_curve,
+        },
+        index=values.index,
+    ).replace([np.inf, -np.inf], np.nan)
+
+
+def _causal_crypto_prediction(close: pd.Series, horizon_bars: int) -> dict[str, float] | None:
+    """Fit a regularized online classifier only on labels resolved by decision time."""
+    horizon = max(1, int(horizon_bars))
+    if close is None or len(close) < max(96, horizon + 64):
+        return None
+
+    numeric_close = pd.to_numeric(close, errors="coerce").dropna()
+    numeric_close = numeric_close[numeric_close > 0]
+    if len(numeric_close) < max(96, horizon + 64):
+        return None
+
+    features = _causal_crypto_features(numeric_close)
+    log_close = np.log(numeric_close)
+    forward_log_return = log_close.shift(-horizon) - log_close
+    target_up = (forward_log_return > 0).astype(float)
+
+    feature_columns = list(features.columns)
+    training = features.copy()
+    training["target_up"] = target_up
+    training["forward_log_return"] = forward_log_return
+    training = training.iloc[:-horizon].dropna()
+    current = features.iloc[-1]
+    if training.empty or current.isna().any() or len(training) < 80:
+        return None
+
+    training = training.tail(1600)
+    x_raw = training[feature_columns].to_numpy(dtype=float)
+    y = training["target_up"].to_numpy(dtype=float)
+    y_return = training["forward_log_return"].to_numpy(dtype=float)
+    if len(np.unique(y)) < 2:
+        return None
+
+    age = np.arange(len(training) - 1, -1, -1, dtype=float)
+    half_life = max(96.0, min(512.0, len(training) / 2.0))
+    weights = np.exp(-math.log(2.0) * age / half_life)
+    weights = weights / max(float(np.mean(weights)), 1e-12)
+
+    weight_sum = max(float(np.sum(weights)), 1e-12)
+    means = np.sum(x_raw * weights[:, None], axis=0) / weight_sum
+    variances = np.sum(((x_raw - means) ** 2) * weights[:, None], axis=0) / weight_sum
+    scales = np.sqrt(np.maximum(variances, 1e-8))
+    z = np.clip((x_raw - means) / scales, -8.0, 8.0)
+    current_z = np.clip((current.to_numpy(dtype=float) - means) / scales, -8.0, 8.0)
+    x = np.column_stack([np.ones(len(z)), z])
+    x_current = np.concatenate([[1.0], current_z])
+
+    base_rate = min(0.95, max(0.05, _weighted_mean(y, weights)))
+    beta = np.zeros(x.shape[1], dtype=float)
+    beta[0] = math.log(base_rate / (1.0 - base_rate))
+    regularization = np.diag([0.05] + [3.5] * (x.shape[1] - 1))
+
+    for _ in range(25):
+        eta = np.clip(x @ beta, -25.0, 25.0)
+        probability = 1.0 / (1.0 + np.exp(-eta))
+        variance = np.maximum(probability * (1.0 - probability), 1e-6)
+        gradient = x.T @ (weights * (y - probability)) - regularization @ beta
+        hessian = x.T @ ((weights * variance)[:, None] * x) + regularization
+        try:
+            step = np.linalg.solve(hessian, gradient)
+        except np.linalg.LinAlgError:
+            return None
+        beta += step
+        if float(np.linalg.norm(step)) < 1e-6:
+            break
+
+    raw_probability = _safe_sigmoid(float(x_current @ beta))
+    probability_up = base_rate + 0.75 * (raw_probability - base_rate)
+    probability_up = min(0.95, max(0.05, probability_up))
+
+    ridge = np.diag([0.05] + [8.0] * (x.shape[1] - 1))
+    weighted_x = x * weights[:, None]
+    try:
+        return_beta = np.linalg.solve(x.T @ weighted_x + ridge, x.T @ (weights * y_return))
+        predicted_log_return = float(x_current @ return_beta)
+    except np.linalg.LinAlgError:
+        predicted_log_return = 0.0
+
+    recent_returns = np.log(numeric_close / numeric_close.shift(1)).dropna().tail(96)
+    vol_per_bar = float(recent_returns.std(ddof=0)) if len(recent_returns) else 0.0
+    if not math.isfinite(vol_per_bar) or vol_per_bar <= 0:
+        return None
+    statistical_move = (probability_up - 0.5) * 2.0 * vol_per_bar * math.sqrt(horizon) * 0.75
+    predicted_log_return = 0.55 * predicted_log_return + 0.45 * statistical_move
+    max_move = 3.0 * vol_per_bar * math.sqrt(horizon)
+    predicted_log_return = max(-max_move, min(max_move, predicted_log_return))
+
+    return {
+        "probability_up": float(probability_up),
+        "predicted_log_return": float(predicted_log_return),
+        "vol_per_bar": float(vol_per_bar),
+        "training_samples": float(len(training)),
+    }
+
+
 def forecast_price(
     history: pd.DataFrame,
     days: float | None = 5,
@@ -195,17 +342,34 @@ def forecast_price(
         horizon_hours=horizon_hours,
         horizon_days=horizon_days,
     )
-    target = spot * math.exp((drift_per_bar - 0.5 * vol_per_bar**2) * bars)
+
+    selected_model = str(model or "log-return diffusion")
+    selected_version = str(model_version or FORECAST_MODEL_VERSION)
+    causal_prediction = None
+    if asset == "crypto" and selected_model in {"log-return diffusion", CRYPTO_CAUSAL_MODEL}:
+        causal_prediction = _causal_crypto_prediction(close, bars)
+        if causal_prediction is not None:
+            selected_model = CRYPTO_CAUSAL_MODEL
+            selected_version = CRYPTO_CAUSAL_MODEL_VERSION
+
+    if causal_prediction is not None:
+        probability_up = float(causal_prediction["probability_up"])
+        predicted_log_return = float(causal_prediction["predicted_log_return"])
+        vol_per_bar = float(causal_prediction["vol_per_bar"])
+        target = spot * math.exp(predicted_log_return)
+    else:
+        target = spot * math.exp((drift_per_bar - 0.5 * vol_per_bar**2) * bars)
+        z = drift_per_bar * math.sqrt(bars) / (vol_per_bar + 1e-12)
+        probability_up = float(1 / (1 + math.exp(-1.7 * z)))
+
     radius = vol_per_bar * math.sqrt(bars)
     low = target * math.exp(-1.645 * radius)
     high = target * math.exp(1.645 * radius)
-    z = drift_per_bar * math.sqrt(bars) / (vol_per_bar + 1e-12)
-    probability_up = float(1 / (1 + math.exp(-1.7 * z)))
     expected_move_pct = ((target / spot) - 1.0) * 100.0
     generated_at = datetime.now(timezone.utc).isoformat()
     source_quote_timestamp = _quote_timestamp(history)
     forecast_key = "|".join(
-        [requested_symbol, provider_symbol, interval, source_quote_timestamp, str(bars), model_version, generated_at]
+        [requested_symbol, provider_symbol, interval, source_quote_timestamp, str(bars), selected_model, selected_version, generated_at]
     )
     return Forecast(
         symbol=requested_symbol,
@@ -216,7 +380,7 @@ def forecast_price(
         low_price=float(low),
         high_price=float(high),
         probability_up=probability_up,
-        model=model,
+        model=selected_model,
         requested_symbol=requested_symbol,
         provider_symbol=provider_symbol,
         source_interval=interval,
@@ -225,7 +389,7 @@ def forecast_price(
         horizon_bars=bars,
         horizon_minutes=float(minutes),
         expected_move_pct=float(expected_move_pct),
-        model_version=model_version,
+        model_version=selected_version,
         data_quality_score=_quality_score(close, returns),
         forecast_id=hashlib.sha256(forecast_key.encode("utf-8")).hexdigest()[:24],
         spot_price=spot,
