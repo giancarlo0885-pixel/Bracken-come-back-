@@ -33,7 +33,6 @@ def _env_flag(name: str, default: bool = False) -> bool:
 
 
 def _live_capital_requested() -> bool:
-    """Treat any live execution/broker switch as a request for the strict gate."""
     return (
         str(EXECUTION_MODE).strip().lower() == "live"
         or str(BROKER_MODE).strip().lower() == "live"
@@ -43,7 +42,6 @@ def _live_capital_requested() -> bool:
 
 
 def _live_runtime_configuration_errors() -> list[str]:
-    """Return fail-closed configuration errors for live-capital startup."""
     errors: list[str] = []
     if str(EXECUTION_MODE).strip().lower() != "live":
         errors.append("EXECUTION_MODE must be live")
@@ -65,14 +63,6 @@ def _live_runtime_configuration_errors() -> list[str]:
 
 
 def _live_evidence_failures(report: dict[str, Any]) -> list[str]:
-    """Evaluate capital evidence independently of the disarmed candidate safety state.
-
-    oracle_readiness deliberately requires paper/disarmed switches while deciding
-    whether the system is a MANUAL_LIVE_CANDIDATE. Once a worker is explicitly
-    started in live mode, that safety-state check is expected to be false, so the
-    live startup gate re-checks every capital evidence item except that candidate
-    configuration check.
-    """
     checks = report.get("checks") or {}
     required_ok = (
         "database",
@@ -115,15 +105,7 @@ def _enforce_live_capital_gate(result: dict[str, Any]) -> None:
 
 
 def prepare_capital_readiness_runtime(worker: Any, market: str) -> dict[str, Any]:
-    """Prepare capital-readiness infrastructure and fail closed for live startup.
-
-    Paper/shadow workers retain best-effort preparation behavior. If any live or
-    broker-submission switch is requested, migrations, historical walk-forward
-    evidence, governance preparation, runtime configuration, capital evidence,
-    broker readiness, reconciliation, and explicit human approval become
-    mandatory before the worker may start. This function never changes live-
-    trading switches or submits broker orders.
-    """
+    """Prepare capital-readiness infrastructure and fail closed for live startup."""
     live_requested = _live_capital_requested()
     result: dict[str, Any] = {
         "market": str(market or "").lower(),
@@ -146,15 +128,11 @@ def prepare_capital_readiness_runtime(worker: Any, market: str) -> dict[str, Any
         log.warning("Capital readiness migrations unavailable: %s", exc.__class__.__name__)
         return result
 
-    # The governance code already knew how to judge walk-forward/calibration
-    # evidence, but production previously had no path that generated it. Build
-    # bounded, deduplicated historical out-of-sample evidence before governance.
-    # A weak model still fails its real metrics; nothing here lowers thresholds.
     if result["market"] == "crypto":
         try:
-            from capital_model_evidence_runtime import refresh_capital_model_evidence
+            from capital_model_v40 import refresh_v40_crypto_evidence
 
-            result["model_evidence"] = refresh_capital_model_evidence()
+            result["model_evidence"] = refresh_v40_crypto_evidence()
         except Exception as exc:
             result["model_evidence_error"] = exc.__class__.__name__
             if live_requested:
