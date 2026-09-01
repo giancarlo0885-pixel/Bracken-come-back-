@@ -8,6 +8,8 @@ from database import row, rows
 
 
 _HEALTHY = {"ok", "pass", "healthy", "ready", "available", "configured"}
+_CONFIRMED = {"pass", "verified", "confirmed", "agreement", "ok"}
+_REJECTED = {"reject", "rejected", "blocked", "failed", "fail"}
 
 
 def _parse_ts(value: Any) -> datetime | None:
@@ -68,35 +70,62 @@ def provider_health_summary(*, maximum_age_minutes: int = 90) -> dict[str, Any]:
 
 
 def quote_integrity_summary(*, lookback_hours: int = 24, maximum_divergence_pct: float = 1.0) -> dict[str, Any]:
+    """Assess whether execution consensus is behaving safely.
+
+    A divergent quote that was *rejected* is evidence that the consensus guard
+    worked and must not poison capital readiness for the entire lookback window.
+    The hard failure is a divergent observation that was nevertheless marked as
+    confirmed/accepted. We still surface rejected/divergent counts for audit.
+    """
     cutoff = datetime.now(timezone.utc) - timedelta(hours=max(1, int(lookback_hours)))
     try:
         stats = row(
             """
             SELECT
                 COUNT(*)::int AS total,
-                COUNT(*) FILTER (WHERE difference_pct IS NOT NULL AND difference_pct > %s)::int AS divergent,
                 COUNT(*) FILTER (
                     WHERE LOWER(COALESCE(consensus_status,'')) IN ('pass','verified','confirmed','agreement','ok')
-                )::int AS confirmed
+                )::int AS confirmed,
+                COUNT(*) FILTER (
+                    WHERE LOWER(COALESCE(consensus_status,'')) IN ('reject','rejected','blocked','failed','fail')
+                )::int AS rejected,
+                COUNT(*) FILTER (
+                    WHERE difference_pct IS NOT NULL
+                      AND difference_pct > %s
+                      AND LOWER(COALESCE(consensus_status,'')) IN ('pass','verified','confirmed','agreement','ok')
+                )::int AS unsafe_confirmed_divergent,
+                COUNT(*) FILTER (
+                    WHERE difference_pct IS NOT NULL
+                      AND difference_pct > %s
+                      AND LOWER(COALESCE(consensus_status,'')) IN ('reject','rejected','blocked','failed','fail')
+                )::int AS safely_rejected_divergent
             FROM quote_verifications
             WHERE created_at >= %s
             """,
-            (float(maximum_divergence_pct), cutoff.isoformat()),
+            (float(maximum_divergence_pct), float(maximum_divergence_pct), cutoff.isoformat()),
         ) or {}
     except Exception as exc:
         return {"ok": False, "status": "UNAVAILABLE", "reason": exc.__class__.__name__}
 
     total = int(stats.get("total") or 0)
-    divergent = int(stats.get("divergent") or 0)
     confirmed = int(stats.get("confirmed") or 0)
-    # Zero samples is UNKNOWN, never silently PASS.
-    ok = total > 0 and divergent == 0 and confirmed > 0
+    rejected = int(stats.get("rejected") or 0)
+    unsafe = int(stats.get("unsafe_confirmed_divergent") or 0)
+    safely_rejected = int(stats.get("safely_rejected_divergent") or 0)
+    # Zero samples is UNKNOWN, never silently PASS. Rejected divergence is safe
+    # only because the execution guard prevented it from becoming accepted truth.
+    ok = total > 0 and confirmed > 0 and unsafe == 0
     return {
         "ok": ok,
-        "status": "PASS" if ok else ("INSUFFICIENT_EVIDENCE" if total == 0 else "FAIL_CLOSED"),
+        "status": "PASS" if ok else ("INSUFFICIENT_EVIDENCE" if total == 0 or confirmed == 0 else "FAIL_CLOSED"),
         "sample_count": total,
         "confirmed": confirmed,
-        "divergent": divergent,
+        "rejected": rejected,
+        "unsafe_confirmed_divergent": unsafe,
+        "safely_rejected_divergent": safely_rejected,
+        # Compatibility field: only divergences that escaped the rejection gate
+        # count as readiness-failing divergence.
+        "divergent": unsafe,
         "maximum_divergence_pct": float(maximum_divergence_pct),
     }
 
