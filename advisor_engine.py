@@ -270,7 +270,7 @@ def generate_recommendation(
     )
     oracle_decision = build_oracle_decision_identity(
         symbol=symbol,
-        action=proposed_action,
+        action=("AVOID" if restricted else proposed_action),
         opportunity_score=opportunity,
         confidence=confidence,
         expected_upside_pct=expected_return,
