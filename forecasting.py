@@ -11,7 +11,7 @@ import pandas as pd
 
 from asset_routing import infer_asset_class, normalize_symbol
 from config import FORECAST_MODEL_VERSION
-from crypto_predictor_v42 import predict_crypto_direction
+from crypto_predictor_v43 import predict_crypto_direction
 
 
 INTERVAL_MINUTES = {
@@ -28,8 +28,8 @@ INTERVAL_MINUTES = {
     "1mo": 43200,
 }
 
-CRYPTO_CAUSAL_MODEL = "crypto sign transition selector"
-CRYPTO_CAUSAL_MODEL_VERSION = "v42-sign-transition"
+CRYPTO_CAUSAL_MODEL = "crypto selective sign transition"
+CRYPTO_CAUSAL_MODEL_VERSION = "v43-selective-transition"
 
 
 @dataclass
@@ -97,7 +97,6 @@ def bars_per_year(source_interval: Any, asset_class: str = "stock") -> float:
 
 
 def active_crypto_model_identity() -> tuple[str, str]:
-    """Return the model identity that currently governs crypto capital evidence."""
     return CRYPTO_CAUSAL_MODEL, CRYPTO_CAUSAL_MODEL_VERSION
 
 
@@ -210,13 +209,16 @@ def forecast_price(
     causal_prediction = None
     short_horizon_crypto = asset == "crypto" and interval_minutes(interval) <= 15.0 and minutes <= 30.0
     causal_requested = selected_model == CRYPTO_CAUSAL_MODEL
-    if asset == "crypto" and (causal_requested or (selected_model == "log-return diffusion" and short_horizon_crypto)):
-        causal_prediction = predict_crypto_direction(history, bars)
-        if causal_prediction is not None:
-            selected_model = CRYPTO_CAUSAL_MODEL
-            selected_version = CRYPTO_CAUSAL_MODEL_VERSION
-        elif causal_requested:
+    if asset == "crypto" and (causal_requested or short_horizon_crypto):
+        if not short_horizon_crypto:
             return None
+        causal_prediction = predict_crypto_direction(history, bars)
+        if causal_prediction is None:
+            # Selective abstention is intentional. Never replace an abstention
+            # with the older diffusion model on the same short-horizon decision.
+            return None
+        selected_model = CRYPTO_CAUSAL_MODEL
+        selected_version = CRYPTO_CAUSAL_MODEL_VERSION
 
     if causal_prediction is not None:
         probability_up = float(causal_prediction["probability_up"])
