@@ -7,6 +7,7 @@ from typing import Any
 
 _INSTALLED = False
 CORE_REBALANCE_BUY_INTENT = "CORE_REBALANCE_BUY"
+CORE_REBALANCE_CANDIDATE_INTENT = "CORE_REBALANCE_CANDIDATE"
 
 
 def _truthy(value: Any) -> bool:
@@ -79,6 +80,157 @@ def _normalize_core_rebalance_action(signal: Any) -> Any:
     _set_signal_value(signal, "v39_normalization_reason", CORE_REBALANCE_BUY_INTENT)
     _set_signal_value(signal, "action", "ACCUMULATE")
     return signal
+
+
+def _numeric(value: Any, default: float = 0.0) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return default
+    return number if number == number else default
+
+
+def _core_rebalance_candidate_allowed(
+    signal: Any,
+    *,
+    market: str,
+    deployment_gap: float,
+    score_threshold: float,
+    confidence_threshold: float,
+) -> bool:
+    """Identify a HOLD that may be ranked for core allocation, not executed.
+
+    This is intentionally narrower than converting HOLD to BUY: it only labels a
+    crypto HOLD as a portfolio candidate while capital is under-deployed and the
+    signal still meets the worker's normal quality thresholds. Actual buy intent
+    is emitted only after V39 returns a positive allocation for the same symbol.
+    """
+    if str(market or "").strip().lower() != "crypto":
+        return False
+    if deployment_gap <= 0:
+        return False
+    if str(_signal_value(signal, "action", "HOLD") or "HOLD").strip().upper() != "HOLD":
+        return False
+    existing_intent = _core_rebalance_intent(signal)
+    if existing_intent not in {"", CORE_REBALANCE_CANDIDATE_INTENT}:
+        return False
+    score = _numeric(_signal_value(signal, "score", 0.0))
+    confidence = _numeric(_signal_value(signal, "confidence", 0.0))
+    return score >= score_threshold and confidence >= confidence_threshold
+
+
+def _install_core_rebalance_producer(market_worker_module: Any) -> None:
+    """Bridge underweight crypto HOLDs into V39 without bypassing safety gates.
+
+    Candidate HOLDs are temporarily presented to the existing V39 opportunity
+    evaluator as ACCUMULATE *only for capital qualification*. Their tactical
+    action is restored immediately. This preserves the evaluator's existing
+    quote identity/freshness, tradeability, liquidity, spread, risk, signal-id,
+    and forecast-id requirements. V39 then applies hard risk, liquidity capacity,
+    reserve, position concentration, sector concentration, buying-power, margin,
+    and downstream execution checks. Only a positive optimizer allocation emits
+    CORE_REBALANCE_BUY and normalizes the signal for the existing paper-buy path.
+    """
+    from global_adaptive_engine import capital_engine_state
+
+    original_opportunity = market_worker_module._v39_signal_opportunity
+    if getattr(original_opportunity, "_oracle_core_rebalance_aware", False):
+        return
+
+    def rebalance_aware_opportunity(
+        market: str,
+        signal: Any,
+        prices: dict[str, Any],
+        ranked_by_symbol: dict[str, dict[str, Any]],
+        scan_type: str,
+    ) -> dict[str, Any]:
+        candidate = _core_rebalance_intent(signal) == CORE_REBALANCE_CANDIDATE_INTENT
+        if not candidate:
+            return original_opportunity(market, signal, prices, ranked_by_symbol, scan_type)
+
+        original_action = str(_signal_value(signal, "action", "HOLD") or "HOLD").strip().upper()
+        _set_signal_value(signal, "action", "ACCUMULATE")
+        try:
+            opportunity = original_opportunity(market, signal, prices, ranked_by_symbol, scan_type)
+        finally:
+            _set_signal_value(signal, "action", original_action)
+
+        stages = [stage for stage in list(opportunity.get("stages") or []) if stage != "buy_signal"]
+        if "core_rebalance_candidate" not in stages:
+            stages.append("core_rebalance_candidate")
+        opportunity["stages"] = stages
+        opportunity["core_rebalance_candidate"] = True
+        opportunity["portfolio_intent"] = CORE_REBALANCE_CANDIDATE_INTENT
+        opportunity["tactical_action"] = original_action
+        return opportunity
+
+    rebalance_aware_opportunity._oracle_core_rebalance_aware = True
+    market_worker_module._v39_signal_opportunity = rebalance_aware_opportunity
+
+    original_prioritize = market_worker_module._v39_prioritize_signals
+
+    def rebalance_aware_prioritize(
+        market: str,
+        signals: list[Any],
+        prices: dict[str, Any],
+        ranked: list[dict[str, Any]],
+        scan_type: str,
+    ) -> list[Any]:
+        if str(market or "").strip().lower() == "crypto" and signals:
+            try:
+                portfolio, positions = market_worker_module._v39_position_rows(market)
+                state = capital_engine_state(portfolio, positions, [], "crypto")
+                deployment_gap = max(0.0, _numeric(state.get("deployment_gap")))
+            except Exception as exc:
+                market_worker_module.log.debug(
+                    "CORE_REBALANCE candidate scan skipped | market=%s | error=%s",
+                    market,
+                    exc,
+                )
+                deployment_gap = 0.0
+
+            score_threshold = _numeric(getattr(market_worker_module, "HIGH_SCORE_THRESHOLD", 0.0))
+            confidence_threshold = _numeric(getattr(market_worker_module, "HIGH_CONFIDENCE_THRESHOLD", 0.0))
+            for signal in signals:
+                if _core_rebalance_candidate_allowed(
+                    signal,
+                    market=market,
+                    deployment_gap=deployment_gap,
+                    score_threshold=score_threshold,
+                    confidence_threshold=confidence_threshold,
+                ):
+                    _set_signal_value(signal, "portfolio_intent", CORE_REBALANCE_CANDIDATE_INTENT)
+                    _set_signal_value(signal, "v39_rebalance_deployment_gap", deployment_gap)
+
+        ordered = original_prioritize(market, signals, prices, ranked, scan_type)
+
+        for signal in ordered or []:
+            if _core_rebalance_intent(signal) != CORE_REBALANCE_CANDIDATE_INTENT:
+                continue
+            approved_amount = market_worker_module._finite_positive(
+                _signal_value(signal, "v39_optimizer_approved_amount", None)
+            )
+            allocation = _signal_value(signal, "v39_optimizer_allocation", {}) or {}
+            symbol = str(_signal_value(signal, "symbol", "") or "").strip().upper()
+            allocation_symbol = str(allocation.get("symbol") or "").strip().upper()
+            if approved_amount is None or not symbol or allocation_symbol != symbol:
+                continue
+
+            _set_signal_value(signal, "rebalance_intent", CORE_REBALANCE_BUY_INTENT)
+            _set_signal_value(signal, "portfolio_intent", CORE_REBALANCE_BUY_INTENT)
+            _set_signal_value(signal, "v39_rebalance_approved_amount", approved_amount)
+            _normalize_core_rebalance_action(signal)
+            market_worker_module.log.info(
+                "CORE_REBALANCE_BUY | market=%s | symbol=%s | approved_amount=%s | action=%s",
+                market,
+                symbol,
+                approved_amount,
+                _signal_value(signal, "action", ""),
+            )
+        return ordered
+
+    rebalance_aware_prioritize._oracle_core_rebalance_aware = True
+    market_worker_module._v39_prioritize_signals = rebalance_aware_prioritize
 
 
 def _verification_metadata(route: dict[str, Any], payload: dict[str, Any]) -> None:
@@ -164,10 +316,11 @@ def install_runtime_integrity_patch(market_worker_module: Any) -> None:
 
     Legacy `quote_verified`/`verified` keep their existing generic execution-
     eligibility meaning. New explicit metadata and log fields make provider
-    verification and Yahoo paper-reference verification unambiguous. Explicit
-    core-rebalance intent normalization is installed before V39 optimization;
-    it never bypasses optimizer or execution safety checks. Persistent symbol
-    quarantine is also enforced for non-held fast-scan candidates.
+    verification and Yahoo paper-reference verification unambiguous. Core crypto
+    rebalancing now has an explicit producer: under-deployed HOLDs may enter V39
+    as candidates, but only optimizer-approved allocations emit CORE_REBALANCE_BUY
+    and reach the existing paper execution path. Persistent symbol quarantine is
+    also enforced for non-held fast-scan candidates.
     """
     global _INSTALLED
     if _INSTALLED:
@@ -191,6 +344,7 @@ def install_runtime_integrity_patch(market_worker_module: Any) -> None:
         return _normalize_core_rebalance_action(normalized)
 
     market_worker_module._normalize_starter_action = normalize_starter_action
+    _install_core_rebalance_producer(market_worker_module)
 
     original_quote_payload = market_worker_module._quote_payload_from_history
 
