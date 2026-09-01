@@ -20,6 +20,7 @@ from readiness_observability import emit_capital_readiness_report
 from robinhood_quote_compat import install_robinhood_quote_compat
 from runtime_integrity_patch import install_runtime_integrity_patch
 from runtime_provider_reliability import install_yahoo_runtime_reliability
+from strategic_core_rebalance_runtime import install_strategic_core_rebalance_producer
 from structured_logging import configure_structured_logging
 
 
@@ -29,6 +30,7 @@ logger = logging.getLogger("crypto-worker")
 install_yahoo_runtime_reliability()
 install_runtime_integrity_patch(market_worker)
 install_core_rebalance_score_compat()
+install_strategic_core_rebalance_producer(market_worker)
 install_binance_us_reference_fallback()
 install_robinhood_quote_compat()
 install_crypto_v39_spread_bridge(market_worker)
