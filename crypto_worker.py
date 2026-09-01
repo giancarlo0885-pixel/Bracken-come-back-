@@ -5,6 +5,7 @@ import market_worker
 from binance_us_adapter import install_binance_us_reference_fallback
 from capital_readiness_runtime import prepare_capital_readiness_runtime
 from crypto_execution_guard import install_crypto_execution_quote_guard
+from crypto_forecast_runtime import install_crypto_short_horizon_forecast
 from crypto_quote_readiness_sampler import install_v39_quote_verification_sampler
 from live_broker_capital import install_live_broker_capital_sizing
 from paper_execution_accounting import install_paper_execution_accounting
@@ -27,6 +28,7 @@ install_robinhood_quote_compat()
 install_crypto_execution_quote_guard(market_worker)
 install_v39_quote_verification_sampler(market_worker)
 install_live_broker_capital_sizing()
+install_crypto_short_horizon_forecast(market_worker)
 if os.getenv("EXECUTION_MODE", "paper").strip().lower() == "paper":
     install_paper_execution_reality(market_worker)
     install_paper_execution_accounting(market_worker)
