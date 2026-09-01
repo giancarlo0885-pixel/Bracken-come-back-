@@ -142,3 +142,9 @@ register_model(
     "shadow",
     "requires nested past-only short-horizon walk-forward validation",
 )
+register_model(
+    "crypto sign transition selector",
+    "v42-sign-transition",
+    "shadow",
+    "requires causal sign-transition walk-forward validation",
+)

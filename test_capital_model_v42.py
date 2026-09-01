@@ -5,34 +5,32 @@ from types import SimpleNamespace
 import numpy as np
 import pandas as pd
 
-import capital_model_v41 as v41
-from crypto_predictor_v41 import predict_crypto_direction
+import capital_model_v42 as v42
+import oracle_readiness
+from crypto_predictor_v42 import predict_crypto_direction
 from forecasting import CRYPTO_CAUSAL_MODEL, CRYPTO_CAUSAL_MODEL_VERSION, active_crypto_model_identity, forecast_price
 from walk_forward_validation import temporal_leakage_probe
 
 
-def _block_reversal_history(periods: int = 900) -> pd.DataFrame:
-    returns: list[float] = []
+def _block_reversal_history(periods: int = 960, *, with_volume: bool = True) -> pd.DataFrame:
     block = 3
+    returns: list[float] = []
     for index in range(periods):
         phase = (index // block) % 2
-        magnitude = 0.0030 + 0.0004 * np.sin(index / 17.0)
+        magnitude = 0.0030 + 0.00025 * np.sin(index / 13.0)
         returns.append(magnitude if phase == 0 else -magnitude)
     prices = 100.0 * np.exp(np.cumsum(returns))
-    previous = np.concatenate([[prices[0]], prices[:-1]])
-    high = np.maximum(previous, prices) * 1.0008
-    low = np.minimum(previous, prices) * 0.9992
+    prior = np.concatenate([[prices[0]], prices[:-1]])
     index = pd.date_range("2026-01-01", periods=periods, freq="5min", tz="UTC")
-    frame = pd.DataFrame(
-        {
-            "Open": previous,
-            "High": high,
-            "Low": low,
-            "Close": prices,
-            "Volume": 1_000_000.0 * (1.0 + 0.10 * np.abs(np.sin(np.arange(periods) / 11.0))),
-        },
-        index=index,
-    )
+    payload = {
+        "Open": prior,
+        "High": np.maximum(prior, prices) * 1.001,
+        "Low": np.minimum(prior, prices) * 0.999,
+        "Close": prices,
+    }
+    if with_volume:
+        payload["Volume"] = np.full(periods, 1_000_000.0)
+    frame = pd.DataFrame(payload, index=index)
     frame.attrs["provider_route"] = {
         "requested_symbol": "BTC-USD",
         "provider_symbol": "BTC-USD",
@@ -44,32 +42,44 @@ def _block_reversal_history(periods: int = 900) -> pd.DataFrame:
     return frame
 
 
-def test_short_horizon_forecast_uses_current_causal_model() -> None:
+def test_v42_active_model_identity_and_short_horizon() -> None:
     history = _block_reversal_history()
     forecast = forecast_price(history, None, market="crypto", source_interval="5m", horizon_minutes=15)
     assert forecast is not None
-    assert forecast.model == CRYPTO_CAUSAL_MODEL
-    assert forecast.model_version == CRYPTO_CAUSAL_MODEL_VERSION
+    assert forecast.model == CRYPTO_CAUSAL_MODEL == "crypto sign transition selector"
+    assert forecast.model_version == CRYPTO_CAUSAL_MODEL_VERSION == "v42-sign-transition"
     assert forecast.horizon_bars == 3
     assert forecast.horizon_minutes == 15
     assert active_crypto_model_identity() == (CRYPTO_CAUSAL_MODEL, CRYPTO_CAUSAL_MODEL_VERSION)
+    assert oracle_readiness._execution_models() == [active_crypto_model_identity()]
 
 
-def test_v41_nested_selector_learns_reversal_without_outer_future() -> None:
-    history = _block_reversal_history(903)
+def test_v42_transition_estimator_recovers_known_reversal() -> None:
+    # 963 ends after a positive 3-bar block; the next block in the historical
+    # process is down. A sign-transition estimator should learn that reversal.
+    history = _block_reversal_history(963)
     prediction = predict_crypto_direction(history, 3)
     assert prediction is not None
     assert prediction["selection_validation_samples"] >= 36
     assert prediction["selected_expert"] != "climatology"
     assert prediction["selection_brier_skill"] > 0.0
+    assert prediction["current_lag_up"] is True
     assert prediction["probability_up"] < 0.5
 
 
-def test_v41_future_mutation_probe_remains_causal() -> None:
-    history = _block_reversal_history(940)
+def test_v42_prediction_does_not_require_optional_ohlcv_fields() -> None:
+    history = _block_reversal_history(963, with_volume=False)[["Close"]].copy()
+    prediction = predict_crypto_direction(history, 3)
+    assert prediction is not None
+    assert prediction["training_samples"] > 300
+    assert 0.0 < prediction["probability_up"] < 1.0
+
+
+def test_v42_future_mutation_probe_remains_causal() -> None:
+    history = _block_reversal_history(980)
     result = temporal_leakage_probe(
         history,
-        decision_position=780,
+        decision_position=820,
         horizon_bars=3,
         source_interval="5m",
         asset_class="crypto",
@@ -78,13 +88,12 @@ def test_v41_future_mutation_probe_remains_causal() -> None:
     assert result["ok"] is True
 
 
-def test_v41_evidence_runner_keeps_5m_to_15m_outer_scope(monkeypatch) -> None:
+def test_v42_evidence_runner_keeps_5m_to_15m_scope(monkeypatch) -> None:
     calls: list[dict] = []
-    monkeypatch.setattr(v41, "_evidence_current", lambda *args: False)
-    monkeypatch.setattr(v41, "register_model", lambda *args, **kwargs: None)
-    monkeypatch.setattr(v41, "active_crypto_model_identity", lambda: ("crypto nested adaptive selector", "v41-nested-selector"))
+    monkeypatch.setattr(v42, "_evidence_current", lambda *args: False)
+    monkeypatch.setattr(v42, "register_model", lambda *args, **kwargs: None)
     monkeypatch.setattr(
-        v41,
+        v42,
         "_build_symbol_evidence",
         lambda symbol, model, version, **kwargs: calls.append(
             {"symbol": symbol, "model": model, "version": version, **kwargs}
@@ -101,21 +110,20 @@ def test_v41_evidence_runner_keeps_5m_to_15m_outer_scope(monkeypatch) -> None:
         },
     )
     monkeypatch.setattr(
-        v41,
+        v42,
         "apply_model_governance",
         lambda *args: SimpleNamespace(recommended_status="approved", eligible_for_approval=True),
     )
     monkeypatch.setattr(
-        v41,
+        v42,
         "_recent_evidence",
         lambda *args: {"run_count": 3, "distinct_symbols": 3, "calibration_samples": 360},
     )
 
-    result = v41.refresh_v41_crypto_evidence(force=True)
+    result = v42.refresh_v42_crypto_evidence(force=True)
     assert result[0]["eligible_for_approval"] is True
     assert len(calls) == 3
-    assert all(item["model"] == "crypto nested adaptive selector" for item in calls)
-    assert all(item["version"] == "v41-nested-selector" for item in calls)
+    assert {item["symbol"] for item in calls} == {"BTC-USD", "ETH-USD", "SOL-USD"}
     assert all(item["period"] == "30d" for item in calls)
     assert all(item["interval"] == "5m" for item in calls)
     assert all(item["horizon_bars"] == 3 for item in calls)

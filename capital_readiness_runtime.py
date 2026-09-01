@@ -130,9 +130,9 @@ def prepare_capital_readiness_runtime(worker: Any, market: str) -> dict[str, Any
 
     if result["market"] == "crypto":
         try:
-            from capital_model_v41 import refresh_v41_crypto_evidence
+            from capital_model_v42 import refresh_v42_crypto_evidence
 
-            result["model_evidence"] = refresh_v41_crypto_evidence()
+            result["model_evidence"] = refresh_v42_crypto_evidence()
         except Exception as exc:
             result["model_evidence_error"] = exc.__class__.__name__
             if live_requested:

@@ -11,7 +11,7 @@ import pandas as pd
 
 from asset_routing import infer_asset_class, normalize_symbol
 from config import FORECAST_MODEL_VERSION
-from crypto_predictor_v41 import predict_crypto_direction
+from crypto_predictor_v42 import predict_crypto_direction
 
 
 INTERVAL_MINUTES = {
@@ -28,8 +28,8 @@ INTERVAL_MINUTES = {
     "1mo": 43200,
 }
 
-CRYPTO_CAUSAL_MODEL = "crypto nested adaptive selector"
-CRYPTO_CAUSAL_MODEL_VERSION = "v41-nested-selector"
+CRYPTO_CAUSAL_MODEL = "crypto sign transition selector"
+CRYPTO_CAUSAL_MODEL_VERSION = "v42-sign-transition"
 
 
 @dataclass
@@ -216,8 +216,6 @@ def forecast_price(
             selected_model = CRYPTO_CAUSAL_MODEL
             selected_version = CRYPTO_CAUSAL_MODEL_VERSION
         elif causal_requested:
-            # Do not label a diffusion fallback as the causal model when the
-            # nested selector lacks enough resolved evidence to make a forecast.
             return None
 
     if causal_prediction is not None:
