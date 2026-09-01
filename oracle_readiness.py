@@ -12,13 +12,13 @@ from capital_model_governance import model_governance_assessment
 from config import (
     ENABLE_BROKER_SUBMISSION,
     EXECUTION_MODE,
-    FORECAST_MODEL_VERSION,
     LIVE_TRADING_ARMED,
     LIVE_TRADING_KILL_SWITCH,
     ROBINHOOD_CRYPTO_ENABLED,
 )
 from database import database_health, rows
 from forecast_calibration import evaluate_probability_calibration
+from forecasting import active_crypto_model_identity
 from shadow_broker import shadow_readiness_summary
 
 
@@ -28,12 +28,6 @@ MANUAL_LIVE_READY_STATUSES = {"MANUAL_LIVE_CANDIDATE"}
 
 
 def readiness_exit_code(status: str, required: str = "shadow") -> int:
-    """Return a fail-closed process exit code for automation.
-
-    `NOT_READY` must never return success. The default CLI contract requires at
-    least SHADOW_READY; callers preparing a live-capital change can require the
-    stricter MANUAL_LIVE_CANDIDATE state with `--require manual-live`.
-    """
     normalized = str(status or "NOT_READY").strip().upper()
     requirement = str(required or "shadow").strip().lower()
     if requirement == "manual-live":
@@ -42,23 +36,12 @@ def readiness_exit_code(status: str, required: str = "shadow") -> int:
 
 
 def _execution_models() -> list[tuple[str, str]]:
-    try:
-        records = rows(
-            """
-            SELECT model, COALESCE(model_version,'') AS model_version, MAX(created_at) AS latest
-            FROM forecasts
-            WHERE model IS NOT NULL AND model <> ''
-            GROUP BY model, COALESCE(model_version,'')
-            ORDER BY latest DESC
-            LIMIT 10
-            """
-        )
-    except Exception:
-        records = []
-    models = [(str(item.get("model") or ""), str(item.get("model_version") or "")) for item in records if item.get("model")]
-    if not models:
-        models = [("log-return diffusion", FORECAST_MODEL_VERSION)]
-    return models
+    """Return only the model that currently governs crypto capital decisions.
+
+    Historical forecast versions remain in the database for auditability, but an
+    obsolete shadow model must not block readiness for the active execution model.
+    """
+    return [active_crypto_model_identity()]
 
 
 def _calibration_for_model(model: str, model_version: str) -> dict[str, Any]:
@@ -92,6 +75,50 @@ def _calibration_for_model(model: str, model_version: str) -> dict[str, Any]:
         return {"ok": False, "status": "UNAVAILABLE", "reason": exc.__class__.__name__}
 
 
+def _json_object(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return dict(value)
+    if isinstance(value, str):
+        try:
+            decoded = json.loads(value)
+            return decoded if isinstance(decoded, dict) else {}
+        except Exception:
+            return {}
+    return {}
+
+
+def _leakage_for_model(model: str, model_version: str) -> dict[str, Any]:
+    """Report causality checks independently from predictive performance."""
+    try:
+        records = rows(
+            """
+            SELECT run_id, leakage_checks, created_at
+            FROM walk_forward_validation_runs
+            WHERE model=%s AND COALESCE(model_version,'')=COALESCE(%s,'')
+            ORDER BY created_at DESC
+            LIMIT 20
+            """,
+            (model, model_version),
+        )
+    except Exception as exc:
+        return {"ok": False, "status": "UNAVAILABLE", "reason": exc.__class__.__name__, "run_count": 0}
+    if not records:
+        return {"ok": False, "status": "NO_EVIDENCE", "run_count": 0}
+
+    failures: list[str] = []
+    for item in records:
+        leakage = _json_object(item.get("leakage_checks"))
+        probe = _json_object(leakage.get("future_mutation_probe"))
+        if leakage.get("strict_ordering") is not True or probe.get("ok") is not True:
+            failures.append(str(item.get("run_id") or "run"))
+    return {
+        "ok": not failures,
+        "status": "PASS" if not failures else "FAIL",
+        "run_count": len(records),
+        "failed_run_count": len(failures),
+    }
+
+
 def _model_evidence() -> dict[str, Any]:
     models: list[dict[str, Any]] = []
     all_governed = True
@@ -102,11 +129,17 @@ def _model_evidence() -> dict[str, Any]:
         try:
             governance = model_governance_assessment(model, version).to_dict()
         except Exception as exc:
-            governance = {"eligible_for_approval": False, "recommended_status": "shadow", "reasons": [exc.__class__.__name__]}
+            governance = {
+                "eligible_for_approval": False,
+                "recommended_status": "shadow",
+                "passing_run_count": 0,
+                "reasons": [exc.__class__.__name__],
+            }
         calibration = _calibration_for_model(model, version)
+        leakage = _leakage_for_model(model, version)
         governed = bool(governance.get("eligible_for_approval")) and str(governance.get("recommended_status")) == "approved"
         walk_forward = governed and int(governance.get("passing_run_count") or 0) > 0
-        leak_ok = walk_forward
+        leak_ok = bool(leakage.get("ok"))
         all_governed = all_governed and governed
         all_calibrated = all_calibrated and bool(calibration.get("ok"))
         all_walk_forward = all_walk_forward and walk_forward
@@ -117,6 +150,7 @@ def _model_evidence() -> dict[str, Any]:
                 "model_version": version,
                 "governance": governance,
                 "calibration": calibration,
+                "leakage": leakage,
                 "walk_forward_ok": walk_forward,
                 "temporal_leakage_ok": leak_ok,
             }
@@ -277,7 +311,13 @@ def human_report(report: dict[str, Any]) -> str:
         item = checks.get(name) or {}
         state = "PASS" if item.get("ok") else str(item.get("status") or "FAIL")
         lines.append(f"{name.upper():24s} {state}")
-    lines.extend(["", f"OVERALL: {report.get('overall_status', 'NOT_READY')}", "CAPITAL AUTHORIZED: NO — explicit human authorization is always required."])
+    lines.extend(
+        [
+            "",
+            f"OVERALL: {report.get('overall_status', 'NOT_READY')}",
+            "CAPITAL AUTHORIZED: NO — explicit human authorization is always required.",
+        ]
+    )
     return "\n".join(lines)
 
 
