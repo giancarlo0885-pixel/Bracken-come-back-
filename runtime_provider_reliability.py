@@ -17,16 +17,51 @@ _KEY_LOCKS: dict[str, threading.Lock] = {}
 _UNAVAILABLE_UNTIL: dict[str, float] = {}
 _INSTALLED = False
 
-# Yahoo disambiguates some crypto tickers with an internal instrument suffix.
-# Keep Oracle symbols canonical and translate only at the provider boundary.
+# Yahoo disambiguates several crypto tickers with CoinMarketCap-style numeric
+# suffixes. Keep Oracle symbols canonical and translate only at the provider
+# boundary so execution, Coinbase consensus, and portfolio identity never inherit
+# Yahoo's provider-native naming convention.
 _YAHOO_CRYPTO_NATIVE_SYMBOLS = {
+    "APT-USD": "APT21794-USD",
     "ARB-USD": "ARB11841-USD",
+    "PEPE-USD": "PEPE24478-USD",
+    "POL-USD": "POL28321-USD",
+    "SUI-USD": "SUI20947-USD",
+    "UNI-USD": "UNI7083-USD",
 }
 
 
 def yahoo_native_symbol(symbol: str) -> str:
     requested = str(symbol or "").upper().strip()
     return _YAHOO_CRYPTO_NATIVE_SYMBOLS.get(requested, requested)
+
+
+def _install_current_crypto_universe() -> bool:
+    """Retire the legacy MATIC seed in favor of Polygon's active POL token.
+
+    The watchlist object is imported by reference throughout the runtime. Mutating
+    it in place updates the scanner/opportunity-engine seed without touching
+    historical database rows or held positions. Held legacy symbols are still
+    reintroduced by the worker's held-position path for risk monitoring/exits.
+    """
+    import config
+
+    watchlist = getattr(config, "CRYPTO_WATCHLIST", None)
+    if not isinstance(watchlist, dict):
+        return False
+
+    changed = False
+    if "MATIC-USD" in watchlist:
+        watchlist.pop("MATIC-USD", None)
+        changed = True
+    if "POL-USD" not in watchlist:
+        watchlist["POL-USD"] = "Polygon Ecosystem Token"
+        changed = True
+
+    watchlists = getattr(config, "WATCHLISTS", None)
+    if isinstance(watchlists, dict):
+        watchlists["crypto"] = watchlist
+    return changed
 
 
 def _key(symbol: str, period: str, interval: str) -> str:
@@ -160,9 +195,8 @@ def _install_yahoo_strict_alias_preservation() -> None:
 
     ``provider_router._strict_yahoo_history`` historically restamps a Yahoo frame
     with the canonical symbol, which is correct for identity checks but would
-    erase an alias such as ``ARB11841-USD``. Wrap only aliased instruments so the
-    canonical requested/provider symbols remain ``ARB-USD`` while provenance
-    retains the actual Yahoo instrument.
+    erase provider aliases. Wrap only aliased instruments so canonical Oracle
+    identity remains stable while provenance retains the actual Yahoo instrument.
     """
     import provider_router
 
@@ -205,11 +239,13 @@ def _install_yahoo_strict_alias_preservation() -> None:
 
 
 def install_yahoo_runtime_reliability() -> None:
-    """Install the quiet, alias-aware Yahoo fallback for all crypto worker scans."""
+    """Install current crypto symbols plus the alias-aware Yahoo fallback."""
     global _INSTALLED
     if _INSTALLED:
         return
     import market_data
+
+    universe_changed = _install_current_crypto_universe()
 
     def patched(symbol: str, period: str, interval: str) -> pd.DataFrame:
         return yahoo_reference_history(market_data, symbol, period, interval)
@@ -217,4 +253,7 @@ def install_yahoo_runtime_reliability() -> None:
     market_data._download_yahoo = patched
     _install_yahoo_strict_alias_preservation()
     _INSTALLED = True
-    log.info("Installed Yahoo fallback single-flight, native-symbol aliases, and unavailable-symbol cooldown")
+    log.info(
+        "Installed Yahoo fallback single-flight, native-symbol aliases, unavailable-symbol cooldown, and current crypto universe | universe_changed=%s",
+        universe_changed,
+    )
