@@ -130,21 +130,7 @@ def update_model_status(
 
 register_model("regime-aware ensemble", "v36-advisor-foundation", "shadow", "requires walk-forward validation")
 register_model("log-return diffusion", "v36-timeframe-aware", "shadow", "requires walk-forward validation")
-register_model(
-    "crypto causal adaptive",
-    "v40-causal-adaptive",
-    "shadow",
-    "requires causal short-horizon walk-forward validation",
-)
-register_model(
-    "crypto nested adaptive selector",
-    "v41-nested-selector",
-    "shadow",
-    "requires nested past-only short-horizon walk-forward validation",
-)
-register_model(
-    "crypto sign transition selector",
-    "v42-sign-transition",
-    "shadow",
-    "requires causal sign-transition walk-forward validation",
-)
+register_model("crypto causal adaptive", "v40-causal-adaptive", "shadow", "requires causal short-horizon walk-forward validation")
+register_model("crypto nested adaptive selector", "v41-nested-selector", "shadow", "requires nested past-only short-horizon walk-forward validation")
+register_model("crypto sign transition selector", "v42-sign-transition", "shadow", "requires causal sign-transition walk-forward validation")
+register_model("crypto selective sign transition", "v43-selective-transition", "shadow", "requires coverage-constrained selective walk-forward validation")
