@@ -232,6 +232,8 @@ def generate_recommendation(
             action = "WATCH"
         else:
             action = "HOLD"
+    elif guarded.action == "AVOID" and proposed_action in ENTRY_ACTIONS and not restricted:
+        action = "HOLD"
     else:
         action = guarded.action
 
@@ -268,7 +270,7 @@ def generate_recommendation(
     )
     oracle_decision = build_oracle_decision_identity(
         symbol=symbol,
-        action=action,
+        action=proposed_action,
         opportunity_score=opportunity,
         confidence=confidence,
         expected_upside_pct=expected_return,

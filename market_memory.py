@@ -319,6 +319,7 @@ def _exact_entry_lot_snapshots(
         ).strip()
         resolved.append(
             {
+                "decision_id": lot.get("decision_id") or snapshot.get("decision_id") or decision.get("decision_id"),
                 "lot_id": lot.get("lot_id"),
                 "signal_id": signal_id,
                 "forecast_id": forecast_id or None,
@@ -431,20 +432,14 @@ def record_closed_trade_memory(
         from database import connect
         with connect() as conn:
             entry_provenance = entry_provenance or {}
-            entries = _exact_entry_lot_snapshots(
-                conn,
-                market=market,
-                symbol=symbol,
-                opened_at=position.get("opened_at"),
-            )
-
             explicit_entry_id = (
                 entry_provenance.get("entry_decision_id")
                 or entry_provenance.get("decision_id")
                 or position.get("entry_decision_id")
                 or position.get("decision_id")
             )
-            if not entries and explicit_entry_id not in (None, ""):
+            entries: list[dict[str, Any]] = []
+            if explicit_entry_id not in (None, ""):
                 payload = {}
                 audit = conn.execute(
                     """SELECT payload, opportunity_score, created_at FROM oracle_decision_audit
@@ -475,6 +470,7 @@ def record_closed_trade_memory(
                     return False
                 entries = [
                     {
+                        "decision_id": explicit_entry_id,
                         "lot_id": entry_provenance.get("lot_id"),
                         "signal_id": (
                             entry_provenance.get("entry_signal_id")
@@ -495,6 +491,13 @@ def record_closed_trade_memory(
                         "oracle_decision": payload,
                     }
                 ]
+            else:
+                entries = _exact_entry_lot_snapshots(
+                    conn,
+                    market=market,
+                    symbol=symbol,
+                    opened_at=position.get("opened_at"),
+                )
 
             if not entries:
                 return False
@@ -509,6 +512,7 @@ def record_closed_trade_memory(
             provenance = [
                 {
                     "lot_id": item.get("lot_id"),
+                    "decision_id": item.get("decision_id"),
                     "signal_id": item.get("signal_id"),
                     "forecast_id": item.get("forecast_id"),
                     "quote_id": item.get("quote_id"),
@@ -529,6 +533,7 @@ def record_closed_trade_memory(
                 "return_pct": return_pct,
                 "features": features,
                 "entry_provenance": provenance,
+                "entry_decision_id": primary.get("decision_id") or primary.get("signal_id"),
                 "entry_signal_ids": [item.get("signal_id") for item in provenance],
                 "entry_forecast_ids": [item.get("forecast_id") for item in provenance if item.get("forecast_id")],
             }
@@ -563,7 +568,7 @@ def record_closed_trade_memory(
                     None,
                     json.dumps(dna_payload),
                     now,
-                    primary.get("signal_id"),
+                    primary.get("decision_id") or primary.get("signal_id"),
                     primary.get("signal_id"),
                     primary.get("forecast_id"),
                     primary.get("quote_id"),

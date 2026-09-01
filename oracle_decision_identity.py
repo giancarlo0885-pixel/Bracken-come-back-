@@ -334,6 +334,16 @@ def build_oracle_decision_identity(
 ) -> dict[str, Any]:
     """Build the legacy ten-question decision payload from guarded evidence."""
     gaps = [str(item) for item in evidence_gaps or [] if str(item or "").strip()]
+    _, identity_failures = action_preserves_oracle_buy_identity(
+        action,
+        opportunity_score=opportunity_score,
+        confidence=confidence,
+        expected_upside_pct=expected_upside_pct,
+        expected_downside_pct=expected_downside_pct,
+        risk_reward_ratio=risk_reward_ratio,
+        data_quality_score=data_quality_score,
+        evidence_gaps=gaps,
+    )
     guarded = guard_oracle_action(
         action,
         expected_return=expected_upside_pct,
@@ -346,9 +356,10 @@ def build_oracle_decision_identity(
         data_quality_score=data_quality_score,
         liquidity_available=not any("liquidity" in gap.lower() for gap in gaps),
         evidence_gaps=gaps,
-        contradicting_evidence=risk_factors,
     )
     judgment = canonical_oracle_judgment(guarded.action)
+    if judgment == "AVOID" and canonical_oracle_judgment(action) in ENTRY_JUDGMENTS:
+        judgment = "WAIT"
     if gaps and any(any(marker in gap.lower() for marker in UNKNOWN_MARKERS) for gap in gaps):
         if judgment in {"WAIT", "BUY", "STRONG BUY"}:
             judgment = "UNKNOWN"
@@ -370,6 +381,7 @@ def build_oracle_decision_identity(
 
     contradictions = list(risk_factors or [])
     contradictions.extend(gaps)
+    contradictions.extend(identity_failures)
     contradictions.extend(guarded.contradictions)
     contradictions.extend(guarded.unknowns)
     if not contradictions:
