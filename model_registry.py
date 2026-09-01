@@ -136,3 +136,9 @@ register_model(
     "shadow",
     "requires causal short-horizon walk-forward validation",
 )
+register_model(
+    "crypto nested adaptive selector",
+    "v41-nested-selector",
+    "shadow",
+    "requires nested past-only short-horizon walk-forward validation",
+)
