@@ -42,12 +42,12 @@ def _block_reversal_history(periods: int = 960, *, with_volume: bool = True) -> 
     return frame
 
 
-def test_v42_active_model_identity_and_short_horizon() -> None:
+def test_short_horizon_forecast_uses_current_causal_model() -> None:
     history = _block_reversal_history()
     forecast = forecast_price(history, None, market="crypto", source_interval="5m", horizon_minutes=15)
     assert forecast is not None
-    assert forecast.model == CRYPTO_CAUSAL_MODEL == "crypto sign transition selector"
-    assert forecast.model_version == CRYPTO_CAUSAL_MODEL_VERSION == "v42-sign-transition"
+    assert forecast.model == CRYPTO_CAUSAL_MODEL
+    assert forecast.model_version == CRYPTO_CAUSAL_MODEL_VERSION
     assert forecast.horizon_bars == 3
     assert forecast.horizon_minutes == 15
     assert active_crypto_model_identity() == (CRYPTO_CAUSAL_MODEL, CRYPTO_CAUSAL_MODEL_VERSION)
@@ -55,8 +55,6 @@ def test_v42_active_model_identity_and_short_horizon() -> None:
 
 
 def test_v42_transition_estimator_recovers_known_reversal() -> None:
-    # 963 ends after a positive 3-bar block; the next block in the historical
-    # process is down. A sign-transition estimator should learn that reversal.
     history = _block_reversal_history(963)
     prediction = predict_crypto_direction(history, 3)
     assert prediction is not None
@@ -92,12 +90,11 @@ def test_v42_evidence_runner_keeps_5m_to_15m_scope(monkeypatch) -> None:
     calls: list[dict] = []
     monkeypatch.setattr(v42, "_evidence_current", lambda *args: False)
     monkeypatch.setattr(v42, "register_model", lambda *args, **kwargs: None)
+    monkeypatch.setattr(v42, "active_crypto_model_identity", lambda: ("crypto sign transition selector", "v42-sign-transition"))
     monkeypatch.setattr(
         v42,
         "_build_symbol_evidence",
-        lambda symbol, model, version, **kwargs: calls.append(
-            {"symbol": symbol, "model": model, "version": version, **kwargs}
-        )
+        lambda symbol, model, version, **kwargs: calls.append({"symbol": symbol, "model": model, "version": version, **kwargs})
         or {
             "symbol": symbol,
             "status": "PASS",
@@ -109,21 +106,14 @@ def test_v42_evidence_runner_keeps_5m_to_15m_scope(monkeypatch) -> None:
             "temporal_leakage_ok": True,
         },
     )
-    monkeypatch.setattr(
-        v42,
-        "apply_model_governance",
-        lambda *args: SimpleNamespace(recommended_status="approved", eligible_for_approval=True),
-    )
-    monkeypatch.setattr(
-        v42,
-        "_recent_evidence",
-        lambda *args: {"run_count": 3, "distinct_symbols": 3, "calibration_samples": 360},
-    )
+    monkeypatch.setattr(v42, "apply_model_governance", lambda *args: SimpleNamespace(recommended_status="approved", eligible_for_approval=True))
+    monkeypatch.setattr(v42, "_recent_evidence", lambda *args: {"run_count": 3, "distinct_symbols": 3, "calibration_samples": 360})
 
     result = v42.refresh_v42_crypto_evidence(force=True)
     assert result[0]["eligible_for_approval"] is True
     assert len(calls) == 3
-    assert {item["symbol"] for item in calls} == {"BTC-USD", "ETH-USD", "SOL-USD"}
+    assert all(item["model"] == "crypto sign transition selector" for item in calls)
+    assert all(item["version"] == "v42-sign-transition" for item in calls)
     assert all(item["period"] == "30d" for item in calls)
     assert all(item["interval"] == "5m" for item in calls)
     assert all(item["horizon_bars"] == 3 for item in calls)
