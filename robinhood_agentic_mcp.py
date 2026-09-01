@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable
+from datetime import datetime, timezone
+import hashlib
+import json
+import uuid
+from typing import Any
 
 
 REQUIRED_CRYPTO_TOOLS = {
@@ -15,6 +19,8 @@ REQUIRED_CRYPTO_TOOLS = {
     "place_crypto_order",
     "cancel_crypto_order",
 }
+
+AUTONOMOUS_LIVE_SUBMISSION_ALLOWED = False
 
 
 @dataclass
@@ -59,6 +65,72 @@ def preview_crypto_order(client: Any | None, order: dict[str, Any]) -> dict[str,
     return {"ok": not warnings, "status": "PREVIEWED", "preview": preview, "warnings": warnings}
 
 
+def _proposal_fingerprint(order: dict[str, Any], context: dict[str, Any] | None = None) -> str:
+    payload = {
+        "order": order,
+        "context": context or {},
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def propose_crypto_order(
+    client: Any | None,
+    order: dict[str, Any],
+    *,
+    context: dict[str, Any] | None = None,
+    proposal_id: str | None = None,
+) -> dict[str, Any]:
+    """Automatically prepare and preview a crypto order without submitting it.
+
+    Oracle may automate signal generation, broker-capital sizing, quote checks and
+    preview generation. This boundary deliberately stops before real-money order
+    placement. A separate human-authorized workflow must handle any live submit.
+    """
+    preview = preview_crypto_order(client, order)
+    if not preview.get("ok"):
+        return {
+            "ok": False,
+            "status": "PROPOSAL_REJECTED",
+            "reason": preview.get("reason") or "broker preview failed",
+            "preview": preview,
+            "submission_allowed": False,
+            "human_approval_required": True,
+        }
+
+    return {
+        "ok": True,
+        "status": "AWAITING_HUMAN_APPROVAL",
+        "proposal_id": str(proposal_id or uuid.uuid4()),
+        "proposal_fingerprint": _proposal_fingerprint(order, context),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "order": dict(order),
+        "context": dict(context or {}),
+        "preview": preview.get("preview"),
+        "warnings": list(preview.get("warnings") or []),
+        "submission_allowed": False,
+        "human_approval_required": True,
+    }
+
+
+def autonomous_crypto_order_submission(
+    client: Any | None,
+    order: dict[str, Any],
+    *,
+    context: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Fail closed if any runtime tries to submit a live crypto order autonomously."""
+    proposal = propose_crypto_order(client, order, context=context)
+    return {
+        "ok": False,
+        "status": "AUTONOMOUS_LIVE_SUBMISSION_BLOCKED",
+        "reason": "real-money crypto orders require a separate explicit human-authorized submission step",
+        "proposal": proposal,
+        "submission_allowed": False,
+        "human_approval_required": True,
+    }
+
+
 def agentic_preflight(client: Any | None) -> dict[str, Any]:
     status = discover_tools(client)
     result = {
@@ -70,6 +142,7 @@ def agentic_preflight(client: Any | None) -> dict[str, Any]:
         "QUOTE CHECK": "NOT_RUN",
         "BUYING POWER CHECK": "NOT_RUN",
         "ORDER PREVIEW CAPABILITY": "PASS" if "preview_crypto_order" not in status.missing_tools else "MISSING",
+        "AUTONOMOUS LIVE SUBMISSION": "BLOCKED",
         "LIVE TRADING ARMED/DISARMED": "DISARMED",
         "missing_tools": status.missing_tools,
     }
@@ -84,4 +157,3 @@ def agentic_preflight(client: Any | None) -> dict[str, Any]:
     except Exception:
         result["ROBINHOOD AUTH"] = "ERROR"
     return result
-
