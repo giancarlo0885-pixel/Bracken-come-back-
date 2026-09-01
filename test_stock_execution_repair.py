@@ -8,7 +8,15 @@ import stock_execution_repair as repair
 
 
 class FakeSnapshot:
-    def __init__(self, symbol: str = "MSFT", price: float = 500.0):
+    def __init__(
+        self,
+        symbol: str = "MSFT",
+        price: float = 500.0,
+        *,
+        provider_verified: bool = True,
+        paper_reference_verified: bool = False,
+        correlation_id: str | None = "repair-test",
+    ):
         now = datetime.now(timezone.utc).isoformat()
         self.symbol = symbol
         self.price = price
@@ -17,6 +25,9 @@ class FakeSnapshot:
         self.interval = "1m"
         self.quote_verified = True
         self.stale = False
+        self.provider_verified = provider_verified
+        self.paper_reference_verified = paper_reference_verified
+        self.correlation_id = correlation_id
 
     def to_quote_payload(self):
         return {
@@ -34,7 +45,12 @@ class FakeSnapshot:
             "stale": False,
             "source_capability": "history_intraday",
             "source_identity": f"Yahoo Finance:{self.symbol}:1d:1m",
-            "correlation_id": "repair-test",
+            "correlation_id": self.correlation_id,
+            "provider_quote_verified": self.provider_verified,
+            "paper_reference_verified": self.paper_reference_verified,
+            "verification_basis": (
+                "provider" if self.provider_verified else "paper:fresh_identity_matched_yahoo"
+            ),
         }
 
 
@@ -96,9 +112,14 @@ def test_verified_live_quote_replaces_research_execution_payload(monkeypatch):
     assert payload is not None
     assert payload["price"] == 501.25
     assert payload["quote_verified"] is True
+    assert payload["execution_quote_eligible"] is True
+    assert payload["provider_quote_verified"] is True
+    assert payload["paper_reference_verified"] is False
+    assert payload["verification_kind"] == "provider"
     assert payload["stale"] is False
     assert payload["interval"] == "1m"
     assert payload["avg_dollar_volume"] == 25_000_000.0
+    assert payload["correlation_id"] == "repair-test"
 
     signal = SimpleNamespace(
         symbol="MSFT",
@@ -117,6 +138,34 @@ def test_verified_live_quote_replaces_research_execution_payload(monkeypatch):
     assert reason == "ok"
     assert captured["quote"]["interval"] == "1d"
     assert captured["quote"]["quote_timestamp"] == "2026-08-28T20:00:00+00:00"
+
+
+def test_paper_reference_stays_explicit_and_gets_correlation_id(monkeypatch):
+    repair._snapshot_cache.clear()
+    monkeypatch.setattr(
+        repair,
+        "_verified_live_snapshot",
+        lambda symbol: FakeSnapshot(
+            symbol,
+            501.25,
+            provider_verified=False,
+            paper_reference_verified=True,
+            correlation_id=None,
+        ),
+    )
+
+    worker = FakeWorker()
+    payload = repair._verified_payload(worker, "MSFT", object(), "fast")
+
+    assert payload is not None
+    assert payload["quote_verified"] is True
+    assert payload["verified"] is True
+    assert payload["execution_quote_eligible"] is True
+    assert payload["provider_quote_verified"] is False
+    assert payload["paper_reference_verified"] is True
+    assert payload["verification_kind"] == "paper_reference"
+    assert payload["correlation_id"]
+    assert payload["decision_correlation_id"] == payload["correlation_id"]
 
 
 def test_unverified_stock_quote_is_filtered_before_execution(monkeypatch):
