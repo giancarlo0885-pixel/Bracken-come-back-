@@ -23,6 +23,22 @@ from shadow_broker import shadow_readiness_summary
 
 
 VALID_STATUSES = {"NOT_READY", "SHADOW_READY", "MANUAL_LIVE_CANDIDATE"}
+SHADOW_READY_STATUSES = {"SHADOW_READY", "MANUAL_LIVE_CANDIDATE"}
+MANUAL_LIVE_READY_STATUSES = {"MANUAL_LIVE_CANDIDATE"}
+
+
+def readiness_exit_code(status: str, required: str = "shadow") -> int:
+    """Return a fail-closed process exit code for automation.
+
+    `NOT_READY` must never return success. The default CLI contract requires at
+    least SHADOW_READY; callers preparing a live-capital change can require the
+    stricter MANUAL_LIVE_CANDIDATE state with `--require manual-live`.
+    """
+    normalized = str(status or "NOT_READY").strip().upper()
+    requirement = str(required or "shadow").strip().lower()
+    if requirement == "manual-live":
+        return 0 if normalized in MANUAL_LIVE_READY_STATUSES else 2
+    return 0 if normalized in SHADOW_READY_STATUSES else 2
 
 
 def _execution_models() -> list[tuple[str, str]]:
@@ -268,10 +284,16 @@ def human_report(report: dict[str, Any]) -> str:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Read-only GARIBALDI capital-readiness report")
     parser.add_argument("--json", action="store_true", help="print machine-readable JSON")
+    parser.add_argument(
+        "--require",
+        choices=("shadow", "manual-live"),
+        default="shadow",
+        help="minimum readiness state required for exit code 0",
+    )
     args = parser.parse_args()
     report = build_readiness_report()
     print(json.dumps(report, indent=2, sort_keys=True, default=str) if args.json else human_report(report))
-    return 0 if report["overall_status"] in VALID_STATUSES else 2
+    return readiness_exit_code(report.get("overall_status", "NOT_READY"), args.require)
 
 
 if __name__ == "__main__":
