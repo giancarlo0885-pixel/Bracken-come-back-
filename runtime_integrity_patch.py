@@ -121,6 +121,44 @@ def _verification_metadata(route: dict[str, Any], payload: dict[str, Any]) -> No
     payload["decision_correlation_id"] = correlation_id
 
 
+def _install_fast_quarantine_filter(market_worker_module: Any) -> None:
+    """Prevent quarantined non-held symbols from leaking back into fast scans.
+
+    The deep scanner already filters the persistent invalid-symbol quarantine and
+    ranked fast candidates are filtered at query time. The rotating watchlist
+    slice historically bypassed that filter, allowing a known-bad provider symbol
+    to be retried immediately. Held positions are deliberately retained so price
+    monitoring and risk exits are never disabled by a data-source quarantine.
+    """
+    original = market_worker_module._fast_candidate_batch
+    if getattr(original, "_oracle_quarantine_aware", False):
+        return
+
+    def quarantine_aware(market: str) -> list[tuple[str, str]]:
+        candidates = list(original(market) or [])
+        quarantined = {
+            str(symbol or "").upper().strip()
+            for symbol in (market_worker_module._active_quarantined_symbols() or set())
+            if str(symbol or "").strip()
+        }
+        if not quarantined:
+            return candidates
+        held = {
+            str(symbol or "").upper().strip()
+            for symbol in (market_worker_module._held_symbols(market) or set())
+            if str(symbol or "").strip()
+        }
+        return [
+            (symbol, name)
+            for symbol, name in candidates
+            if str(symbol or "").upper().strip() in held
+            or str(symbol or "").upper().strip() not in quarantined
+        ]
+
+    quarantine_aware._oracle_quarantine_aware = True
+    market_worker_module._fast_candidate_batch = quarantine_aware
+
+
 def install_runtime_integrity_patch(market_worker_module: Any) -> None:
     """Install fail-closed runtime corrections for paper workers.
 
@@ -128,7 +166,8 @@ def install_runtime_integrity_patch(market_worker_module: Any) -> None:
     eligibility meaning. New explicit metadata and log fields make provider
     verification and Yahoo paper-reference verification unambiguous. Explicit
     core-rebalance intent normalization is installed before V39 optimization;
-    it never bypasses optimizer or execution safety checks.
+    it never bypasses optimizer or execution safety checks. Persistent symbol
+    quarantine is also enforced for non-held fast-scan candidates.
     """
     global _INSTALLED
     if _INSTALLED:
@@ -142,6 +181,8 @@ def install_runtime_integrity_patch(market_worker_module: Any) -> None:
             "RUNTIME INTEGRITY | paper_small_account_max_positions=%s | extra_open_positions=0",
             effective_cap,
         )
+
+    _install_fast_quarantine_filter(market_worker_module)
 
     original_normalize_starter_action = market_worker_module._normalize_starter_action
 

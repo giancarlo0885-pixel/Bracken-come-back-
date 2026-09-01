@@ -129,6 +129,39 @@ def test_unverified_quote_does_not_gain_verification():
     assert payload["verification_kind"] == "unverified"
 
 
+def test_fast_quarantine_filter_removes_nonheld_candidate():
+    worker = SimpleNamespace(
+        _fast_candidate_batch=lambda market: [
+            ("BTC-USD", "Bitcoin"),
+            ("ARB-USD", "Arbitrum"),
+        ],
+        _active_quarantined_symbols=lambda: {"ARB-USD"},
+        _held_symbols=lambda market: set(),
+    )
+
+    patch._install_fast_quarantine_filter(worker)
+
+    assert worker._fast_candidate_batch("crypto") == [("BTC-USD", "Bitcoin")]
+
+
+def test_fast_quarantine_filter_keeps_held_symbol_for_risk_monitoring():
+    worker = SimpleNamespace(
+        _fast_candidate_batch=lambda market: [
+            ("BTC-USD", "Bitcoin"),
+            ("ARB-USD", "Arbitrum"),
+        ],
+        _active_quarantined_symbols=lambda: {"ARB-USD"},
+        _held_symbols=lambda market: {"ARB-USD"},
+    )
+
+    patch._install_fast_quarantine_filter(worker)
+
+    assert worker._fast_candidate_batch("crypto") == [
+        ("BTC-USD", "Bitcoin"),
+        ("ARB-USD", "Arbitrum"),
+    ]
+
+
 def test_workers_install_integrity_patch():
     stock_source = open("stock_worker.py", encoding="utf-8").read()
     crypto_source = open("crypto_worker.py", encoding="utf-8").read()
