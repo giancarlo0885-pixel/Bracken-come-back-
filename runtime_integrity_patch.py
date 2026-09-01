@@ -6,6 +6,7 @@ from typing import Any
 
 
 _INSTALLED = False
+CORE_REBALANCE_BUY_INTENT = "CORE_REBALANCE_BUY"
 
 
 def _truthy(value: Any) -> bool:
@@ -32,6 +33,52 @@ def _install_small_account_position_cap(oracle_bot_module: Any) -> int | None:
     oracle_bot_module.DEFAULT_MAX_OPEN_POSITIONS = min(configured_base, cap)
     oracle_bot_module.EXTRA_OPEN_POSITIONS = 0
     return min(configured_base, cap)
+
+
+def _signal_value(signal: Any, name: str, default: Any = None) -> Any:
+    if isinstance(signal, dict):
+        return signal.get(name, default)
+    return getattr(signal, name, default)
+
+
+def _set_signal_value(signal: Any, name: str, value: Any) -> None:
+    if isinstance(signal, dict):
+        signal[name] = value
+    else:
+        setattr(signal, name, value)
+
+
+def _core_rebalance_intent(signal: Any) -> str:
+    """Return an explicit rebalance intent without inferring intent from HOLD alone."""
+    for field in ("rebalance_intent", "execution_intent", "portfolio_intent", "v39_intent"):
+        value = str(_signal_value(signal, field, "") or "").strip().upper()
+        if value:
+            return value
+    payload = _signal_value(signal, "payload", None)
+    if isinstance(payload, dict):
+        for field in ("rebalance_intent", "execution_intent", "portfolio_intent", "v39_intent"):
+            value = str(payload.get(field) or "").strip().upper()
+            if value:
+                return value
+    return ""
+
+
+def _normalize_core_rebalance_action(signal: Any) -> Any:
+    """Promote only an explicitly authorized core-rebalance HOLD into an entry candidate.
+
+    A normal HOLD remains a non-entry. CORE_REBALANCE_BUY only changes the action
+    to ACCUMULATE so the existing V39 optimizer, forecast, quote, risk, sizing,
+    and execution gates can evaluate it; it does not approve or size a trade.
+    """
+    if signal is None:
+        return signal
+    action = str(_signal_value(signal, "action", "HOLD") or "HOLD").strip().upper()
+    if action != "HOLD" or _core_rebalance_intent(signal) != CORE_REBALANCE_BUY_INTENT:
+        return signal
+    _set_signal_value(signal, "v39_original_action", "HOLD")
+    _set_signal_value(signal, "v39_normalization_reason", CORE_REBALANCE_BUY_INTENT)
+    _set_signal_value(signal, "action", "ACCUMULATE")
+    return signal
 
 
 def _verification_metadata(route: dict[str, Any], payload: dict[str, Any]) -> None:
@@ -79,7 +126,9 @@ def install_runtime_integrity_patch(market_worker_module: Any) -> None:
 
     Legacy `quote_verified`/`verified` keep their existing generic execution-
     eligibility meaning. New explicit metadata and log fields make provider
-    verification and Yahoo paper-reference verification unambiguous.
+    verification and Yahoo paper-reference verification unambiguous. Explicit
+    core-rebalance intent normalization is installed before V39 optimization;
+    it never bypasses optimizer or execution safety checks.
     """
     global _INSTALLED
     if _INSTALLED:
@@ -93,6 +142,14 @@ def install_runtime_integrity_patch(market_worker_module: Any) -> None:
             "RUNTIME INTEGRITY | paper_small_account_max_positions=%s | extra_open_positions=0",
             effective_cap,
         )
+
+    original_normalize_starter_action = market_worker_module._normalize_starter_action
+
+    def normalize_starter_action(signal: Any) -> Any:
+        normalized = original_normalize_starter_action(signal)
+        return _normalize_core_rebalance_action(normalized)
+
+    market_worker_module._normalize_starter_action = normalize_starter_action
 
     original_quote_payload = market_worker_module._quote_payload_from_history
 
