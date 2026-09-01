@@ -2,6 +2,7 @@ import logging
 import os
 
 import market_worker
+from binance_us_adapter import install_binance_us_reference_fallback
 from capital_readiness_runtime import prepare_capital_readiness_runtime
 from crypto_execution_guard import install_crypto_execution_quote_guard
 from crypto_quote_readiness_sampler import install_v39_quote_verification_sampler
@@ -19,6 +20,7 @@ logger = logging.getLogger("crypto-worker")
 
 install_yahoo_runtime_reliability()
 install_runtime_integrity_patch(market_worker)
+install_binance_us_reference_fallback()
 install_crypto_execution_quote_guard(market_worker)
 install_v39_quote_verification_sampler(market_worker)
 if os.getenv("EXECUTION_MODE", "paper").strip().lower() == "paper":
