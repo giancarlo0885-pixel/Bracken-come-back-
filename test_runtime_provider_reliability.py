@@ -8,6 +8,7 @@ import time
 from types import SimpleNamespace
 
 import pandas as pd
+import pytest
 
 import crypto_execution_guard as crypto_guard
 import runtime_provider_reliability as reliability
@@ -76,14 +77,14 @@ def test_concurrent_missing_yahoo_symbol_is_requested_once_then_cooled_down():
     module = _market_data_stub(lambda symbol: _FailingTicker(counter, lock))
 
     def run():
-        return reliability.yahoo_reference_history(module, "APT-USD", "5d", "5m")
+        return reliability.yahoo_reference_history(module, "TEST-USD", "5d", "5m")
 
     with ThreadPoolExecutor(max_workers=4) as pool:
         results = list(pool.map(lambda _: run(), range(4)))
 
     assert counter["calls"] == 1
     assert all(result.empty for result in results)
-    assert reliability._cooldown_active(reliability._key("APT-USD", "5d", "5m")) is True
+    assert reliability._cooldown_active(reliability._key("TEST-USD", "5d", "5m")) is True
 
 
 def test_successful_yahoo_reference_preserves_exact_identity_and_clears_cooldown():
@@ -101,7 +102,18 @@ def test_successful_yahoo_reference_preserves_exact_identity_and_clears_cooldown
     assert reliability._cooldown_active(key) is False
 
 
-def test_arbitrum_uses_yahoo_native_alias_but_keeps_canonical_identity():
+@pytest.mark.parametrize(
+    ("canonical", "native"),
+    [
+        ("APT-USD", "APT21794-USD"),
+        ("ARB-USD", "ARB11841-USD"),
+        ("PEPE-USD", "PEPE24478-USD"),
+        ("POL-USD", "POL28321-USD"),
+        ("SUI-USD", "SUI20947-USD"),
+        ("UNI-USD", "UNI7083-USD"),
+    ],
+)
+def test_current_crypto_aliases_use_yahoo_native_symbol_but_keep_canonical_identity(canonical, native):
     requested_tickers: list[str] = []
 
     def ticker_factory(symbol: str):
@@ -109,13 +121,13 @@ def test_arbitrum_uses_yahoo_native_alias_but_keeps_canonical_identity():
         return _WorkingTicker()
 
     module = _market_data_stub(ticker_factory)
-    result = reliability.yahoo_reference_history(module, "ARB-USD", "5d", "5m")
+    result = reliability.yahoo_reference_history(module, canonical, "5d", "5m")
 
-    assert requested_tickers == ["ARB11841-USD"]
-    assert reliability.yahoo_native_symbol("ARB-USD") == "ARB11841-USD"
-    assert result.attrs["requested_symbol"] == "ARB-USD"
-    assert result.attrs["provider_symbol"] == "ARB-USD"
-    assert result.attrs["provider_native_symbol"] == "ARB11841-USD"
+    assert requested_tickers == [native]
+    assert reliability.yahoo_native_symbol(canonical) == native
+    assert result.attrs["requested_symbol"] == canonical
+    assert result.attrs["provider_symbol"] == canonical
+    assert result.attrs["provider_native_symbol"] == native
 
 
 def test_arbitrum_strict_yahoo_path_preserves_native_alias(monkeypatch):
@@ -141,6 +153,36 @@ def test_arbitrum_strict_yahoo_path_preserves_native_alias(monkeypatch):
     assert result.attrs["provider_symbol"] == "ARB-USD"
     assert result.attrs["provider_native_symbol"] == "ARB11841-USD"
     assert result.attrs["quote_verified"] is False
+
+
+def test_runtime_crypto_universe_retires_matic_for_pol(monkeypatch):
+    import config
+
+    watchlist = {
+        "BTC-USD": "Bitcoin",
+        "MATIC-USD": "Polygon",
+        "PEPE-USD": "Pepe",
+    }
+    watchlists = {"cash": {}, "crypto": watchlist}
+    monkeypatch.setattr(config, "CRYPTO_WATCHLIST", watchlist)
+    monkeypatch.setattr(config, "WATCHLISTS", watchlists)
+
+    assert reliability._install_current_crypto_universe() is True
+    assert "MATIC-USD" not in watchlist
+    assert watchlist["POL-USD"] == "Polygon Ecosystem Token"
+    assert config.WATCHLISTS["crypto"] is watchlist
+
+
+def test_current_crypto_universe_is_idempotent(monkeypatch):
+    import config
+
+    watchlist = {"BTC-USD": "Bitcoin", "POL-USD": "Polygon Ecosystem Token"}
+    watchlists = {"cash": {}, "crypto": watchlist}
+    monkeypatch.setattr(config, "CRYPTO_WATCHLIST", watchlist)
+    monkeypatch.setattr(config, "WATCHLISTS", watchlists)
+
+    assert reliability._install_current_crypto_universe() is False
+    assert list(watchlist).count("POL-USD") == 1
 
 
 def test_yahoo_provider_name_without_execution_eligibility_is_not_consensus_candidate():
