@@ -13,6 +13,7 @@ import market_worker
 import oracle_bot
 import provider_capabilities
 import provider_router
+from forecast_quality import summarize_validation
 from forecasting import bars_per_year, forecast_price
 from prediction_engine import build_decisions
 from production_audit import build_audit_report
@@ -61,6 +62,80 @@ def test_crypto_forecasts_handle_twenty_four_seven_calendar():
     assert forecast is not None
     assert forecast.asset_class == "crypto"
     assert bars_per_year("5m", "crypto") == pytest.approx(365 * 24 * 60 / 5)
+
+
+def test_forecast_validation_summary_reports_calibration_and_reliability_metrics():
+    summary = summarize_validation(
+        [
+            {
+                "symbol": "AAPL",
+                "asset_class": "stock",
+                "source_interval": "1d",
+                "model": "unit",
+                "model_version": "v1",
+                "probability_up": 0.85,
+                "predicted_move_pct": 3.0,
+                "realized_move_pct": 2.5,
+                "low_move_pct": 1.0,
+                "high_move_pct": 4.0,
+                "direction_correct": True,
+                "mape": 0.05,
+            },
+            {
+                "symbol": "AAPL",
+                "asset_class": "stock",
+                "source_interval": "1d",
+                "model": "unit",
+                "model_version": "v1",
+                "probability_up": 75,
+                "predicted_move_pct": 2.0,
+                "realized_move_pct": 1.0,
+                "low_move_pct": 0.2,
+                "high_move_pct": 2.4,
+                "direction_correct": True,
+                "mape": 0.04,
+            },
+            {
+                "symbol": "AAPL",
+                "asset_class": "stock",
+                "source_interval": "1d",
+                "model": "unit",
+                "model_version": "v1",
+                "probability_up": 0.20,
+                "predicted_move_pct": -1.5,
+                "realized_move_pct": -1.0,
+                "low_move_pct": -2.0,
+                "high_move_pct": -0.2,
+                "direction_correct": True,
+                "mape": 0.03,
+            },
+            {
+                "symbol": "AAPL",
+                "asset_class": "stock",
+                "source_interval": "1d",
+                "model": "unit",
+                "model_version": "v1",
+                "probability_up": 0.10,
+                "predicted_move_pct": -2.0,
+                "realized_move_pct": 0.5,
+                "low_move_pct": -3.0,
+                "high_move_pct": -0.1,
+                "direction_correct": False,
+                "mape": 0.08,
+            },
+        ]
+    )
+
+    assert summary.sample_count == 4
+    assert summary.directional_accuracy == pytest.approx(0.75)
+    assert 0.0 <= summary.brier_score <= 1.0
+    assert summary.log_loss > 0.0
+    assert 0.0 <= summary.expected_calibration_error <= 1.0
+    assert 0.0 <= summary.maximum_calibration_error <= 1.0
+    assert summary.reliability_buckets
+    assert 0.0 <= summary.directional_accuracy_ci_low <= summary.directional_accuracy_ci_high <= 1.0
+    assert summary.forecast_interval_coverage == pytest.approx(0.75)
+    assert summary.effective_sample_size == pytest.approx(4.0)
 
 
 def test_fast_forecast_cannot_replace_deep_forecast():

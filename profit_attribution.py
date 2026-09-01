@@ -42,6 +42,20 @@ class TradeLedgerRow:
     broker_mode: str = "PAPER"
     account_environment: str = "PAPER"
     order_id: str | None = None
+    entry_decision_id: str | None = None
+    entry_signal_id: str | None = None
+    entry_forecast_id: str | None = None
+    entry_quote_id: str | None = None
+    decision_correlation_id: str | None = None
+    model: str | None = None
+    model_version: str | None = None
+    provider: str | None = None
+    provider_symbol: str | None = None
+    quote_timestamp: str | None = None
+    decision_timestamp: str | None = None
+    feature_snapshot: dict[str, Any] | None = None
+    risk_snapshot: dict[str, Any] | None = None
+    portfolio_snapshot: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -66,6 +80,20 @@ class PositionLot:
     decision_id: str | None = None
     broker_mode: str = "PAPER"
     account_environment: str = "PAPER"
+    entry_decision_id: str | None = None
+    entry_signal_id: str | None = None
+    entry_forecast_id: str | None = None
+    entry_quote_id: str | None = None
+    decision_correlation_id: str | None = None
+    model: str | None = None
+    model_version: str | None = None
+    provider: str | None = None
+    provider_symbol: str | None = None
+    quote_timestamp: str | None = None
+    decision_timestamp: str | None = None
+    feature_snapshot: dict[str, Any] | None = None
+    risk_snapshot: dict[str, Any] | None = None
+    portfolio_snapshot: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -204,6 +232,20 @@ def fifo_close_lots(
                 broker_mode=lot.broker_mode,
                 account_environment=lot.account_environment,
                 order_id=order_id,
+                entry_decision_id=lot.entry_decision_id or lot.decision_id,
+                entry_signal_id=lot.entry_signal_id,
+                entry_forecast_id=lot.entry_forecast_id,
+                entry_quote_id=lot.entry_quote_id,
+                decision_correlation_id=lot.decision_correlation_id,
+                model=lot.model,
+                model_version=lot.model_version,
+                provider=lot.provider,
+                provider_symbol=lot.provider_symbol,
+                quote_timestamp=lot.quote_timestamp,
+                decision_timestamp=lot.decision_timestamp,
+                feature_snapshot=lot.feature_snapshot,
+                risk_snapshot=lot.risk_snapshot,
+                portfolio_snapshot=lot.portfolio_snapshot,
             )
         )
     if remaining > 0:

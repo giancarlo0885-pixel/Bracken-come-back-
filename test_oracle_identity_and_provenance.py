@@ -251,7 +251,7 @@ def test_closed_trade_memory_uses_exact_entry_decision_not_latest(monkeypatch):
     sql, params = conn.audit_queries[0]
     assert "payload->>'signal_id'=%s" in sql
     assert params[-1] == "signal-A"
-    dna = json.loads(conn.inserted_trade_dna[-2])
+    dna = json.loads(conn.inserted_trade_dna[19])
     assert dna["provenance_status"] == market_memory.EXACT_PROVENANCE_STATUS
     assert dna["entry_signal_ids"] == ["signal-A"]
     assert dna["entry_forecast_ids"] == ["forecast-A"]

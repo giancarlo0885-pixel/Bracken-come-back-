@@ -1,4 +1,7 @@
-from market_memory import assess_market_memory, feature_vector, setup_similarity
+import json
+from datetime import datetime, timezone
+
+from market_memory import assess_market_memory, feature_vector, record_closed_trade_memory, setup_similarity
 from oracle_intelligence import evaluate_opportunity
 
 
@@ -48,3 +51,77 @@ def test_oracle_exposes_market_memory_adjustment():
     assert decision.memory["analog_count"] == 6
     assert decision.opportunity_score >= decision.base_opportunity_score
     assert "memory" in decision.to_dict()
+
+
+def test_closed_trade_memory_uses_immutable_entry_decision_not_later_symbol_decision(monkeypatch):
+    inserted = {}
+
+    class Result:
+        def __init__(self, value=None):
+            self.value = value
+
+        def fetchone(self):
+            return self.value
+
+    class FakeConn:
+        def execute(self, sql, params=()):
+            if "SELECT payload" in sql:
+                assert "payload->>'decision_id'" in sql
+                assert "ORDER BY created_at ASC" in sql
+                assert params[2] == "decision-A"
+                return Result(
+                    {
+                        "payload": {
+                            "decision_id": "decision-A",
+                            "features": {"alpha": 0.20, "momentum_20d": 0.10},
+                            "reason": "entry decision A",
+                            "opportunity_score": 70,
+                        },
+                        "opportunity_score": 70,
+                        "created_at": "2026-01-01T14:30:00+00:00",
+                    }
+                )
+            if "INSERT INTO trade_dna" in sql:
+                inserted["sql"] = sql
+                inserted["params"] = params
+                return Result()
+            raise AssertionError(f"unexpected SQL: {sql}")
+
+    class FakeContext:
+        def __enter__(self):
+            return FakeConn()
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    import database
+
+    monkeypatch.setattr(database, "connect", lambda: FakeContext())
+    record_closed_trade_memory(
+        market="cash",
+        symbol="AAPL",
+        position={
+            "symbol": "AAPL",
+            "opened_at": datetime(2026, 1, 1, tzinfo=timezone.utc).isoformat(),
+            "average_price": 100,
+        },
+        exit_price=110,
+        pnl=10,
+        exit_reason="unit close",
+        quantity=1,
+        entry_provenance={
+            "entry_decision_id": "decision-A",
+            "entry_signal_id": "signal-A",
+            "entry_forecast_id": "forecast-A",
+            "entry_quote_id": "quote-A",
+            "decision_correlation_id": "corr-A",
+            "feature_snapshot": {"alpha": 0.20, "momentum_20d": 0.10},
+        },
+    )
+
+    params = inserted["params"]
+    payload = json.loads(params[19])
+    assert payload["entry_decision_id"] == "decision-A"
+    assert payload["features"] == {"alpha": 0.20, "momentum_20d": 0.10}
+    assert "decision-B" not in json.dumps(payload)
+    assert params[-5:] == ("decision-A", "signal-A", "forecast-A", "quote-A", "corr-A")

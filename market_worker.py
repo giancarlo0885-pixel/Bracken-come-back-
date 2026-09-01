@@ -763,7 +763,26 @@ def _v39_execute_iterative(
         signal = ordered[0]
         symbol = str(getattr(signal, "symbol", "") or "").upper()
         action = str(getattr(signal, "action", "") or "").upper()
-        if GLOBAL_PIT_MODE and action in {"BUY", "STRONG_BUY", "ACCUMULATE", "LONG"}:
+        entry_action = action in {"BUY", "STRONG_BUY", "STRONG BUY", "ACCUMULATE", "LONG"}
+        if not entry_action:
+            remaining = [item for item in remaining if str(getattr(item, "symbol", "") or "").upper() != symbol]
+            continue
+        if not _execution_quote_eligible((prices or {}).get(symbol)):
+            _v39_record_event(
+                market,
+                symbol,
+                "execution_rejected",
+                {
+                    "symbol": symbol,
+                    "action": action,
+                    "scan_type": scan_type,
+                    "reason": "execution quote failed eligibility gate",
+                },
+                "execution_quote_not_eligible",
+            )
+            remaining = [item for item in remaining if str(getattr(item, "symbol", "") or "").upper() != symbol]
+            continue
+        if GLOBAL_PIT_MODE:
             approved_amount = _finite_positive(getattr(signal, "v39_optimizer_approved_amount", None))
             allocation_symbol = str((getattr(signal, "v39_optimizer_allocation", {}) or {}).get("symbol") or "").upper()
             if approved_amount is None or allocation_symbol != symbol:

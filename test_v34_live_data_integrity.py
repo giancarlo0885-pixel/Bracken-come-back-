@@ -28,6 +28,8 @@ def test_missing_target_is_never_a_buy() -> None:
     decisions = build_decisions([_op("ABT")], signals, [], 10)
     assert decisions[0]["action"] == "WAIT"
     assert "forecast target" in decisions[0]["data_status"]
+    assert decisions[0]["probability_up"] is None
+    assert decisions[0]["probability_evidence"]["classification"] == "HEURISTIC_SCORE"
 
 
 def test_small_expected_move_is_downgraded() -> None:
@@ -42,10 +44,12 @@ def test_small_expected_move_is_downgraded() -> None:
 def test_fresh_price_and_target_can_remain_buy() -> None:
     now = datetime.now(timezone.utc).isoformat()
     signals = [{"market": "cash", "symbol": "AAPL", "price": 200, "action": "BUY", "confidence": .9, "created_at": now, "source_interval": "1d", "scan_type": "deep", "source_quote_timestamp": now}]
-    forecasts = [{"market": "cash", "symbol": "AAPL", "requested_symbol": "AAPL", "provider_symbol": "AAPL", "source_interval": "1d", "scan_type": "deep", "source_quote_timestamp": now, "target_price": 205, "created_at": now}]
+    forecasts = [{"market": "cash", "symbol": "AAPL", "requested_symbol": "AAPL", "provider_symbol": "AAPL", "source_interval": "1d", "scan_type": "deep", "source_quote_timestamp": now, "target_price": 205, "probability_up": 0.64, "created_at": now}]
     decisions = build_decisions([_op("AAPL")], signals, forecasts, 10)
     assert decisions[0]["action"] == "BUY"
     assert decisions[0]["trade_eligible"] is True
+    assert decisions[0]["probability_up"] == 64.0
+    assert decisions[0]["probability_evidence"]["classification"] == "MODEL_ESTIMATE"
 
 
 def test_missing_signal_timestamp_is_never_trade_ready() -> None:
@@ -87,6 +91,48 @@ def test_stale_signal_is_downgraded() -> None:
     decisions = build_decisions([_op("AAPL")], signals, forecasts, 10)
     assert decisions[0]["action"] == "WAIT"
     assert "stale" in decisions[0]["data_status"].lower()
+
+
+def test_asof_decision_excludes_future_signal_and_forecast_contamination() -> None:
+    as_of = datetime(2026, 1, 2, 15, 0, tzinfo=timezone.utc)
+    quote_time = as_of.isoformat()
+    future = (as_of + timedelta(minutes=5)).isoformat()
+    signals = [
+        {"market": "cash", "symbol": "AAPL", "price": 200, "action": "BUY", "confidence": .9, "created_at": future, "source_interval": "1d", "scan_type": "deep", "source_quote_timestamp": future},
+        {"market": "cash", "symbol": "AAPL", "price": 190, "action": "HOLD", "confidence": .5, "created_at": quote_time, "source_interval": "1d", "scan_type": "deep", "source_quote_timestamp": quote_time},
+    ]
+    forecasts = [
+        {"market": "cash", "symbol": "AAPL", "requested_symbol": "AAPL", "provider_symbol": "AAPL", "source_interval": "1d", "scan_type": "deep", "source_quote_timestamp": future, "target_price": 230, "created_at": future},
+    ]
+
+    opportunity = _op("AAPL")
+    opportunity["created_at"] = quote_time
+    decisions = build_decisions([opportunity], signals, forecasts, 10, decision_timestamp=as_of)
+
+    assert decisions[0]["price"] == 190
+    assert decisions[0]["requested_action"] == "HOLD"
+    assert decisions[0]["action"] == "HOLD"
+
+
+def test_asof_decision_rejects_cache_route_newer_than_historical_decision_time() -> None:
+    as_of = datetime(2026, 1, 2, 15, 0, tzinfo=timezone.utc)
+    future = (as_of + timedelta(minutes=2)).isoformat()
+    details = {
+        "market_data_route": {
+            "price": 200,
+            "interval": "1d",
+            "quote_timestamp": as_of.isoformat(),
+            "fetched_at": future,
+        }
+    }
+    signals = [{"market": "cash", "symbol": "AAPL", "price": 200, "action": "BUY", "confidence": .9, "created_at": as_of.isoformat(), "details": details}]
+
+    opportunity = _op("AAPL")
+    opportunity["created_at"] = as_of.isoformat()
+    decisions = build_decisions([opportunity], signals, [], 10, decision_timestamp=as_of)
+
+    assert decisions[0]["action"] == "WAIT"
+    assert "live market price" in decisions[0]["data_status"]
 
 
 def test_global_currency_labels_are_not_usd() -> None:
