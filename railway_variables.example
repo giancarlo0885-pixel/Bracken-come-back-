@@ -24,6 +24,12 @@ ENABLE_NEW_ENTRIES=false
 ENABLE_AUTOMATED_EXITS=false
 ENABLE_PORTFOLIO_ROTATION=false
 ENABLE_BROKER_SUBMISSION=false
+# Live-capital controls remain fail-closed until readiness and explicit human approval are complete.
+LIVE_TRADING_ARMED=false
+LIVE_ORDER_APPROVAL_MODE=manual
+LIVE_CAPITAL_HUMAN_APPROVED=false
+BROKER_MODE=paper
+LIVE_TRADING_KILL_SWITCH=true
 ENABLE_OPENAI=false
 GLOBAL_KILL_SWITCH=false
 ENABLE_NEWS=true
