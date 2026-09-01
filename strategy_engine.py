@@ -109,10 +109,67 @@ def _generic_strategy(name: str, data: dict[str, Any]) -> StrategySignal:
     )
 
 
+def _mean_reversion_strategy(data: dict[str, Any]) -> StrategySignal:
+    symbol = str(data.get("symbol") or "").upper().strip()
+    if not symbol.endswith("-USD"):
+        return _generic_strategy("mean_reversion", data)
+    if data.get("mean_reversion_available") is not True:
+        return StrategySignal(
+            "mean_reversion",
+            0.0,
+            0.0,
+            False,
+            "Short-horizon crypto reversal evidence unavailable",
+            {
+                "symbol": symbol,
+                "mean_reversion_available": data.get("mean_reversion_available"),
+            },
+        )
+
+    required = (
+        "mean_reversion_zscore",
+        "short_horizon_return",
+        "mean_reversion_score",
+        "mean_reversion_confidence",
+    )
+    missing = [key for key in required if data.get(key) in (None, "", [], {})]
+    if missing:
+        return StrategySignal(
+            "mean_reversion",
+            0.0,
+            0.0,
+            False,
+            "Required short-horizon reversal evidence unavailable",
+            {"missing": missing},
+        )
+
+    factor = max(-1.0, min(1.0, _metric(data, "mean_reversion_score")))
+    score = max(5.0, min(95.0, 50.0 + 45.0 * factor))
+    model_confidence = max(0.0, min(1.0, _metric(data, "mean_reversion_confidence")))
+    data_quality = max(0.0, min(1.0, _metric(data, "data_quality_score", 70.0) / 100.0))
+    confidence = min(model_confidence, data_quality)
+    return StrategySignal(
+        "mean_reversion",
+        score,
+        confidence,
+        True,
+        "Research-backed short-horizon crypto reversal factor evaluated",
+        {
+            "zscore": data.get("mean_reversion_zscore"),
+            "horizon_return": data.get("short_horizon_return"),
+            "factor": factor,
+            "side": data.get("mean_reversion_side"),
+            "horizon_minutes": data.get("mean_reversion_horizon_minutes"),
+            "displacement_bps": data.get("mean_reversion_displacement_bps"),
+        },
+    )
+
+
 STRATEGY_REGISTRY: dict[str, Callable[[dict[str, Any]], StrategySignal]] = {
     name: (lambda data, strategy=name: _generic_strategy(strategy, data))
     for name in STRATEGY_NAMES
 }
+STRATEGY_REGISTRY["mean_reversion"] = _mean_reversion_strategy
 
 
 def evaluate_strategies(data: dict[str, Any], enabled: list[str] | None = None) -> list[StrategySignal]:
