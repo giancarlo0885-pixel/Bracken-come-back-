@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from datetime import datetime, timezone
+import json
 import logging
 import os
 import threading
@@ -10,12 +11,15 @@ from typing import Any
 
 import requests
 
+from database import connect, utc_now
 from market_sessions import parse_utc
 
 log = logging.getLogger("crypto-execution-guard")
 
 _COINBASE_CACHE_LOCK = threading.Lock()
 _COINBASE_CACHE: dict[str, tuple[float, dict[str, Any] | None, str | None]] = {}
+_QUOTE_VERIFICATION_LOCK = threading.Lock()
+_QUOTE_VERIFICATION_CACHE: dict[tuple[str, str, str, str, str], float] = {}
 
 
 def _symbol(signal: Any) -> str:
@@ -47,6 +51,139 @@ def _paper_yahoo_reference(quote: dict[str, Any]) -> bool:
             or quote.get("quote_verified") is True
         )
     )
+
+
+def _finite_float(value: Any) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if number != number or number in (float("inf"), float("-inf")):
+        return None
+    return number
+
+
+def _quote_verification_record(
+    symbol: str,
+    oracle_quote: dict[str, Any],
+    validation: dict[str, Any],
+) -> dict[str, Any]:
+    primary_price = _finite_float(oracle_quote.get("price"))
+    secondary_price = _finite_float(validation.get("reference_price"))
+    difference_pct = _finite_float(validation.get("difference_pct"))
+    status = "verified" if validation.get("ok") is True else "rejected"
+    primary_timestamp = str(oracle_quote.get("quote_timestamp") or oracle_quote.get("timestamp") or "")
+    secondary_timestamp = str(validation.get("reference_timestamp") or "")
+    reason = str(validation.get("reason") or ("COINBASE_REFERENCE_CONFIRMED" if status == "verified" else "COINBASE_REFERENCE_REJECTED"))
+    return {
+        "symbol": str(symbol or "").upper().strip(),
+        "market": "crypto",
+        "primary_provider": str(oracle_quote.get("provider") or ""),
+        "secondary_provider": str(validation.get("reference_provider") or "") or None,
+        "primary_price": primary_price,
+        "secondary_price": secondary_price,
+        "difference_pct": difference_pct,
+        "consensus_status": status,
+        "primary_timestamp": primary_timestamp,
+        "secondary_timestamp": secondary_timestamp,
+        "reason": reason,
+        "payload": {
+            "evidence_kind": "yahoo_coinbase_execution_consensus",
+            "source": "crypto_execution_guard",
+            "reason": reason,
+            "primary_timestamp": primary_timestamp,
+            "secondary_timestamp": secondary_timestamp or None,
+            "spread_pct": _finite_float(validation.get("spread_pct")),
+            "age_seconds": _finite_float(validation.get("age_seconds")),
+            "attempted_secondary_provider": "Coinbase Exchange",
+        },
+    }
+
+
+def _verification_fingerprint(record: dict[str, Any]) -> tuple[str, str, str, str, str]:
+    return (
+        str(record.get("symbol") or ""),
+        str(record.get("primary_timestamp") or ""),
+        str(record.get("secondary_timestamp") or ""),
+        str(record.get("consensus_status") or ""),
+        str(record.get("reason") or ""),
+    )
+
+
+def _persist_quote_verifications(records: list[dict[str, Any]]) -> int:
+    """Persist sanitized Coinbase consensus evidence in one database transaction.
+
+    Runtime quote checks can repeat the same provider timestamps every worker
+    pulse. A short in-memory fingerprint cache prevents duplicate audit rows while
+    preserving both confirmed and rejected consensus outcomes. Persistence is
+    best-effort for paper execution; readiness remains fail-closed if evidence
+    cannot be written.
+    """
+    if not records:
+        return 0
+
+    try:
+        dedupe_ttl_seconds = max(60, int(os.getenv("QUOTE_VERIFICATION_DEDUPE_TTL_SECONDS", "900")))
+    except ValueError:
+        dedupe_ttl_seconds = 900
+    now_monotonic = time.monotonic()
+
+    candidates: list[tuple[tuple[str, str, str, str, str], dict[str, Any]]] = []
+    with _QUOTE_VERIFICATION_LOCK:
+        expired = [
+            key
+            for key, inserted_at in _QUOTE_VERIFICATION_CACHE.items()
+            if now_monotonic - inserted_at > dedupe_ttl_seconds
+        ]
+        for key in expired:
+            _QUOTE_VERIFICATION_CACHE.pop(key, None)
+        for record in records:
+            key = _verification_fingerprint(record)
+            if key in _QUOTE_VERIFICATION_CACHE:
+                continue
+            if any(existing_key == key for existing_key, _ in candidates):
+                continue
+            candidates.append((key, record))
+
+    if not candidates:
+        return 0
+
+    try:
+        with connect() as conn:
+            for _, record in candidates:
+                conn.execute(
+                    """
+                    INSERT INTO quote_verifications (
+                        symbol, market, primary_provider, secondary_provider,
+                        primary_price, secondary_price, difference_pct,
+                        consensus_status, payload, created_at
+                    ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s)
+                    """,
+                    (
+                        record.get("symbol"),
+                        record.get("market"),
+                        record.get("primary_provider"),
+                        record.get("secondary_provider"),
+                        record.get("primary_price"),
+                        record.get("secondary_price"),
+                        record.get("difference_pct"),
+                        record.get("consensus_status"),
+                        json.dumps(record.get("payload") or {}, sort_keys=True, default=str),
+                        utc_now(),
+                    ),
+                )
+    except Exception as exc:
+        log.warning(
+            "Quote verification persistence unavailable | records=%d | error=%s",
+            len(candidates),
+            exc.__class__.__name__,
+        )
+        return 0
+
+    with _QUOTE_VERIFICATION_LOCK:
+        for key, _ in candidates:
+            _QUOTE_VERIFICATION_CACHE[key] = now_monotonic
+    return len(candidates)
 
 
 def _coinbase_quote(symbol: str) -> tuple[dict[str, Any] | None, str | None]:
@@ -120,36 +257,26 @@ def _coinbase_reference_validation(symbol: str, oracle_price: Any) -> dict[str, 
     timestamp = parse_utc(quote.get("timestamp"))
     if timestamp is None:
         return {"ok": False, "reason": "COINBASE_TIMESTAMP_INVALID"}
-    age_seconds = max(0.0, (datetime.now(timezone.utc) - timestamp).total_seconds())
-    if age_seconds > max_age_seconds:
-        return {"ok": False, "reason": "COINBASE_QUOTE_STALE", "age_seconds": age_seconds}
 
     mid = (bid + ask) / 2.0
     spread_pct = ((ask - bid) / mid) * 100.0 if mid > 0 else 100.0
     difference_pct = abs(reference - mid) / mid * 100.0 if mid > 0 else 100.0
-    if spread_pct > max_spread_pct:
-        return {
-            "ok": False,
-            "reason": "COINBASE_SPREAD_TOO_WIDE",
-            "spread_pct": spread_pct,
-            "difference_pct": difference_pct,
-        }
-    if difference_pct > max_diff_pct:
-        return {
-            "ok": False,
-            "reason": "COINBASE_PRICE_DIVERGENCE",
-            "spread_pct": spread_pct,
-            "difference_pct": difference_pct,
-        }
-    return {
-        "ok": True,
-        "reason": "COINBASE_REFERENCE_CONFIRMED",
+    context = {
         "reference_provider": "Coinbase Exchange",
         "reference_price": mid,
         "reference_timestamp": timestamp.isoformat(),
         "spread_pct": spread_pct,
         "difference_pct": difference_pct,
     }
+
+    age_seconds = max(0.0, (datetime.now(timezone.utc) - timestamp).total_seconds())
+    if age_seconds > max_age_seconds:
+        return {"ok": False, "reason": "COINBASE_QUOTE_STALE", "age_seconds": age_seconds, **context}
+    if spread_pct > max_spread_pct:
+        return {"ok": False, "reason": "COINBASE_SPREAD_TOO_WIDE", **context}
+    if difference_pct > max_diff_pct:
+        return {"ok": False, "reason": "COINBASE_PRICE_DIVERGENCE", **context}
+    return {"ok": True, "reason": "COINBASE_REFERENCE_CONFIRMED", **context}
 
 
 def _broker_quote_map(symbols: list[str]) -> tuple[dict[str, dict[str, Any]], str | None]:
@@ -228,6 +355,7 @@ def install_crypto_execution_quote_guard(worker: Any) -> None:
         # consensus. It is never sufficient to skip Coinbase.
         consensus_pairs: list[tuple[Any, str, dict[str, Any]]] = []
         consensus_blocked: dict[str, list[str]] = defaultdict(list)
+        verification_evidence: list[dict[str, Any]] = []
         for signal, symbol, oracle_quote in verified_pairs:
             is_yahoo = str(oracle_quote.get("provider") or "").strip().lower() == "yahoo finance"
             if is_yahoo:
@@ -235,6 +363,7 @@ def install_crypto_execution_quote_guard(worker: Any) -> None:
                     consensus_blocked["YAHOO_REFERENCE_NOT_EXECUTION_ELIGIBLE"].append(symbol)
                     continue
                 validation = _coinbase_reference_validation(symbol, oracle_quote.get("price"))
+                verification_evidence.append(_quote_verification_record(symbol, oracle_quote, validation))
                 if not validation.get("ok"):
                     consensus_blocked[str(validation.get("reason") or "COINBASE_REFERENCE_REJECTED")].append(symbol)
                     continue
@@ -244,6 +373,14 @@ def install_crypto_execution_quote_guard(worker: Any) -> None:
                 oracle_quote["reference_timestamp"] = validation["reference_timestamp"]
                 oracle_quote["reference_difference_pct"] = validation["difference_pct"]
             consensus_pairs.append((signal, symbol, oracle_quote))
+
+        persisted = _persist_quote_verifications(verification_evidence)
+        if persisted:
+            worker.log.info(
+                "CRYPTO | QUOTE VERIFICATION EVIDENCE | persisted=%d | attempted=%d",
+                persisted,
+                len(verification_evidence),
+            )
 
         for reason, affected in consensus_blocked.items():
             worker.log.info(
