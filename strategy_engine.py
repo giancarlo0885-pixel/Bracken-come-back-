@@ -40,12 +40,7 @@ REQUIRED_EVIDENCE: dict[str, tuple[str, ...]] = {
     "momentum": ("momentum_5d", "momentum_20d"),
     "trend_following": ("trend_strength",),
     "breakout": ("breakout_level", "price"),
-    "mean_reversion": (
-        "mean_reversion_zscore",
-        "short_horizon_return",
-        "mean_reversion_score",
-        "mean_reversion_confidence",
-    ),
+    "mean_reversion": ("mean_reversion_zscore",),
     "oversold_recovery": ("rsi",),
     "quality": ("quality_score",),
     "value": ("valuation_score",),
@@ -116,7 +111,9 @@ def _generic_strategy(name: str, data: dict[str, Any]) -> StrategySignal:
 
 def _mean_reversion_strategy(data: dict[str, Any]) -> StrategySignal:
     symbol = str(data.get("symbol") or "").upper().strip()
-    if not symbol.endswith("-USD") or data.get("mean_reversion_available") is not True:
+    if not symbol.endswith("-USD"):
+        return _generic_strategy("mean_reversion", data)
+    if data.get("mean_reversion_available") is not True:
         return StrategySignal(
             "mean_reversion",
             0.0,
@@ -129,7 +126,12 @@ def _mean_reversion_strategy(data: dict[str, Any]) -> StrategySignal:
             },
         )
 
-    required = REQUIRED_EVIDENCE["mean_reversion"]
+    required = (
+        "mean_reversion_zscore",
+        "short_horizon_return",
+        "mean_reversion_score",
+        "mean_reversion_confidence",
+    )
     missing = [key for key in required if data.get(key) in (None, "", [], {})]
     if missing:
         return StrategySignal(
