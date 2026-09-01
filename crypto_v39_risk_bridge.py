@@ -17,18 +17,29 @@ def _finite(value: Any) -> float | None:
     return number
 
 
+def _quant_safety_to_v39_risk(safety_score: Any) -> float | None:
+    """Convert quant_trade_standard safety (high=good) to V39 risk (low=good)."""
+    safety = _finite(safety_score)
+    if safety is None:
+        return None
+    safety = max(0.0, min(100.0, safety))
+    return 100.0 - safety
+
+
 def install_crypto_v39_risk_bridge(worker: Any) -> None:
     """Attach measured/canonical risk evidence before V39 capital qualification.
 
-    Production OracleSignal objects already carry volatility_20d and atr_pct
-    calculated from the source history. V39 requires finite risk evidence but the
-    execution-path transformation currently drops it. This bridge reuses the
-    existing quant_trade_standard risk model; it does not create an authorization
-    and does not alter any downstream hard-risk, liquidity, concentration,
-    reserve, margin, drawdown, quote, or execution gate.
+    Production OracleSignal objects carry volatility_20d and atr_pct calculated
+    from source history. quant_trade_standard converts those into a 0..100 safety
+    score where higher is safer. V39/global-pit uses the inverse convention for
+    ``risk_score``: 0 is lowest risk and 100 is highest risk. The bridge therefore
+    converts ``v39_risk = 100 - quant_safety`` while preserving the original
+    assessment as audit evidence.
 
-    If the measured volatility/ATR inputs are unavailable or invalid, risk remains
-    unknown and V39 continues to fail closed.
+    This repairs metadata semantics only. It does not create an authorization and
+    does not alter downstream hard-risk, liquidity, concentration, reserve,
+    margin, drawdown, quote, or execution gates. If measured volatility/ATR inputs
+    are unavailable or invalid, risk remains unknown and V39 fails closed.
     """
     original = worker._v39_signal_opportunity
     if getattr(original, "_oracle_quant_risk_bridge", False):
@@ -69,16 +80,20 @@ def install_crypto_v39_risk_bridge(worker: Any) -> None:
                         market="crypto",
                         portfolio_concentration=max(0.0, min(1.0, concentration)),
                     )
-                    risk_score = _finite(assessment.risk_score)
+                    quant_safety_score = _finite(assessment.risk_score)
+                    risk_score = _quant_safety_to_v39_risk(quant_safety_score)
                     if risk_score is not None:
                         setattr(signal, "risk_score", risk_score)
-                        setattr(signal, "v39_risk_source", "quant_trade_standard")
+                        setattr(signal, "v39_risk_source", "quant_trade_standard:inverse_safety")
+                        setattr(signal, "v39_quant_safety_score", quant_safety_score)
                         setattr(signal, "v39_risk_assessment", assessment.to_dict())
                         worker.log.info(
-                            "CRYPTO | V39 RISK EVIDENCE | symbol=%s | risk_score=%.4f | volatility_20d=%.6f | "
-                            "atr_pct=%.6f | concentration=%.6f | source=quant_trade_standard",
+                            "CRYPTO | V39 RISK EVIDENCE | symbol=%s | risk_score=%.4f | quant_safety=%.4f | "
+                            "volatility_20d=%.6f | atr_pct=%.6f | concentration=%.6f | "
+                            "source=quant_trade_standard:inverse_safety",
                             symbol,
                             risk_score,
+                            quant_safety_score,
                             volatility,
                             atr_pct,
                             concentration,
