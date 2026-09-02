@@ -39,6 +39,7 @@ def emit_capital_readiness_report(
     broker = checks.get("broker") or {}
     shadow = checks.get("shadow_forward") or {}
     models = checks.get("models") or {}
+    data_integrity = checks.get("data_integrity") or {}
 
     logger.info(
         "CAPITAL READINESS | overall=%s | database=%s | safety=%s | accounting=%s | "
@@ -62,6 +63,26 @@ def emit_capital_readiness_report(
         shadow.get("p95_paper_vs_broker_error_pct"),
         len(models.get("models") or []),
     )
+
+    if data_integrity.get("ok") is not True:
+        providers = data_integrity.get("providers") or {}
+        quotes = data_integrity.get("quote_integrity") or {}
+        news = data_integrity.get("news") or {}
+        logger.info(
+            "CAPITAL READINESS DATA | provider_status=%s | configured_providers=%s | healthy_providers=%s | "
+            "quote_status=%s | quote_samples=%s | quote_confirmed=%s | quote_rejected=%s | "
+            "unsafe_confirmed_divergent=%s | safely_rejected_divergent=%s | news_status=%s",
+            str(providers.get("status") or "UNKNOWN"),
+            int(providers.get("configured_providers") or 0),
+            int(providers.get("healthy_providers") or 0),
+            str(quotes.get("status") or "UNKNOWN"),
+            int(quotes.get("sample_count") or 0),
+            int(quotes.get("confirmed") or 0),
+            int(quotes.get("rejected") or 0),
+            int(quotes.get("unsafe_confirmed_divergent") or 0),
+            int(quotes.get("safely_rejected_divergent") or 0),
+            str(news.get("status") or "UNKNOWN"),
+        )
 
     if models.get("ok") is not True:
         for item in list(models.get("models") or [])[:10]:
