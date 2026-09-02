@@ -134,3 +134,4 @@ register_model("crypto causal adaptive", "v40-causal-adaptive", "shadow", "requi
 register_model("crypto nested adaptive selector", "v41-nested-selector", "shadow", "requires nested past-only short-horizon walk-forward validation")
 register_model("crypto sign transition selector", "v42-sign-transition", "shadow", "requires causal sign-transition walk-forward validation")
 register_model("crypto selective sign transition", "v43-selective-transition", "shadow", "requires coverage-constrained selective walk-forward validation")
+register_model("crypto selective flow reversal", "v45-flow-shadow", "shadow", "BTC/ETH research only; requires disjoint forward validation before any promotion")
