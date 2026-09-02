@@ -233,7 +233,14 @@ def build_decisions(
         confidence = _f(sig.get("confidence"), _f(payload.get("confidence"), score))
         if confidence <= 1:
             confidence *= 100
-        price = _f(sig.get("price"), _f(payload.get("price"), _f(payload_route.get("price"))))
+
+        # The signal price is analysis provenance.  When ranking persisted an
+        # independently verified execution quote, use that price and timestamp
+        # for the current dashboard/trade-readiness view.
+        execution_verified = payload.get("execution_quote_verified") is True
+        execution_price = _f(payload.get("execution_price")) if execution_verified else 0.0
+        price = execution_price if _positive(execution_price) else _f(sig.get("price"), _f(payload.get("price"), _f(payload_route.get("price"))))
+
         target = _f(fc.get("target_price"), _f(payload.get("target_price")))
         low = _f(fc.get("low_price"), _f(payload.get("low_price")))
         high = _f(fc.get("high_price"), _f(payload.get("high_price")))
@@ -282,6 +289,14 @@ def build_decisions(
         reason = str(payload.get("reason") or details.get("reason") or sig.get("details") or "Ranked by the Oracle's combined market evidence.")
         reason = reason[:280]
         risk = "Low" if score >= 85 and confidence >= 80 else "Moderate" if score >= 60 else "High"
+
+        execution_timestamp = payload.get("execution_quote_timestamp") if execution_verified else None
+        execution_age = payload.get("execution_quote_age_seconds") if execution_verified else None
+        execution_interval = payload.get("execution_source_interval") if execution_verified else None
+        execution_requested = payload.get("execution_requested_symbol") if execution_verified else None
+        execution_provider_symbol = payload.get("execution_provider_symbol") if execution_verified else None
+        execution_provider = payload.get("execution_provider") if execution_verified else None
+
         results.append({
             "market": market,
             "symbol": symbol,
@@ -305,14 +320,19 @@ def build_decisions(
             "reason": reason,
             "created_at": signal_time,
             "scan_type": sig.get("scan_type") or payload.get("scan_type"),
-            "source_interval": sig.get("source_interval") or payload.get("source_interval") or payload_route.get("interval"),
+            "analysis_source_interval": sig.get("source_interval") or payload.get("analysis_source_interval") or payload.get("source_interval") or payload_route.get("interval"),
+            "analysis_quote_timestamp": sig.get("source_quote_timestamp") or payload.get("analysis_quote_timestamp") or payload.get("source_quote_timestamp") or payload_route.get("quote_timestamp"),
+            "source_interval": execution_interval or sig.get("source_interval") or payload.get("source_interval") or payload_route.get("interval"),
             "source_quote_timestamp": sig.get("source_quote_timestamp") or payload.get("source_quote_timestamp") or payload_route.get("quote_timestamp"),
-            "quote_timestamp": sig.get("quote_timestamp") or payload.get("quote_timestamp") or payload_route.get("quote_timestamp"),
-            "quote_age_seconds": sig.get("quote_age_seconds") if sig.get("quote_age_seconds") is not None else payload.get("quote_age_seconds"),
-            "requested_symbol": sig.get("requested_symbol") or payload.get("requested_symbol") or payload_route.get("requested_symbol"),
-            "provider_symbol": sig.get("provider_symbol") or payload.get("provider_symbol") or payload_route.get("provider_symbol"),
-            "provider": sig.get("provider") or payload.get("provider") or payload_route.get("provider"),
-            "quote_verified": bool(sig.get("quote_verified") or payload.get("quote_verified") or payload_route.get("quote_verified") is True),
+            "quote_timestamp": execution_timestamp or sig.get("quote_timestamp") or payload.get("quote_timestamp") or payload_route.get("quote_timestamp"),
+            "quote_age_seconds": execution_age if execution_age is not None else (sig.get("quote_age_seconds") if sig.get("quote_age_seconds") is not None else payload.get("quote_age_seconds")),
+            "requested_symbol": execution_requested or sig.get("requested_symbol") or payload.get("requested_symbol") or payload_route.get("requested_symbol"),
+            "provider_symbol": execution_provider_symbol or sig.get("provider_symbol") or payload.get("provider_symbol") or payload_route.get("provider_symbol"),
+            "provider": execution_provider or sig.get("provider") or payload.get("provider") or payload_route.get("provider"),
+            "quote_verified": bool(execution_verified or sig.get("quote_verified") or payload.get("quote_verified") or payload_route.get("quote_verified") is True),
+            "execution_quote_verified": execution_verified,
+            "provider_quote_verified": payload.get("provider_quote_verified") is True,
+            "paper_reference_verified": payload.get("paper_reference_verified") is True,
         })
 
     # Trade-ready BUYs first, then other current decisions, with incomplete/stale
