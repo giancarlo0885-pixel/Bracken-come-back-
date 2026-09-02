@@ -404,12 +404,15 @@ def _risk_reward_ratio(asset: dict[str, Any]) -> float:
     ratio = _finite(asset.get("reward_risk_ratio"))
     if ratio > 0:
         return ratio
-    entry = _finite(asset.get("entry_price") or asset.get("entry") or asset.get("price"))
-    stop = _finite(asset.get("stop_price") or asset.get("stop"))
-    target = _finite(asset.get("target_price") or asset.get("target"))
+    raw_entry = asset.get("entry_price") or asset.get("entry") or asset.get("price")
+    raw_stop = asset.get("stop_price") or asset.get("stop")
+    raw_target = asset.get("target_price") or asset.get("target")
+    entry = _finite(raw_entry)
+    stop = _finite(raw_stop)
+    target = _finite(raw_target)
     downside = abs(entry - stop)
     upside = abs(target - entry)
-    if entry > 0 and downside > 0 and upside > 0:
+    if raw_stop not in (None, "") and raw_target not in (None, "") and entry > 0 and stop > 0 and target > 0 and downside > 0 and upside > 0:
         return upside / downside
     risk_score = _finite(asset.get("risk_score"), 100.0)
     if risk_score < 100:
