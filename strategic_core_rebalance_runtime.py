@@ -10,6 +10,59 @@ def _row_symbol(row: dict[str, Any]) -> str:
     return str(row.get("Asset") or row.get("symbol") or "").upper().strip()
 
 
+def _promotion_rejection_reason(signal: Any) -> str:
+    intent = patch._core_rebalance_intent(signal)
+    raw_amount = patch._signal_value(signal, "v39_optimizer_approved_amount", None)
+    approved_amount = patch._numeric(raw_amount, default=0.0)
+    allocation = patch._signal_value(signal, "v39_optimizer_allocation", {}) or {}
+    symbol = str(patch._signal_value(signal, "symbol", "") or "").upper().strip()
+    allocation_symbol = str(allocation.get("symbol") or "").upper().strip()
+
+    if intent == patch.CORE_REBALANCE_BUY_INTENT:
+        return "approved"
+    if intent not in {
+        patch.CORE_REBALANCE_CANDIDATE_INTENT,
+        patch.CORE_REBALANCE_STRATEGIC_CANDIDATE_INTENT,
+    }:
+        return f"intent_changed:{intent or 'missing'}"
+    if approved_amount <= 0:
+        return "optimizer_amount_missing_or_nonpositive"
+    if not symbol:
+        return "signal_symbol_missing"
+    if allocation_symbol != symbol:
+        return f"allocation_symbol_mismatch:{allocation_symbol or 'missing'}"
+    return "promotion_not_emitted_after_valid_allocation"
+
+
+def _log_promotion_decision(worker: Any, signal: Any) -> None:
+    source = str(patch._signal_value(signal, "core_rebalance_source", "") or "")
+    if source != "configured_core_allocation_gap":
+        return
+
+    symbol = str(patch._signal_value(signal, "symbol", "") or "").upper().strip()
+    intent = patch._core_rebalance_intent(signal)
+    raw_amount = patch._signal_value(signal, "v39_optimizer_approved_amount", None)
+    approved_amount = patch._numeric(raw_amount, default=0.0)
+    allocation = patch._signal_value(signal, "v39_optimizer_allocation", {}) or {}
+    allocation_symbol = str(allocation.get("symbol") or "").upper().strip()
+    reason = _promotion_rejection_reason(signal)
+    approved = intent == patch.CORE_REBALANCE_BUY_INTENT
+
+    worker.log.info(
+        "CORE_REBALANCE_PROMOTION_DECISION | symbol=%s | approved=%s | intent=%s | "
+        "approved_amount_raw=%s | approved_amount=%.2f | allocation_symbol=%s | "
+        "action=%s | reason=%s",
+        symbol,
+        approved,
+        intent or "missing",
+        raw_amount,
+        approved_amount,
+        allocation_symbol or "missing",
+        patch._signal_value(signal, "action", ""),
+        reason,
+    )
+
+
 def install_strategic_core_rebalance_producer(worker: Any) -> None:
     """Authorize V39 core-rebalance candidates from configured portfolio deficits.
 
@@ -75,7 +128,11 @@ def install_strategic_core_rebalance_producer(worker: Any) -> None:
                     patch._signal_value(signal, "action", ""),
                 )
 
-        return original(market, signals, prices, ranked, scan_type)
+        ordered = original(market, signals, prices, ranked, scan_type)
+        if str(market or "").strip().lower() == "crypto":
+            for signal in ordered or []:
+                _log_promotion_decision(worker, signal)
+        return ordered
 
     strategic_prioritize._oracle_strategic_core_producer = True
     worker._v39_prioritize_signals = strategic_prioritize
