@@ -46,9 +46,7 @@ def _quote(symbol: str = "BTC-USD") -> dict:
     }
 
 
-def test_passive_shadow_sampler_records_buy_and_sell_without_broker_submission(monkeypatch) -> None:
-    monkeypatch.setenv("EXECUTION_MODE", "paper")
-    monkeypatch.setenv("ROBINHOOD_CRYPTO_ENABLED", "true")
+def _install_valid_reference_stubs(monkeypatch) -> None:
     sampler._SEEN.clear()
     monkeypatch.setattr(sampler, "_already_recorded", lambda *args: False)
     monkeypatch.setattr(
@@ -68,6 +66,12 @@ def test_passive_shadow_sampler_records_buy_and_sell_without_broker_submission(m
             "difference_pct": 0.0,
         },
     )
+
+
+def test_passive_shadow_sampler_records_buy_and_sell_without_broker_submission(monkeypatch) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "paper")
+    monkeypatch.setenv("ROBINHOOD_CRYPTO_ENABLED", "true")
+    _install_valid_reference_stubs(monkeypatch)
     recorded = []
     monkeypatch.setattr(sampler, "record_shadow_order", lambda **kwargs: recorded.append(kwargs))
 
@@ -83,6 +87,59 @@ def test_passive_shadow_sampler_records_buy_and_sell_without_broker_submission(m
     assert all(item["paper_fill_id"] is None if "paper_fill_id" in item else True for item in recorded)
     assert all(item["payload"]["evidence_kind"] == "passive_paper_execution_model" for item in recorded)
     assert client.calls == [("BTC-USD",)]
+
+
+def test_passive_shadow_filters_symbols_not_tradable_on_robinhood(monkeypatch) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "paper")
+    monkeypatch.setenv("ROBINHOOD_CRYPTO_ENABLED", "true")
+    _install_valid_reference_stubs(monkeypatch)
+    recorded = []
+    monkeypatch.setattr(sampler, "record_shadow_order", lambda **kwargs: recorded.append(kwargs))
+
+    class TradableClient(FakeClient):
+        def trading_pairs(self):
+            return [
+                {"symbol": "BTC-USD", "tradable": True},
+                {"symbol": "ETH-USD", "tradable": False},
+            ]
+
+    client = TradableClient()
+    result = sampler.capture_passive_shadow_samples(
+        FakeWorker(),
+        [
+            SimpleNamespace(symbol="BTC-USD", action="HOLD"),
+            SimpleNamespace(symbol="ETH-USD", action="HOLD"),
+        ],
+        {"BTC-USD": _quote("BTC-USD"), "ETH-USD": _quote("ETH-USD")},
+        client=client,
+    )
+
+    assert result["captured"] == 2
+    assert result["skipped"] == 2
+    assert client.calls == [("BTC-USD",)]
+    assert {item["symbol"] for item in recorded} == {"BTC-USD"}
+
+
+def test_pair_discovery_failure_is_fail_closed_without_broker_quote_request(monkeypatch) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "paper")
+    monkeypatch.setenv("ROBINHOOD_CRYPTO_ENABLED", "true")
+    _install_valid_reference_stubs(monkeypatch)
+
+    class BrokenPairClient(FakeClient):
+        def trading_pairs(self):
+            raise RuntimeError("pair discovery unavailable")
+
+    client = BrokenPairClient()
+    result = sampler.capture_passive_shadow_samples(
+        FakeWorker(),
+        [SimpleNamespace(symbol="BTC-USD", action="HOLD")],
+        {"BTC-USD": _quote()},
+        client=client,
+    )
+
+    assert result["status"] == "BROKER_PAIR_DISCOVERY_UNAVAILABLE"
+    assert result["captured"] == 0
+    assert client.calls == []
 
 
 def test_divergent_reference_is_not_shadow_sampled(monkeypatch) -> None:
