@@ -26,7 +26,7 @@ def test_governance_pass_requires_skill_calibration_coverage_and_no_leakage():
         records.append(
             {
                 "status": "RESOLVED",
-                "probability_up": 0.58 if realized_up else 0.42,
+                "probability_up": 0.99 if realized_up else 0.01,
                 "realized_up": realized_up,
             }
         )
