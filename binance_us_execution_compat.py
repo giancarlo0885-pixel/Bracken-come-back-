@@ -3,7 +3,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Any, Callable, Mapping
+import hashlib
+import hmac
 import time
+from urllib.parse import urlencode
+
+import requests
 
 WS_CONNECT_WEIGHT = 2
 WS_SERVER_PING_INTERVAL_SECONDS = 20.0
@@ -19,6 +24,65 @@ def _decimal(value: Any) -> Decimal | None:
     if not result.is_finite():
         return None
     return result
+
+
+def signed_my_filters(
+    *,
+    api_key: str,
+    secret_key: str,
+    symbol: str,
+    session: Any | None = None,
+    base_url: str = "https://api.binance.us",
+    recv_window: int = 5000,
+    timestamp_ms: int | None = None,
+    timeout_seconds: float = 5.0,
+    acquire_weight: Callable[[int], Any] | None = None,
+) -> dict[str, Any]:
+    """Fetch account-specific filters via signed GET /api/v3/myFilters.
+
+    Secrets are supplied by the caller and are never logged or returned.
+    """
+    native = str(symbol or "").upper().strip()
+    if not native:
+        raise ValueError("BINANCE_US_SYMBOL_MISSING")
+    key = str(api_key or "").strip()
+    secret = str(secret_key or "")
+    if not key or not secret:
+        raise ValueError("BINANCE_US_API_CREDENTIALS_MISSING")
+
+    window = max(1, min(60_000, int(recv_window)))
+    ts = int(timestamp_ms if timestamp_ms is not None else time.time() * 1000)
+    params = {"symbol": native, "recvWindow": window, "timestamp": ts}
+    query = urlencode(params)
+    params["signature"] = hmac.new(
+        secret.encode("utf-8"),
+        query.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+
+    if acquire_weight is not None:
+        acquire_weight(MY_FILTERS_WEIGHT)
+
+    client = session or requests.Session()
+    response = client.get(
+        f"{str(base_url).rstrip('/')}/api/v3/myFilters",
+        params=params,
+        headers={
+            "X-MBX-APIKEY": key,
+            "user-agent": "GARIBALDI-MARKET-ORACLE/1.0",
+        },
+        timeout=max(0.5, float(timeout_seconds)),
+    )
+    if getattr(response, "status_code", None) == 429:
+        retry_after = getattr(response, "headers", {}).get("Retry-After")
+        raise RuntimeError(
+            f"BINANCE_US_RATE_LIMITED retry_after={retry_after or 'unknown'}"
+        )
+    response.raise_for_status()
+    payload = response.json()
+    if not isinstance(payload, Mapping):
+        raise RuntimeError("BINANCE_US_MY_FILTERS_INVALID")
+    return dict(payload)
 
 
 def normalize_my_filters(payload: Mapping[str, Any]) -> dict[str, Any]:
