@@ -113,3 +113,6 @@ def install_core_rebalance_optimizer_trace(worker: Any) -> None:
 
         traced_optimizer._oracle_core_optimizer_trace = True
         worker.adaptive_portfolio_optimizer = traced_optimizer
+
+
+# Production observability contract: tactical and strategic rebalance gates are traced separately.
