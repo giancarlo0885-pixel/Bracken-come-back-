@@ -54,6 +54,8 @@ if os.getenv("EXECUTION_MODE", "paper").strip().lower() == "paper":
     install_fee_aware_fifo_policy()
     install_paper_lifecycle_observability(market_worker)
 
+# Keep this entrypoint in the crypto-worker deploy watch set; readiness helpers are imported above.
+
 
 def run_robinhood_startup_preflight() -> None:
     """Run read-only broker connectivity plus durable restart reconciliation."""
