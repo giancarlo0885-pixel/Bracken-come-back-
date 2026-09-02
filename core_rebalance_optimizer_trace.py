@@ -4,6 +4,7 @@ from typing import Any
 
 import runtime_integrity_patch as patch
 from global_pit_engine import hard_risk_gate
+from strategic_rebalance_optimizer_bridge import _strategic_rebalance_gate
 
 
 def install_core_rebalance_optimizer_trace(worker: Any) -> None:
@@ -63,21 +64,33 @@ def install_core_rebalance_optimizer_trace(worker: Any) -> None:
                 ]
                 if candidates:
                     hard_gate_evidence = []
+                    strategic_authorization_evidence = []
                     for item in candidates:
-                        gate = hard_risk_gate(item)
+                        tactical_gate = hard_risk_gate(item)
+                        strategic_gate = _strategic_rebalance_gate(item)
                         hard_gate_evidence.append(
                             {
                                 "symbol": item.get("symbol"),
-                                "allowed": gate.get("allowed"),
-                                "reasons": gate.get("reasons"),
-                                "core_signals_supporting": gate.get("core_signals_supporting"),
-                                "confidence_score": gate.get("confidence_score"),
-                                "reward_risk_ratio": gate.get("reward_risk_ratio"),
+                                "allowed": tactical_gate.get("allowed"),
+                                "reasons": tactical_gate.get("reasons"),
+                                "core_signals_supporting": tactical_gate.get("core_signals_supporting"),
+                                "confidence_score": tactical_gate.get("confidence_score"),
+                                "reward_risk_ratio": tactical_gate.get("reward_risk_ratio"),
+                            }
+                        )
+                        strategic_authorization_evidence.append(
+                            {
+                                "symbol": item.get("symbol"),
+                                "allowed": strategic_gate.get("allowed"),
+                                "reasons": strategic_gate.get("reasons"),
+                                "tactical_authorization_reasons": strategic_gate.get("tactical_authorization_reasons") or [],
+                                "authorization_basis": strategic_gate.get("authorization_basis")
+                                or ("hard_risk_gate" if strategic_gate.get("allowed") else "blocked_by_hard_risk_gate"),
                             }
                         )
                     worker.log.info(
-                        "CORE_REBALANCE_OPTIMIZER | candidates=%s | hard_gate=%s | allocations=%s | rejections=%s | "
-                        "cash=%s | equity=%s | positions=%s",
+                        "CORE_REBALANCE_OPTIMIZER | candidates=%s | hard_gate=%s | gate_scope=TACTICAL | "
+                        "strategic_authorization=%s | allocations=%s | rejections=%s | cash=%s | equity=%s | positions=%s",
                         [
                             {
                                 "symbol": item.get("symbol"),
@@ -89,6 +102,7 @@ def install_core_rebalance_optimizer_trace(worker: Any) -> None:
                             for item in candidates
                         ],
                         hard_gate_evidence,
+                        strategic_authorization_evidence,
                         plan.get("allocations"),
                         plan.get("rejections"),
                         portfolio.get("cash"),
