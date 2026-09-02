@@ -81,6 +81,8 @@ def _filter_robinhood_tradable_candidates(
     This is evidence collection only. It does not make a symbol strategy-tradable
     and does not alter the Oracle execution universe. The filter prevents one
     unsupported symbol from invalidating the entire read-only batch request.
+    Changes to this module also intentionally remain a crypto-worker deployment
+    trigger so runtime observability fixes are pulled into the worker snapshot.
     """
     trading_pairs = getattr(client, "trading_pairs", None)
     if not callable(trading_pairs):
