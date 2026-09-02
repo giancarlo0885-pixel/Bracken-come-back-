@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 import runtime_integrity_patch as patch
+from global_pit_engine import hard_risk_gate
 
 
 def install_core_rebalance_optimizer_trace(worker: Any) -> None:
@@ -61,8 +62,21 @@ def install_core_rebalance_optimizer_trace(worker: Any) -> None:
                     or str(item.get("portfolio_intent") or "").upper() == patch.CORE_REBALANCE_CANDIDATE_INTENT
                 ]
                 if candidates:
+                    hard_gate_evidence = []
+                    for item in candidates:
+                        gate = hard_risk_gate(item)
+                        hard_gate_evidence.append(
+                            {
+                                "symbol": item.get("symbol"),
+                                "allowed": gate.get("allowed"),
+                                "reasons": gate.get("reasons"),
+                                "core_signals_supporting": gate.get("core_signals_supporting"),
+                                "confidence_score": gate.get("confidence_score"),
+                                "reward_risk_ratio": gate.get("reward_risk_ratio"),
+                            }
+                        )
                     worker.log.info(
-                        "CORE_REBALANCE_OPTIMIZER | candidates=%s | allocations=%s | rejections=%s | "
+                        "CORE_REBALANCE_OPTIMIZER | candidates=%s | hard_gate=%s | allocations=%s | rejections=%s | "
                         "cash=%s | equity=%s | positions=%s",
                         [
                             {
@@ -74,6 +88,7 @@ def install_core_rebalance_optimizer_trace(worker: Any) -> None:
                             }
                             for item in candidates
                         ],
+                        hard_gate_evidence,
                         plan.get("allocations"),
                         plan.get("rejections"),
                         portfolio.get("cash"),
