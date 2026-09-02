@@ -10,6 +10,44 @@ def _row_symbol(row: dict[str, Any]) -> str:
     return str(row.get("Asset") or row.get("symbol") or "").upper().strip()
 
 
+def _reset_previous_strategic_approval(signal: Any) -> bool:
+    """Expire optimizer approval metadata before a new strategic allocation pass.
+
+    V39 prioritization may revisit the same mutable signal object several times in
+    one scan. A CORE_REBALANCE_BUY is therefore valid only for the optimizer pass
+    that emitted its positive allocation. Before the next configured-core pass we
+    restore the tactical HOLD and remove the prior allocation/intent so the symbol
+    must be re-authorized from current portfolio, quote, risk, and optimizer state.
+    """
+    source = str(patch._signal_value(signal, "core_rebalance_source", "") or "")
+    if source != "configured_core_allocation_gap":
+        return False
+    if patch._core_rebalance_intent(signal) != patch.CORE_REBALANCE_BUY_INTENT:
+        return False
+
+    original_action = str(patch._signal_value(signal, "v39_original_action", "") or "").upper().strip()
+    normalization_reason = str(
+        patch._signal_value(signal, "v39_normalization_reason", "") or ""
+    ).upper().strip()
+    current_action = str(patch._signal_value(signal, "action", "") or "").upper().strip()
+    if (
+        original_action == "HOLD"
+        and normalization_reason == patch.CORE_REBALANCE_BUY_INTENT
+        and current_action == "ACCUMULATE"
+    ):
+        patch._set_signal_value(signal, "action", "HOLD")
+
+    for field in ("rebalance_intent", "execution_intent", "portfolio_intent", "v39_intent"):
+        value = str(patch._signal_value(signal, field, "") or "").upper().strip()
+        if value == patch.CORE_REBALANCE_BUY_INTENT:
+            patch._set_signal_value(signal, field, "")
+
+    patch._set_signal_value(signal, "v39_optimizer_approved_amount", None)
+    patch._set_signal_value(signal, "v39_optimizer_allocation", {})
+    patch._set_signal_value(signal, "v39_rebalance_approved_amount", None)
+    return True
+
+
 def _promotion_rejection_reason(signal: Any) -> str:
     intent = patch._core_rebalance_intent(signal)
     raw_amount = patch._signal_value(signal, "v39_optimizer_approved_amount", None)
@@ -19,6 +57,12 @@ def _promotion_rejection_reason(signal: Any) -> str:
     allocation_symbol = str(allocation.get("symbol") or "").upper().strip()
 
     if intent == patch.CORE_REBALANCE_BUY_INTENT:
+        if approved_amount <= 0:
+            return "stale_buy_intent_without_positive_optimizer_amount"
+        if not symbol:
+            return "stale_buy_intent_without_signal_symbol"
+        if allocation_symbol != symbol:
+            return f"stale_buy_intent_allocation_symbol_mismatch:{allocation_symbol or 'missing'}"
         return "approved"
     if intent not in {
         patch.CORE_REBALANCE_CANDIDATE_INTENT,
@@ -46,7 +90,12 @@ def _log_promotion_decision(worker: Any, signal: Any) -> None:
     allocation = patch._signal_value(signal, "v39_optimizer_allocation", {}) or {}
     allocation_symbol = str(allocation.get("symbol") or "").upper().strip()
     reason = _promotion_rejection_reason(signal)
-    approved = intent == patch.CORE_REBALANCE_BUY_INTENT
+    approved = (
+        intent == patch.CORE_REBALANCE_BUY_INTENT
+        and approved_amount > 0
+        and bool(symbol)
+        and allocation_symbol == symbol
+    )
 
     worker.log.info(
         "CORE_REBALANCE_PROMOTION_DECISION | symbol=%s | approved=%s | intent=%s | "
@@ -86,6 +135,13 @@ def install_strategic_core_rebalance_producer(worker: Any) -> None:
         scan_type: str,
     ) -> list[Any]:
         if str(market or "").strip().lower() == "crypto" and signals and prices:
+            for signal in signals:
+                if _reset_previous_strategic_approval(signal):
+                    worker.log.info(
+                        "CORE_REBALANCE_APPROVAL_EXPIRED | symbol=%s | reason=new_optimizer_pass_required",
+                        str(patch._signal_value(signal, "symbol", "") or "").upper().strip(),
+                    )
+
             try:
                 portfolio, positions = worker._v39_position_rows(market)
                 plan_rows = crypto_core_rebalance_plan(prices, portfolio, positions)
