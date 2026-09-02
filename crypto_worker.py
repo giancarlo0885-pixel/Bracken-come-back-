@@ -22,6 +22,7 @@ from robinhood_quote_compat import install_robinhood_quote_compat
 from runtime_integrity_patch import install_runtime_integrity_patch
 from runtime_provider_reliability import install_yahoo_runtime_reliability
 from strategic_core_rebalance_runtime import install_strategic_core_rebalance_producer
+from strategic_rebalance_optimizer_bridge import install_strategic_rebalance_optimizer_bridge
 from structured_logging import configure_structured_logging
 
 
@@ -41,6 +42,7 @@ install_live_broker_capital_sizing()
 install_live_v39_broker_capital_bridge(market_worker)
 install_crypto_short_horizon_forecast(market_worker)
 install_crypto_v39_risk_bridge(market_worker)
+install_strategic_rebalance_optimizer_bridge(market_worker)
 install_core_rebalance_optimizer_trace(market_worker)
 install_core_rebalance_observability(market_worker)
 if os.getenv("EXECUTION_MODE", "paper").strip().lower() == "paper":
