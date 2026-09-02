@@ -72,6 +72,34 @@ def _due_for_sample(key: tuple[str, str, str]) -> bool:
     return True
 
 
+def _filter_robinhood_tradable_candidates(
+    candidates: list[tuple[str, dict[str, Any], dict[str, Any], list[str]]],
+    client: Any,
+) -> tuple[list[tuple[str, dict[str, Any], dict[str, Any], list[str]]], int, str | None]:
+    """Keep passive observations within Robinhood's advertised API pair universe.
+
+    This is evidence collection only. It does not make a symbol strategy-tradable
+    and does not alter the Oracle execution universe. The filter prevents one
+    unsupported symbol from invalidating the entire read-only batch request.
+    """
+    trading_pairs = getattr(client, "trading_pairs", None)
+    if not callable(trading_pairs):
+        # Test/dummy clients used by local callers may expose only market data.
+        return candidates, 0, None
+    try:
+        pairs = list(trading_pairs() or [])
+    except Exception as exc:
+        return [], sum(len(item[3]) for item in candidates), exc.__class__.__name__
+    supported = {
+        str(pair.get("symbol") or "").upper().strip()
+        for pair in pairs
+        if isinstance(pair, dict) and pair.get("tradable") is True and pair.get("symbol")
+    }
+    filtered = [item for item in candidates if item[0] in supported]
+    skipped = sum(len(item[3]) for item in candidates if item[0] not in supported)
+    return filtered, skipped, None
+
+
 def capture_passive_shadow_samples(
     worker: Any,
     signals: Any,
@@ -127,6 +155,21 @@ def capture_passive_shadow_samples(
         return {"status": "NO_NEW_REFERENCE_BARS", "captured": 0}
 
     client = client or RobinhoodCryptoClient()
+    candidates, unsupported_skipped, discovery_error = _filter_robinhood_tradable_candidates(candidates, client)
+    if discovery_error:
+        return {
+            "status": "BROKER_PAIR_DISCOVERY_UNAVAILABLE",
+            "captured": 0,
+            "skipped": unsupported_skipped,
+            "reason": discovery_error,
+        }
+    if not candidates:
+        return {
+            "status": "NO_BROKER_TRADABLE_CANDIDATES",
+            "captured": 0,
+            "skipped": unsupported_skipped,
+        }
+
     broker_quotes = client.best_bid_ask_quotes(*[item[0] for item in candidates])
     broker_map = {
         str(item.get("symbol") or "").upper().strip(): item
@@ -134,7 +177,7 @@ def capture_passive_shadow_samples(
         if isinstance(item, dict) and item.get("symbol")
     }
     captured = 0
-    skipped = 0
+    skipped = unsupported_skipped
     notional = _sample_notional()
 
     for symbol, oracle_quote, validation, sides in candidates:
