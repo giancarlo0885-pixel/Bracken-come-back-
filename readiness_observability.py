@@ -40,11 +40,13 @@ def emit_capital_readiness_report(
     shadow = checks.get("shadow_forward") or {}
     models = checks.get("models") or {}
     data_integrity = checks.get("data_integrity") or {}
+    paper = checks.get("paper_lifecycle") or {}
 
     logger.info(
         "CAPITAL READINESS | overall=%s | database=%s | safety=%s | accounting=%s | "
         "data_integrity=%s | models=%s | durable_order_journal=%s | reconciliation=%s | "
-        "broker_connectivity=%s | broker_funding=%s | shadow_forward=%s | "
+        "broker_connectivity=%s | broker_funding=%s | shadow_forward=%s | paper_lifecycle=%s | "
+        "paper_entry=%s | paper_exit=%s | paper_buys=%s | paper_sells=%s | portfolio_reloads=%s | "
         "shadow_evaluated=%s/%s | shadow_p95_error_pct=%s | model_count=%s | "
         "capital_authorized=NO | human_authorization_required=true",
         str(report.get("overall_status") or "NOT_READY"),
@@ -58,6 +60,12 @@ def emit_capital_readiness_report(
         "PASS" if broker.get("connectivity_ok") is True else str(broker.get("status") or "FAIL"),
         "PASS" if broker.get("funding_ok") is True else str(broker.get("buying_power_state") or broker.get("status") or "FAIL"),
         _state(checks, "shadow_forward"),
+        _state(checks, "paper_lifecycle"),
+        bool(paper.get("entry_proven")),
+        bool(paper.get("exit_proven")),
+        int(paper.get("buy_fills") or 0),
+        int(paper.get("sell_fills") or 0),
+        int(paper.get("portfolio_reload_events") or 0),
         int(shadow.get("evaluated_samples") or 0),
         int(shadow.get("minimum_samples") or 0),
         shadow.get("p95_paper_vs_broker_error_pct"),
