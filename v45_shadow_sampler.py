@@ -3,8 +3,9 @@ from __future__ import annotations
 import json
 import logging
 import os
+import sys
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta, timezone
 from typing import Any
 
 import pandas as pd
@@ -22,6 +23,7 @@ INTERVAL = "5m"
 INTERVAL_MS = 300_000
 HISTORY_BARS = 2200
 POLL_SECONDS = max(60, int(os.getenv("V45_SHADOW_POLL_SECONDS", "300")))
+ACTIONABLE_MOVE_PCT = 1.25
 
 
 def ensure_schema() -> None:
@@ -112,7 +114,7 @@ def _persist_observation(symbol: str, provider_symbol: str, history: pd.DataFram
     resolve_at = observed_at + timedelta(minutes=15)
     spot = float(history["Close"].iloc[-1])
     predict_status = str(prediction.get("status") or "ABSTAIN")
-    status = "PENDING" if predict_status == "PREDICT" else "ABSTAIN"
+    status = "PENDING" if predict_status == "PREDICT" else "ABSTAIN_PENDING"
     with connect() as conn:
         conn.execute(
             """
@@ -142,22 +144,23 @@ def _persist_observation(symbol: str, provider_symbol: str, history: pd.DataFram
         )
 
 
-def _resolve_pending(symbol: str, history: pd.DataFrame) -> int:
+def _resolve_pending(symbol: str, history: pd.DataFrame) -> dict[str, int]:
+    counts = {"predictions": 0, "abstentions": 0}
     if history.empty:
-        return 0
+        return counts
     latest_at = pd.Timestamp(history.index[-1]).to_pydatetime().astimezone(timezone.utc)
     with connect() as conn:
         pending = conn.execute(
             """
-            SELECT id, resolve_at, spot_price
+            SELECT id, resolve_at, spot_price, status
             FROM v45_shadow_predictions
-            WHERE symbol=%s AND model_version=%s AND status='PENDING' AND resolve_at <= %s
+            WHERE symbol=%s AND model_version=%s
+              AND status IN ('PENDING','ABSTAIN_PENDING') AND resolve_at <= %s
             ORDER BY resolve_at ASC
             LIMIT 500
             """,
             (symbol, MODEL_VERSION, latest_at),
         ).fetchall()
-        resolved = 0
         for item in pending:
             resolve_at = pd.Timestamp(item["resolve_at"])
             if resolve_at.tzinfo is None:
@@ -167,17 +170,52 @@ def _resolve_pending(symbol: str, history: pd.DataFrame) -> int:
                 continue
             realized_price = float(candidates["Close"].iloc[0])
             realized_up = realized_price > float(item["spot_price"])
+            old_status = str(item["status"])
+            new_status = "RESOLVED" if old_status == "PENDING" else "ABSTAIN_RESOLVED"
             conn.execute(
                 """
                 UPDATE v45_shadow_predictions
-                SET status='RESOLVED', realized_price=%s, realized_up=%s,
-                    resolved_at=NOW()
-                WHERE id=%s AND status='PENDING'
+                SET status=%s, realized_price=%s, realized_up=%s, resolved_at=NOW()
+                WHERE id=%s AND status=%s
                 """,
-                (realized_price, realized_up, int(item["id"])),
+                (new_status, realized_price, realized_up, int(item["id"]), old_status),
             )
-            resolved += 1
-        return resolved
+            key = "predictions" if old_status == "PENDING" else "abstentions"
+            counts[key] += 1
+    return counts
+
+
+def evidence_summary() -> dict[str, Any]:
+    with connect() as conn:
+        counts = conn.execute(
+            """
+            SELECT
+              COUNT(*) AS total,
+              COUNT(*) FILTER (WHERE status='PENDING') AS predictions_pending,
+              COUNT(*) FILTER (WHERE status='RESOLVED') AS predictions_resolved,
+              COUNT(*) FILTER (WHERE status IN ('ABSTAIN_PENDING','ABSTAIN')) AS abstentions_pending,
+              COUNT(*) FILTER (WHERE status='ABSTAIN_RESOLVED') AS abstentions_resolved,
+              COUNT(*) FILTER (
+                WHERE status='ABSTAIN_RESOLVED' AND spot_price > 0 AND realized_price > 0
+                  AND ABS(((realized_price / spot_price) - 1.0) * 100.0) < %s
+              ) AS abstentions_below_actionable_move
+            FROM v45_shadow_predictions
+            WHERE model_version=%s
+            """,
+            (ACTIONABLE_MOVE_PCT, MODEL_VERSION),
+        ).fetchone() or {}
+    resolved_abstentions = int(counts.get("abstentions_resolved") or 0)
+    quiet_abstentions = int(counts.get("abstentions_below_actionable_move") or 0)
+    return {
+        "total_observations": int(counts.get("total") or 0),
+        "predictions_pending": int(counts.get("predictions_pending") or 0),
+        "predictions_resolved": int(counts.get("predictions_resolved") or 0),
+        "abstentions_pending": int(counts.get("abstentions_pending") or 0),
+        "abstentions_resolved": resolved_abstentions,
+        "abstentions_below_actionable_move": quiet_abstentions,
+        "abstention_quiet_rate": (quiet_abstentions / resolved_abstentions) if resolved_abstentions else None,
+        "actionable_move_pct": ACTIONABLE_MOVE_PCT,
+    }
 
 
 def governance_summary() -> dict[str, Any]:
@@ -199,9 +237,6 @@ def governance_summary() -> dict[str, Any]:
         {"status": "RESOLVED", "probability_up": row["probability_up"], "realized_up": row["realized_up"]}
         for row in rows
     ]
-    # Baseline and leakage checks remain fail-closed until the independent
-    # validation service supplies affirmative evidence. The sampler cannot
-    # promote itself merely by accumulating predictions.
     return evaluate_shadow_predictions(
         records,
         total_opportunities=int(total_row.get("n") or 0),
@@ -227,13 +262,18 @@ def sample_once() -> dict[str, Any]:
         except Exception as exc:
             output["symbols"][symbol] = {"status": "ERROR", "reason": exc.__class__.__name__}
             LOG.exception("V45 SHADOW symbol failure | symbol=%s", symbol)
+    output["evidence"] = evidence_summary()
     output["governance"] = governance_summary()
     LOG.info("V45 SHADOW | %s", json.dumps(output, sort_keys=True, default=str))
     return output
 
 
 def run_forever() -> None:
-    logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
+    logging.basicConfig(
+        level=os.getenv("LOG_LEVEL", "INFO"),
+        stream=sys.stdout,
+        format="%(levelname)s:%(name)s:%(message)s",
+    )
     LOG.info("V45 SHADOW START | execution_allowed=False | broker_submission=False | symbols=BTC-USD,ETH-USD")
     while True:
         started = time.monotonic()
