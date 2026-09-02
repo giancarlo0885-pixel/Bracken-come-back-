@@ -14,6 +14,7 @@ from crypto_v39_risk_bridge import install_crypto_v39_risk_bridge
 from crypto_v39_spread_bridge import install_crypto_v39_spread_bridge
 from live_broker_capital import install_live_broker_capital_sizing
 from live_v39_broker_bridge import install_live_v39_broker_capital_bridge
+from paper_broker_reference_runtime import install_paper_broker_reference
 from paper_execution_accounting import install_paper_execution_accounting
 from paper_execution_reality import install_paper_execution_reality
 from paper_fee_policy import install_fee_aware_fifo_policy
@@ -53,9 +54,10 @@ if os.getenv("EXECUTION_MODE", "paper").strip().lower() == "paper":
     install_paper_execution_accounting(market_worker)
     install_fee_aware_fifo_policy()
     install_paper_lifecycle_observability(market_worker)
+    install_paper_broker_reference(market_worker)
 
 # Keep this entrypoint in the crypto-worker deploy watch set; readiness helpers are imported above.
-# Production deploy marker: passive shadow readiness cohort fix is present in this source tree.
+# Production deploy marker: broker-anchored paper execution v2 is present in this source tree.
 
 
 def run_robinhood_startup_preflight() -> None:
