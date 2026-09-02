@@ -19,6 +19,7 @@ from config import (
 from database import database_health, rows
 from forecast_calibration import evaluate_probability_calibration
 from forecasting import active_crypto_model_identity
+from paper_lifecycle_readiness import paper_lifecycle_health
 from shadow_broker import shadow_readiness_summary
 
 
@@ -259,6 +260,7 @@ def determine_overall_status(checks: dict[str, dict[str, Any]]) -> str:
         shadow_architecture
         and bool(checks["models"].get("ok"))
         and bool(checks["shadow_forward"].get("ok"))
+        and bool(checks["paper_lifecycle"].get("ok"))
         and bool(checks["broker"].get("funding_ok"))
         and bool(checks["reconciliation"].get("ok"))
     )
@@ -283,6 +285,7 @@ def build_readiness_report() -> dict[str, Any]:
             minimum_samples=max(30, int(os.getenv("CAPITAL_MIN_SHADOW_SAMPLES", "100"))),
             maximum_paper_error_pct=max(0.0, float(os.getenv("CAPITAL_MAX_SHADOW_P95_ERROR_PCT", "1.0"))),
         ),
+        "paper_lifecycle": paper_lifecycle_health("crypto"),
     }
     overall = determine_overall_status(checks)
     return {
@@ -307,6 +310,7 @@ def human_report(report: dict[str, Any]) -> str:
         "reconciliation",
         "broker",
         "shadow_forward",
+        "paper_lifecycle",
     ):
         item = checks.get(name) or {}
         state = "PASS" if item.get("ok") else str(item.get("status") or "FAIL")
