@@ -15,6 +15,8 @@ def _normalize_base64_env(name: str) -> None:
 def main() -> None:
     # PowerShell / clipboard pastes can carry CRLF or surrounding whitespace.
     # Normalize only formatting; never transform the actual base64 payload.
+    # This entrypoint change intentionally triggers a crypto-worker build that
+    # includes the V39 core-rebalance promotion observability on current main.
     _normalize_base64_env("ROBINHOOD_CRYPTO_PRIVATE_KEY_BASE64")
     _normalize_base64_env("ROBINHOOD_CRYPTO_PUBLIC_KEY_BASE64")
     os.environ["ROBINHOOD_CRYPTO_API_KEY"] = os.getenv("ROBINHOOD_CRYPTO_API_KEY", "").strip()
