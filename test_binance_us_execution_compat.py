@@ -99,3 +99,50 @@ def test_websocket_ping_immediately_pongs_and_shutdown_reconnects():
     assert guard.heartbeat_ok() is True
     assert guard.on_text_event({"e": "serverShutdown"}) is True
     assert guard.reconnect_required is True
+
+
+class _SignedResponse:
+    status_code = 200
+    headers = {}
+
+    def raise_for_status(self):
+        return None
+
+    def json(self):
+        return {
+            "assetFilters": [],
+            "symbolFilters": [],
+            "exchangeFilters": [],
+        }
+
+
+class _SignedSession:
+    def __init__(self):
+        self.params = None
+        self.headers = None
+
+    def get(self, url, *, params, headers, timeout):
+        self.params = dict(params)
+        self.headers = dict(headers)
+        return _SignedResponse()
+
+
+def test_signed_my_filters_uses_weight_40_and_does_not_send_secret():
+    import binance_us_execution_compat as compat
+
+    session = _SignedSession()
+    weights = []
+    result = compat.signed_my_filters(
+        api_key="public-key",
+        secret_key="super-secret",
+        symbol="btcusd",
+        session=session,
+        timestamp_ms=1700000000000,
+        acquire_weight=weights.append,
+    )
+    assert result["assetFilters"] == []
+    assert weights == [40]
+    assert session.params["symbol"] == "BTCUSD"
+    assert "signature" in session.params
+    assert "super-secret" not in str(session.params)
+    assert session.headers["X-MBX-APIKEY"] == "public-key"
