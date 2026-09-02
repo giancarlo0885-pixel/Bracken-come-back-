@@ -26,46 +26,77 @@ def _parse_ts(value: Any) -> datetime | None:
 
 
 def provider_health_summary(*, maximum_age_minutes: int = 90) -> dict[str, Any]:
+    """Report health for providers that actually feed capital quote consensus.
+
+    ``provider_health`` currently also contains contextual/news providers such as
+    Gemini. A news quota event must not masquerade as a market-data outage. The
+    capital provider gate therefore uses recent *confirmed* quote-verification
+    observations from the same provider pair used by execution consensus.
+
+    This remains fail-closed: no recent confirmed market-provider evidence means
+    provider health is not ready.
+    """
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=max(1, int(maximum_age_minutes)))
     try:
         records = rows(
             """
-            SELECT provider, configured, status, latency_ms, message, checked_at
-            FROM provider_health
+            SELECT provider, MAX(created_at) AS last_seen, COUNT(*)::int AS confirmed_samples
+            FROM (
+                SELECT primary_provider AS provider, created_at, consensus_status
+                FROM quote_verifications
+                UNION ALL
+                SELECT secondary_provider AS provider, created_at, consensus_status
+                FROM quote_verifications
+            ) evidence
+            WHERE provider IS NOT NULL
+              AND provider <> ''
+              AND created_at >= %s
+              AND LOWER(COALESCE(consensus_status,'')) IN ('pass','verified','confirmed','agreement','ok')
+            GROUP BY provider
             ORDER BY provider
-            """
+            """,
+            (cutoff.isoformat(),),
         )
     except Exception as exc:
-        return {"ok": False, "status": "UNAVAILABLE", "reason": exc.__class__.__name__, "providers": []}
+        return {
+            "ok": False,
+            "status": "UNAVAILABLE",
+            "reason": exc.__class__.__name__,
+            "configured_providers": 0,
+            "healthy_providers": 0,
+            "providers": [],
+            "source": "quote_verifications",
+        }
 
     now = datetime.now(timezone.utc)
     details: list[dict[str, Any]] = []
     healthy_count = 0
-    configured_count = 0
     for item in records:
-        configured = bool(item.get("configured"))
-        configured_count += 1 if configured else 0
-        checked = _parse_ts(item.get("checked_at"))
-        age_minutes = None if checked is None else max(0.0, (now - checked).total_seconds() / 60.0)
-        status = str(item.get("status") or "").strip().lower()
-        healthy = configured and status in _HEALTHY and age_minutes is not None and age_minutes <= maximum_age_minutes
+        last_seen = _parse_ts(item.get("last_seen"))
+        age_minutes = None if last_seen is None else max(0.0, (now - last_seen).total_seconds() / 60.0)
+        samples = int(item.get("confirmed_samples") or 0)
+        healthy = bool(samples > 0 and age_minutes is not None and age_minutes <= maximum_age_minutes)
         healthy_count += 1 if healthy else 0
         details.append(
             {
                 "provider": str(item.get("provider") or ""),
-                "configured": configured,
-                "status": status or "unknown",
+                "configured": True,
+                "status": "confirmed_quote_evidence" if healthy else "stale_or_missing_quote_evidence",
                 "age_minutes": age_minutes,
+                "confirmed_samples": samples,
                 "healthy": healthy,
             }
         )
 
-    ok = configured_count > 0 and healthy_count > 0
+    observed_count = len(details)
+    ok = observed_count > 0 and healthy_count > 0
     return {
         "ok": ok,
         "status": "PASS" if ok else "INSUFFICIENT_PROVIDER_HEALTH",
-        "configured_providers": configured_count,
+        "configured_providers": observed_count,
         "healthy_providers": healthy_count,
         "providers": details,
+        "source": "quote_verifications",
     }
 
 
