@@ -640,7 +640,7 @@ def _eodhd(symbol: str, period: str, interval: str, key: str) -> pd.DataFrame:
             return pd.DataFrame()
         requested_symbol = mapping["requested_symbol"]
         code = mapping["provider_code"]
-    start = (pd.Timestamp.utcnow() - pd.Timedelta(days=_period_days(period))).date()
+    start = (pd.Timestamp.now("UTC") - pd.Timedelta(days=_period_days(period))).date()
     response = requests.get(
         f"https://eodhd.com/api/eod/{code}",
         params={"api_token": key, "fmt": "json", "from": str(start), "period": "d"},
@@ -821,7 +821,7 @@ def _finnhub(symbol: str, period: str, interval: str, key: str) -> pd.DataFrame:
     provider_native_symbol = _finnhub_crypto_symbol(requested_symbol, key) if is_crypto else requested_symbol
     if not provider_native_symbol:
         return pd.DataFrame()
-    now = int(pd.Timestamp.utcnow().timestamp())
+    now = int(pd.Timestamp.now("UTC").timestamp())
     start = now - _period_days(period) * 86400
     response = requests.get(
         endpoint,
