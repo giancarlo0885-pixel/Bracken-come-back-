@@ -116,4 +116,4 @@ def install_core_rebalance_optimizer_trace(worker: Any) -> None:
 
 
 # Production observability contract: tactical and strategic rebalance gates are traced separately.
-# Railway deploy-watch verification marker: web and stock-worker watch this file so production follows main.
+# Railway deploy-watch verification marker: web and stock-worker follow this root file from main after watch activation.
