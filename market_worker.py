@@ -591,6 +591,15 @@ def _v39_signal_opportunity(market: str, signal: Any, prices: dict[str, Any], ra
     symbol = str(getattr(signal, "symbol", "") or "").upper()
     quote = dict(prices.get(symbol) or {})
     ranked = dict(ranked_by_symbol.get(symbol) or {})
+    signal_score = getattr(signal, "score", 0.0)
+    expected_move = (
+        ranked.get("expected_return")
+        if ranked.get("expected_return") not in (None, "")
+        else ranked.get("expected_move_pct")
+    )
+    if expected_move in (None, ""):
+        expected_move = getattr(signal, "expected_move_pct", None)
+    price = _finite_positive(quote.get("price")) or _finite_positive(getattr(signal, "price", None))
     liquidity = _finite_positive(quote.get("avg_dollar_volume")) or _finite_positive(ranked.get("liquidity")) or 0.0
     stages = ["surveillance", "deep_research" if scan_type == "deep" else "active_hot"]
     action = str(getattr(signal, "action", "") or "").upper()
@@ -651,6 +660,10 @@ def _v39_signal_opportunity(market: str, signal: Any, prices: dict[str, Any], ra
         "exchange": quote.get("exchange") or ranked.get("exchange"),
         "currency": quote.get("currency") or "USD",
         "sector": sector or "",
+        "price": price,
+        "entry_price": price,
+        "target_price": ranked.get("target_price") or ranked.get("target") or getattr(signal, "target_price", None),
+        "stop_price": ranked.get("stop_price") or ranked.get("stop") or getattr(signal, "stop_price", None),
         "quote_verified": quote.get("quote_verified") is True,
         "quote_timestamp": quote.get("quote_timestamp"),
         "source_interval": quote.get("source_interval") or quote.get("interval"),
@@ -660,8 +673,15 @@ def _v39_signal_opportunity(market: str, signal: Any, prices: dict[str, Any], ra
         "avg_dollar_volume": liquidity,
         "liquidity": liquidity,
         "spread_pct": spread,
-        "opportunity_score": ranked.get("opportunity_score") or getattr(signal, "score", 0.0),
-        "expected_move_pct": ranked.get("expected_return") or ranked.get("expected_move_pct"),
+        "trend_score": ranked.get("trend_score") or ranked.get("momentum_score") or getattr(signal, "trend_score", None) or getattr(signal, "momentum_score", None),
+        "momentum_score": ranked.get("momentum_score") or getattr(signal, "momentum_score", None),
+        "volume_liquidity_score": ranked.get("volume_liquidity_score") or ranked.get("volume_score") or ranked.get("liquidity_score") or getattr(signal, "volume_liquidity_score", None),
+        "catalyst_score": ranked.get("catalyst_score") or getattr(signal, "catalyst_score", None),
+        "regime_score": ranked.get("regime_score") or ranked.get("macro_score") or getattr(signal, "regime_score", None),
+        "risk_reward_score": ranked.get("risk_reward_score") or getattr(signal, "risk_reward_score", None),
+        "reward_risk_ratio": ranked.get("reward_risk_ratio") or getattr(signal, "reward_risk_ratio", None),
+        "opportunity_score": ranked.get("opportunity_score") or signal_score,
+        "expected_move_pct": expected_move,
         "confidence": getattr(signal, "confidence", 0.0),
         "data_quality_score": quote.get("data_quality_score") or ranked.get("data_quality_score") or 0.0,
         "risk_score": risk_score,

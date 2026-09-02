@@ -40,8 +40,15 @@ def install_core_rebalance_score_compat() -> None:
             return False
         if str(patch._signal_value(signal, "action", "HOLD") or "HOLD").strip().upper() != "HOLD":
             return False
+
+        # Score-scale compatibility must not broaden authorization semantics.
+        # Only an upstream portfolio producer may authorize a core-rebalance
+        # candidate. A plain tactical HOLD is never inferred to be a candidate.
         existing_intent = patch._core_rebalance_intent(signal)
-        if existing_intent not in {"", patch.CORE_REBALANCE_CANDIDATE_INTENT}:
+        if existing_intent not in {
+            patch.CORE_REBALANCE_CANDIDATE_INTENT,
+            patch.CORE_REBALANCE_STRATEGIC_CANDIDATE_INTENT,
+        }:
             return False
 
         score = patch._signal_value(signal, "score", 0.0)

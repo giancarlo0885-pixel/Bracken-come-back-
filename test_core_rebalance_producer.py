@@ -67,8 +67,8 @@ def _worker(*, cash=2000.0, equity=2000.0, allocate=True):
     return worker
 
 
-def _hold_signal():
-    return SimpleNamespace(
+def _hold_signal(*, strategic=True):
+    signal = SimpleNamespace(
         symbol="BTC-USD",
         action="HOLD",
         score=92.0,
@@ -76,6 +76,9 @@ def _hold_signal():
         signal_id="sig-1",
         forecast_id="fc-1",
     )
+    if strategic:
+        signal.portfolio_intent = patch.CORE_REBALANCE_STRATEGIC_CANDIDATE_INTENT
+    return signal
 
 
 def _verified_prices():
@@ -156,7 +159,7 @@ def test_optimizer_rejection_cannot_emit_core_rebalance_buy():
 def test_fully_invested_portfolio_does_not_turn_hold_into_rebalance_candidate():
     worker = _worker(cash=0.0, equity=2000.0)
     patch._install_core_rebalance_producer(worker)
-    signal = _hold_signal()
+    signal = _hold_signal(strategic=False)
 
     worker._v39_prioritize_signals(
         "crypto",
@@ -174,8 +177,26 @@ def test_fully_invested_portfolio_does_not_turn_hold_into_rebalance_candidate():
 def test_low_quality_hold_is_not_promoted_just_because_portfolio_is_empty():
     worker = _worker()
     patch._install_core_rebalance_producer(worker)
-    signal = _hold_signal()
+    signal = _hold_signal(strategic=False)
     signal.score = 55.0
+
+    worker._v39_prioritize_signals(
+        "crypto",
+        [signal],
+        _verified_prices(),
+        [{"symbol": "BTC-USD"}],
+        "deep",
+    )
+
+    assert signal.action == "HOLD"
+    assert getattr(signal, "portfolio_intent", None) is None
+    assert getattr(signal, "rebalance_intent", None) is None
+
+
+def test_plain_high_quality_hold_is_not_core_rebalance_candidate():
+    worker = _worker()
+    patch._install_core_rebalance_producer(worker)
+    signal = _hold_signal(strategic=False)
 
     worker._v39_prioritize_signals(
         "crypto",

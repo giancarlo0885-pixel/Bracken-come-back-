@@ -8,6 +8,7 @@ from typing import Any
 _INSTALLED = False
 CORE_REBALANCE_BUY_INTENT = "CORE_REBALANCE_BUY"
 CORE_REBALANCE_CANDIDATE_INTENT = "CORE_REBALANCE_CANDIDATE"
+CORE_REBALANCE_STRATEGIC_CANDIDATE_INTENT = "CORE_REBALANCE_STRATEGIC_CANDIDATE"
 
 
 def _truthy(value: Any) -> bool:
@@ -112,7 +113,7 @@ def _core_rebalance_candidate_allowed(
     if str(_signal_value(signal, "action", "HOLD") or "HOLD").strip().upper() != "HOLD":
         return False
     existing_intent = _core_rebalance_intent(signal)
-    if existing_intent not in {"", CORE_REBALANCE_CANDIDATE_INTENT}:
+    if existing_intent not in {CORE_REBALANCE_CANDIDATE_INTENT, CORE_REBALANCE_STRATEGIC_CANDIDATE_INTENT}:
         return False
     score = _numeric(_signal_value(signal, "score", 0.0))
     confidence = _numeric(_signal_value(signal, "confidence", 0.0))
@@ -144,7 +145,10 @@ def _install_core_rebalance_producer(market_worker_module: Any) -> None:
         ranked_by_symbol: dict[str, dict[str, Any]],
         scan_type: str,
     ) -> dict[str, Any]:
-        candidate = _core_rebalance_intent(signal) == CORE_REBALANCE_CANDIDATE_INTENT
+        candidate = _core_rebalance_intent(signal) in {
+            CORE_REBALANCE_CANDIDATE_INTENT,
+            CORE_REBALANCE_STRATEGIC_CANDIDATE_INTENT,
+        }
         if not candidate:
             return original_opportunity(market, signal, prices, ranked_by_symbol, scan_type)
 
@@ -162,6 +166,8 @@ def _install_core_rebalance_producer(market_worker_module: Any) -> None:
         opportunity["core_rebalance_candidate"] = True
         opportunity["portfolio_intent"] = CORE_REBALANCE_CANDIDATE_INTENT
         opportunity["tactical_action"] = original_action
+        if opportunity.get("trend_score") in (None, "") and _numeric(_signal_value(signal, "score", 0.0)) > 0:
+            opportunity["trend_score"] = _numeric(_signal_value(signal, "score", 0.0))
         return opportunity
 
     rebalance_aware_opportunity._oracle_core_rebalance_aware = True
