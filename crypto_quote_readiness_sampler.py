@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 import os
+import time
 from typing import Any
 
 import oracle_bot
@@ -15,11 +16,49 @@ from crypto_execution_guard import (
 from shadow_forward_sampler import maintain_passive_shadow_evidence
 
 
+_LAST_SHADOW_STATUS_LOG = 0.0
+
+
 def _sample_limit() -> int:
     try:
         return max(1, min(12, int(os.getenv("V39_QUOTE_VERIFICATION_SAMPLE_SIZE", "6"))))
     except ValueError:
         return 6
+
+
+def _shadow_status_log_interval() -> int:
+    try:
+        return max(30, min(900, int(os.getenv("SHADOW_STATUS_LOG_INTERVAL_SECONDS", "60"))))
+    except ValueError:
+        return 60
+
+
+def _emit_shadow_status(worker: Any, result: dict[str, Any]) -> None:
+    """Emit bounded sanitized evidence-collection status without broker details."""
+    global _LAST_SHADOW_STATUS_LOG
+    capture = result.get("capture") if isinstance(result.get("capture"), dict) else {}
+    evaluate = result.get("evaluate") if isinstance(result.get("evaluate"), dict) else {}
+    captured = int(capture.get("captured") or 0)
+    evaluated = int(evaluate.get("evaluated") or 0)
+    now = time.monotonic()
+    noteworthy = captured > 0 or evaluated > 0 or str(capture.get("status") or "") in {
+        "BROKER_PAIR_DISCOVERY_UNAVAILABLE",
+    }
+    if not noteworthy and now - _LAST_SHADOW_STATUS_LOG < _shadow_status_log_interval():
+        return
+    _LAST_SHADOW_STATUS_LOG = now
+    worker.log.info(
+        "CRYPTO | PASSIVE SHADOW STATUS | overall=%s | capture_status=%s | captured=%d | skipped=%d | "
+        "capture_reason=%s | evaluate_status=%s | evaluated=%d | due=%d | broker_submission=NONE",
+        str(result.get("status") or "UNKNOWN"),
+        str(capture.get("status") or "UNKNOWN"),
+        captured,
+        int(capture.get("skipped") or 0),
+        str(capture.get("reason") or "")[:80] or "none",
+        str(evaluate.get("status") or "UNKNOWN"),
+        evaluated,
+        int(evaluate.get("due") or 0),
+    )
 
 
 def persist_v39_quote_verification_evidence(
@@ -112,7 +151,9 @@ def install_v39_quote_verification_sampler(worker: Any) -> None:
                     exc.__class__.__name__,
                 )
             try:
-                maintain_passive_shadow_evidence(worker, signals, prices)
+                shadow_result = maintain_passive_shadow_evidence(worker, signals, prices)
+                if isinstance(shadow_result, dict):
+                    _emit_shadow_status(worker, shadow_result)
             except Exception as exc:
                 # Passive shadow sampling is read-only against Robinhood and
                 # never changes the tactical signal or paper portfolio. Missing
