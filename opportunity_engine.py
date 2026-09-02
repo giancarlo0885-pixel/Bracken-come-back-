@@ -9,6 +9,44 @@ def _value(obj: Any, name: str, default: Any = None) -> Any:
     return obj.get(name, default) if isinstance(obj, dict) else getattr(obj, name, default)
 
 
+def _verified_execution_quote(symbol: str) -> dict[str, Any]:
+    """Return a current execution-eligible quote without weakening provider gates.
+
+    Opportunity ranking is built from research signals, whose source history can
+    legitimately be daily or otherwise non-execution-grade.  The worker already
+    requires a separate execution quote before trading.  The dashboard needs the
+    same distinction, so ranking payloads carry a verified execution mark while
+    preserving the original analysis provenance.
+    """
+    normalized = str(symbol or "").upper().strip()
+    if not normalized:
+        return {}
+    try:
+        from market_data import get_live_snapshot, snapshot_is_verified
+
+        snapshot = get_live_snapshot(normalized)
+        if snapshot is None or not snapshot_is_verified(snapshot, normalized):
+            return {}
+        payload = dict(snapshot.to_quote_payload())
+    except Exception:
+        return {}
+
+    requested = str(payload.get("requested_symbol") or normalized).upper().strip()
+    provider_symbol = str(payload.get("provider_symbol") or "").upper().strip()
+    if requested != normalized or provider_symbol != normalized:
+        return {}
+    if payload.get("quote_verified") is not True or payload.get("stale") is True:
+        return {}
+    try:
+        if float(payload.get("price") or 0.0) <= 0:
+            return {}
+    except (TypeError, ValueError):
+        return {}
+    if not payload.get("quote_timestamp"):
+        return {}
+    return payload
+
+
 def rank_opportunities(signals: list[Any], limit: int = 12, market: str | None = None) -> list[dict]:
     """Rank opportunities with the same quant standard used by execution.
 
@@ -63,6 +101,40 @@ def rank_opportunities(signals: list[Any], limit: int = 12, market: str | None =
                 "market_data_route": route,
             }
         )
+
+        # Keep analysis provenance immutable, but attach the independently
+        # verified execution mark that the paper broker is allowed to use.
+        symbol = str(_value(signal, "symbol", payload.get("symbol", "")) or payload.get("symbol", "")).upper().strip()
+        execution_quote = _verified_execution_quote(symbol)
+        if execution_quote:
+            payload.update(
+                {
+                    "analysis_source_interval": payload.get("source_interval"),
+                    "analysis_quote_timestamp": payload.get("source_quote_timestamp") or payload.get("quote_timestamp"),
+                    "analysis_provider": payload.get("provider"),
+                    "execution_price": execution_quote.get("price"),
+                    "execution_quote_timestamp": execution_quote.get("quote_timestamp"),
+                    "execution_quote_age_seconds": execution_quote.get("quote_age_seconds"),
+                    "execution_source_interval": execution_quote.get("source_interval") or execution_quote.get("interval"),
+                    "execution_requested_symbol": execution_quote.get("requested_symbol"),
+                    "execution_provider_symbol": execution_quote.get("provider_symbol"),
+                    "execution_provider": execution_quote.get("provider"),
+                    "execution_quote_verified": True,
+                    "execution_stale": False,
+                    "provider_quote_verified": execution_quote.get("provider_quote_verified") is True,
+                    "paper_reference_verified": execution_quote.get("paper_reference_verified") is True,
+                    # These top-level fields describe the price displayed as
+                    # tradable now; source_* above still describe analysis.
+                    "price": execution_quote.get("price"),
+                    "quote_timestamp": execution_quote.get("quote_timestamp"),
+                    "quote_age_seconds": execution_quote.get("quote_age_seconds"),
+                    "requested_symbol": execution_quote.get("requested_symbol"),
+                    "provider_symbol": execution_quote.get("provider_symbol"),
+                    "provider": execution_quote.get("provider"),
+                    "quote_verified": True,
+                }
+            )
+
         payload["features"] = feature_vector(signal)
         payload["council_score"] = round(float(_value(signal, "score", 0.0)) * (100 if float(_value(signal, "score", 0.0)) <= 1 else 1), 2)
         payload["confidence"] = round(float(_value(signal, "confidence", 0.0)) * (100 if float(_value(signal, "confidence", 0.0)) <= 1 else 1), 2)
