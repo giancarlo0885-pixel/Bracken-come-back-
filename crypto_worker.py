@@ -55,7 +55,7 @@ if os.getenv("EXECUTION_MODE", "paper").strip().lower() == "paper":
     install_paper_lifecycle_observability(market_worker)
 
 # Keep this entrypoint in the crypto-worker deploy watch set; readiness helpers are imported above.
-# Fresh-source deploy marker: Railway must use the configured direct Python start command.
+# Production deploy marker: passive shadow readiness cohort fix is present in this source tree.
 
 
 def run_robinhood_startup_preflight() -> None:
