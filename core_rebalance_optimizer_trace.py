@@ -116,3 +116,4 @@ def install_core_rebalance_optimizer_trace(worker: Any) -> None:
 
 
 # Production observability contract: tactical and strategic rebalance gates are traced separately.
+# Railway watch verification marker: source must follow the current main branch.
