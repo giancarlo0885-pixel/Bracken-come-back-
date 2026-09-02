@@ -20,6 +20,7 @@ from paper_execution_reality import install_paper_execution_reality
 from paper_fee_policy import install_fee_aware_fifo_policy
 from paper_lifecycle_observability import install_paper_lifecycle_observability
 from readiness_observability import emit_capital_readiness_report
+from robinhood_current_marketdata_runtime import install_robinhood_current_marketdata
 from robinhood_pagination_compat import install_robinhood_pagination_compat
 from robinhood_quote_compat import install_robinhood_quote_compat
 from runtime_integrity_patch import install_runtime_integrity_patch
@@ -39,6 +40,9 @@ install_strategic_core_rebalance_producer(market_worker)
 install_binance_us_reference_fallback()
 install_robinhood_pagination_compat()
 install_robinhood_quote_compat()
+# Robinhood now supplies the point-in-time crypto execution mark. Historical
+# OHLCV remains on the existing provider router for indicators and forecasts.
+install_robinhood_current_marketdata(market_worker)
 install_crypto_v39_spread_bridge(market_worker)
 install_crypto_execution_quote_guard(market_worker)
 install_v39_quote_verification_sampler(market_worker)
@@ -57,7 +61,7 @@ if os.getenv("EXECUTION_MODE", "paper").strip().lower() == "paper":
     install_paper_broker_reference(market_worker)
 
 # Keep this entrypoint in the crypto-worker deploy watch set; readiness helpers are imported above.
-# Production deploy marker: broker-anchored paper execution v2 is present in this source tree.
+# Production deploy marker: Robinhood current crypto market data + broker-anchored paper execution are active.
 
 
 def run_robinhood_startup_preflight() -> None:
