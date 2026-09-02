@@ -189,6 +189,7 @@ def shadow_readiness_summary(*, minimum_samples: int = 100, maximum_paper_error_
                 PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY paper_vs_broker_error_pct)
                     FILTER (WHERE paper_vs_broker_error_pct IS NOT NULL) AS p95_paper_error
             FROM shadow_broker_orders
+            WHERE payload->>'evidence_kind'='passive_paper_execution_model'
             """
         ) or {}
         evaluated = int(stats.get("evaluated") or 0)
