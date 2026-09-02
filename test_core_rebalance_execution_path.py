@@ -110,15 +110,16 @@ def test_ordinary_hold_without_rebalance_intent_stays_non_entry(monkeypatch):
         lambda market: ({"cash": 2000.0, "equity": 2000.0, "buying_power": 2000.0}, []),
     )
     monkeypatch.setattr(market_worker, "_v39_record_event", lambda *args, **kwargs: None)
-    # Use a non-core symbol so the configured strategic allocator cannot
-    # legitimately authorize this HOLD as a core-rebalance candidate.
-    signal = _signal("DOGE-USD")
+    # Synthetic symbol is deliberately outside configured core allocation weights,
+    # so this isolates the invariant that an ordinary tactical HOLD is not itself
+    # rebalance authorization.
+    signal = _signal("NONCORE-USD")
 
     ordered = market_worker._v39_prioritize_signals(
         "crypto",
         [signal],
-        {"DOGE-USD": _quote("DOGE-USD", 0.25)},
-        [_ranked("DOGE-USD")],
+        {"NONCORE-USD": _quote("NONCORE-USD", 1.0)},
+        [_ranked("NONCORE-USD")],
         "deep",
     )
 
