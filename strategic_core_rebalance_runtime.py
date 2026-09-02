@@ -70,7 +70,9 @@ def install_strategic_core_rebalance_producer(worker: Any) -> None:
     not itself an authorization. Only a symbol that appears in
     ``crypto_core_rebalance_plan`` with a positive deficit and a current verified
     quote receives ``CORE_REBALANCE_CANDIDATE`` metadata. V39 still owns final
-    capital approval and no signal becomes CORE_REBALANCE_BUY here.
+    capital approval and no signal becomes CORE_REBALANCE_BUY here. Promotion
+    decisions are logged after V39 returns so rejected capital handoffs are
+    observable without weakening any execution gate.
     """
     original = worker._v39_prioritize_signals
     if getattr(original, "_oracle_strategic_core_producer", False):
