@@ -6,9 +6,6 @@ from typing import Any
 from database import row, rows
 
 
-_EXECUTED_PAPER_STATUSES = {"FILLED", "PARTIAL_CANCELLED"}
-
-
 def _finite(value: Any, default: float = 0.0) -> float:
     try:
         number = float(value)
@@ -69,7 +66,7 @@ def paper_lifecycle_health(market: str = "crypto") -> dict[str, Any]:
         )
         held_positions = rows(
             """
-            SELECT symbol, quantity, current_price, market_value
+            SELECT symbol, quantity, current_price
             FROM positions
             WHERE market=%s AND quantity > 0
             ORDER BY symbol
@@ -105,6 +102,10 @@ def paper_lifecycle_health(market: str = "crypto") -> dict[str, Any]:
         else:
             status = "NO_PAPER_ENTRY_PROOF"
 
+        held_market_value = sum(
+            max(0.0, _finite(item.get("quantity"))) * max(0.0, _finite(item.get("current_price")))
+            for item in held_positions
+        )
         return {
             "ok": round_trip_proven,
             "status": status,
@@ -120,7 +121,7 @@ def paper_lifecycle_health(market: str = "crypto") -> dict[str, Any]:
             "portfolio_reload_events": reload_events,
             "held_position_count": len(held_positions),
             "held_symbols": [str(item.get("symbol") or "").upper() for item in held_positions[:24]],
-            "held_market_value": round(sum(max(0.0, _finite(item.get("market_value"))) for item in held_positions), 8),
+            "held_market_value": round(held_market_value, 8),
             "latest_buy": latest_buy,
             "latest_sell": latest_sell,
         }
