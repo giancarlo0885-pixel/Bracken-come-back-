@@ -17,6 +17,7 @@ from live_v39_broker_bridge import install_live_v39_broker_capital_bridge
 from paper_execution_accounting import install_paper_execution_accounting
 from paper_execution_reality import install_paper_execution_reality
 from paper_fee_policy import install_fee_aware_fifo_policy
+from paper_lifecycle_observability import install_paper_lifecycle_observability
 from readiness_observability import emit_capital_readiness_report
 from robinhood_pagination_compat import install_robinhood_pagination_compat
 from robinhood_quote_compat import install_robinhood_quote_compat
@@ -51,6 +52,7 @@ if os.getenv("EXECUTION_MODE", "paper").strip().lower() == "paper":
     install_paper_execution_reality(market_worker)
     install_paper_execution_accounting(market_worker)
     install_fee_aware_fifo_policy()
+    install_paper_lifecycle_observability(market_worker)
 
 
 def run_robinhood_startup_preflight() -> None:

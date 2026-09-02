@@ -88,7 +88,7 @@ def test_model_governance_does_not_promote_failed_baseline_evidence(monkeypatch)
     assert assessment.recommended_status == "shadow"
 
 
-def test_readiness_state_machine_never_skips_shadow_evidence():
+def test_readiness_state_machine_never_skips_shadow_or_paper_evidence():
     base = {
         "database": {"ok": True},
         "safety": {"ok": True},
@@ -99,6 +99,7 @@ def test_readiness_state_machine_never_skips_shadow_evidence():
         "reconciliation": {"ok": False},
         "broker": {"connectivity_ok": True, "funding_ok": False},
         "shadow_forward": {"ok": False},
+        "paper_lifecycle": {"ok": False},
     }
     assert determine_overall_status(base) == "SHADOW_READY"
     base["models"]["ok"] = True
@@ -106,6 +107,8 @@ def test_readiness_state_machine_never_skips_shadow_evidence():
     base["broker"]["funding_ok"] = True
     assert determine_overall_status(base) == "SHADOW_READY"
     base["shadow_forward"]["ok"] = True
+    assert determine_overall_status(base) == "SHADOW_READY"
+    base["paper_lifecycle"]["ok"] = True
     assert determine_overall_status(base) == "MANUAL_LIVE_CANDIDATE"
 
 
