@@ -1,6 +1,6 @@
 from __future__ import annotations
 from dataclasses import dataclass, asdict
-import math, numpy as np, pandas as pd
+import math, os, numpy as np, pandas as pd
 from config import SIGNAL_BUY_THRESHOLD, SIGNAL_SELL_THRESHOLD
 from crypto_mean_reversion import assess_short_horizon_mean_reversion
 from technical_indicators import rsi, macd, atr, bollinger_position
@@ -23,6 +23,40 @@ class OracleSignal:
     def to_dict(self): return asdict(self)
 
 def _clip(x,a=-1,b=1): return max(a,min(b,x))
+
+def _truthy(name: str, default: str = "false") -> bool:
+    return str(os.getenv(name, default) or default).strip().lower() == "true"
+
+def _crypto_symbol(symbol: str) -> bool:
+    text = str(symbol or "").strip().upper()
+    return text.endswith("-USD") or text.endswith("USD")
+
+def _signal_thresholds(symbol: str) -> tuple[float, float]:
+    """Return signal thresholds, relaxing only the isolated crypto paper sandbox.
+
+    Live-capital controls always win. The relaxed band is intentionally narrow
+    enough to generate both entry and exit samples while leaving quote, sizing,
+    accounting, duplicate-order, drawdown, and execution-integrity gates intact.
+    """
+    paper_learning = (
+        str(os.getenv("EXECUTION_MODE", "paper") or "paper").strip().lower() == "paper"
+        and _truthy("PAPER_AUTONOMOUS_LEARNING")
+        and not _truthy("ENABLE_BROKER_SUBMISSION")
+        and not _truthy("LIVE_TRADING_ARMED")
+        and _crypto_symbol(symbol)
+    )
+    if not paper_learning:
+        return float(SIGNAL_BUY_THRESHOLD), float(SIGNAL_SELL_THRESHOLD)
+
+    buy = float(os.getenv("PAPER_CRYPTO_BUY_THRESHOLD", "0.52"))
+    sell = float(os.getenv("PAPER_CRYPTO_SELL_THRESHOLD", "0.48"))
+    buy = max(0.50, min(0.99, buy))
+    sell = max(0.01, min(0.50, sell))
+    if sell >= buy:
+        midpoint = (sell + buy) / 2.0
+        sell = min(0.499, midpoint - 0.001)
+        buy = max(0.501, midpoint + 0.001)
+    return buy, sell
 
 def _series(frame: pd.DataFrame, column: str) -> pd.Series:
     value = frame[column]
@@ -79,7 +113,8 @@ def analyze_market(symbol, history, news_sentiment=0.0):
     raw-=0.12*_clip(vol/1.2,0,1)
     if reg["name"]=="risk-off": raw-=0.06
     score=float(_clip(0.5+raw/2,0,1))
-    action="BUY" if score>=SIGNAL_BUY_THRESHOLD else "SELL" if score<=SIGNAL_SELL_THRESHOLD else "HOLD"
+    buy_threshold, sell_threshold = _signal_thresholds(symbol)
+    action="BUY" if score>=buy_threshold else "SELL" if score<=sell_threshold else "HOLD"
     confidence=min(0.99,0.50+abs(score-0.5)*1.4)
     reason=(f"20d momentum {m20:+.1%}; RSI {r:.1f}; trend {trend:+.1%}; "
             f"volatility {vol:.1%}; regime {reg['name']}; news {news_sentiment:+.2f}.")
