@@ -11,6 +11,7 @@ from portfolio_valuation import install_closed_market_valuation_pulse
 from runtime_integrity_patch import install_runtime_integrity_patch
 from runtime_provider_reliability import install_yahoo_runtime_reliability
 from stock_execution_repair import install_stock_execution_quote_repair
+from stock_transient_quarantine_repair import install_stock_transient_quarantine_repair
 from structured_logging import configure_structured_logging
 
 configure_structured_logging(os.getenv("LOG_LEVEL", "INFO"))
@@ -20,6 +21,7 @@ install_runtime_integrity_patch(market_worker)
 install_paper_autonomous_learning()
 install_closed_market_valuation_pulse(market_worker)
 install_stock_execution_quote_repair(market_worker)
+install_stock_transient_quarantine_repair(market_worker)
 if os.getenv("EXECUTION_MODE", "paper").strip().lower() == "paper":
     install_paper_execution_reality(market_worker)
     install_paper_execution_accounting(market_worker)
