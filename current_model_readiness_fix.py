@@ -54,7 +54,7 @@ def install_current_model_readiness_fix() -> None:
                 WHERE model=%s
                   AND COALESCE(model_version,'')=COALESCE(%s,'')
                   AND symbol IN ({placeholders})
-                ORDER BY symbol, created_at DESC, id DESC
+                ORDER BY symbol, created_at DESC, run_id DESC
                 """,
                 tuple([model, model_version, *expected]),
             )
