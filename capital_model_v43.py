@@ -20,6 +20,10 @@ DEFAULT_MIN_HISTORY_BARS = 240
 DEFAULT_STRIDE = 24
 
 
+def _truthy(value: Any) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _symbols() -> list[str]:
     raw = os.getenv("CAPITAL_CRYPTO_SYMBOLS", ",".join(DEFAULT_SYMBOLS))
     symbols: list[str] = []
@@ -38,7 +42,12 @@ def refresh_v43_crypto_evidence(*, force: bool = False) -> list[dict[str, Any]]:
     directional accuracy are not emitted as forecasts. Oracle's existing outer
     sample-count, accuracy, Brier, calibration, baseline and leakage requirements
     remain unchanged, so excessive abstention cannot manufacture approval.
+
+    ``CAPITAL_FORCE_V43_EVIDENCE_REFRESH`` is an operational validation control,
+    not a performance override. It only regenerates evidence from current code;
+    every existing pass/fail threshold remains unchanged.
     """
+    force = bool(force or _truthy(os.getenv("CAPITAL_FORCE_V43_EVIDENCE_REFRESH", "false")))
     model, version = active_crypto_model_identity()
     register_model(model, version, "shadow", "requires coverage-constrained walk-forward validation")
 
