@@ -23,11 +23,12 @@ def install_paper_crypto_learning_relaxation() -> bool:
     """Relax strategy/capacity vetoes strictly for autonomous crypto paper learning.
 
     Autonomous paper learning is intentionally allowed to keep generating samples
-    without the production daily-new-entry or open-position count caps. Quote
-    identity/freshness, finite metrics, spread/slippage, liquidity, accounting,
+    without production daily-entry, open-position-count, correlation, or daily-
+    turnover strategy caps. Quote identity/freshness, finite metrics,
+    spread/slippage, liquidity, cash/buying-power/reserve checks, accounting,
     duplicate protection, fill realism, execution claims, and every live-order
-    control remain intact. The relaxation is impossible to activate when broker
-    submission or live trading is armed.
+    control remain intact. The relaxation cannot activate when broker submission
+    or live trading is armed.
     """
     global _INSTALLED
     if _INSTALLED:
@@ -55,12 +56,12 @@ def install_paper_crypto_learning_relaxation() -> bool:
             return original_pre_trade_risk_checks(**kwargs)
 
         updated = dict(kwargs)
-        # These two values exist only to enforce production capacity caps. They
-        # are deliberately neutralized for the isolated paper-learning sandbox.
-        # The canonical portfolio is still supplied elsewhere for accounting,
-        # concentration, P&L, and lifecycle tracking.
+        # These metrics only impose production cadence/capacity strategy limits.
+        # Neutralize them inside the isolated paper-learning sandbox while the
+        # canonical portfolio remains authoritative for solvency and accounting.
         updated["new_entries_today"] = 0
         updated["positions"] = []
+        updated["turnover_pct_today"] = 0.0
         return original_pre_trade_risk_checks(**updated)
 
     def paper_shared_risk_gate(**kwargs):
@@ -70,10 +71,8 @@ def install_paper_crypto_learning_relaxation() -> bool:
 
         updated = dict(kwargs)
         quote = dict(updated.get("quote") or {})
-        # Correlation remains measurable in signal/model evidence, but it is a
-        # strategy constraint rather than a data-integrity constraint. Setting
-        # the execution-gate exposure to zero prevents it from starving an
-        # explicitly no-threshold autonomous paper-learning experiment.
+        # Correlation remains observable in model evidence, but is not allowed to
+        # starve an explicitly free-form autonomous paper-learning experiment.
         quote["correlation_exposure_pct"] = 0.0
         quote["correlation_source"] = "paper_learning_non_veto_observation"
         updated["quote"] = quote
