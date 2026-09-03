@@ -1,9 +1,14 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import logging
 import math
+import os
 import uuid
 from typing import Any
+
+
+log = logging.getLogger("paper-fee-policy")
 
 
 def _finite(value: Any, default: float = 0.0) -> float:
@@ -12,6 +17,138 @@ def _finite(value: Any, default: float = 0.0) -> float:
     except (TypeError, ValueError):
         return default
     return number if math.isfinite(number) else default
+
+
+def _false_env(name: str) -> bool:
+    return str(os.getenv(name, "false") or "false").strip().lower() in {"", "0", "false", "no", "off"}
+
+
+def _paper_reconciliation_allowed() -> bool:
+    return (
+        str(os.getenv("EXECUTION_MODE", "") or "").strip().lower() == "paper"
+        and _false_env("ENABLE_BROKER_SUBMISSION")
+        and _false_env("LIVE_TRADING_ARMED")
+    )
+
+
+def _reconcile_partial_lot_gap(lots: list[Any], requested_quantity: float) -> None:
+    """Backfill a historical paper-position lot gap from canonical cost basis.
+
+    This runs only when the caller already has positive open lots but their total
+    quantity is below the requested close.  The canonical ``positions`` row is
+    treated as the source of truth.  A compensating lot is persisted only when
+    its implied unit cost can be derived from canonical total cost minus the
+    known open-lot cost.  No cash, trades, fills, or realized P&L are changed.
+    """
+    current_open = sum(max(0.0, _finite(getattr(lot, "quantity_remaining", 0.0))) for lot in lots)
+    requested = max(0.0, _finite(requested_quantity))
+    tolerance = max(1e-9, requested * 1e-9)
+    if requested <= 0 or current_open + tolerance >= requested or not lots:
+        return
+    if not _paper_reconciliation_allowed():
+        raise ValueError("paper lot reconciliation blocked by execution safety state")
+
+    first = lots[0]
+    symbol = str(getattr(first, "symbol", "") or "").upper().strip()
+    market = str(getattr(first, "market", "") or "").lower().strip()
+    if not symbol or not market:
+        raise ValueError("paper lot reconciliation requires market and symbol")
+
+    from database import connect
+    from profit_attribution import PositionLot
+
+    with connect() as repair_conn:
+        position = repair_conn.execute(
+            """
+            SELECT * FROM positions
+            WHERE market=%s AND symbol=%s
+            LIMIT 1
+            """,
+            (market, symbol),
+        ).fetchone()
+        if not position:
+            raise ValueError("paper lot reconciliation requires a canonical position")
+
+        canonical_qty = max(0.0, _finite(position.get("quantity")))
+        canonical_avg = _finite(position.get("average_price", position.get("entry_price", 0.0)))
+        if canonical_qty + tolerance < requested or canonical_avg <= 0:
+            raise ValueError("paper lot reconciliation canonical position is insufficient")
+
+        db_lots = repair_conn.execute(
+            """
+            SELECT * FROM position_lots
+            WHERE market=%s AND symbol=%s AND quantity_remaining > 0
+            ORDER BY opened_at ASC, id ASC
+            """,
+            (market, symbol),
+        ).fetchall()
+        db_open = sum(max(0.0, _finite(row.get("quantity_remaining"))) for row in db_lots)
+        if db_open + tolerance >= requested:
+            raise ValueError("paper lot reconciliation detected concurrent lot state; retry close")
+
+        missing_qty = canonical_qty - db_open
+        if missing_qty <= tolerance:
+            raise ValueError("paper lot reconciliation found no defensible missing quantity")
+
+        known_cost = sum(
+            max(0.0, _finite(row.get("quantity_remaining"))) * max(0.0, _finite(row.get("entry_price")))
+            for row in db_lots
+        )
+        canonical_cost = canonical_qty * canonical_avg
+        missing_cost = canonical_cost - known_cost
+        implied_entry = missing_cost / missing_qty if missing_qty > 0 else 0.0
+        if not math.isfinite(implied_entry) or implied_entry <= 0:
+            raise ValueError("paper lot reconciliation could not derive a positive cost basis")
+
+        now = datetime.now(timezone.utc)
+        opened_at = position.get("opened_at") or position.get("updated_at") or now
+        if not isinstance(opened_at, datetime):
+            try:
+                opened_at = datetime.fromisoformat(str(opened_at).replace("Z", "+00:00"))
+            except (TypeError, ValueError):
+                opened_at = now
+        if opened_at.tzinfo is None:
+            opened_at = opened_at.replace(tzinfo=timezone.utc)
+
+        lot_id = f"lot:reconcile:{market}:{symbol}:{uuid.uuid4()}"
+        repair_conn.execute(
+            """
+            INSERT INTO position_lots (
+                lot_id, symbol, market, bucket, strategy, opened_at,
+                quantity_opened, quantity_remaining, entry_price, entry_fees,
+                decision_id, broker_mode, account_environment, created_at
+            )
+            VALUES (%s,%s,%s,'Historical','canonical_lot_reconciliation',%s,%s,%s,%s,0,NULL,'PAPER','PAPER',%s)
+            """,
+            (lot_id, symbol, market, opened_at, missing_qty, missing_qty, implied_entry, now),
+        )
+
+    lots.append(
+        PositionLot(
+            lot_id=lot_id,
+            symbol=symbol,
+            market=market,
+            bucket="Historical",
+            strategy="canonical_lot_reconciliation",
+            opened_at=opened_at,
+            quantity_opened=missing_qty,
+            quantity_remaining=missing_qty,
+            entry_price=implied_entry,
+            entry_fees=0.0,
+            decision_id=None,
+            broker_mode="PAPER",
+            account_environment="PAPER",
+        )
+    )
+    log.warning(
+        "PAPER LOT RECONCILIATION | market=%s | symbol=%s | canonical_qty=%.10f | prior_open_qty=%.10f | backfilled_qty=%.10f | implied_entry=%.10f",
+        market,
+        symbol,
+        canonical_qty,
+        db_open,
+        missing_qty,
+        implied_entry,
+    )
 
 
 def fee_aware_fifo_close_lots(
@@ -31,8 +168,8 @@ def fee_aware_fifo_close_lots(
     """Close FIFO lots with round-trip fee-correct returns.
 
     Entry fees are already represented by the BUY ledger row and stored on the
-    position lot.  Therefore the SELL ledger row carries only its allocated exit
-    fee in ``fees`` and ``net_pnl``.  ``return_pct`` still includes both entry
+    position lot. Therefore the SELL ledger row carries only its allocated exit
+    fee in ``fees`` and ``net_pnl``. ``return_pct`` still includes both entry
     and exit fees, which keeps round-trip performance honest without counting
     the entry fee twice in portfolio-level ledger sums.
     """
@@ -41,6 +178,7 @@ def fee_aware_fifo_close_lots(
     remaining = _finite(quantity)
     if remaining <= 0:
         raise ValueError("close quantity must be positive")
+    _reconcile_partial_lot_gap(lots, remaining)
     total_close_quantity = remaining
     exit_dt = exit_time
     if not isinstance(exit_dt, datetime):
