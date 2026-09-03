@@ -3,6 +3,7 @@ import os
 
 import market_worker
 from capital_readiness_runtime import prepare_capital_readiness_runtime
+from migration_runtime_safety import install_migration_runtime_safety
 from paper_autonomous_learning import install_paper_autonomous_learning
 from paper_execution_accounting import install_paper_execution_accounting
 from paper_execution_reality import install_paper_execution_reality
@@ -16,6 +17,7 @@ from structured_logging import configure_structured_logging
 
 configure_structured_logging(os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("stock-worker")
+install_migration_runtime_safety()
 install_yahoo_runtime_reliability()
 install_runtime_integrity_patch(market_worker)
 install_paper_autonomous_learning()
