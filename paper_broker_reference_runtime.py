@@ -37,6 +37,46 @@ def _broker_limits() -> tuple[float, float]:
     return price_tolerance, max_spread
 
 
+def _verified_quote_as_broker_book(symbol: str, payload: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Convert an already-verified execution payload back into broker-book shape.
+
+    The crypto worker has already authenticated and identity-checked the Robinhood
+    book before a candidate reaches the final paper-fill boundary. Reusing that
+    exact book prevents a second network read from turning a valid decision into
+    a false BROKER_QUOTE_INVALID/BROKER_QUOTE_UNAVAILABLE rejection.
+    """
+    if not isinstance(payload, dict):
+        return None
+    requested = str(symbol or "").upper().strip()
+    payload_symbol = str(
+        payload.get("provider_symbol")
+        or payload.get("requested_symbol")
+        or payload.get("symbol")
+        or requested
+    ).upper().strip()
+    provider = str(payload.get("current_data_provider") or payload.get("provider") or "").strip()
+    verified = payload.get("provider_quote_verified") is True or payload.get("quote_verified") is True
+    bid = _finite(payload.get("execution_bid") if payload.get("execution_bid") is not None else payload.get("bid"))
+    ask = _finite(payload.get("execution_ask") if payload.get("execution_ask") is not None else payload.get("ask"))
+    if (
+        not requested
+        or payload_symbol != requested
+        or provider != "Robinhood Crypto"
+        or not verified
+        or bid <= 0
+        or ask <= 0
+        or ask < bid
+    ):
+        return None
+    return {
+        "symbol": requested,
+        "bid": str(bid),
+        "ask": str(ask),
+        "bid_price": str(bid),
+        "ask_price": str(ask),
+    }
+
+
 def _validated_broker_reference(
     symbol: str,
     oracle_price: float,
@@ -213,13 +253,15 @@ def install_paper_broker_reference(worker: Any) -> bool:
     ):
         if str(market or "").lower() != "crypto":
             return current_buy(market, symbol, price, signal, *args, **kwargs)
-        reference = _validated_broker_reference(symbol, price)
+        verified_quote = kwargs.get("verified_quote")
+        broker_quote = _verified_quote_as_broker_book(symbol, verified_quote)
+        reference = _validated_broker_reference(symbol, price, broker_quote=broker_quote)
         if reference.get("ok") is not True:
             reason = str(reference.get("reason") or "PAPER_BROKER_REFERENCE_REJECTED")
             log.warning("PAPER BROKER REFERENCE BLOCK | side=BUY | symbol=%s | reason=%s", symbol, reason)
             return False, f"paper broker reference blocked: {reason}", None
         quote = _broker_anchored_quote(
-            kwargs.get("verified_quote"),
+            verified_quote,
             oracle_price=float(price),
             reference=reference,
         )
@@ -236,7 +278,8 @@ def install_paper_broker_reference(worker: Any) -> bool:
         if str(market or "").lower() != "crypto":
             return current_close(market, position, price, reason, quote_metadata=quote_metadata)
         symbol = str(position.get("symbol") or "").upper().strip()
-        reference = _validated_broker_reference(symbol, price)
+        broker_quote = _verified_quote_as_broker_book(symbol, quote_metadata)
+        reference = _validated_broker_reference(symbol, price, broker_quote=broker_quote)
         if reference.get("ok") is not True:
             block_reason = str(reference.get("reason") or "PAPER_BROKER_REFERENCE_REJECTED")
             log.warning("PAPER BROKER REFERENCE BLOCK | side=SELL | symbol=%s | reason=%s", symbol, block_reason)
