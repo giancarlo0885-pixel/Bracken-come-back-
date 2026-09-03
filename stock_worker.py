@@ -14,6 +14,7 @@ from stock_execution_repair import install_stock_execution_quote_repair
 from structured_logging import configure_structured_logging
 
 configure_structured_logging(os.getenv("LOG_LEVEL", "INFO"))
+logger = logging.getLogger("stock-worker")
 install_yahoo_runtime_reliability()
 install_runtime_integrity_patch(market_worker)
 install_paper_autonomous_learning()
@@ -25,7 +26,8 @@ if os.getenv("EXECUTION_MODE", "paper").strip().lower() == "paper":
     install_fee_aware_fifo_policy()
 
 # Keep this entrypoint in the stock-worker deploy watch set when paper-learning
-# runtime policy changes. Production source-sync marker: 2026-09-03.
+# runtime policy changes. Production source-sync marker: current main, 2026-09-03.
 if __name__ == "__main__":
+    logger.info("ORACLE STOCK SOURCE SYNC | current-main deployment active")
     prepare_capital_readiness_runtime(market_worker, "cash")
     market_worker.run_worker("cash")
