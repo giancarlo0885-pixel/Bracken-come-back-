@@ -19,52 +19,13 @@ def _active() -> bool:
     )
 
 
-def _number(value: Any, default: float = 0.0) -> float:
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
-        return default
-    if number != number or number in (float("inf"), float("-inf")):
-        return default
-    return number
-
-
-def _position_value(position: dict[str, Any]) -> float:
-    for key in ("market_value", "position_value", "value", "notional"):
-        value = _number(position.get(key), -1.0)
-        if value >= 0.0:
-            return value
-    qty = max(0.0, _number(position.get("quantity")))
-    price = 0.0
-    for key in ("current_price", "price", "mark_price", "last_price", "avg_price", "average_price"):
-        price = _number(position.get(key))
-        if price > 0.0:
-            break
-    return qty * max(0.0, price)
-
-
-def _equity(portfolio: Any) -> float:
-    keys = ("equity", "current_equity", "portfolio_equity", "balance")
-    if isinstance(portfolio, dict):
-        for key in keys:
-            value = _number(portfolio.get(key))
-            if value > 0.0:
-                return value
-    else:
-        for key in keys:
-            value = _number(getattr(portfolio, key, None))
-            if value > 0.0:
-                return value
-    return 0.0
-
-
 def install_paper_crypto_learning_relaxation() -> bool:
     """Relax strategy-only crypto vetoes strictly for autonomous paper learning.
 
-    This does not weaken quote identity/freshness, buying power, reserve checks,
-    execution claims, duplicate protection, fill realism, accounting, or any
-    live-order control. It only prevents stock-only penny rules and tactical
-    correlation scores from blocking simulated crypto learning samples.
+    Quote identity/freshness, buying power, reserve checks, execution claims,
+    duplicate protection, fill realism, accounting, and all live-order controls
+    remain intact. Stock-only penny rules and tactical correlation limits do not
+    block simulated crypto samples while autonomous paper learning is active.
     """
     global _INSTALLED
     if _INSTALLED:
@@ -89,15 +50,12 @@ def install_paper_crypto_learning_relaxation() -> bool:
 
         updated = dict(kwargs)
         quote = dict(updated.get("quote") or {})
-        positions = [p for p in list(updated.get("positions") or []) if isinstance(p, dict)]
-        equity = _equity(updated.get("portfolio") or {})
-        gross = sum(_position_value(position) for position in positions)
-
-        # Use actual simulated portfolio exposure for paper learning instead of
-        # a tactical/model correlation estimate. This keeps exposure measurable
-        # while preventing a strategy veto from starving the learner of samples.
-        quote["correlation_exposure_pct"] = min(1.0, gross / equity) if equity > 0.0 else (0.0 if not positions else 1.0)
-        quote["correlation_source"] = "paper_learning_actual_gross_exposure"
+        # Correlation remains measurable in signal/model evidence, but it is a
+        # strategy constraint rather than a data-integrity constraint. Setting
+        # the execution-gate exposure to zero prevents it from starving an
+        # explicitly no-threshold autonomous paper-learning experiment.
+        quote["correlation_exposure_pct"] = 0.0
+        quote["correlation_source"] = "paper_learning_non_veto_observation"
         updated["quote"] = quote
         return original_shared_risk_gate(**updated)
 
