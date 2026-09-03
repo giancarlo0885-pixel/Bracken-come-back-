@@ -15,14 +15,13 @@ def _first_present(quote: dict[str, Any], *keys: str) -> Any:
 
 
 def _normalized_book(quote: dict[str, Any]) -> dict[str, Decimal | bool] | None:
-    """Parse documented Robinhood best-bid/ask field shapes without synthesis.
+    """Parse documented Robinhood best-bid/ask shapes and fail closed on bad books.
 
-    Robinhood v2 reports the best available bid and ask across partner exchanges.
-    Those independently selected venue prices can temporarily form a crossed
-    aggregate book (best bid > best ask). Both sides are still authenticated,
-    positive executable references, so a crossed aggregate is not treated as
-    corrupt. The original bid/ask are preserved exactly and spread_pct records
-    the non-negative magnitude of the venue dislocation.
+    Execution truth must describe a coherent executable market. A crossed book
+    (best bid > best ask) is therefore rejected rather than converted into a
+    synthetic positive spread with ``abs``. We do not swap sides or fabricate a
+    price. If Robinhood returns an internally inconsistent aggregate snapshot,
+    callers must retry/fall back according to their existing read-only policy.
     """
     if not isinstance(quote, dict):
         return None
@@ -45,23 +44,30 @@ def _normalized_book(quote: dict[str, Any]) -> dict[str, Decimal | bool] | None:
         ask = Decimal(str(ask_raw))
     except Exception:
         return None
+
     if not bid.is_finite() or not ask.is_finite() or bid <= 0 or ask <= 0:
         return None
-    mid = (bid + ask) / Decimal("2")
-    if mid <= 0:
+    if ask < bid:
         return None
-    spread_pct = (abs(ask - bid) / mid) * Decimal("100")
+
+    mid = (bid + ask) / Decimal("2")
+    if not mid.is_finite() or mid <= 0:
+        return None
+    spread_pct = ((ask - bid) / mid) * Decimal("100")
+    if not spread_pct.is_finite() or spread_pct < 0:
+        return None
+
     return {
         "bid": bid,
         "ask": ask,
         "mid": mid,
         "spread_pct": spread_pct,
-        "crossed": bool(bid > ask),
+        "crossed": False,
     }
 
 
 def install_robinhood_quote_core_fix() -> bool:
-    """Install one canonical broker-book parser for all read-only execution paths."""
+    """Install one canonical fail-closed broker-book parser for read-only paths."""
     if getattr(rh, "_oracle_quote_core_fix_installed", False):
         return False
     rh.best_bid_ask = _normalized_book
