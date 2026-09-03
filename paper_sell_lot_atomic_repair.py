@@ -45,23 +45,17 @@ def _opened_at(position: dict[str, Any], now: Any) -> datetime:
     return result
 
 
-def install_atomic_paper_sell_lot_repair(worker: Any) -> None:
+def install_atomic_paper_sell_lot_repair(_worker: Any | None = None) -> None:
     """Repair historical paper lot gaps inside the active SELL transaction.
 
-    Older paper positions can predate the durable position-lot ledger. A previous
-    repair attempted to reopen ``positions`` from a second connection after the
-    SELL path had already deleted that row, so attribution could still fail with
-    ``not enough open lot quantity to close``.
-
-    This wrapper runs immediately before the existing sell-attribution function,
-    on the caller's transaction and connection. It locks current open lots and,
-    only in provably paper-only mode, backfills a missing historical lot from the
-    canonical position snapshot already used by the SELL. Cost basis is derived
-    from canonical position cost minus known open-lot cost; no price is invented.
-    Any contradictory/insufficient evidence still fails closed and the enclosing
-    SELL transaction rolls back.
+    ``_record_sell_attribution`` belongs to ``oracle_bot`` rather than
+    ``market_worker``. Importing it here after paper fee-accounting installation
+    ensures this wrapper sits on the final attribution chain and shares the
+    caller's active database transaction.
     """
-    original = worker._record_sell_attribution
+    import oracle_bot
+
+    original = oracle_bot._record_sell_attribution
     if getattr(original, "_oracle_atomic_paper_lot_repair", False):
         return
 
@@ -148,4 +142,4 @@ def install_atomic_paper_sell_lot_repair(worker: Any) -> None:
         return original(conn, **kwargs)
 
     repaired._oracle_atomic_paper_lot_repair = True
-    worker._record_sell_attribution = repaired
+    oracle_bot._record_sell_attribution = repaired
