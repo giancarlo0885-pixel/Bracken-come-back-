@@ -25,7 +25,7 @@ if os.getenv("EXECUTION_MODE", "paper").strip().lower() == "paper":
     install_fee_aware_fifo_policy()
 
 # Keep this entrypoint in the stock-worker deploy watch set when paper-learning
-# runtime policy changes.
+# runtime policy changes. Production source-sync marker: 2026-09-03.
 if __name__ == "__main__":
     prepare_capital_readiness_runtime(market_worker, "cash")
     market_worker.run_worker("cash")
