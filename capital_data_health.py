@@ -26,15 +26,17 @@ def _parse_ts(value: Any) -> datetime | None:
 
 
 def provider_health_summary(*, maximum_age_minutes: int = 90) -> dict[str, Any]:
-    """Report health for providers that actually feed capital quote consensus.
+    """Report health from providers that actually supplied execution evidence.
 
-    ``provider_health`` currently also contains contextual/news providers such as
-    Gemini. A news quota event must not masquerade as a market-data outage. The
-    capital provider gate therefore uses recent *confirmed* quote-verification
-    observations from the same provider pair used by execution consensus.
+    Quote-consensus rows remain the strongest independent evidence. Broker-anchored
+    paper fills are also valid recent provider evidence because a fill is persisted
+    only after the execution quote passes the Oracle's quote identity/freshness and
+    paper-broker validation path. This matters when Robinhood is the primary point-
+    in-time crypto mark: those quotes no longer need a Yahoo/Coinbase consensus row,
+    so counting only ``quote_verifications`` incorrectly reported zero providers.
 
-    This remains fail-closed: no recent confirmed market-provider evidence means
-    provider health is not ready.
+    Context/news provider rows are intentionally excluded. No recent confirmed
+    quote or broker-fill evidence still fails closed.
     """
     cutoff = datetime.now(timezone.utc) - timedelta(minutes=max(1, int(maximum_age_minutes)))
     try:
@@ -42,16 +44,23 @@ def provider_health_summary(*, maximum_age_minutes: int = 90) -> dict[str, Any]:
             """
             SELECT provider, MAX(created_at) AS last_seen, COUNT(*)::int AS confirmed_samples
             FROM (
-                SELECT primary_provider AS provider, created_at, consensus_status
+                SELECT primary_provider AS provider, created_at
                 FROM quote_verifications
+                WHERE LOWER(COALESCE(consensus_status,'')) IN ('pass','verified','confirmed','agreement','ok')
                 UNION ALL
-                SELECT secondary_provider AS provider, created_at, consensus_status
+                SELECT secondary_provider AS provider, created_at
                 FROM quote_verifications
+                WHERE LOWER(COALESCE(consensus_status,'')) IN ('pass','verified','confirmed','agreement','ok')
+                UNION ALL
+                SELECT quote_provider AS provider, created_at
+                FROM paper_fills
+                WHERE LOWER(COALESCE(market,''))='crypto'
+                  AND LOWER(COALESCE(side,'')) IN ('buy','sell')
+                  AND COALESCE(notional,0) > 0
             ) evidence
             WHERE provider IS NOT NULL
               AND provider <> ''
               AND created_at >= %s
-              AND LOWER(COALESCE(consensus_status,'')) IN ('pass','verified','confirmed','agreement','ok')
             GROUP BY provider
             ORDER BY provider
             """,
@@ -65,7 +74,7 @@ def provider_health_summary(*, maximum_age_minutes: int = 90) -> dict[str, Any]:
             "configured_providers": 0,
             "healthy_providers": 0,
             "providers": [],
-            "source": "quote_verifications",
+            "source": "quote_verifications+paper_fills",
         }
 
     now = datetime.now(timezone.utc)
@@ -81,7 +90,7 @@ def provider_health_summary(*, maximum_age_minutes: int = 90) -> dict[str, Any]:
             {
                 "provider": str(item.get("provider") or ""),
                 "configured": True,
-                "status": "confirmed_quote_evidence" if healthy else "stale_or_missing_quote_evidence",
+                "status": "recent_execution_evidence" if healthy else "stale_or_missing_execution_evidence",
                 "age_minutes": age_minutes,
                 "confirmed_samples": samples,
                 "healthy": healthy,
@@ -96,7 +105,7 @@ def provider_health_summary(*, maximum_age_minutes: int = 90) -> dict[str, Any]:
         "configured_providers": observed_count,
         "healthy_providers": healthy_count,
         "providers": details,
-        "source": "quote_verifications",
+        "source": "quote_verifications+paper_fills",
     }
 
 
@@ -143,8 +152,6 @@ def quote_integrity_summary(*, lookback_hours: int = 24, maximum_divergence_pct:
     rejected = int(stats.get("rejected") or 0)
     unsafe = int(stats.get("unsafe_confirmed_divergent") or 0)
     safely_rejected = int(stats.get("safely_rejected_divergent") or 0)
-    # Zero samples is UNKNOWN, never silently PASS. Rejected divergence is safe
-    # only because the execution guard prevented it from becoming accepted truth.
     ok = total > 0 and confirmed > 0 and unsafe == 0
     return {
         "ok": ok,
@@ -154,8 +161,6 @@ def quote_integrity_summary(*, lookback_hours: int = 24, maximum_divergence_pct:
         "rejected": rejected,
         "unsafe_confirmed_divergent": unsafe,
         "safely_rejected_divergent": safely_rejected,
-        # Compatibility field: only divergences that escaped the rejection gate
-        # count as readiness-failing divergence.
         "divergent": unsafe,
         "maximum_divergence_pct": float(maximum_divergence_pct),
     }
@@ -193,9 +198,6 @@ def capital_data_health() -> dict[str, Any]:
     providers = provider_health_summary()
     quotes = quote_integrity_summary()
     news = news_integrity_summary()
-    # News is a contextual evidence source. If enabled and unhealthy, the Oracle
-    # must abstain from claims that require news, but market-price integrity is
-    # the hard capital gate here.
     hard_ok = bool(providers.get("ok")) and bool(quotes.get("ok"))
     return {
         "ok": hard_ok,
