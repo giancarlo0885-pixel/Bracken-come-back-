@@ -12,6 +12,7 @@ from crypto_forecast_runtime import install_crypto_short_horizon_forecast
 from crypto_quote_readiness_sampler import install_v39_quote_verification_sampler
 from crypto_v39_risk_bridge import install_crypto_v39_risk_bridge
 from crypto_v39_spread_bridge import install_crypto_v39_spread_bridge
+from current_model_readiness_fix import install_current_model_readiness_fix
 from live_broker_capital import install_live_broker_capital_sizing
 from live_v39_broker_bridge import install_live_v39_broker_capital_bridge
 from paper_autonomous_learning import install_paper_autonomous_learning
@@ -69,8 +70,10 @@ install_strategic_rebalance_optimizer_bridge(market_worker)
 install_core_rebalance_optimizer_trace(market_worker)
 install_core_rebalance_observability(market_worker)
 # Install before prepare_capital_readiness_runtime() so freshly generated model
-# evidence uses the abstention-aware temporal causality probe.
+# evidence uses the abstention-aware temporal causality probe and readiness judges
+# only the latest validation generation for each symbol.
 install_selective_model_leakage_fix()
+install_current_model_readiness_fix()
 if os.getenv("EXECUTION_MODE", "paper").strip().lower() == "paper":
     install_paper_execution_reality(market_worker)
     install_paper_execution_accounting(market_worker)
