@@ -10,6 +10,12 @@ from typing import Any, Callable
 os.environ.setdefault("UI_AUTO_REFRESH", "false")
 
 from database import database_ready
+from migration_runtime_safety import install_migration_runtime_safety
+
+
+# Install before app.py is executed so every later ``from migrations import
+# run_migrations`` in the Streamlit process receives the restart-safe runner.
+install_migration_runtime_safety()
 
 
 def database_preflight(
