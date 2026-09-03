@@ -84,9 +84,12 @@ if os.getenv("EXECUTION_MODE", "paper").strip().lower() == "paper":
     # Must run after fee-aware attribution is installed so the repair wraps the
     # final SELL attribution path and shares the caller's database transaction.
     install_atomic_paper_sell_lot_repair(market_worker)
-    install_paper_lifecycle_observability(market_worker)
     install_paper_broker_reference(market_worker)
+    # The SELL router must be inside the lifecycle observer. This lets the
+    # observer see both routed exits and optimized entries in the same returned
+    # action list; the previous order made genuine SELLs appear as sells=0.
     install_paper_sell_execution_router(market_worker)
+    install_paper_lifecycle_observability(market_worker)
 
 # Keep this entrypoint in the crypto-worker deploy watch set; readiness helpers are imported above.
 # Production deploy marker: broker-anchored paper BUY/SELL execution, transport resilience, and DB lifecycle verification are active.
