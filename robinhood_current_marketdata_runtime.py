@@ -10,7 +10,7 @@ from typing import Any, Iterable
 
 from asset_routing import infer_asset_class
 from market_data import MarketSnapshot
-from robinhood_crypto_api import RobinhoodCryptoClient, best_bid_ask
+import robinhood_crypto_api as rh
 
 
 log = logging.getLogger("robinhood-current-marketdata")
@@ -29,6 +29,17 @@ def _finite_positive(value: Any) -> float | None:
 def _crypto_symbol(symbol: str) -> bool:
     normalized = str(symbol or "").upper().strip()
     return bool(normalized and infer_asset_class(normalized) == "crypto")
+
+
+def _signal_value(signal: Any, name: str, default: Any = None) -> Any:
+    if isinstance(signal, dict):
+        return signal.get(name, default)
+    return getattr(signal, name, default)
+
+
+def _signal_route(signal: Any) -> dict[str, Any]:
+    route = _signal_value(signal, "market_data_route", {}) or {}
+    return dict(route) if isinstance(route, dict) else {}
 
 
 def robinhood_recoverable_symbols(
@@ -54,13 +65,17 @@ def snapshot_from_robinhood_quote(
     Robinhood's v2 best-bid/ask response does not expose an exchange-event
     timestamp. The snapshot timestamp is therefore the authenticated provider
     read time, and the verification basis records that distinction explicitly.
+
+    ``rh.best_bid_ask`` is intentionally resolved at call time. The worker installs
+    Robinhood's documented quote-shape compatibility patch during startup, and a
+    copied function reference would bypass that patch for spread-inclusive books.
     """
     requested = str(symbol or "").upper().strip()
     quote_symbol = str(quote.get("symbol") or "").upper().strip()
     if not requested or quote_symbol != requested or not _crypto_symbol(requested):
         return None
 
-    book = best_bid_ask(quote)
+    book = rh.best_bid_ask(quote)
     if book is None:
         return None
 
@@ -101,11 +116,23 @@ def snapshot_from_robinhood_quote(
 
 
 def overlay_execution_payload(payload: dict[str, Any], snapshot: MarketSnapshot) -> dict[str, Any]:
-    """Replace only the point-in-time execution mark; preserve research provenance."""
+    """Attach a Robinhood execution mark while retaining immutable research provenance."""
     data = dict(payload or {})
     symbol = str(data.get("symbol") or snapshot.symbol or "").upper().strip()
     if symbol != str(snapshot.symbol or "").upper().strip():
         return data
+
+    analysis_price = data.get("analysis_price", data.get("price"))
+    analysis_provider = data.get("analysis_provider", data.get("provider"))
+    analysis_quote_timestamp = data.get(
+        "analysis_quote_timestamp",
+        data.get("source_quote_timestamp") or data.get("quote_timestamp") or data.get("timestamp"),
+    )
+    analysis_source_interval = data.get(
+        "analysis_source_interval",
+        data.get("source_interval") or data.get("interval"),
+    )
+    analysis_verification_basis = data.get("analysis_verification_basis", data.get("verification_basis"))
 
     provider_support = [
         str(item)
@@ -115,13 +142,24 @@ def overlay_execution_payload(payload: dict[str, Any], snapshot: MarketSnapshot)
     if "Robinhood Crypto" not in provider_support:
         provider_support.append("Robinhood Crypto")
 
+    liquidity = _finite_positive(
+        data.get("avg_dollar_volume")
+        or data.get("average_dollar_volume")
+        or data.get("liquidity")
+    )
+
     data.update(
         {
-            "analysis_price": data.get("price"),
-            "analysis_provider": data.get("provider"),
-            "analysis_quote_timestamp": data.get("quote_timestamp") or data.get("timestamp"),
-            "analysis_source_interval": data.get("source_interval") or data.get("interval"),
-            "analysis_verification_basis": data.get("verification_basis"),
+            "analysis_price": analysis_price,
+            "analysis_provider": analysis_provider,
+            "analysis_quote_timestamp": analysis_quote_timestamp,
+            "analysis_source_interval": analysis_source_interval,
+            "analysis_verification_basis": analysis_verification_basis,
+            "execution_price": snapshot.price,
+            "execution_bid": snapshot.bid,
+            "execution_ask": snapshot.ask,
+            "execution_quote_timestamp": snapshot.timestamp,
+            "execution_source_interval": snapshot.interval,
             "price": snapshot.price,
             "bid": snapshot.bid,
             "ask": snapshot.ask,
@@ -139,6 +177,7 @@ def overlay_execution_payload(payload: dict[str, Any], snapshot: MarketSnapshot)
             "stale": False,
             "spread_pct": snapshot.spread_pct,
             "spread_known": snapshot.spread_pct is not None,
+            "tradeable": bool(snapshot.quote_verified is True and liquidity is not None),
             "source_mode": "broker_current_quote",
             "source_capability": snapshot.source_capability,
             "source_identity": snapshot.source_identity,
@@ -156,8 +195,8 @@ def overlay_execution_payload(payload: dict[str, Any], snapshot: MarketSnapshot)
 
 
 class RobinhoodCurrentData:
-    def __init__(self, client: RobinhoodCryptoClient | None = None) -> None:
-        self.client = client or RobinhoodCryptoClient()
+    def __init__(self, client: rh.RobinhoodCryptoClient | None = None) -> None:
+        self.client = client or rh.RobinhoodCryptoClient()
         self._lock = threading.Lock()
         self._cache: dict[str, tuple[float, MarketSnapshot]] = {}
         self._tradable_symbols: set[str] | None = None
@@ -265,6 +304,11 @@ def install_robinhood_current_marketdata(worker: Any) -> bool:
     opportunity ranking marks, and live position pulses use Robinhood best
     bid/ask and fail closed when an authenticated broker quote is unavailable.
 
+    The forecast remains bound to the analysis bar that generated it. A separate
+    current Robinhood book may move after that bar, so the forecast gate validates
+    the saved analysis interval/timestamp while still calculating expected return
+    against the current Robinhood execution price.
+
     A legacy provider quarantine is not allowed to suppress a configured crypto
     seed when Robinhood itself currently reports that exact USD pair as API
     tradable. The quarantine row is retained for audit; only the runtime block is
@@ -276,6 +320,7 @@ def install_robinhood_current_marketdata(worker: Any) -> bool:
         return False
 
     import market_data
+    import oracle_bot
 
     provider = RobinhoodCurrentData()
     if provider.client.configured().get("ok") is not True:
@@ -292,6 +337,7 @@ def install_robinhood_current_marketdata(worker: Any) -> bool:
     original_many_snapshots = market_data.get_many_snapshots
     original_execution_quote = worker._execution_quote_payload_from_history
     original_active_quarantine = worker._active_quarantined_symbols
+    original_forecast_gate = oracle_bot._entry_forecast_gate
 
     def active_quarantined_symbols() -> set[str]:
         quarantined = set(original_active_quarantine() or set())
@@ -350,6 +396,46 @@ def install_robinhood_current_marketdata(worker: Any) -> bool:
         )
         return enriched
 
+    def forecast_gate(
+        market: str,
+        symbol: str,
+        price: float,
+        signal: Any | None = None,
+        quote: dict[str, Any] | None = None,
+    ) -> tuple[bool, str]:
+        if str(market or "").lower() != "crypto" or not isinstance(quote, dict):
+            return original_forecast_gate(market, symbol, price, signal=signal, quote=quote)
+        if quote.get("current_data_provider") != "Robinhood Crypto":
+            return original_forecast_gate(market, symbol, price, signal=signal, quote=quote)
+
+        analysis_quote = dict(quote)
+        route = _signal_route(signal)
+        analysis_interval = (
+            quote.get("analysis_source_interval")
+            or _signal_value(signal, "source_interval", None)
+            or route.get("interval")
+            or route.get("source_interval")
+        )
+        analysis_timestamp = (
+            quote.get("analysis_quote_timestamp")
+            or _signal_value(signal, "source_quote_timestamp", None)
+            or route.get("quote_timestamp")
+        )
+        if analysis_interval:
+            analysis_quote["interval"] = analysis_interval
+            analysis_quote["source_interval"] = analysis_interval
+        if analysis_timestamp:
+            analysis_quote["quote_timestamp"] = analysis_timestamp
+            analysis_quote["timestamp"] = analysis_timestamp
+
+        return original_forecast_gate(
+            market,
+            symbol,
+            price,
+            signal=signal,
+            quote=analysis_quote,
+        )
+
     recovered_now: set[str] = set()
     try:
         current_quarantine = set(original_active_quarantine() or set())
@@ -362,6 +448,7 @@ def install_robinhood_current_marketdata(worker: Any) -> bool:
     worker.get_many_snapshots = many_snapshots
     worker._active_quarantined_symbols = active_quarantined_symbols
     worker._execution_quote_payload_from_history = execution_quote_payload_from_history
+    oracle_bot._entry_forecast_gate = forecast_gate
     worker._robinhood_current_marketdata_installed = True
     worker._robinhood_current_marketdata_provider = provider
     log.info(
