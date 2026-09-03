@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import logging
 import math
+import os
+from pathlib import Path
 import threading
 import time
 from typing import Any
@@ -34,6 +36,26 @@ _YAHOO_CRYPTO_NATIVE_SYMBOLS = {
 def yahoo_native_symbol(symbol: str) -> str:
     requested = str(symbol or "").upper().strip()
     return _YAHOO_CRYPTO_NATIVE_SYMBOLS.get(requested, requested)
+
+
+def _install_yfinance_cache(market_data_module: Any) -> str:
+    """Use one explicit writable timezone-cache directory per container.
+
+    yfinance's default ``/root/.cache/py-yfinance`` initialization can race when
+    the always-on worker launches fast and deep scans concurrently. Configure the
+    cache once before any Ticker object is created so that harmless directory
+    creation races do not disable the cache or pollute production logs.
+    """
+    location = str(os.getenv("YFINANCE_TZ_CACHE_DIR", "/tmp/oracle-yfinance-tz") or "/tmp/oracle-yfinance-tz").strip()
+    try:
+        Path(location).mkdir(parents=True, exist_ok=True)
+        setter = getattr(market_data_module.yf, "set_tz_cache_location", None)
+        if callable(setter):
+            setter(location)
+            return location
+    except Exception as exc:
+        log.info("YFINANCE CACHE SETUP | status=FALLBACK | reason=%s", exc.__class__.__name__)
+    return "default"
 
 
 def _install_current_crypto_universe() -> bool:
@@ -167,8 +189,6 @@ def yahoo_reference_history(market_data_module: Any, symbol: str, period: str, i
             )
             return pd.DataFrame()
 
-        # Reject a non-finite/invalid terminal close before the router can treat
-        # the frame as a usable paper reference.
         try:
             close = pd.to_numeric(normalized["Close"], errors="coerce").dropna()
             latest = float(close.iloc[-1]) if len(close) else float("nan")
@@ -191,13 +211,6 @@ def yahoo_reference_history(market_data_module: Any, symbol: str, period: str, i
 
 
 def _install_yahoo_strict_alias_preservation() -> None:
-    """Preserve canonical identity while retaining Yahoo's provider-native alias.
-
-    ``provider_router._strict_yahoo_history`` historically restamps a Yahoo frame
-    with the canonical symbol, which is correct for identity checks but would
-    erase provider aliases. Wrap only aliased instruments so canonical Oracle
-    identity remains stable while provenance retains the actual Yahoo instrument.
-    """
     import provider_router
 
     original = provider_router._strict_yahoo_history
@@ -245,6 +258,7 @@ def install_yahoo_runtime_reliability() -> None:
         return
     import market_data
 
+    cache_location = _install_yfinance_cache(market_data)
     universe_changed = _install_current_crypto_universe()
 
     def patched(symbol: str, period: str, interval: str) -> pd.DataFrame:
@@ -254,6 +268,7 @@ def install_yahoo_runtime_reliability() -> None:
     _install_yahoo_strict_alias_preservation()
     _INSTALLED = True
     log.info(
-        "Installed Yahoo fallback single-flight, native-symbol aliases, unavailable-symbol cooldown, and current crypto universe | universe_changed=%s",
+        "Installed Yahoo fallback single-flight, native-symbol aliases, unavailable-symbol cooldown, and current crypto universe | universe_changed=%s | tz_cache=%s",
         universe_changed,
+        cache_location,
     )
