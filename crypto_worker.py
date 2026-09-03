@@ -14,6 +14,7 @@ from crypto_v39_risk_bridge import install_crypto_v39_risk_bridge
 from crypto_v39_spread_bridge import install_crypto_v39_spread_bridge
 from live_broker_capital import install_live_broker_capital_sizing
 from live_v39_broker_bridge import install_live_v39_broker_capital_bridge
+from paper_autonomous_learning import install_paper_autonomous_learning
 from paper_broker_reference_runtime import install_paper_broker_reference
 from paper_execution_accounting import install_paper_execution_accounting
 from paper_execution_reality import install_paper_execution_reality
@@ -35,6 +36,7 @@ logger = logging.getLogger("crypto-worker")
 
 install_yahoo_runtime_reliability()
 install_runtime_integrity_patch(market_worker)
+install_paper_autonomous_learning()
 install_core_rebalance_score_compat()
 install_strategic_core_rebalance_producer(market_worker)
 install_binance_us_reference_fallback()
