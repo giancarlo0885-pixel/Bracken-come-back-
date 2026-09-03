@@ -33,6 +33,7 @@ from robinhood_quote_resilience import install_robinhood_quote_resilience
 from robinhood_transport_resilience import install_robinhood_transport_resilience
 from runtime_integrity_patch import install_runtime_integrity_patch
 from runtime_provider_reliability import install_yahoo_runtime_reliability
+from selective_model_leakage_fix import install_selective_model_leakage_fix
 from strategic_core_rebalance_runtime import install_strategic_core_rebalance_producer
 from strategic_rebalance_optimizer_bridge import install_strategic_rebalance_optimizer_bridge
 from structured_logging import configure_structured_logging
@@ -67,6 +68,9 @@ install_paper_core_rebalance_qualification(market_worker)
 install_strategic_rebalance_optimizer_bridge(market_worker)
 install_core_rebalance_optimizer_trace(market_worker)
 install_core_rebalance_observability(market_worker)
+# Install before prepare_capital_readiness_runtime() so freshly generated model
+# evidence uses the abstention-aware temporal causality probe.
+install_selective_model_leakage_fix()
 if os.getenv("EXECUTION_MODE", "paper").strip().lower() == "paper":
     install_paper_execution_reality(market_worker)
     install_paper_execution_accounting(market_worker)
