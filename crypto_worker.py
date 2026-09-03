@@ -21,6 +21,7 @@ from paper_execution_accounting import install_paper_execution_accounting
 from paper_execution_reality import install_paper_execution_reality
 from paper_fee_policy import install_fee_aware_fifo_policy
 from paper_lifecycle_observability import install_paper_lifecycle_observability
+from paper_sell_db_verification import emit_recent_crypto_sell_db_verification
 from paper_sell_execution_router import install_paper_sell_execution_router
 from readiness_observability import emit_capital_readiness_report
 from robinhood_current_marketdata_runtime import install_robinhood_current_marketdata
@@ -71,7 +72,7 @@ if os.getenv("EXECUTION_MODE", "paper").strip().lower() == "paper":
     install_paper_sell_execution_router(market_worker)
 
 # Keep this entrypoint in the crypto-worker deploy watch set; readiness helpers are imported above.
-# Production deploy marker: Robinhood current crypto market data + broker-anchored paper execution + SELL routing are active.
+# Production deploy marker: broker-anchored paper BUY/SELL execution and DB lifecycle verification are active.
 
 
 def run_robinhood_startup_preflight() -> None:
@@ -142,4 +143,6 @@ if __name__ == "__main__":
     prepare_capital_readiness_runtime(market_worker, "crypto")
     run_robinhood_startup_preflight()
     emit_capital_readiness_report(logger)
+    if os.getenv("EXECUTION_MODE", "paper").strip().lower() == "paper":
+        emit_recent_crypto_sell_db_verification()
     market_worker.run_worker("crypto")
