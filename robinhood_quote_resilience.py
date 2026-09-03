@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from decimal import Decimal
 import os
 import time
 from typing import Any, Iterable
@@ -26,16 +27,55 @@ def _grace_seconds() -> float:
     return min(60.0, max(3.0, value))
 
 
-def install_robinhood_quote_resilience(worker: Any) -> bool:
-    """Repair transient/partial Robinhood book reads for paper execution.
+def _first_present(quote: dict[str, Any], *keys: str) -> Any:
+    for key in keys:
+        value = quote.get(key)
+        if value not in (None, ""):
+            return value
+    return None
 
-    A batch response may occasionally omit an otherwise API-tradable symbol.
-    Missing symbols get one immediate single-symbol retry. Symbols Robinhood's
-    trading-pairs endpoint does not mark API-tradable are never sent to the best
-    bid/ask endpoint, which documents HTTP 400 for unsupported pairs. In
-    paper-only mode, a previously authenticated book may be reused for at most a
-    short bounded grace window. Live execution never uses that grace path.
-    """
+
+def _invalid_book_reason(quote: dict[str, Any]) -> str:
+    if not isinstance(quote, dict):
+        return "NOT_OBJECT"
+    bid_raw = _first_present(quote, "bid_price", "bid", "bid_inclusive_of_sell_spread")
+    ask_raw = _first_present(quote, "ask_price", "ask", "ask_inclusive_of_buy_spread")
+    if bid_raw is None:
+        return "BID_MISSING"
+    if ask_raw is None:
+        return "ASK_MISSING"
+    try:
+        bid = Decimal(str(bid_raw))
+        ask = Decimal(str(ask_raw))
+    except Exception:
+        return f"NON_NUMERIC:bid_type={type(bid_raw).__name__}:ask_type={type(ask_raw).__name__}"
+    if not bid.is_finite() or not ask.is_finite():
+        return "NON_FINITE"
+    if bid <= 0 or ask <= 0:
+        return "NON_POSITIVE"
+    if ask < bid:
+        return "CROSSED_BOOK"
+    return "UNKNOWN"
+
+
+def _public_quote_keys(quote: dict[str, Any]) -> str:
+    allowed = {
+        "symbol",
+        "bid",
+        "ask",
+        "bid_price",
+        "ask_price",
+        "bid_inclusive_of_sell_spread",
+        "ask_inclusive_of_buy_spread",
+        "bid_inclusive_of_sell_fee",
+        "ask_inclusive_of_buy_fee",
+        "timestamp",
+    }
+    return ",".join(sorted(str(key) for key in quote.keys() if str(key) in allowed)) or "none"
+
+
+def install_robinhood_quote_resilience(worker: Any) -> bool:
+    """Repair transient/partial Robinhood book reads for paper execution."""
     if getattr(worker, "_robinhood_quote_resilience_installed", False):
         return False
     provider = getattr(worker, "_robinhood_current_marketdata_provider", None)
@@ -91,8 +131,10 @@ def install_robinhood_quote_resilience(worker: Any) -> bool:
             snapshot = snapshot_from_robinhood_quote(symbol, quote, fetched_at=read_time)
             if snapshot is None:
                 worker.log.info(
-                    "CRYPTO | ROBINHOOD SINGLE QUOTE RETRY | symbol=%s | status=INVALID_BOOK | api_tradable=true",
+                    "CRYPTO | ROBINHOOD SINGLE QUOTE RETRY | symbol=%s | status=INVALID_BOOK | reason=%s | public_keys=%s | api_tradable=true",
                     symbol,
+                    _invalid_book_reason(quote),
+                    _public_quote_keys(quote),
                 )
                 continue
             inserted_at = time.monotonic()
