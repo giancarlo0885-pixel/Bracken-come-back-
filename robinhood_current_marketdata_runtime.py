@@ -31,6 +31,18 @@ def _crypto_symbol(symbol: str) -> bool:
     return bool(normalized and infer_asset_class(normalized) == "crypto")
 
 
+def robinhood_recoverable_symbols(
+    quarantined: Iterable[str],
+    robinhood_tradable: Iterable[str],
+    configured_watchlist: Iterable[str],
+) -> set[str]:
+    """Return legacy-quarantined crypto seeds Robinhood now proves are valid."""
+    blocked = {str(symbol or "").upper().strip() for symbol in quarantined if str(symbol or "").strip()}
+    supported = {str(symbol or "").upper().strip() for symbol in robinhood_tradable if str(symbol or "").strip()}
+    configured = {str(symbol or "").upper().strip() for symbol in configured_watchlist if str(symbol or "").strip()}
+    return blocked & supported & configured
+
+
 def snapshot_from_robinhood_quote(
     symbol: str,
     quote: dict[str, Any],
@@ -148,6 +160,7 @@ class RobinhoodCurrentData:
         self.client = client or RobinhoodCryptoClient()
         self._lock = threading.Lock()
         self._cache: dict[str, tuple[float, MarketSnapshot]] = {}
+        self._tradable_symbols: set[str] | None = None
 
     @staticmethod
     def _ttl_seconds() -> float:
@@ -156,6 +169,24 @@ class RobinhoodCurrentData:
         except ValueError:
             value = 3.0
         return min(30.0, max(1.0, value))
+
+    def tradable_symbols(self) -> set[str]:
+        if self._tradable_symbols is not None:
+            return set(self._tradable_symbols)
+        try:
+            pairs = self.client.trading_pairs()
+        except Exception as exc:
+            log.warning("Robinhood trading-pair discovery failed | error=%s", exc.__class__.__name__)
+            return set()
+        supported = {
+            str(pair.get("symbol") or "").upper().strip()
+            for pair in pairs or []
+            if isinstance(pair, dict)
+            and pair.get("tradable") is True
+            and str(pair.get("symbol") or "").strip()
+        }
+        self._tradable_symbols = supported
+        return set(supported)
 
     def _cached(self, symbol: str, now: float) -> MarketSnapshot | None:
         cached = self._cache.get(symbol)
@@ -233,6 +264,11 @@ def install_robinhood_current_marketdata(worker: Any) -> bool:
     historical bars required by technical models. Crypto execution marks,
     opportunity ranking marks, and live position pulses use Robinhood best
     bid/ask and fail closed when an authenticated broker quote is unavailable.
+
+    A legacy provider quarantine is not allowed to suppress a configured crypto
+    seed when Robinhood itself currently reports that exact USD pair as API
+    tradable. The quarantine row is retained for audit; only the runtime block is
+    bypassed for that broker-verified configured symbol.
     """
     if os.getenv("ROBINHOOD_CRYPTO_ENABLED", "false").strip().lower() != "true":
         return False
@@ -246,9 +282,21 @@ def install_robinhood_current_marketdata(worker: Any) -> bool:
         log.warning("Robinhood current-data bridge not installed: credentials unavailable")
         return False
 
+    robinhood_tradable = provider.tradable_symbols()
+    configured_crypto = set(getattr(worker, "WATCHLISTS", {}).get("crypto", {}).keys())
+    if not robinhood_tradable:
+        log.warning("Robinhood current-data bridge not installed: no API-tradable crypto pairs returned")
+        return False
+
     original_live_snapshot = market_data.get_live_snapshot
     original_many_snapshots = market_data.get_many_snapshots
     original_execution_quote = worker._execution_quote_payload_from_history
+    original_active_quarantine = worker._active_quarantined_symbols
+
+    def active_quarantined_symbols() -> set[str]:
+        quarantined = set(original_active_quarantine() or set())
+        recoverable = robinhood_recoverable_symbols(quarantined, robinhood_tradable, configured_crypto)
+        return quarantined - recoverable
 
     def live_snapshot(symbol: str) -> MarketSnapshot | None:
         if not _crypto_symbol(symbol):
@@ -302,11 +350,24 @@ def install_robinhood_current_marketdata(worker: Any) -> bool:
         )
         return enriched
 
+    recovered_now: set[str] = set()
+    try:
+        current_quarantine = set(original_active_quarantine() or set())
+        recovered_now = robinhood_recoverable_symbols(current_quarantine, robinhood_tradable, configured_crypto)
+    except Exception:
+        recovered_now = set()
+
     market_data.get_live_snapshot = live_snapshot
     market_data.get_many_snapshots = many_snapshots
     worker.get_many_snapshots = many_snapshots
+    worker._active_quarantined_symbols = active_quarantined_symbols
     worker._execution_quote_payload_from_history = execution_quote_payload_from_history
     worker._robinhood_current_marketdata_installed = True
     worker._robinhood_current_marketdata_provider = provider
-    log.info("Installed Robinhood Crypto primary current-data bridge | endpoint=best_bid_ask | broker_submission=NONE")
+    log.info(
+        "Installed Robinhood Crypto primary current-data bridge | endpoint=best_bid_ask | api_tradable_pairs=%d | configured_pairs=%d | legacy_quarantine_recovered=%d | broker_submission=NONE",
+        len(robinhood_tradable),
+        len(configured_crypto),
+        len(recovered_now),
+    )
     return True
