@@ -180,6 +180,11 @@ def fee_aware_fifo_close_lots(
         raise ValueError("close quantity must be positive")
     _reconcile_partial_lot_gap(lots, remaining)
     total_close_quantity = remaining
+    # Position/lot quantities are persisted at finite decimal precision. Use the
+    # same narrow tolerance for the terminal FIFO remainder so harmless numeric
+    # dust cannot reject a fully attributable close. Material shortages still
+    # exceed this bound and fail closed.
+    quantity_tolerance = max(1e-10, total_close_quantity * 1e-9)
     exit_dt = exit_time
     if not isinstance(exit_dt, datetime):
         text = str(exit_time or "").strip()
@@ -214,8 +219,10 @@ def fee_aware_fifo_close_lots(
         entry_cost_basis = _finite(lot.entry_price) * close_qty + entry_fee_allocated
         return_pct = round_trip_net / entry_cost_basis * 100.0 if entry_cost_basis > 0 else 0.0
 
-        lot.quantity_remaining = round(lot_remaining - close_qty, 10)
-        remaining = round(remaining - close_qty, 10)
+        lot_after = round(lot_remaining - close_qty, 10)
+        remaining_after = round(remaining - close_qty, 10)
+        lot.quantity_remaining = 0.0 if abs(lot_after) <= quantity_tolerance else lot_after
+        remaining = 0.0 if abs(remaining_after) <= quantity_tolerance else remaining_after
         rows.append(
             TradeLedgerRow(
                 trade_id=str(uuid.uuid4()),
@@ -245,7 +252,7 @@ def fee_aware_fifo_close_lots(
             )
         )
 
-    if remaining > 0:
+    if remaining > quantity_tolerance:
         raise ValueError("not enough open lot quantity to close")
     return rows
 
