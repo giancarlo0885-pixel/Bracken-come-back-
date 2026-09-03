@@ -26,6 +26,7 @@ from robinhood_current_marketdata_runtime import install_robinhood_current_marke
 from robinhood_pagination_compat import install_robinhood_pagination_compat
 from robinhood_quote_compat import install_robinhood_quote_compat
 from robinhood_quote_core_fix import install_robinhood_quote_core_fix
+from robinhood_quote_resilience import install_robinhood_quote_resilience
 from runtime_integrity_patch import install_runtime_integrity_patch
 from runtime_provider_reliability import install_yahoo_runtime_reliability
 from strategic_core_rebalance_runtime import install_strategic_core_rebalance_producer
@@ -49,6 +50,7 @@ install_robinhood_quote_core_fix()
 # Robinhood now supplies the point-in-time crypto execution mark. Historical
 # OHLCV remains on the existing provider router for indicators and forecasts.
 install_robinhood_current_marketdata(market_worker)
+install_robinhood_quote_resilience(market_worker)
 install_crypto_v39_spread_bridge(market_worker)
 install_crypto_execution_quote_guard(market_worker)
 install_v39_quote_verification_sampler(market_worker)
