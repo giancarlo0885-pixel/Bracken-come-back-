@@ -25,6 +25,7 @@ from paper_fee_policy import install_fee_aware_fifo_policy
 from paper_lifecycle_observability import install_paper_lifecycle_observability
 from paper_sell_db_verification import emit_recent_crypto_sell_db_verification
 from paper_sell_execution_router import install_paper_sell_execution_router
+from paper_sell_lot_atomic_repair import install_atomic_paper_sell_lot_repair
 from readiness_observability import emit_capital_readiness_report
 from robinhood_current_marketdata_runtime import install_robinhood_current_marketdata
 from robinhood_pagination_compat import install_robinhood_pagination_compat
@@ -78,6 +79,9 @@ if os.getenv("EXECUTION_MODE", "paper").strip().lower() == "paper":
     install_paper_execution_reality(market_worker)
     install_paper_execution_accounting(market_worker)
     install_fee_aware_fifo_policy()
+    # Must run after fee-aware attribution is installed so the repair wraps the
+    # final SELL attribution path and shares the caller's database transaction.
+    install_atomic_paper_sell_lot_repair(market_worker)
     install_paper_lifecycle_observability(market_worker)
     install_paper_broker_reference(market_worker)
     install_paper_sell_execution_router(market_worker)
