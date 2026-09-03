@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 import logging
+import os
 from typing import Any
 
 
@@ -22,12 +23,17 @@ def _compact(row: dict[str, Any] | None) -> dict[str, Any]:
     return {key: row.get(key) for key in allowed if key in row}
 
 
-def emit_recent_crypto_sell_db_verification(*, lookback_minutes: int = 180) -> dict[str, Any]:
-    """Read and log persisted crypto paper SELL evidence from production Postgres.
+def _verbose() -> bool:
+    return str(os.getenv("PAPER_SELL_DB_VERIFY_VERBOSE", "false") or "false").strip().lower() == "true"
 
-    This function performs SELECT queries only. It exists so production lifecycle
-    evidence can be verified through the same DATABASE_URL used by the worker when
-    an external Railway SQL diagnostic is unavailable.
+
+def emit_recent_crypto_sell_db_verification(*, lookback_minutes: int = 180) -> dict[str, Any]:
+    """Read and summarize persisted crypto paper SELL evidence from Postgres.
+
+    SELECT queries only. The PASS/FAIL accounting summary always logs. Detailed
+    historical trade/order/fill rows are opt-in with
+    PAPER_SELL_DB_VERIFY_VERBOSE=true so routine worker restarts are not delayed
+    by large log payloads.
     """
     from database import rows
 
@@ -90,16 +96,17 @@ def emit_recent_crypto_sell_db_verification(*, lookback_minutes: int = 180) -> d
     gross_realized = sum(float(item.get("gross_realized_pnl") or 0.0) for item in trades)
     fees = sum(float(item.get("fees") or 0.0) for item in trades)
     log.info(
-        "PAPER SELL DB VERIFY | status=%s | sells=%d | orders=%d | fills=%d | symbols=%s | net_realized_pnl=%.8f | gross_realized_pnl=%.8f | fees=%.8f",
+        "PAPER SELL DB VERIFY | status=%s | sells=%d | orders=%d | fills=%d | symbols=%s | net_realized_pnl=%.8f | gross_realized_pnl=%.8f | fees=%.8f | verbose=%s",
         "PASS" if trades and fills else "PARTIAL",
-        len(trades), len(orders), len(fills), ",".join(symbols), net_realized, gross_realized, fees,
+        len(trades), len(orders), len(fills), ",".join(symbols), net_realized, gross_realized, fees, _verbose(),
     )
-    for item in trades:
-        log.info("PAPER SELL DB TRADE | %s", _compact(dict(item)))
-    for item in orders:
-        log.info("PAPER SELL DB ORDER | %s", _compact(dict(item)))
-    for item in fills:
-        log.info("PAPER SELL DB FILL | %s", _compact(dict(item)))
+    if _verbose():
+        for item in trades:
+            log.info("PAPER SELL DB TRADE | %s", _compact(dict(item)))
+        for item in orders:
+            log.info("PAPER SELL DB ORDER | %s", _compact(dict(item)))
+        for item in fills:
+            log.info("PAPER SELL DB FILL | %s", _compact(dict(item)))
 
     return {
         "ok": bool(trades and fills),
