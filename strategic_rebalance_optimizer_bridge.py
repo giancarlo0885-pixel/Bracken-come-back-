@@ -109,6 +109,14 @@ def install_strategic_rebalance_optimizer_bridge(worker: Any) -> None:
                 max_position - current,
                 equity * adaptive.GLOBAL_PIT_PREFERRED_POSITION_PCT,
             )
+
+            # An explicit configured-core target gap is an authorization ceiling,
+            # not merely a reason to enter. Never let the generic optimizer buy
+            # more than the remaining gap that produced the authorization.
+            strategic_target_gap = adaptive._finite(item.get("core_target_amount"))
+            if _explicit_strategic_rebalance(item) and strategic_target_gap > 0:
+                candidate_amount = min(candidate_amount, strategic_target_gap)
+
             if candidate_amount <= 0:
                 break
 
@@ -131,6 +139,7 @@ def install_strategic_rebalance_optimizer_bridge(worker: Any) -> None:
                     "sector": sector,
                     "liquidity": capacity,
                     "authorization_basis": gate.get("authorization_basis") or "hard_risk_gate",
+                    "core_target_gap": round(strategic_target_gap, 2) if strategic_target_gap > 0 else None,
                 }
             )
             cash -= executable_amount
