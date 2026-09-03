@@ -18,10 +18,11 @@ def main() -> None:
         "--browser.gatherUsageStats=false",
     ]
     print(f"Starting GARIBALDI MARKET ORACLE web service on 0.0.0.0:{port}", flush=True)
+    print("ORACLE WEB SOURCE SYNC | current-main deployment requested", flush=True)
     print("Command: " + " ".join(command), flush=True)
     os.execv(sys.executable, command)
 
 
-# Production source-sync marker: 2026-09-03.
+# Production source-sync marker: current main, 2026-09-03.
 if __name__ == "__main__":
     main()
