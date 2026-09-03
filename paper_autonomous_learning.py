@@ -21,20 +21,43 @@ def _active() -> bool:
     )
 
 
+def _safe_number(value, default=None):
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return default
+    if number != number or number in (float("inf"), float("-inf")):
+        return default
+    return number
+
+
+def _position_value(position: dict) -> float:
+    for key in ("market_value", "position_value", "value", "notional"):
+        value = _safe_number(position.get(key))
+        if value is not None and value >= 0:
+            return value
+    quantity = _safe_number(position.get("quantity"), 0.0) or 0.0
+    price = None
+    for key in ("current_price", "price", "mark_price", "last_price", "avg_price", "average_price"):
+        price = _safe_number(position.get(key))
+        if price is not None and price > 0:
+            break
+    return max(0.0, quantity * (price or 0.0))
+
+
 def install_paper_autonomous_learning() -> bool:
     """Relax strategy-only vetoes for autonomous paper learning.
 
-    The override is active only while execution is explicitly paper-only and
-    both live submission controls are disarmed. It does not bypass quote
-    integrity, buying power, cash reserve, duplicate-order protection, fill
-    realism, severe-drawdown blocks, or broker submission policy.
+    Active only while execution is explicitly paper-only and both live
+    submission controls are disarmed. Quote identity/freshness, cash reserve,
+    buying power, duplicate-order protection, fill realism, accounting,
+    severe-drawdown blocks, and broker submission policy remain intact.
 
-    In learning mode, low confidence/liquidity no longer collapse an otherwise
-    approved candidate to zero. If the normal risk formula still produces less
-    than the configured minimum trade notional, the simulation is allowed to
-    take a minimum viable sample position, bounded by available cash and the
-    normal single-position ceiling. This creates outcome data without granting
-    any live-money permission.
+    Missing slippage/correlation inputs are repaired with deterministic paper
+    proxies rather than bypassing the shared risk engine: slippage uses half the
+    verified spread when available (otherwise a configurable paper assumption),
+    and correlation exposure uses current gross paper exposure/equity as a
+    conservative proxy when no model metric exists.
     """
     global _INSTALLED
     if _INSTALLED:
@@ -60,6 +83,10 @@ def install_paper_autonomous_learning() -> bool:
         float(capital_allocator.MIN_TRADE_NOTIONAL),
         float(os.getenv("PAPER_LEARNING_MIN_NOTIONAL", str(capital_allocator.MIN_TRADE_NOTIONAL))),
     )
+    default_slippage_pct = max(
+        0.0,
+        min(0.05, float(os.getenv("PAPER_LEARNING_DEFAULT_SLIPPAGE_PCT", "0.001"))),
+    )
 
     def paper_confidence_multiplier(confidence: float) -> float:
         value = float(original_confidence_multiplier(confidence))
@@ -83,8 +110,6 @@ def install_paper_autonomous_learning() -> bool:
         if bool(kwargs.get("buying_power_validated")) and kwargs.get("buying_power") is not None:
             spendable_cash = min(spendable_cash, max(0.0, float(kwargs.get("buying_power") or 0.0)))
 
-        # Keep the normal single-position ceiling. We are relaxing the
-        # minimum-sample veto, not manufacturing leverage or ignoring reserves.
         position_room = max(
             0.0,
             float(decision.max_position_dollars or 0.0)
@@ -127,20 +152,61 @@ def install_paper_autonomous_learning() -> bool:
     capital_allocator.adaptive_capital_allocation = paper_adaptive_capital_allocation
     capital_allocator.PAPER_AUTONOMOUS_LEARNING_ACTIVE = True
 
-    # oracle_bot imports the allocator function directly, so update its bound
-    # reference explicitly after market_worker bootstrap.
     try:
         import oracle_bot
+
         oracle_bot.adaptive_capital_allocation = paper_adaptive_capital_allocation
+        original_shared_risk_gate = oracle_bot._shared_risk_gate
+
+        def paper_shared_risk_gate(**kwargs):
+            if not _active():
+                return original_shared_risk_gate(**kwargs)
+
+            quote = dict(kwargs.get("quote") or {})
+            positions = list(kwargs.get("positions") or [])
+            portfolio = kwargs.get("portfolio") or {}
+
+            if _safe_number(quote.get("slippage_pct")) is None and _safe_number(quote.get("estimated_slippage_pct")) is None:
+                spread = None
+                try:
+                    spread = oracle_bot._quote_spread_pct(quote)
+                except Exception:
+                    spread = None
+                quote["slippage_pct"] = max(0.0, float(spread) / 2.0) if spread is not None else default_slippage_pct
+                quote["slippage_source"] = "paper_learning_spread_proxy" if spread is not None else "paper_learning_default_proxy"
+
+            if _safe_number(quote.get("correlation_exposure_pct")) is None:
+                equity = 0.0
+                if isinstance(portfolio, dict):
+                    for key in ("equity", "current_equity", "portfolio_equity", "balance"):
+                        equity = _safe_number(portfolio.get(key), 0.0) or 0.0
+                        if equity > 0:
+                            break
+                else:
+                    for key in ("equity", "current_equity", "portfolio_equity", "balance"):
+                        equity = _safe_number(getattr(portfolio, key, None), 0.0) or 0.0
+                        if equity > 0:
+                            break
+                gross = sum(_position_value(position) for position in positions if isinstance(position, dict))
+                quote["correlation_exposure_pct"] = min(1.0, gross / equity) if equity > 0 else (0.0 if not positions else 1.0)
+                quote["correlation_source"] = "paper_learning_gross_exposure_proxy"
+
+            updated = dict(kwargs)
+            updated["quote"] = quote
+            return original_shared_risk_gate(**updated)
+
+        oracle_bot._shared_risk_gate = paper_shared_risk_gate
     except Exception:
         pass
 
     _INSTALLED = True
     logging.getLogger("paper-autonomous-learning").info(
         "PAPER AUTONOMOUS LEARNING | active=True | confidence_floor=%.2f | liquidity_floor=%.2f | "
-        "minimum_sample_notional=%.2f | execution_mode=paper | broker_submission=NONE | live_trading=DISARMED",
+        "minimum_sample_notional=%.2f | default_slippage_pct=%.4f | risk_metric_proxies=ENABLED | "
+        "execution_mode=paper | broker_submission=NONE | live_trading=DISARMED",
         confidence_floor,
         liquidity_floor,
         learning_notional,
+        default_slippage_pct,
     )
     return True
