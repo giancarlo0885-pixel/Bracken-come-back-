@@ -53,6 +53,19 @@ def install_paper_core_rebalance_qualification(worker: Any) -> None:
         opportunity = original(market, signal, prices, ranked_by_symbol, scan_type)
         if str(market or "").strip().lower() != "crypto" or not _strict_paper_learning():
             return opportunity
+
+        # Carry the explicit configured-core target gap into the optimizer record.
+        # The strategic optimizer uses this as a hard sizing ceiling so a target-gap
+        # authorization can never buy more than the gap that authorized it.
+        target_amount = _finite(patch._signal_value(signal, "core_target_amount", None))
+        if target_amount is not None and target_amount > 0:
+            opportunity["core_target_amount"] = target_amount
+            opportunity["core_target_weight"] = patch._signal_value(signal, "core_target_weight", None)
+            opportunity["core_current_value"] = _finite(patch._signal_value(signal, "core_current_value", None)) or 0.0
+            opportunity["core_rebalance_candidate"] = True
+            opportunity["portfolio_intent"] = patch._core_rebalance_intent(signal)
+            opportunity["tactical_action"] = str(patch._signal_value(signal, "action", "") or "").upper().strip()
+
         if opportunity.get("qualified_for_capital") is True:
             return opportunity
 
