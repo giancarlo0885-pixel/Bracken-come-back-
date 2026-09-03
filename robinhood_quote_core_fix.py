@@ -14,11 +14,15 @@ def _first_present(quote: dict[str, Any], *keys: str) -> Any:
     return None
 
 
-def _normalized_book(quote: dict[str, Any]) -> dict[str, Decimal] | None:
-    """Parse every documented Robinhood best-bid/ask field shape.
+def _normalized_book(quote: dict[str, Any]) -> dict[str, Decimal | bool] | None:
+    """Parse documented Robinhood best-bid/ask field shapes without synthesis.
 
-    Values are never synthesized: both sides must be supplied by Robinhood,
-    positive, finite Decimals, and ask must be >= bid.
+    Robinhood v2 reports the best available bid and ask across partner exchanges.
+    Those independently selected venue prices can temporarily form a crossed
+    aggregate book (best bid > best ask). Both sides are still authenticated,
+    positive executable references, so a crossed aggregate is not treated as
+    corrupt. The original bid/ask are preserved exactly and spread_pct records
+    the non-negative magnitude of the venue dislocation.
     """
     if not isinstance(quote, dict):
         return None
@@ -41,13 +45,19 @@ def _normalized_book(quote: dict[str, Any]) -> dict[str, Decimal] | None:
         ask = Decimal(str(ask_raw))
     except Exception:
         return None
-    if not bid.is_finite() or not ask.is_finite() or bid <= 0 or ask <= 0 or ask < bid:
+    if not bid.is_finite() or not ask.is_finite() or bid <= 0 or ask <= 0:
         return None
     mid = (bid + ask) / Decimal("2")
     if mid <= 0:
         return None
-    spread_pct = ((ask - bid) / mid) * Decimal("100")
-    return {"bid": bid, "ask": ask, "mid": mid, "spread_pct": spread_pct}
+    spread_pct = (abs(ask - bid) / mid) * Decimal("100")
+    return {
+        "bid": bid,
+        "ask": ask,
+        "mid": mid,
+        "spread_pct": spread_pct,
+        "crossed": bool(bid > ask),
+    }
 
 
 def install_robinhood_quote_core_fix() -> bool:
