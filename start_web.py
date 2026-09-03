@@ -22,5 +22,6 @@ def main() -> None:
     os.execv(sys.executable, command)
 
 
+# Production source-sync marker: 2026-09-03.
 if __name__ == "__main__":
     main()
