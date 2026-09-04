@@ -19,6 +19,25 @@ _LAST_CORE_FALLBACK: tuple[str, ...] = ()
 _LAST_VALUE_REPAIR: tuple[str, ...] = ()
 
 
+class _StrategicSizingAssessment:
+    """Delegate quant evidence while replacing only its soft sizing multiplier."""
+
+    def __init__(self, base: Any | None, position_multiplier: float) -> None:
+        self._base = base
+        self.position_multiplier = position_multiplier
+        base_reason = str(getattr(base, "reason", "") or "") if base is not None else ""
+        self.reason = (
+            f"{base_reason}; strategic optimizer final-size authorization"
+            if base_reason
+            else "strategic optimizer final-size authorization"
+        )
+
+    def __getattr__(self, name: str) -> Any:
+        if self._base is None:
+            raise AttributeError(name)
+        return getattr(self._base, name)
+
+
 def _truthy(name: str, default: str = "false") -> bool:
     return str(os.getenv(name, default) or default).strip().lower() == "true"
 
@@ -306,6 +325,37 @@ def install_optimizer_repairs(worker: Any) -> bool:
         liquidity = liquidity if isinstance(liquidity, dict) else {}
         approved_dollar_volume = max(0.0, _number(liquidity.get("average_dollar_volume")))
 
+        effective_quant_assessment = quant_assessment
+        if strategic_target > 0:
+            quant_approved = bool(getattr(quant_assessment, "approved", True)) if quant_assessment is not None else True
+            if quant_approved:
+                confidence = oracle_bot.normalized_confidence(signal)
+                score = oracle_bot.normalized_score(signal)
+                strength = max(0.55, min(1.0, max(confidence, score / 100.0)))
+                compensation_multiplier = 1.0 / max(strength, 1e-9)
+                original_multiplier = _number(getattr(quant_assessment, "position_multiplier", 1.0), 1.0)
+                effective_quant_assessment = _StrategicSizingAssessment(
+                    quant_assessment,
+                    compensation_multiplier,
+                )
+                log.info(
+                    "CORE_OPTIMIZER_SOFT_SCALE_BYPASS | market=%s | symbol=%s | target=%.2f | "
+                    "signal_strength=%.6f | original_quant_multiplier=%.6f | execution_multiplier=%.6f | status=PASS",
+                    market,
+                    symbol,
+                    strategic_target,
+                    strength,
+                    original_multiplier,
+                    compensation_multiplier,
+                )
+            else:
+                log.info(
+                    "CORE_OPTIMIZER_SOFT_SCALE_BYPASS | market=%s | symbol=%s | target=%.2f | status=SKIPPED_QUANT_UNAPPROVED",
+                    market,
+                    symbol,
+                    strategic_target,
+                )
+
         target_token = _CORE_TARGET.set(strategic_target)
         liquidity_token = _CORE_APPROVED_DOLLAR_VOLUME.set(approved_dollar_volume)
         try:
@@ -326,7 +376,7 @@ def install_optimizer_repairs(worker: Any) -> bool:
                 symbol,
                 price,
                 signal,
-                quant_assessment=quant_assessment,
+                quant_assessment=effective_quant_assessment,
                 target_trade_value=target_trade_value,
                 rotation_candidate=rotation_candidate,
                 verified_quote=verified_quote,
@@ -339,6 +389,6 @@ def install_optimizer_repairs(worker: Any) -> bool:
     oracle_bot._buy = optimizer_aware_buy
     _INSTALLED = True
     log.info(
-        "OPTIMIZER_REPAIR | active=True | fixes=strategic_target_handoff,core_position_accounting,core_value_fallback,approved_liquidity_handoff | live_trading=DISARMED"
+        "OPTIMIZER_REPAIR | active=True | fixes=strategic_target_handoff,core_position_accounting,core_value_fallback,approved_liquidity_handoff,duplicate_soft_sizing | live_trading=DISARMED"
     )
     return True
