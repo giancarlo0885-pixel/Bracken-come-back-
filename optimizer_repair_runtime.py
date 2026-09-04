@@ -15,6 +15,7 @@ log = logging.getLogger("optimizer-repair")
 _INSTALLED = False
 _CORE_TARGET = ContextVar("oracle_core_rebalance_target", default=0.0)
 _LAST_CORE_FALLBACK: tuple[str, ...] = ()
+_LAST_VALUE_REPAIR: tuple[str, ...] = ()
 
 
 def _truthy(name: str, default: str = "false") -> bool:
@@ -47,8 +48,10 @@ def _core_aware_positions(positions: list[dict[str, Any]]) -> tuple[list[dict[st
         symbol = str(item.get("symbol") or "").upper().strip()
         explicit_bucket = str(item.get("bucket") or "").strip()
         if symbol in core_symbols and not explicit_bucket:
-            # positions is an aggregate table and historically did not persist the lot bucket.
-            # Treat configured core symbols as core unless the row explicitly says otherwise.
+            # The aggregate positions table historically did not persist lot-level
+            # core/tactical attribution. Counting an already-held configured core
+            # asset toward its target is the conservative choice because it avoids
+            # duplicate strategic exposure when attribution is absent.
             item["bucket"] = "Core"
             fallback.add(symbol)
         repaired.append(item)
@@ -116,6 +119,7 @@ def install_optimizer_repairs(worker: Any) -> bool:
 
     import capital_allocator
     import oracle_bot
+    import strategic_core_rebalance_runtime as strategic_runtime
 
     original_position_rows = worker._v39_position_rows
 
@@ -134,6 +138,56 @@ def install_optimizer_repairs(worker: Any) -> bool:
         return portfolio, repaired
 
     worker._v39_position_rows = core_aware_position_rows
+
+    # The core planner historically accepted a stored market_value=0 as an
+    # authoritative value, so its quantity*price fallback was never reached.
+    # Mark configured-core holdings from the current verified quote first, then
+    # fall back to the aggregate current_price only when a current quote is absent.
+    original_core_plan = strategic_runtime.crypto_core_rebalance_plan
+
+    def core_value_aware_plan(
+        quotes: dict[str, dict[str, Any]],
+        portfolio: dict[str, Any],
+        positions: list[dict[str, Any]],
+    ):
+        global _LAST_VALUE_REPAIR
+        configured = {str(symbol).upper().strip() for symbol in CRYPTO_CORE_WEIGHTS}
+        normalized: list[dict[str, Any]] = []
+        repaired_symbols: set[str] = set()
+
+        for position in positions or []:
+            item = dict(position)
+            symbol = str(item.get("symbol") or "").upper().strip()
+            if symbol in configured:
+                if not str(item.get("bucket") or "").strip():
+                    item["bucket"] = "Core"
+
+                quantity = max(0.0, _number(item.get("quantity")))
+                quote = dict((quotes or {}).get(symbol) or {})
+                price = max(0.0, _number(quote.get("price")))
+                if price <= 0:
+                    price = max(0.0, _number(item.get("current_price")))
+
+                if quantity > 0 and price > 0:
+                    marked_value = quantity * price
+                    stored_value = max(0.0, _number(item.get("market_value")))
+                    item["market_value"] = marked_value
+                    item["current_price"] = price
+                    if stored_value <= 0 or abs(stored_value - marked_value) > max(0.01, marked_value * 0.001):
+                        repaired_symbols.add(symbol)
+            normalized.append(item)
+
+        repaired_tuple = tuple(sorted(repaired_symbols))
+        if repaired_tuple and repaired_tuple != _LAST_VALUE_REPAIR:
+            log.info(
+                "CORE_OPTIMIZER_VALUE_REPAIR | symbols=%s | source=quantity_x_current_verified_price",
+                ",".join(repaired_tuple),
+            )
+            _LAST_VALUE_REPAIR = repaired_tuple
+
+        return original_core_plan(quotes, portfolio, normalized)
+
+    strategic_runtime.crypto_core_rebalance_plan = core_value_aware_plan
 
     original_adaptive = oracle_bot.adaptive_capital_allocation
 
@@ -211,6 +265,10 @@ def install_optimizer_repairs(worker: Any) -> bool:
         token = _CORE_TARGET.set(strategic_target)
         try:
             if strategic_target > 0:
+                # Persist explicit core attribution for new strategic lots so
+                # subsequent optimizer passes can value them without inference.
+                patch._set_signal_value(signal, "bucket", "Core")
+                patch._set_signal_value(signal, "core_bucket", "Core")
                 log.info(
                     "CORE_OPTIMIZER_HANDOFF | market=%s | symbol=%s | approved_target=%.2f | mode=paper",
                     market,
@@ -234,6 +292,6 @@ def install_optimizer_repairs(worker: Any) -> bool:
     oracle_bot._buy = optimizer_aware_buy
     _INSTALLED = True
     log.info(
-        "OPTIMIZER_REPAIR | active=True | fixes=strategic_target_handoff,core_position_accounting | live_trading=DISARMED"
+        "OPTIMIZER_REPAIR | active=True | fixes=strategic_target_handoff,core_position_accounting,core_value_fallback | live_trading=DISARMED"
     )
     return True
