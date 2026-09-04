@@ -14,6 +14,7 @@ import runtime_integrity_patch as patch
 log = logging.getLogger("optimizer-repair")
 _INSTALLED = False
 _CORE_TARGET = ContextVar("oracle_core_rebalance_target", default=0.0)
+_CORE_APPROVED_DOLLAR_VOLUME = ContextVar("oracle_core_rebalance_dollar_volume", default=0.0)
 _LAST_CORE_FALLBACK: tuple[str, ...] = ()
 _LAST_VALUE_REPAIR: tuple[str, ...] = ()
 
@@ -64,7 +65,14 @@ def _core_rebalance_notional(
     kwargs: dict[str, Any],
     target: float,
 ) -> float:
-    """Return the strategic target clipped only by hard capital/liquidity capacity."""
+    """Return the optimizer-approved strategic target clipped by hard capacity only.
+
+    The paper-learning wrapper may intentionally emit a $2 sample notional after
+    the tactical allocator rejects a low-confidence strategic candidate. Its
+    derived capacity fields are not authoritative for an already-approved V39
+    strategic allocation, so this path rebuilds hard capacity from configuration,
+    portfolio state, and the liquidity evidence attached to the V39 approval.
+    """
     target = max(0.0, _number(target))
     equity = max(0.0, _number(kwargs.get("equity")))
     cash = max(0.0, _number(kwargs.get("cash")))
@@ -72,13 +80,26 @@ def _core_rebalance_notional(
     if target <= 0 or equity <= 0 or cash <= 0 or price <= 0:
         return 0.0
 
-    reserve_required = max(0.0, _number(getattr(decision, "reserve_required", 0.0)))
+    configured_reserve_pct = max(
+        0.0,
+        _number(getattr(capital_allocator_module, "CRYPTO_MIN_CASH_RESERVE_PCT", 0.0)),
+    )
+    reserve_required = max(
+        equity * configured_reserve_pct,
+        max(0.0, _number(getattr(decision, "reserve_required", 0.0))),
+    )
     spendable_cash = max(0.0, cash - reserve_required)
     if bool(kwargs.get("buying_power_validated")) and kwargs.get("buying_power") is not None:
         spendable_cash = min(spendable_cash, max(0.0, _number(kwargs.get("buying_power"))))
 
     existing_position_value = max(0.0, _number(kwargs.get("existing_position_value")))
-    max_position_dollars = max(0.0, _number(getattr(decision, "max_position_dollars", 0.0)))
+    configured_position_pct = max(
+        0.0,
+        _number(getattr(capital_allocator_module, "MAX_SINGLE_CRYPTO_TACTICAL_POSITION_PCT", 0.0)),
+    )
+    max_position_dollars = equity * configured_position_pct
+    if max_position_dollars <= 0:
+        max_position_dollars = max(0.0, _number(getattr(decision, "max_position_dollars", 0.0)))
     position_room = max(0.0, max_position_dollars - existing_position_value)
 
     current_exposure = max(0.0, _number(kwargs.get("current_exposure")))
@@ -88,14 +109,19 @@ def _core_rebalance_notional(
     )
     deployment_room = max(0.0, deployed_limit - current_exposure)
 
-    dollar_volume = max(0.0, _number(kwargs.get("dollar_volume")))
+    # Prefer direct execution-call liquidity when present. If the tactical
+    # allocator lost that field, reuse the exact average-dollar-volume evidence
+    # from the V39 optimizer allocation that authorized this strategic target.
+    dollar_volume = max(
+        0.0,
+        _number(kwargs.get("dollar_volume")),
+        _number(_CORE_APPROVED_DOLLAR_VOLUME.get()),
+    )
     participation_pct = max(
         0.0,
         _number(getattr(capital_allocator_module, "MAX_POSITION_VS_DAILY_DOLLAR_VOLUME_PCT", 0.0)),
     )
     participation_room = dollar_volume * participation_pct
-    if participation_room <= 0:
-        return 0.0
 
     notional = min(
         target,
@@ -105,7 +131,20 @@ def _core_rebalance_notional(
         participation_room,
     )
     minimum = max(0.0, _number(getattr(capital_allocator_module, "MIN_TRADE_NOTIONAL", 0.0)))
-    return round(notional, 2) if notional >= minimum else 0.0
+    final = round(notional, 2) if notional >= minimum else 0.0
+    if final <= 0:
+        log.info(
+            "CORE_OPTIMIZER_CAPACITY | symbol=%s | target=%.2f | reserve_room=%.2f | position_room=%.2f | "
+            "deployment_room=%.2f | liquidity_room=%.2f | dollar_volume=%.2f | status=BLOCKED",
+            str(kwargs.get("symbol") or "").upper(),
+            target,
+            spendable_cash,
+            position_room,
+            deployment_room,
+            participation_room,
+            dollar_volume,
+        )
+    return final
 
 
 def install_optimizer_repairs(worker: Any) -> bool:
@@ -262,7 +301,13 @@ def install_optimizer_repairs(worker: Any) -> bool:
             and source == "configured_core_allocation_gap"
             else 0.0
         )
-        token = _CORE_TARGET.set(strategic_target)
+        allocation = patch._signal_value(signal, "v39_optimizer_allocation", {}) or {}
+        liquidity = allocation.get("liquidity") if isinstance(allocation, dict) else {}
+        liquidity = liquidity if isinstance(liquidity, dict) else {}
+        approved_dollar_volume = max(0.0, _number(liquidity.get("average_dollar_volume")))
+
+        target_token = _CORE_TARGET.set(strategic_target)
+        liquidity_token = _CORE_APPROVED_DOLLAR_VOLUME.set(approved_dollar_volume)
         try:
             if strategic_target > 0:
                 # Persist explicit core attribution for new strategic lots so
@@ -270,10 +315,11 @@ def install_optimizer_repairs(worker: Any) -> bool:
                 patch._set_signal_value(signal, "bucket", "Core")
                 patch._set_signal_value(signal, "core_bucket", "Core")
                 log.info(
-                    "CORE_OPTIMIZER_HANDOFF | market=%s | symbol=%s | approved_target=%.2f | mode=paper",
+                    "CORE_OPTIMIZER_HANDOFF | market=%s | symbol=%s | approved_target=%.2f | approved_dollar_volume=%.2f | mode=paper",
                     market,
                     symbol,
                     strategic_target,
+                    approved_dollar_volume,
                 )
             return original_buy(
                 market,
@@ -287,11 +333,12 @@ def install_optimizer_repairs(worker: Any) -> bool:
                 rotation_verified_quote=rotation_verified_quote,
             )
         finally:
-            _CORE_TARGET.reset(token)
+            _CORE_APPROVED_DOLLAR_VOLUME.reset(liquidity_token)
+            _CORE_TARGET.reset(target_token)
 
     oracle_bot._buy = optimizer_aware_buy
     _INSTALLED = True
     log.info(
-        "OPTIMIZER_REPAIR | active=True | fixes=strategic_target_handoff,core_position_accounting,core_value_fallback | live_trading=DISARMED"
+        "OPTIMIZER_REPAIR | active=True | fixes=strategic_target_handoff,core_position_accounting,core_value_fallback,approved_liquidity_handoff | live_trading=DISARMED"
     )
     return True
