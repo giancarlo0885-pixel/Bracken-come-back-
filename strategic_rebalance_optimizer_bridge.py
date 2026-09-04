@@ -4,6 +4,7 @@ from typing import Any
 
 import global_adaptive_engine as adaptive
 import runtime_integrity_patch as patch
+from config import MIN_TRADE_VALUE
 
 
 _TACTICAL_AUTHORIZATION_REASONS = {
@@ -86,6 +87,7 @@ def install_strategic_rebalance_optimizer_bridge(worker: Any) -> None:
         allocations: list[dict[str, Any]] = []
         rejections: list[dict[str, Any]] = []
         recalc_count = 0
+        minimum_notional = max(0.0, float(MIN_TRADE_VALUE))
 
         for item in sorted(
             opportunities,
@@ -127,6 +129,20 @@ def install_strategic_rebalance_optimizer_bridge(worker: Any) -> None:
                 continue
             executable_amount = min(candidate_amount, adaptive._finite(capacity.get("executable_order_value")))
             if executable_amount <= 0:
+                continue
+
+            # Enforce the same minimum notional used by the execution layer before
+            # an allocation can leave the optimizer. Sub-minimum target gaps are
+            # treated as rebalance dust and can accumulate until executable.
+            if executable_amount + 1e-9 < minimum_notional:
+                rejections.append(
+                    {
+                        "symbol": symbol,
+                        "reason": "below minimum executable notional",
+                        "proposed_amount": round(executable_amount, 8),
+                        "minimum_notional": round(minimum_notional, 8),
+                    }
+                )
                 continue
 
             sector = str(item.get("sector") or "").strip() or "Unknown"
