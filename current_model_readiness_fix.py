@@ -30,6 +30,30 @@ def _active_symbols() -> list[str]:
     return symbols[:12] or list(_DEFAULT_SYMBOLS)
 
 
+def _legacy_symbol_less_leakage(records: list[dict[str, Any]]) -> dict[str, Any]:
+    """Evaluate legacy leakage rows that predate per-symbol evidence.
+
+    This compatibility path is used only when every returned row lacks a symbol.
+    The presence of even one symbol switches back to strict active-universe
+    completeness, so partially migrated evidence cannot satisfy readiness.
+    """
+    failures: list[str] = []
+    for item in records:
+        leakage = _json_object(item.get("leakage_checks"))
+        probe = _json_object(leakage.get("future_mutation_probe"))
+        if leakage.get("strict_ordering") is not True or probe.get("ok") is not True:
+            failures.append(str(item.get("run_id") or "run"))
+    ok = bool(records) and not failures
+    return {
+        "ok": ok,
+        "status": "PASS" if ok else ("NO_EVIDENCE" if not records else "FAIL"),
+        "run_count": len(records),
+        "failed_run_count": len(failures),
+        "failed_runs": failures,
+        "evidence_scope": "legacy_symbol_less",
+    }
+
+
 def install_current_model_readiness_fix() -> None:
     """Evaluate current leakage evidence without erasing historical failures.
 
@@ -72,7 +96,11 @@ def install_current_model_readiness_fix() -> None:
                 "evidence_scope": "latest_active_symbol_set",
             }
 
-        by_symbol = {str(item.get("symbol") or "").upper(): item for item in (records or [])}
+        records = list(records or [])
+        if records and all(not str(item.get("symbol") or "").strip() for item in records):
+            return _legacy_symbol_less_leakage(records)
+
+        by_symbol = {str(item.get("symbol") or "").upper(): item for item in records if str(item.get("symbol") or "").strip()}
         missing = [symbol for symbol in expected if symbol not in by_symbol]
         failures: list[dict[str, str]] = []
         passed_symbols: list[str] = []
@@ -100,7 +128,7 @@ def install_current_model_readiness_fix() -> None:
         return {
             "ok": ok,
             "status": "PASS" if ok else ("NO_EVIDENCE" if missing and not failures else "FAIL"),
-            "run_count": len(records or []),
+            "run_count": len(records),
             "failed_run_count": len(failures),
             "expected_symbols": expected,
             "passed_symbols": passed_symbols,
