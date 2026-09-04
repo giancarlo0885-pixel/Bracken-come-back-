@@ -38,15 +38,19 @@ def install_current_model_readiness_fix() -> None:
     closed if any expected symbol is missing or currently fails causality. This
     prevents obsolete symbols/runs from poisoning current readiness forever while
     preserving their rows for audit and model-governance history.
+
+    The replacement intentionally calls ``oracle_readiness.rows`` rather than
+    capturing ``database.rows``. That keeps the dependency injectable for tests
+    and diagnostics and prevents the runtime monkeypatch from bypassing readiness
+    instrumentation.
     """
     import oracle_readiness as readiness
-    from database import rows
 
     def current_leakage_for_model(model: str, model_version: str) -> dict[str, Any]:
         expected = _active_symbols()
         placeholders = ",".join(["%s"] * len(expected))
         try:
-            records = rows(
+            records = readiness.rows(
                 f"""
                 SELECT DISTINCT ON (symbol)
                        run_id, symbol, leakage_checks, created_at
