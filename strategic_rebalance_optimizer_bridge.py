@@ -10,24 +10,26 @@ _TACTICAL_AUTHORIZATION_REASONS = {
     "at least three core signals must support the trade",
     "confidence below trade threshold",
 }
+_STRATEGIC_ENTRY_ACTIONS = {"HOLD", "BUY", "STRONG_BUY", "ACCUMULATE", "LONG"}
 
 
 def _explicit_strategic_rebalance(item: dict[str, Any]) -> bool:
     return bool(
         item.get("core_rebalance_candidate") is True
         and str(item.get("portfolio_intent") or "").strip().upper() == patch.CORE_REBALANCE_CANDIDATE_INTENT
-        and str(item.get("tactical_action") or "").strip().upper() == "HOLD"
+        and str(item.get("tactical_action") or "").strip().upper() in _STRATEGIC_ENTRY_ACTIONS
     )
 
 
 def _strategic_rebalance_gate(item: dict[str, Any]) -> dict[str, Any]:
     """Reuse the existing hard gate while separating tactical authorization.
 
-    Strategic core rebalance authorization comes from an explicit portfolio
-    target-gap intent, not from a tactical BUY vote. All hard-risk reasons remain
-    blocking except the two tactical authorization checks (3-core-signal agreement
-    and 70% tactical confidence), and only for an explicitly marked HOLD-based
-    core-rebalance candidate.
+    Strategic core rebalance authorization comes from an explicit configured
+    portfolio target gap, not solely from a tactical vote. All hard-risk reasons
+    remain blocking. Only the two tactical authorization checks (three-core-signal
+    agreement and tactical confidence) may be waived, and only for an explicitly
+    marked entry-compatible core-rebalance candidate. SELL/exit actions are never
+    strategic rebalance candidates.
     """
     gate = adaptive.hard_risk_gate(item)
     if gate.get("allowed"):
