@@ -5,6 +5,7 @@ numpy>=1.26,<3
 yfinance>=0.2.54,<1
 plotly>=5.20,<7
 requests>=2.31,<3
+websocket-client>=1.8,<2
 feedparser>=6.0,<7
 python-dotenv>=1.0,<2
 scikit-learn>=1.4,<2
