@@ -1,7 +1,15 @@
+import hashlib
+import hmac
+from urllib.parse import urlencode
+
 from binance_us_execution_compat import (
     BinanceUsWebSocketGuard,
     MY_FILTERS_WEIGHT,
+    classify_binance_us_error,
     normalize_execution_report,
+    percent_encoded_payload,
+    sign_percent_encoded_payload,
+    trading_symbol_params,
     validate_2026_order_filters,
 )
 
@@ -99,6 +107,44 @@ def test_websocket_ping_immediately_pongs_and_shutdown_reconnects():
     assert guard.heartbeat_ok() is True
     assert guard.on_text_event({"e": "serverShutdown"}) is True
     assert guard.reconnect_required is True
+
+
+def test_signing_percent_encodes_before_hmac():
+    params = [
+        ("symbol", "BTCUSD"),
+        ("clientTag", "oracle alpha/beta+1"),
+        ("timestamp", 1700000000000),
+    ]
+    encoded = percent_encoded_payload(params)
+    assert encoded == urlencode(params)
+    assert "oracle+alpha%2Fbeta%2B1" in encoded
+
+    payload, signature = sign_percent_encoded_payload(params, "super-secret")
+    expected = hmac.new(
+        b"super-secret",
+        encoded.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    assert payload == encoded
+    assert signature == expected
+
+
+def test_new_2026_errors_are_fail_closed():
+    cases = {
+        -1022: "BINANCE_US_INVALID_SIGNATURE",
+        -1151: "BINANCE_US_DUPLICATE_SYMBOL",
+        -1220: "BINANCE_US_SYMBOL_STATUS_MISMATCH",
+        -2039: "BINANCE_US_ORDER_IDENTIFIER_MISMATCH",
+    }
+    for code, reason in cases.items():
+        result = classify_binance_us_error({"code": code, "msg": "test"})
+        assert result["reason"] == reason
+        assert result["retryable"] is False
+
+
+def test_trading_symbol_params_fail_closed_on_halt_or_break():
+    params = trading_symbol_params("btcusd", limit=100)
+    assert params == {"symbol": "BTCUSD", "symbolStatus": "TRADING", "limit": 100}
 
 
 class _SignedResponse:
