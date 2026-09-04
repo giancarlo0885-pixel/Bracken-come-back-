@@ -6,6 +6,9 @@ from crypto_opportunity_engine import crypto_core_rebalance_plan
 import runtime_integrity_patch as patch
 
 
+_STRATEGIC_ENTRY_ACTIONS = {"HOLD", "BUY", "STRONG_BUY", "ACCUMULATE", "LONG"}
+
+
 def _row_symbol(row: dict[str, Any]) -> str:
     return str(row.get("Asset") or row.get("symbol") or "").upper().strip()
 
@@ -16,8 +19,9 @@ def _reset_previous_strategic_approval(signal: Any) -> bool:
     V39 prioritization may revisit the same mutable signal object several times in
     one scan. A CORE_REBALANCE_BUY is therefore valid only for the optimizer pass
     that emitted its positive allocation. Before the next configured-core pass we
-    restore the tactical HOLD and remove the prior allocation/intent so the symbol
-    must be re-authorized from current portfolio, quote, risk, and optimizer state.
+    restore a HOLD that was normalized to ACCUMULATE and remove the prior
+    allocation/intent so the symbol must be re-authorized from current portfolio,
+    quote, risk, and optimizer state.
     """
     source = str(patch._signal_value(signal, "core_rebalance_source", "") or "")
     if source != "configured_core_allocation_gap":
@@ -115,13 +119,13 @@ def _log_promotion_decision(worker: Any, signal: Any) -> None:
 def install_strategic_core_rebalance_producer(worker: Any) -> None:
     """Authorize V39 core-rebalance candidates from configured portfolio deficits.
 
-    The configured core allocator is the strategic producer. A tactical HOLD is
-    not itself an authorization. Only a symbol that appears in
+    The configured core allocator is the strategic producer. A tactical action is
+    not itself an authorization. A symbol must appear in
     ``crypto_core_rebalance_plan`` with a positive deficit and a current verified
-    quote receives ``CORE_REBALANCE_CANDIDATE`` metadata. V39 still owns final
-    capital approval and no signal becomes CORE_REBALANCE_BUY here. Promotion
-    decisions are logged after V39 returns so rejected capital handoffs are
-    observable without weakening any execution gate.
+    quote, and its tactical action must still be an entry-compatible action. SELL
+    and exit intent are never reinterpreted. V39 owns final capital approval and
+    no signal becomes CORE_REBALANCE_BUY here. Promotion decisions are logged
+    after V39 returns so rejected capital handoffs remain observable.
     """
     original = worker._v39_prioritize_signals
     if getattr(original, "_oracle_strategic_core_producer", False):
@@ -162,8 +166,12 @@ def install_strategic_core_rebalance_producer(worker: Any) -> None:
                 row = plan_by_symbol.get(symbol)
                 if row is None:
                     continue
-                # Never reinterpret SELL/exit intent as a strategic entry.
-                if str(patch._signal_value(signal, "action", "HOLD") or "HOLD").upper() != "HOLD":
+
+                # Configured-core target gaps may reinforce an existing entry vote
+                # or elevate HOLD for allocation review. SELL/exit intent is never
+                # converted into a strategic entry.
+                action = str(patch._signal_value(signal, "action", "HOLD") or "HOLD").upper().strip()
+                if action not in _STRATEGIC_ENTRY_ACTIONS:
                     continue
                 existing = patch._core_rebalance_intent(signal)
                 if existing not in {"", patch.CORE_REBALANCE_CANDIDATE_INTENT}:
@@ -183,7 +191,7 @@ def install_strategic_core_rebalance_producer(worker: Any) -> None:
                     patch._numeric(row.get("Amount")),
                     row.get("Target Weight"),
                     patch._numeric(row.get("Current Core Value")),
-                    patch._signal_value(signal, "action", ""),
+                    action,
                 )
 
         ordered = original(market, signals, prices, ranked, scan_type)
