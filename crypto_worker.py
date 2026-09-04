@@ -16,6 +16,7 @@ from current_model_readiness_fix import install_current_model_readiness_fix
 from live_broker_capital import install_live_broker_capital_sizing
 from live_v39_broker_bridge import install_live_v39_broker_capital_bridge
 from migration_runtime_safety import install_migration_runtime_safety
+from optimizer_repair_runtime import install_optimizer_repairs
 from paper_autonomous_learning import install_paper_autonomous_learning
 from paper_broker_reference_runtime import install_paper_broker_reference
 from paper_core_rebalance_qualification import install_paper_core_rebalance_qualification
@@ -91,8 +92,12 @@ if os.getenv("EXECUTION_MODE", "paper").strip().lower() == "paper":
     install_paper_sell_execution_router(market_worker)
     install_paper_lifecycle_observability(market_worker)
 
+# Install last so the optimizer repair sees the final wrapped execution chain.
+# The module self-disables unless execution is paper-only and live submission is disarmed.
+install_optimizer_repairs(market_worker)
+
 # Keep this entrypoint in the crypto-worker deploy watch set; readiness helpers are imported above.
-# Production deploy marker: broker-anchored paper BUY/SELL execution, transport resilience, and DB lifecycle verification are active.
+# Production deploy marker: broker-anchored paper BUY/SELL execution, transport resilience, DB lifecycle verification, and optimizer repair are active.
 
 
 def run_robinhood_startup_preflight() -> None:
