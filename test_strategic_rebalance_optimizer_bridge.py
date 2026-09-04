@@ -125,6 +125,36 @@ def test_crypto_optimizer_allocates_explicit_rebalance_without_using_broker_capi
     assert allocation["authorization_basis"] == "explicit_core_rebalance_target_gap"
 
 
+def test_crypto_optimizer_rejects_rebalance_dust_below_execution_minimum(monkeypatch):
+    worker = SimpleNamespace(adaptive_portfolio_optimizer=adaptive.adaptive_portfolio_optimizer)
+    monkeypatch.setattr(
+        adaptive,
+        "hard_risk_gate",
+        lambda item: {
+            "allowed": False,
+            "reasons": [
+                "at least three core signals must support the trade",
+                "confidence below trade threshold",
+            ],
+        },
+    )
+    install_strategic_rebalance_optimizer_bridge(worker)
+
+    plan = worker.adaptive_portfolio_optimizer(
+        [_candidate(core_target_amount=0.10)],
+        {"cash": 2000.0, "equity": 2000.0, "buying_power": 2000.0},
+        [],
+        engine="crypto",
+    )
+
+    assert plan["allocations"] == []
+    assert plan["rejections"]
+    rejection = plan["rejections"][0]
+    assert rejection["reason"] == "below minimum executable notional"
+    assert rejection["proposed_amount"] == 0.10
+    assert rejection["minimum_notional"] >= 1.0
+
+
 def test_crypto_optimizer_keeps_hard_execution_failure_at_zero(monkeypatch):
     worker = SimpleNamespace(adaptive_portfolio_optimizer=adaptive.adaptive_portfolio_optimizer)
     monkeypatch.setattr(
