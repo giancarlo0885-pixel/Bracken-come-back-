@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, Sequence
 import hashlib
 import hmac
 import time
@@ -26,6 +26,63 @@ def _decimal(value: Any) -> Decimal | None:
     return result
 
 
+def percent_encoded_payload(
+    params: Mapping[str, Any] | Sequence[tuple[str, Any]],
+) -> str:
+    """Return Binance.US canonical percent-encoded payload for SIGNED requests."""
+    return urlencode(params, doseq=True)
+
+
+def sign_percent_encoded_payload(
+    params: Mapping[str, Any] | Sequence[tuple[str, Any]],
+    secret_key: str,
+) -> tuple[str, str]:
+    """Percent-encode first, then HMAC-SHA256 exactly as Binance.US requires."""
+    secret = str(secret_key or "")
+    if not secret:
+        raise ValueError("BINANCE_US_SECRET_KEY_MISSING")
+    encoded = percent_encoded_payload(params)
+    signature = hmac.new(
+        secret.encode("utf-8"),
+        encoded.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    return encoded, signature
+
+
+def classify_binance_us_error(payload: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Normalize material 2026 Binance.US API errors into Oracle-safe reasons."""
+    data = dict(payload or {})
+    try:
+        code = int(data.get("code"))
+    except (TypeError, ValueError):
+        code = None
+
+    reason_by_code = {
+        -1022: "BINANCE_US_INVALID_SIGNATURE",
+        -1151: "BINANCE_US_DUPLICATE_SYMBOL",
+        -1220: "BINANCE_US_SYMBOL_STATUS_MISMATCH",
+        -2039: "BINANCE_US_ORDER_IDENTIFIER_MISMATCH",
+    }
+    reason = reason_by_code.get(code, "BINANCE_US_API_ERROR")
+    retryable = code not in {-1022, -1151, -1220, -2039}
+    return {
+        "ok": False,
+        "reason": reason,
+        "code": code,
+        "message": str(data.get("msg") or ""),
+        "retryable": retryable,
+    }
+
+
+def trading_symbol_params(symbol: str, **extra: Any) -> dict[str, Any]:
+    """Fail closed on HALT/BREAK symbols for endpoints supporting symbolStatus."""
+    native = str(symbol or "").upper().strip()
+    if not native:
+        raise ValueError("BINANCE_US_SYMBOL_MISSING")
+    return {"symbol": native, "symbolStatus": "TRADING", **extra}
+
+
 def signed_my_filters(
     *,
     api_key: str,
@@ -46,19 +103,15 @@ def signed_my_filters(
     if not native:
         raise ValueError("BINANCE_US_SYMBOL_MISSING")
     key = str(api_key or "").strip()
-    secret = str(secret_key or "")
-    if not key or not secret:
+    if not key or not str(secret_key or ""):
         raise ValueError("BINANCE_US_API_CREDENTIALS_MISSING")
 
     window = max(1, min(60_000, int(recv_window)))
     ts = int(timestamp_ms if timestamp_ms is not None else time.time() * 1000)
-    params = {"symbol": native, "recvWindow": window, "timestamp": ts}
-    query = urlencode(params)
-    params["signature"] = hmac.new(
-        secret.encode("utf-8"),
-        query.encode("utf-8"),
-        hashlib.sha256,
-    ).hexdigest()
+    unsigned = [("symbol", native), ("recvWindow", window), ("timestamp", ts)]
+    _, signature = sign_percent_encoded_payload(unsigned, secret_key)
+    params = dict(unsigned)
+    params["signature"] = signature
 
     if acquire_weight is not None:
         acquire_weight(MY_FILTERS_WEIGHT)
@@ -78,6 +131,16 @@ def signed_my_filters(
         raise RuntimeError(
             f"BINANCE_US_RATE_LIMITED retry_after={retry_after or 'unknown'}"
         )
+    if getattr(response, "status_code", 200) >= 400:
+        try:
+            error_payload = response.json()
+        except Exception:
+            response.raise_for_status()
+            raise RuntimeError("BINANCE_US_API_ERROR")
+        classified = classify_binance_us_error(
+            error_payload if isinstance(error_payload, Mapping) else None
+        )
+        raise RuntimeError(classified["reason"])
     response.raise_for_status()
     payload = response.json()
     if not isinstance(payload, Mapping):
