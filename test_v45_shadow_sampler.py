@@ -1,4 +1,7 @@
+import os
+
 import pandas as pd
+import pytest
 
 import v45_shadow_sampler as sampler
 
@@ -15,7 +18,7 @@ def test_sample_once_collects_evidence_without_execution(monkeypatch):
     persisted = []
     monkeypatch.setattr(sampler, "ensure_schema", lambda: None)
     monkeypatch.setattr(sampler, "_fetch_history", lambda symbol: history)
-    monkeypatch.setattr(sampler, "_resolve_pending", lambda symbol, frame: 2)
+    monkeypatch.setattr(sampler, "_resolve_pending", lambda symbol, frame: {"predictions": 0, "abstentions": 2})
     monkeypatch.setattr(
         sampler,
         "predict_v45_flow_shadow",
@@ -28,10 +31,114 @@ def test_sample_once_collects_evidence_without_execution(monkeypatch):
         },
     )
     monkeypatch.setattr(sampler, "_persist_observation", lambda *args: persisted.append(args))
+    monkeypatch.setattr(
+        sampler,
+        "evidence_summary",
+        lambda: {
+            "total_observations": 4,
+            "abstentions_resolved": 2,
+            "abstentions_below_actionable_move": 2,
+            "abstention_quiet_rate": 1.0,
+            "actionable_move_pct": 1.25,
+        },
+    )
     monkeypatch.setattr(sampler, "governance_summary", lambda: {"eligible_for_promotion": False, "status": "SHADOW_ONLY"})
 
     result = sampler.sample_once()
     assert set(result["symbols"]) == {"BTC-USD", "ETH-USD"}
     assert len(persisted) == 2
     assert result["governance"]["eligible_for_promotion"] is False
+    assert result["evidence"]["abstention_quiet_rate"] == 1.0
     assert all(item[3]["execution_allowed"] is False for item in persisted)
+
+
+def test_actionable_move_threshold_is_observational_only():
+    assert sampler.ACTIONABLE_MOVE_PCT == 1.25
+
+
+def test_postgres_v45_abstention_resolution_is_observational_only():
+    if not os.getenv("DATABASE_URL"):
+        pytest.skip("PostgreSQL integration test runs in CI service container")
+
+    sampler.ensure_schema()
+    observed_at = pd.Timestamp("2026-09-02T00:00:00Z").to_pydatetime()
+    resolve_at = pd.Timestamp("2026-09-02T00:15:00Z").to_pydatetime()
+    legacy_observed_at = pd.Timestamp("2026-09-01T23:00:00Z").to_pydatetime()
+    legacy_resolve_at = pd.Timestamp("2026-09-01T23:15:00Z").to_pydatetime()
+
+    with sampler.connect() as conn:
+        conn.execute(
+            "DELETE FROM v45_shadow_predictions WHERE model_version=%s",
+            (sampler.MODEL_VERSION,),
+        )
+        conn.execute(
+            """
+            INSERT INTO v45_shadow_predictions
+            (symbol, provider_symbol, model, model_version, observed_at, resolve_at,
+             spot_price, status, reason)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            """,
+            (
+                "BTC-USD",
+                "BTCUSDT",
+                sampler.MODEL_NAME,
+                sampler.MODEL_VERSION,
+                legacy_observed_at,
+                legacy_resolve_at,
+                100.0,
+                "ABSTAIN",
+                "legacy",
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO v45_shadow_predictions
+            (symbol, provider_symbol, model, model_version, observed_at, resolve_at,
+             spot_price, status, reason)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            """,
+            (
+                "BTC-USD",
+                "BTCUSDT",
+                sampler.MODEL_NAME,
+                sampler.MODEL_VERSION,
+                observed_at,
+                resolve_at,
+                100.0,
+                "ABSTAIN_PENDING",
+                "current",
+            ),
+        )
+
+    history = pd.DataFrame(
+        {
+            "Close": [100.5, 100.75],
+            "QuoteVolume": [1000.0, 1000.0],
+            "TakerBuyQuoteVolume": [500.0, 500.0],
+        },
+        index=pd.to_datetime(["2026-09-02T00:15:00Z", "2026-09-02T00:20:00Z"]),
+    )
+
+    try:
+        resolved = sampler._resolve_pending("BTC-USD", history)
+        assert resolved == {"predictions": 0, "abstentions": 1}
+
+        evidence = sampler.evidence_summary()
+        assert evidence["total_observations"] == 2
+        assert evidence["abstentions_pending"] == 0
+        assert evidence["legacy_abstentions_unresolved"] == 1
+        assert evidence["abstentions_resolved"] == 1
+        assert evidence["abstentions_below_actionable_move"] == 1
+        assert evidence["abstention_quiet_rate"] == 1.0
+        assert evidence["actionable_move_pct"] == 1.25
+
+        governance = sampler.governance_summary()
+        assert governance["n"] == 0
+        assert governance["eligible_for_promotion"] is False
+        assert governance["status"] == "SHADOW_ONLY"
+    finally:
+        with sampler.connect() as conn:
+            conn.execute(
+                "DELETE FROM v45_shadow_predictions WHERE model_version=%s",
+                (sampler.MODEL_VERSION,),
+            )
