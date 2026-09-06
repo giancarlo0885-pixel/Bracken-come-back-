@@ -2,11 +2,13 @@ from __future__ import annotations
 
 from typing import Any
 
+from config import MIN_TRADE_VALUE
 from crypto_opportunity_engine import crypto_core_rebalance_plan
 import runtime_integrity_patch as patch
 
 
 _STRATEGIC_ENTRY_ACTIONS = {"HOLD", "BUY", "STRONG_BUY", "ACCUMULATE", "LONG"}
+_MEANINGFUL_ENTRY_PCT = 0.01
 
 
 def _row_symbol(row: dict[str, Any]) -> str:
@@ -59,6 +61,11 @@ def _promotion_rejection_reason(signal: Any) -> str:
     allocation = patch._signal_value(signal, "v39_optimizer_allocation", {}) or {}
     symbol = str(patch._signal_value(signal, "symbol", "") or "").upper().strip()
     allocation_symbol = str(allocation.get("symbol") or "").upper().strip()
+    target_amount = patch._numeric(patch._signal_value(signal, "core_target_amount", None), default=0.0)
+    meaningful_floor = patch._numeric(
+        patch._signal_value(signal, "core_meaningful_entry_floor", None),
+        default=0.0,
+    )
 
     if intent == patch.CORE_REBALANCE_BUY_INTENT:
         if approved_amount <= 0:
@@ -74,6 +81,10 @@ def _promotion_rejection_reason(signal: Any) -> str:
     }:
         return f"intent_changed:{intent or 'missing'}"
     if approved_amount <= 0:
+        if target_amount > 0 and meaningful_floor > 0 and target_amount + 1e-9 < meaningful_floor:
+            return "target_gap_below_meaningful_entry_floor"
+        if target_amount > 0:
+            return "optimizer_rejected_candidate"
         return "optimizer_amount_missing_or_nonpositive"
     if not symbol:
         return "signal_symbol_missing"
@@ -104,13 +115,15 @@ def _log_promotion_decision(worker: Any, signal: Any) -> None:
     worker.log.info(
         "CORE_REBALANCE_PROMOTION_DECISION | symbol=%s | approved=%s | intent=%s | "
         "approved_amount_raw=%s | approved_amount=%.2f | allocation_symbol=%s | "
-        "action=%s | reason=%s",
+        "target_amount=%.2f | meaningful_entry_floor=%.2f | action=%s | reason=%s",
         symbol,
         approved,
         intent or "missing",
         raw_amount,
         approved_amount,
         allocation_symbol or "missing",
+        patch._numeric(patch._signal_value(signal, "core_target_amount", None), default=0.0),
+        patch._numeric(patch._signal_value(signal, "core_meaningful_entry_floor", None), default=0.0),
         patch._signal_value(signal, "action", ""),
         reason,
     )
@@ -154,8 +167,14 @@ def install_strategic_core_rebalance_producer(worker: Any) -> None:
                     "CORE_REBALANCE_STRATEGIC_PLAN_BLOCKED | reason=%s",
                     exc.__class__.__name__,
                 )
+                portfolio = {}
                 plan_rows = []
 
+            equity = max(0.0, patch._numeric((portfolio or {}).get("equity"), default=0.0))
+            meaningful_entry_floor = max(
+                max(0.0, patch._numeric(MIN_TRADE_VALUE, default=0.0)),
+                equity * _MEANINGFUL_ENTRY_PCT,
+            )
             plan_by_symbol = {
                 _row_symbol(row): row
                 for row in plan_rows
@@ -184,13 +203,15 @@ def install_strategic_core_rebalance_producer(worker: Any) -> None:
                 patch._set_signal_value(signal, "core_target_weight", row.get("Target Weight"))
                 patch._set_signal_value(signal, "core_current_value", patch._numeric(row.get("Current Core Value")))
                 patch._set_signal_value(signal, "core_plan_reason", row.get("Reason"))
+                patch._set_signal_value(signal, "core_meaningful_entry_floor", meaningful_entry_floor)
                 worker.log.info(
                     "CORE_REBALANCE_STRATEGIC_CANDIDATE | symbol=%s | target_amount=%.2f | target_weight=%s | "
-                    "current_core_value=%.2f | action=%s",
+                    "current_core_value=%.2f | meaningful_entry_floor=%.2f | action=%s",
                     symbol,
                     patch._numeric(row.get("Amount")),
                     row.get("Target Weight"),
                     patch._numeric(row.get("Current Core Value")),
+                    meaningful_entry_floor,
                     action,
                 )
 
