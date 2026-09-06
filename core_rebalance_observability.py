@@ -45,6 +45,7 @@ def install_core_rebalance_observability(worker: Any) -> None:
             if _core_rebalance_intent(signal) in {CORE_REBALANCE_CANDIDATE_INTENT, CORE_REBALANCE_BUY_INTENT}
         ]
         buys = [signal for signal in candidates if _core_rebalance_intent(signal) == CORE_REBALANCE_BUY_INTENT]
+        decisions = dict(getattr(worker, "_core_rebalance_optimizer_decisions", {}) or {})
 
         if candidates or deployment_gap > 0:
             sample_source = candidates or sorted(
@@ -56,6 +57,7 @@ def install_core_rebalance_observability(worker: Any) -> None:
             for signal in sample_source[:5]:
                 symbol = str(_signal_value(signal, "symbol", "") or "").upper()
                 quote = dict((prices or {}).get(symbol) or {})
+                decision = dict(decisions.get(symbol) or {})
                 sample.append(
                     {
                         "symbol": symbol,
@@ -66,6 +68,13 @@ def install_core_rebalance_observability(worker: Any) -> None:
                         "signal_id": bool(_signal_value(signal, "signal_id", None)),
                         "forecast_id": bool(_signal_value(signal, "forecast_id", None)),
                         "approved_amount": _numeric(_signal_value(signal, "v39_optimizer_approved_amount", 0.0)),
+                        "optimizer_status": decision.get("status"),
+                        "optimizer_reason": decision.get("reason"),
+                        "optimizer_risk_reasons": decision.get("risk_reasons") or [],
+                        "optimizer_capacity_reason": decision.get("capacity_reason"),
+                        "optimizer_watch_only": bool(decision.get("watch_only")),
+                        "optimizer_proposed_amount": decision.get("proposed_amount"),
+                        "meaningful_entry_floor": decision.get("meaningful_entry_floor"),
                         "quote_verified": quote.get("quote_verified") is True,
                         "tradeable": quote.get("tradeable") is True,
                         "spread_pct": quote.get("spread_pct"),
