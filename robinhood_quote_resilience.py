@@ -27,6 +27,22 @@ def _grace_seconds() -> float:
     return min(60.0, max(3.0, value))
 
 
+def _retry_attempts() -> int:
+    try:
+        value = int(os.getenv("ROBINHOOD_CRYPTO_QUOTE_RETRY_ATTEMPTS", "3"))
+    except ValueError:
+        value = 3
+    return min(5, max(1, value))
+
+
+def _retry_delay_seconds() -> float:
+    try:
+        value = float(os.getenv("ROBINHOOD_CRYPTO_QUOTE_RETRY_DELAY_SECONDS", "0.12"))
+    except ValueError:
+        value = 0.12
+    return min(0.50, max(0.0, value))
+
+
 def _first_present(quote: dict[str, Any], *keys: str) -> Any:
     for key in keys:
         value = quote.get(key)
@@ -102,49 +118,64 @@ def install_robinhood_quote_resilience(worker: Any) -> bool:
         if not missing:
             return results
 
+        attempts = _retry_attempts()
+        retry_delay = _retry_delay_seconds()
         for symbol in missing:
-            try:
-                records = provider.client.best_bid_ask_quotes(symbol)
-            except Exception as exc:
-                worker.log.info(
-                    "CRYPTO | ROBINHOOD SINGLE QUOTE RETRY | symbol=%s | status=ERROR | error=%s",
-                    symbol,
-                    exc.__class__.__name__,
+            for attempt in range(1, attempts + 1):
+                try:
+                    records = provider.client.best_bid_ask_quotes(symbol)
+                except Exception as exc:
+                    worker.log.info(
+                        "CRYPTO | ROBINHOOD SINGLE QUOTE RETRY | symbol=%s | attempt=%s/%s | status=ERROR | error=%s",
+                        symbol,
+                        attempt,
+                        attempts,
+                        exc.__class__.__name__,
+                    )
+                    records = []
+
+                quote = next(
+                    (
+                        item
+                        for item in records or []
+                        if isinstance(item, dict)
+                        and str(item.get("symbol") or "").upper().strip() == symbol
+                    ),
+                    None,
                 )
-                records = []
-            quote = next(
-                (
-                    item
-                    for item in records or []
-                    if isinstance(item, dict)
-                    and str(item.get("symbol") or "").upper().strip() == symbol
-                ),
-                None,
-            )
-            if quote is None:
-                worker.log.info(
-                    "CRYPTO | ROBINHOOD SINGLE QUOTE RETRY | symbol=%s | status=OMITTED | api_tradable=true",
-                    symbol,
-                )
-                continue
-            read_time = datetime.now(timezone.utc).isoformat()
-            snapshot = snapshot_from_robinhood_quote(symbol, quote, fetched_at=read_time)
-            if snapshot is None:
-                worker.log.info(
-                    "CRYPTO | ROBINHOOD SINGLE QUOTE RETRY | symbol=%s | status=INVALID_BOOK | reason=%s | public_keys=%s | api_tradable=true",
-                    symbol,
-                    _invalid_book_reason(quote),
-                    _public_quote_keys(quote),
-                )
-                continue
-            inserted_at = time.monotonic()
-            with provider._lock:
-                provider._cache[symbol] = (inserted_at, snapshot)
-            results[symbol] = snapshot
-            worker.log.info(
-                "CRYPTO | ROBINHOOD SINGLE QUOTE RETRY | symbol=%s | status=RECOVERED | api_tradable=true",
-                symbol,
-            )
+                if quote is None:
+                    worker.log.info(
+                        "CRYPTO | ROBINHOOD SINGLE QUOTE RETRY | symbol=%s | attempt=%s/%s | status=OMITTED | api_tradable=true",
+                        symbol,
+                        attempt,
+                        attempts,
+                    )
+                else:
+                    read_time = datetime.now(timezone.utc).isoformat()
+                    snapshot = snapshot_from_robinhood_quote(symbol, quote, fetched_at=read_time)
+                    if snapshot is not None:
+                        inserted_at = time.monotonic()
+                        with provider._lock:
+                            provider._cache[symbol] = (inserted_at, snapshot)
+                        results[symbol] = snapshot
+                        worker.log.info(
+                            "CRYPTO | ROBINHOOD SINGLE QUOTE RETRY | symbol=%s | attempt=%s/%s | status=RECOVERED | api_tradable=true",
+                            symbol,
+                            attempt,
+                            attempts,
+                        )
+                        break
+                    worker.log.info(
+                        "CRYPTO | ROBINHOOD SINGLE QUOTE RETRY | symbol=%s | attempt=%s/%s | status=INVALID_BOOK | reason=%s | public_keys=%s | api_tradable=true",
+                        symbol,
+                        attempt,
+                        attempts,
+                        _invalid_book_reason(quote),
+                        _public_quote_keys(quote),
+                    )
+
+                if attempt < attempts and retry_delay > 0:
+                    time.sleep(retry_delay)
 
         if not _paper_only():
             return results
@@ -173,7 +204,9 @@ def install_robinhood_quote_resilience(worker: Any) -> bool:
     provider.snapshots = resilient_snapshots
     worker._robinhood_quote_resilience_installed = True
     worker.log.info(
-        "CRYPTO | ROBINHOOD QUOTE RESILIENCE | single_symbol_retry=ON | unsupported_pair_filter=ON | paper_grace_seconds=%.1f | live_grace=OFF",
+        "CRYPTO | ROBINHOOD QUOTE RESILIENCE | single_symbol_retry=ON | retry_attempts=%s | retry_delay_seconds=%.2f | unsupported_pair_filter=ON | paper_grace_seconds=%.1f | live_grace=OFF",
+        _retry_attempts(),
+        _retry_delay_seconds(),
         _grace_seconds(),
     )
     return True
