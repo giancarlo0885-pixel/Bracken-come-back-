@@ -12,6 +12,7 @@ _TACTICAL_AUTHORIZATION_REASONS = {
     "confidence below trade threshold",
 }
 _STRATEGIC_ENTRY_ACTIONS = {"HOLD", "BUY", "STRONG_BUY", "ACCUMULATE", "LONG"}
+_MEANINGFUL_ENTRY_PCT = 0.01
 
 
 def _explicit_strategic_rebalance(item: dict[str, Any]) -> bool:
@@ -88,6 +89,10 @@ def install_strategic_rebalance_optimizer_bridge(worker: Any) -> None:
         rejections: list[dict[str, Any]] = []
         recalc_count = 0
         minimum_notional = max(0.0, float(MIN_TRADE_VALUE))
+        # Paper execution should learn from economically meaningful entries, not
+        # penny-sized fills. A qualified idea below 1% of current paper equity is
+        # retained as a momentum/watch candidate and is not sent to execution.
+        meaningful_entry_floor = max(minimum_notional, equity * _MEANINGFUL_ENTRY_PCT)
 
         for item in sorted(
             opportunities,
@@ -131,16 +136,20 @@ def install_strategic_rebalance_optimizer_bridge(worker: Any) -> None:
             if executable_amount <= 0:
                 continue
 
-            # Enforce the same minimum notional used by the execution layer before
-            # an allocation can leave the optimizer. Sub-minimum target gaps are
-            # treated as rebalance dust and can accumulate until executable.
-            if executable_amount + 1e-9 < minimum_notional:
+            # Do not turn weak/tiny sizing into a trade. Preserve it as a watch
+            # candidate so momentum can continue to be observed until the same
+            # opportunity can justify a meaningful, risk-calculated allocation.
+            if executable_amount + 1e-9 < meaningful_entry_floor:
                 rejections.append(
                     {
                         "symbol": symbol,
-                        "reason": "below minimum executable notional",
+                        "reason": "watch_momentum_candidate",
+                        "watch_only": True,
                         "proposed_amount": round(executable_amount, 8),
                         "minimum_notional": round(minimum_notional, 8),
+                        "meaningful_entry_floor": round(meaningful_entry_floor, 2),
+                        "opportunity_score": round(adaptive._finite(item.get("soft_score") or item.get("opportunity_score")), 4),
+                        "authorization_basis": gate.get("authorization_basis") or "hard_risk_gate",
                     }
                 )
                 continue
@@ -158,6 +167,7 @@ def install_strategic_rebalance_optimizer_bridge(worker: Any) -> None:
                     "liquidity": capacity,
                     "authorization_basis": gate.get("authorization_basis") or "hard_risk_gate",
                     "core_target_gap": round(strategic_target_gap, 2) if strategic_target_gap > 0 else None,
+                    "meaningful_entry_floor": round(meaningful_entry_floor, 2),
                 }
             )
             cash -= executable_amount
@@ -170,6 +180,7 @@ def install_strategic_rebalance_optimizer_bridge(worker: Any) -> None:
             "allocations": allocations,
             "recalculations": recalc_count,
             "cash_after_plan": round(cash, 2),
+            "meaningful_entry_floor": round(meaningful_entry_floor, 2),
             "rejections": rejections,
         }
 
