@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from typing import Any
 
 import global_adaptive_engine as adaptive
@@ -12,7 +13,16 @@ _TACTICAL_AUTHORIZATION_REASONS = {
     "confidence below trade threshold",
 }
 _STRATEGIC_ENTRY_ACTIONS = {"HOLD", "BUY", "STRONG_BUY", "ACCUMULATE", "LONG"}
-_MEANINGFUL_ENTRY_PCT = 0.01
+_DEFAULT_MEANINGFUL_ENTRY_PCT = 0.005
+_DEFAULT_MAX_MEANINGFUL_ENTRY_PCT = 0.01
+
+
+def _env_float(name: str, default: float, *, low: float, high: float) -> float:
+    try:
+        value = float(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        value = default
+    return min(high, max(low, value))
 
 
 def _explicit_strategic_rebalance(item: dict[str, Any]) -> bool:
@@ -58,6 +68,71 @@ def _entry_candidate(item: dict[str, Any]) -> bool:
         "ACCUMULATE",
         "LONG",
     }
+
+
+def _confidence_fraction(item: dict[str, Any]) -> float:
+    confidence = adaptive._finite(item.get("confidence"))
+    if confidence > 1.0:
+        confidence /= 100.0
+    return min(1.0, max(0.0, confidence))
+
+
+def _adaptive_meaningful_entry_floor(
+    item: dict[str, Any],
+    *,
+    equity: float,
+    minimum_notional: float,
+) -> float:
+    """Derive a paper-entry floor from account size and execution quality.
+
+    The old fixed 1% floor was intentionally conservative but could suppress
+    economically sensible learning fills in a small paper account. This keeps a
+    hard minimum while adapting to equity, spread, liquidity and confidence.
+    It never changes risk-gate eligibility and never lowers the floor below the
+    configured minimum trade value.
+    """
+    base_pct = _env_float(
+        "CRYPTO_MEANINGFUL_ENTRY_BASE_PCT",
+        _DEFAULT_MEANINGFUL_ENTRY_PCT,
+        low=0.001,
+        high=0.01,
+    )
+    max_pct = _env_float(
+        "CRYPTO_MEANINGFUL_ENTRY_MAX_PCT",
+        _DEFAULT_MAX_MEANINGFUL_ENTRY_PCT,
+        low=base_pct,
+        high=0.02,
+    )
+    base_floor = max(minimum_notional, equity * base_pct)
+    ceiling = max(minimum_notional, equity * max_pct)
+
+    spread_pct = max(0.0, adaptive._finite(item.get("spread_pct")))
+    liquidity = max(
+        0.0,
+        adaptive._finite(
+            item.get("dollar_volume_24h")
+            or item.get("avg_dollar_volume")
+            or item.get("liquidity")
+        ),
+    )
+    confidence = _confidence_fraction(item)
+
+    # Two round trips of the observed spread should not dominate a meaningful
+    # learning position. This raises the floor only when transaction friction is
+    # material relative to account equity.
+    spread_cost_floor = minimum_notional + equity * min(spread_pct / 100.0, 0.01) * 2.0
+    floor = max(base_floor, spread_cost_floor)
+
+    # Thin assets need a little more notional to justify a fill; highly liquid,
+    # high-confidence candidates may use a modestly lower floor in paper mode.
+    if 0 < liquidity < 5_000_000:
+        floor *= 1.15
+    elif liquidity >= 100_000_000 and confidence >= 0.85:
+        floor *= 0.90
+    elif confidence >= 0.90:
+        floor *= 0.95
+
+    return round(min(ceiling, max(minimum_notional, floor)), 2)
 
 
 def _log_optimizer_decision(worker: Any, symbol: str, *, status: str, reason: str, **details: Any) -> None:
@@ -111,10 +186,16 @@ def install_strategic_rebalance_optimizer_bridge(worker: Any) -> None:
         rejections: list[dict[str, Any]] = []
         recalc_count = 0
         minimum_notional = max(0.0, float(MIN_TRADE_VALUE))
-        # Paper execution should learn from economically meaningful entries, not
-        # penny-sized fills. A qualified idea below 1% of current paper equity is
-        # retained as a momentum/watch candidate and is not sent to execution.
-        meaningful_entry_floor = max(minimum_notional, equity * _MEANINGFUL_ENTRY_PCT)
+        base_meaningful_entry_floor = max(
+            minimum_notional,
+            equity
+            * _env_float(
+                "CRYPTO_MEANINGFUL_ENTRY_BASE_PCT",
+                _DEFAULT_MEANINGFUL_ENTRY_PCT,
+                low=0.001,
+                high=0.01,
+            ),
+        )
 
         for item in sorted(
             opportunities,
@@ -127,6 +208,14 @@ def install_strategic_rebalance_optimizer_bridge(worker: Any) -> None:
             if capital_engine != engine or not qualified:
                 if _entry_candidate(item):
                     reason = "capital_engine_mismatch" if capital_engine != engine else "not_capital_qualified"
+                    rejections.append(
+                        {
+                            "symbol": symbol,
+                            "reason": reason,
+                            "capital_engine": capital_engine,
+                            "qualified_for_capital": qualified,
+                        }
+                    )
                     _log_optimizer_decision(
                         worker,
                         symbol,
@@ -219,9 +308,15 @@ def install_strategic_rebalance_optimizer_bridge(worker: Any) -> None:
                 )
                 continue
 
+            meaningful_entry_floor = _adaptive_meaningful_entry_floor(
+                item,
+                equity=equity,
+                minimum_notional=minimum_notional,
+            )
+
             # Do not turn weak/tiny sizing into a trade. Preserve it as a watch
             # candidate so momentum can continue to be observed until the same
-            # opportunity can justify a meaningful, risk-calculated allocation.
+            # opportunity can justify an economically meaningful allocation.
             if executable_amount + 1e-9 < meaningful_entry_floor:
                 rejections.append(
                     {
@@ -230,7 +325,8 @@ def install_strategic_rebalance_optimizer_bridge(worker: Any) -> None:
                         "watch_only": True,
                         "proposed_amount": round(executable_amount, 8),
                         "minimum_notional": round(minimum_notional, 8),
-                        "meaningful_entry_floor": round(meaningful_entry_floor, 2),
+                        "meaningful_entry_floor": meaningful_entry_floor,
+                        "entry_floor_mode": "adaptive_equity_spread_liquidity_confidence",
                         "opportunity_score": round(adaptive._finite(item.get("soft_score") or item.get("opportunity_score")), 4),
                         "authorization_basis": gate.get("authorization_basis") or "hard_risk_gate",
                     }
@@ -241,7 +337,8 @@ def install_strategic_rebalance_optimizer_bridge(worker: Any) -> None:
                     status="WATCH",
                     reason="below_meaningful_entry_floor",
                     proposed_amount=round(executable_amount, 2),
-                    meaningful_entry_floor=round(meaningful_entry_floor, 2),
+                    meaningful_entry_floor=meaningful_entry_floor,
+                    entry_floor_mode="adaptive",
                 )
                 continue
 
@@ -266,7 +363,8 @@ def install_strategic_rebalance_optimizer_bridge(worker: Any) -> None:
                     "liquidity": capacity,
                     "authorization_basis": gate.get("authorization_basis") or "hard_risk_gate",
                     "core_target_gap": round(strategic_target_gap, 2) if strategic_target_gap > 0 else None,
-                    "meaningful_entry_floor": round(meaningful_entry_floor, 2),
+                    "meaningful_entry_floor": meaningful_entry_floor,
+                    "entry_floor_mode": "adaptive_equity_spread_liquidity_confidence",
                 }
             )
             _log_optimizer_decision(
@@ -277,6 +375,7 @@ def install_strategic_rebalance_optimizer_bridge(worker: Any) -> None:
                 amount=round(executable_amount, 2),
                 cash_before=round(cash, 2),
                 reserve=round(reserve, 2),
+                meaningful_entry_floor=meaningful_entry_floor,
             )
             cash -= executable_amount
             exposure_by_symbol[symbol] = current + executable_amount
@@ -288,7 +387,8 @@ def install_strategic_rebalance_optimizer_bridge(worker: Any) -> None:
             "allocations": allocations,
             "recalculations": recalc_count,
             "cash_after_plan": round(cash, 2),
-            "meaningful_entry_floor": round(meaningful_entry_floor, 2),
+            "meaningful_entry_floor": round(base_meaningful_entry_floor, 2),
+            "meaningful_entry_floor_mode": "adaptive_equity_spread_liquidity_confidence",
             "rejections": rejections,
         }
 
