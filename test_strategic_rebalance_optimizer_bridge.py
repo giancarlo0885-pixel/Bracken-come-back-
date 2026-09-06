@@ -118,14 +118,15 @@ def test_crypto_optimizer_allocates_explicit_rebalance_without_using_broker_capi
     assert len(plan["allocations"]) == 1
     allocation = plan["allocations"][0]
     assert allocation["symbol"] == "BTC-USD"
-    assert allocation["amount"] > 0
+    assert allocation["amount"] >= 20.0
     assert allocation["amount"] <= 2000.0 * adaptive.GLOBAL_PIT_PREFERRED_POSITION_PCT
     assert allocation["amount"] <= 2000.0 - 2000.0 * adaptive.GLOBAL_PIT_RESERVE_PCT
     assert allocation["amount"] < 1_000_000.0
     assert allocation["authorization_basis"] == "explicit_core_rebalance_target_gap"
+    assert plan["meaningful_entry_floor"] == 20.0
 
 
-def test_crypto_optimizer_rejects_rebalance_dust_below_execution_minimum(monkeypatch):
+def test_crypto_optimizer_converts_tiny_rebalance_to_watch_candidate(monkeypatch):
     worker = SimpleNamespace(adaptive_portfolio_optimizer=adaptive.adaptive_portfolio_optimizer)
     monkeypatch.setattr(
         adaptive,
@@ -150,9 +151,28 @@ def test_crypto_optimizer_rejects_rebalance_dust_below_execution_minimum(monkeyp
     assert plan["allocations"] == []
     assert plan["rejections"]
     rejection = plan["rejections"][0]
-    assert rejection["reason"] == "below minimum executable notional"
+    assert rejection["reason"] == "watch_momentum_candidate"
+    assert rejection["watch_only"] is True
     assert rejection["proposed_amount"] == 0.10
+    assert rejection["meaningful_entry_floor"] == 20.0
     assert rejection["minimum_notional"] >= 1.0
+
+
+def test_crypto_optimizer_keeps_just_under_one_percent_as_watch(monkeypatch):
+    worker = SimpleNamespace(adaptive_portfolio_optimizer=adaptive.adaptive_portfolio_optimizer)
+    monkeypatch.setattr(adaptive, "hard_risk_gate", lambda item: {"allowed": True, "reasons": []})
+    install_strategic_rebalance_optimizer_bridge(worker)
+
+    plan = worker.adaptive_portfolio_optimizer(
+        [_candidate(core_target_amount=19.99, tactical_action="BUY")],
+        {"cash": 2000.0, "equity": 2000.0, "buying_power": 2000.0},
+        [],
+        engine="crypto",
+    )
+
+    assert plan["allocations"] == []
+    assert plan["rejections"][0]["reason"] == "watch_momentum_candidate"
+    assert plan["rejections"][0]["meaningful_entry_floor"] == 20.0
 
 
 def test_crypto_optimizer_keeps_hard_execution_failure_at_zero(monkeypatch):
