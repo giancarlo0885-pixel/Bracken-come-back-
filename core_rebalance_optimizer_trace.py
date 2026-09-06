@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import global_adaptive_engine as adaptive
 import runtime_integrity_patch as patch
 from global_pit_engine import hard_risk_gate
 from strategic_rebalance_optimizer_bridge import _strategic_rebalance_gate
@@ -12,6 +13,43 @@ _ENTRY_ACTIONS = {"BUY", "STRONG_BUY", "STRONG BUY", "ACCUMULATE", "LONG"}
 
 def _upper(value: Any) -> str:
     return str(value or "").strip().upper()
+
+
+def _fallback_entry_decision(item: dict[str, Any]) -> dict[str, Any]:
+    """Explain an entry idea even when the optimizer returned no explicit row."""
+    qualified = item.get("qualified_for_capital") is True
+    if not qualified:
+        return {
+            "status": "REJECTED",
+            "reason": "not_capital_qualified",
+            "qualified_for_capital": item.get("qualified_for_capital"),
+        }
+
+    capital_engine = adaptive.classify_capital_engine(item)
+    if capital_engine != "crypto":
+        return {
+            "status": "REJECTED",
+            "reason": "capital_engine_mismatch",
+            "capital_engine": capital_engine,
+            "qualified_for_capital": True,
+        }
+
+    gate = hard_risk_gate(item)
+    if not gate.get("allowed"):
+        return {
+            "status": "REJECTED",
+            "reason": "hard_risk_gate",
+            "risk_reasons": gate.get("reasons") or [],
+            "core_signals_supporting": gate.get("core_signals_supporting"),
+            "confidence_score": gate.get("confidence_score"),
+            "reward_risk_ratio": gate.get("reward_risk_ratio"),
+        }
+
+    return {
+        "status": "REJECTED",
+        "reason": "optimizer_not_selected_after_eligibility",
+        "qualified_for_capital": True,
+    }
 
 
 def _optimizer_decision_index(
@@ -33,6 +71,9 @@ def _optimizer_decision_index(
             "watch_only": bool(rejection.get("watch_only")),
             "proposed_amount": rejection.get("proposed_amount"),
             "meaningful_entry_floor": rejection.get("meaningful_entry_floor"),
+            "entry_floor_mode": rejection.get("entry_floor_mode"),
+            "capital_engine": rejection.get("capital_engine"),
+            "qualified_for_capital": rejection.get("qualified_for_capital"),
         }
 
     for allocation in plan.get("allocations") or []:
@@ -45,6 +86,8 @@ def _optimizer_decision_index(
             "approved_amount": allocation.get("amount"),
             "meaningful_entry_floor": allocation.get("meaningful_entry_floor")
             or plan.get("meaningful_entry_floor"),
+            "entry_floor_mode": allocation.get("entry_floor_mode")
+            or plan.get("meaningful_entry_floor_mode"),
         }
 
     for item in opportunities or []:
@@ -52,12 +95,7 @@ def _optimizer_decision_index(
         action = _upper(item.get("action") or item.get("tactical_action"))
         if not symbol or action not in _ENTRY_ACTIONS or symbol in decisions:
             continue
-        reason = "not_capital_qualified" if item.get("qualified_for_capital") is not True else "no_explicit_optimizer_decision"
-        decisions[symbol] = {
-            "status": "REJECTED",
-            "reason": reason,
-            "qualified_for_capital": item.get("qualified_for_capital"),
-        }
+        decisions[symbol] = _fallback_entry_decision(item)
 
     return decisions
 
@@ -74,9 +112,9 @@ def install_core_rebalance_optimizer_trace(worker: Any) -> None:
             scan_type: str,
         ) -> dict[str, Any]:
             opportunity = original_opportunity(market, signal, prices, ranked_by_symbol, scan_type)
-            if (
-                str(market or "").lower() == "crypto"
-                and patch._core_rebalance_intent(signal) == patch.CORE_REBALANCE_CANDIDATE_INTENT
+            if str(market or "").lower() == "crypto" and (
+                patch._core_rebalance_intent(signal) == patch.CORE_REBALANCE_CANDIDATE_INTENT
+                or _upper(opportunity.get("action") or opportunity.get("tactical_action")) in _ENTRY_ACTIONS
             ):
                 worker.log.info(
                     "CORE_REBALANCE_V39 | symbol=%s | qualified=%s | risk_score=%s | risk_known=%s | "
@@ -151,7 +189,7 @@ def install_core_rebalance_optimizer_trace(worker: Any) -> None:
                             }
                         )
                     worker.log.info(
-                        "CORE_REBALANCE_OPTIMIZER | candidates=%s | hard_gate=%s | gate_scope=TACTICAL | "
+                        "CORE_REBALANCE_OPTIMIZER | candidates=%s | entry_ideas=%s | hard_gate=%s | gate_scope=TACTICAL | "
                         "strategic_authorization=%s | allocations=%s | rejections=%s | decisions=%s | cash=%s | equity=%s | positions=%s",
                         [
                             {
@@ -162,6 +200,14 @@ def install_core_rebalance_optimizer_trace(worker: Any) -> None:
                                 "spread_pct": item.get("spread_pct"),
                             }
                             for item in candidates
+                        ],
+                        [
+                            {
+                                "symbol": item.get("symbol"),
+                                "action": _upper(item.get("action") or item.get("tactical_action")),
+                                "decision": decisions.get(_upper(item.get("symbol"))),
+                            }
+                            for item in entry_ideas[:12]
                         ],
                         hard_gate_evidence,
                         strategic_authorization_evidence,
@@ -179,4 +225,4 @@ def install_core_rebalance_optimizer_trace(worker: Any) -> None:
 
 
 # Production observability contract: tactical and strategic rebalance gates are traced separately.
-# Railway deploy-watch verification marker: web and stock-worker follow this root file from main after watch activation.
+# Railway deploy-watch verification marker: every crypto entry idea gets a decision reason.
