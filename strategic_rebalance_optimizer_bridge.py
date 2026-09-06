@@ -50,6 +50,28 @@ def _strategic_rebalance_gate(item: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _entry_candidate(item: dict[str, Any]) -> bool:
+    return str(item.get("action") or item.get("tactical_action") or "").strip().upper() in {
+        "BUY",
+        "STRONG_BUY",
+        "STRONG BUY",
+        "ACCUMULATE",
+        "LONG",
+    }
+
+
+def _log_optimizer_decision(worker: Any, symbol: str, *, status: str, reason: str, **details: Any) -> None:
+    """Expose capital decisions without changing eligibility, sizing, or execution."""
+    rendered = " | ".join(f"{key}={value}" for key, value in details.items() if value is not None)
+    worker.log.info(
+        "CRYPTO_OPTIMIZER_DECISION | symbol=%s | status=%s | reason=%s%s",
+        symbol or "missing",
+        status,
+        reason,
+        f" | {rendered}" if rendered else "",
+    )
+
+
 def install_strategic_rebalance_optimizer_bridge(worker: Any) -> None:
     original = worker.adaptive_portfolio_optimizer
     if getattr(original, "_oracle_strategic_rebalance_gate", False):
@@ -99,18 +121,49 @@ def install_strategic_rebalance_optimizer_bridge(worker: Any) -> None:
             key=lambda row: adaptive._finite(row.get("soft_score") or row.get("opportunity_score")),
             reverse=True,
         ):
-            if adaptive.classify_capital_engine(item) != engine or item.get("qualified_for_capital") is not True:
+            symbol = adaptive._upper(item.get("symbol"))
+            capital_engine = adaptive.classify_capital_engine(item)
+            qualified = item.get("qualified_for_capital") is True
+            if capital_engine != engine or not qualified:
+                if _entry_candidate(item):
+                    reason = "capital_engine_mismatch" if capital_engine != engine else "not_capital_qualified"
+                    _log_optimizer_decision(
+                        worker,
+                        symbol,
+                        status="REJECTED",
+                        reason=reason,
+                        engine=capital_engine,
+                        qualified=qualified,
+                        score=round(adaptive._finite(item.get("soft_score") or item.get("opportunity_score")), 4),
+                        confidence=round(adaptive._finite(item.get("confidence")), 4),
+                    )
                 continue
 
-            symbol = adaptive._upper(item.get("symbol"))
             gate = _strategic_rebalance_gate(item)
             if not gate.get("allowed"):
-                rejections.append({"symbol": symbol, "reason": "hard risk gate", "risk_reasons": gate.get("reasons") or []})
+                risk_reasons = gate.get("reasons") or []
+                rejections.append({"symbol": symbol, "reason": "hard risk gate", "risk_reasons": risk_reasons})
+                _log_optimizer_decision(
+                    worker,
+                    symbol,
+                    status="REJECTED",
+                    reason="hard_risk_gate",
+                    risk_reasons=",".join(str(reason) for reason in risk_reasons) or "unspecified",
+                )
                 continue
 
             current = exposure_by_symbol.get(symbol, 0.0)
             max_position = equity * adaptive.GLOBAL_PIT_MAX_POSITION_PCT
             if current >= max_position:
+                rejections.append({"symbol": symbol, "reason": "max position reached"})
+                _log_optimizer_decision(
+                    worker,
+                    symbol,
+                    status="REJECTED",
+                    reason="max_position_reached",
+                    current=round(current, 2),
+                    max_position=round(max_position, 2),
+                )
                 continue
 
             candidate_amount = min(
@@ -127,13 +180,43 @@ def install_strategic_rebalance_optimizer_bridge(worker: Any) -> None:
                 candidate_amount = min(candidate_amount, strategic_target_gap)
 
             if candidate_amount <= 0:
-                break
+                rejections.append({"symbol": symbol, "reason": "no capital capacity"})
+                _log_optimizer_decision(
+                    worker,
+                    symbol,
+                    status="REJECTED",
+                    reason="no_capital_capacity",
+                    cash=round(cash, 2),
+                    reserve=round(reserve, 2),
+                    current=round(current, 2),
+                    max_position=round(max_position, 2),
+                )
+                continue
 
             capacity = adaptive.liquidity_capacity(item, candidate_amount)
             if not capacity["allowed"]:
+                capacity_reason = str(capacity.get("reason") or "liquidity_capacity_blocked")
+                rejections.append({"symbol": symbol, "reason": "liquidity capacity", "capacity_reason": capacity_reason})
+                _log_optimizer_decision(
+                    worker,
+                    symbol,
+                    status="REJECTED",
+                    reason="liquidity_capacity",
+                    capacity_reason=capacity_reason,
+                    candidate_amount=round(candidate_amount, 2),
+                    executable=round(adaptive._finite(capacity.get("executable_order_value")), 2),
+                )
                 continue
             executable_amount = min(candidate_amount, adaptive._finite(capacity.get("executable_order_value")))
             if executable_amount <= 0:
+                rejections.append({"symbol": symbol, "reason": "zero executable liquidity"})
+                _log_optimizer_decision(
+                    worker,
+                    symbol,
+                    status="REJECTED",
+                    reason="zero_executable_liquidity",
+                    candidate_amount=round(candidate_amount, 2),
+                )
                 continue
 
             # Do not turn weak/tiny sizing into a trade. Preserve it as a watch
@@ -152,11 +235,27 @@ def install_strategic_rebalance_optimizer_bridge(worker: Any) -> None:
                         "authorization_basis": gate.get("authorization_basis") or "hard_risk_gate",
                     }
                 )
+                _log_optimizer_decision(
+                    worker,
+                    symbol,
+                    status="WATCH",
+                    reason="below_meaningful_entry_floor",
+                    proposed_amount=round(executable_amount, 2),
+                    meaningful_entry_floor=round(meaningful_entry_floor, 2),
+                )
                 continue
 
             sector = str(item.get("sector") or "").strip() or "Unknown"
             if equity and (sector_exposure.get(sector, 0.0) + executable_amount) / equity > adaptive.MAX_SECTOR_EXPOSURE_PCT:
                 rejections.append({"symbol": symbol, "reason": "sector concentration limit"})
+                _log_optimizer_decision(
+                    worker,
+                    symbol,
+                    status="REJECTED",
+                    reason="sector_concentration_limit",
+                    sector=sector,
+                    proposed_amount=round(executable_amount, 2),
+                )
                 continue
 
             allocations.append(
@@ -169,6 +268,15 @@ def install_strategic_rebalance_optimizer_bridge(worker: Any) -> None:
                     "core_target_gap": round(strategic_target_gap, 2) if strategic_target_gap > 0 else None,
                     "meaningful_entry_floor": round(meaningful_entry_floor, 2),
                 }
+            )
+            _log_optimizer_decision(
+                worker,
+                symbol,
+                status="APPROVED",
+                reason="capital_allocated",
+                amount=round(executable_amount, 2),
+                cash_before=round(cash, 2),
+                reserve=round(reserve, 2),
             )
             cash -= executable_amount
             exposure_by_symbol[symbol] = current + executable_amount
