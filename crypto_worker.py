@@ -7,8 +7,10 @@ from capital_readiness_runtime import prepare_capital_readiness_runtime
 from core_rebalance_observability import install_core_rebalance_observability
 from core_rebalance_optimizer_trace import install_core_rebalance_optimizer_trace
 from core_rebalance_score_compat import install_core_rebalance_score_compat
+from crypto_dynamic_universe_runtime import install_crypto_dynamic_universe_runtime
 from crypto_execution_guard import install_crypto_execution_quote_guard
 from crypto_forecast_runtime import install_crypto_short_horizon_forecast
+from crypto_provider_health_runtime import install_crypto_provider_health_runtime
 from crypto_quote_readiness_sampler import install_v39_quote_verification_sampler
 from crypto_v39_risk_bridge import install_crypto_v39_risk_bridge
 from crypto_v39_spread_bridge import install_crypto_v39_spread_bridge
@@ -62,7 +64,13 @@ install_robinhood_transport_resilience()
 # Robinhood now supplies the point-in-time crypto execution mark. Historical
 # OHLCV remains on the existing provider router for indicators and forecasts.
 install_robinhood_current_marketdata(market_worker)
+# Expand discovery only from broker-reported tradable USD pairs. Capital and
+# execution gates remain unchanged for every dynamically added symbol.
+install_crypto_dynamic_universe_runtime(market_worker)
 install_robinhood_quote_resilience(market_worker)
+# Observe final broker availability after retries/cache grace. This is telemetry
+# only and does not alter quote contents or execution eligibility.
+install_crypto_provider_health_runtime(market_worker)
 install_crypto_v39_spread_bridge(market_worker)
 install_crypto_execution_quote_guard(market_worker)
 install_v39_quote_verification_sampler(market_worker)
@@ -102,7 +110,8 @@ install_massive_crypto_websocket(market_worker)
 install_optimizer_repairs(market_worker)
 
 # Keep this entrypoint in the crypto-worker deploy watch set; readiness helpers are imported above.
-# Production deploy marker: broker-anchored paper BUY/SELL execution, transport resilience, DB lifecycle verification, optimizer repair, and Massive WebSocket surveillance are active.
+# Production deploy marker: broker-anchored paper BUY/SELL execution, dynamic crypto discovery,
+# provider-health telemetry, adaptive sizing, optimizer tracing, and Massive surveillance are active.
 
 
 def run_robinhood_startup_preflight() -> None:
