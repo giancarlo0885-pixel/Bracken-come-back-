@@ -6,6 +6,7 @@ from database import rows
 
 
 PENDING_STATUS = "AWAITING_HUMAN_APPROVAL"
+PAPER_EXECUTED_STATUS = "PAPER_EXECUTED_AUTOMATICALLY"
 
 
 def _payload(record: dict[str, Any]) -> dict[str, Any]:
@@ -14,7 +15,7 @@ def _payload(record: dict[str, Any]) -> dict[str, Any]:
 
 
 def list_trade_proposals(*, limit: int = 100, pending_only: bool = True) -> list[dict[str, Any]]:
-    """Return broker-verified crypto proposals without performing broker mutations."""
+    """Return broker-verified paper executions with separate live-proposal metadata."""
     records = rows(
         """
         SELECT proposal_id, shadow_order_id, paper_fill_id, decision_id, symbol, side,
@@ -34,6 +35,7 @@ def list_trade_proposals(*, limit: int = 100, pending_only: bool = True) -> list
         proposal_status = str(payload.get("proposal_status") or PENDING_STATUS)
         if pending_only and proposal_status != PENDING_STATUS:
             continue
+        paper_fill_id = record.get("paper_fill_id")
         proposals.append(
             {
                 "proposal_id": record.get("proposal_id"),
@@ -48,6 +50,8 @@ def list_trade_proposals(*, limit: int = 100, pending_only: bool = True) -> list
                 "broker_spread_pct": record.get("broker_spread_pct"),
                 "oracle_reference_price": record.get("oracle_reference_price"),
                 "paper_fill_price": record.get("paper_fill_price"),
+                "paper_execution_status": PAPER_EXECUTED_STATUS if paper_fill_id else "PAPER_FILL_UNAVAILABLE",
+                "live_submission_status": proposal_status,
                 "proposal_status": proposal_status,
                 "human_approval_required": bool(payload.get("human_approval_required", True)),
                 "submission_allowed": bool(payload.get("submission_allowed", False)),
@@ -66,7 +70,7 @@ def list_trade_proposals(*, limit: int = 100, pending_only: bool = True) -> list
                 "paper_slippage_pct": payload.get("paper_slippage_pct"),
                 "paper_market_impact_pct": payload.get("paper_market_impact_pct"),
                 "shadow_status": record.get("shadow_status"),
-                "paper_fill_id": record.get("paper_fill_id"),
+                "paper_fill_id": paper_fill_id,
                 "shadow_order_id": record.get("shadow_order_id"),
                 "decision_id": record.get("decision_id"),
             }

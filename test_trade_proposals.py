@@ -130,5 +130,7 @@ def test_trade_proposal_query_normalizes_review_fields(monkeypatch):
     assert proposal["proposal_id"] == "proposal:fill-1"
     assert proposal["strategy"] == "mean_reversion"
     assert proposal["risk_reward_ratio"] == 2.0
+    assert proposal["paper_execution_status"] == "PAPER_EXECUTED_AUTOMATICALLY"
+    assert proposal["live_submission_status"] == "AWAITING_HUMAN_APPROVAL"
     assert proposal["human_approval_required"] is True
     assert proposal["submission_allowed"] is False
