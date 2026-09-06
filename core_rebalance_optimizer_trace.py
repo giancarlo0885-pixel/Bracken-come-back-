@@ -7,6 +7,61 @@ from global_pit_engine import hard_risk_gate
 from strategic_rebalance_optimizer_bridge import _strategic_rebalance_gate
 
 
+_ENTRY_ACTIONS = {"BUY", "STRONG_BUY", "STRONG BUY", "ACCUMULATE", "LONG"}
+
+
+def _upper(value: Any) -> str:
+    return str(value or "").strip().upper()
+
+
+def _optimizer_decision_index(
+    opportunities: list[dict[str, Any]],
+    plan: dict[str, Any],
+) -> dict[str, dict[str, Any]]:
+    """Build a read-only per-symbol decision view for downstream observability."""
+    decisions: dict[str, dict[str, Any]] = {}
+
+    for rejection in plan.get("rejections") or []:
+        symbol = _upper(rejection.get("symbol"))
+        if not symbol:
+            continue
+        decisions[symbol] = {
+            "status": "REJECTED",
+            "reason": rejection.get("reason") or "optimizer_rejected_candidate",
+            "risk_reasons": rejection.get("risk_reasons") or [],
+            "capacity_reason": rejection.get("capacity_reason"),
+            "watch_only": bool(rejection.get("watch_only")),
+            "proposed_amount": rejection.get("proposed_amount"),
+            "meaningful_entry_floor": rejection.get("meaningful_entry_floor"),
+        }
+
+    for allocation in plan.get("allocations") or []:
+        symbol = _upper(allocation.get("symbol"))
+        if not symbol:
+            continue
+        decisions[symbol] = {
+            "status": "APPROVED",
+            "reason": "capital_allocated",
+            "approved_amount": allocation.get("amount"),
+            "meaningful_entry_floor": allocation.get("meaningful_entry_floor")
+            or plan.get("meaningful_entry_floor"),
+        }
+
+    for item in opportunities or []:
+        symbol = _upper(item.get("symbol"))
+        action = _upper(item.get("action") or item.get("tactical_action"))
+        if not symbol or action not in _ENTRY_ACTIONS or symbol in decisions:
+            continue
+        reason = "not_capital_qualified" if item.get("qualified_for_capital") is not True else "no_explicit_optimizer_decision"
+        decisions[symbol] = {
+            "status": "REJECTED",
+            "reason": reason,
+            "qualified_for_capital": item.get("qualified_for_capital"),
+        }
+
+    return decisions
+
+
 def install_core_rebalance_optimizer_trace(worker: Any) -> None:
     """Read-only tracing for the candidate -> V39 -> optimizer boundary."""
     original_opportunity = worker._v39_signal_opportunity
@@ -57,12 +112,19 @@ def install_core_rebalance_optimizer_trace(worker: Any) -> None:
         ) -> dict[str, Any]:
             plan = original_optimizer(opportunities, portfolio, positions, engine=engine)
             if str(engine or "").lower() == "crypto":
+                decisions = _optimizer_decision_index(opportunities, plan)
+                worker._core_rebalance_optimizer_decisions = decisions
+
                 candidates = [
                     item for item in opportunities or []
                     if item.get("core_rebalance_candidate") is True
                     or str(item.get("portfolio_intent") or "").upper() == patch.CORE_REBALANCE_CANDIDATE_INTENT
                 ]
-                if candidates:
+                entry_ideas = [
+                    item for item in opportunities or []
+                    if _upper(item.get("action") or item.get("tactical_action")) in _ENTRY_ACTIONS
+                ]
+                if candidates or entry_ideas:
                     hard_gate_evidence = []
                     strategic_authorization_evidence = []
                     for item in candidates:
@@ -90,7 +152,7 @@ def install_core_rebalance_optimizer_trace(worker: Any) -> None:
                         )
                     worker.log.info(
                         "CORE_REBALANCE_OPTIMIZER | candidates=%s | hard_gate=%s | gate_scope=TACTICAL | "
-                        "strategic_authorization=%s | allocations=%s | rejections=%s | cash=%s | equity=%s | positions=%s",
+                        "strategic_authorization=%s | allocations=%s | rejections=%s | decisions=%s | cash=%s | equity=%s | positions=%s",
                         [
                             {
                                 "symbol": item.get("symbol"),
@@ -105,6 +167,7 @@ def install_core_rebalance_optimizer_trace(worker: Any) -> None:
                         strategic_authorization_evidence,
                         plan.get("allocations"),
                         plan.get("rejections"),
+                        decisions,
                         portfolio.get("cash"),
                         portfolio.get("equity") or portfolio.get("total_equity"),
                         len(positions or []),
