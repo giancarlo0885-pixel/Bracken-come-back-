@@ -12,8 +12,15 @@ from runtime_integrity_patch import (
 )
 
 
+_ENTRY_ACTIONS = {"BUY", "STRONG_BUY", "STRONG BUY", "ACCUMULATE", "LONG"}
+
+
+def _upper(value: Any) -> str:
+    return str(value or "").strip().upper()
+
+
 def install_core_rebalance_observability(worker: Any) -> None:
-    """Expose why an empty/underweight crypto portfolio does or does not rebalance.
+    """Expose why crypto opportunities do or do not reach capital deployment.
 
     This wrapper is read-only. It does not modify signals, opportunities,
     allocations, thresholds, execution mode, or any safety gate.
@@ -47,24 +54,52 @@ def install_core_rebalance_observability(worker: Any) -> None:
         buys = [signal for signal in candidates if _core_rebalance_intent(signal) == CORE_REBALANCE_BUY_INTENT]
         decisions = dict(getattr(worker, "_core_rebalance_optimizer_decisions", {}) or {})
 
-        if candidates or deployment_gap > 0:
-            sample_source = candidates or sorted(
-                list(signals or []),
-                key=lambda signal: _numeric(_signal_value(signal, "score", 0.0)),
-                reverse=True,
-            )[:5]
+        entry_signals = [
+            signal for signal in signals or []
+            if _upper(_signal_value(signal, "action", "")) in _ENTRY_ACTIONS
+        ]
+
+        if candidates or entry_signals or deployment_gap > 0:
+            if candidates:
+                sample_source = candidates
+            elif entry_signals:
+                sample_source = sorted(
+                    entry_signals,
+                    key=lambda signal: _numeric(_signal_value(signal, "score", 0.0)),
+                    reverse=True,
+                )[:5]
+            else:
+                sample_source = sorted(
+                    list(signals or []),
+                    key=lambda signal: _numeric(_signal_value(signal, "score", 0.0)),
+                    reverse=True,
+                )[:5]
+
             sample = []
             for signal in sample_source[:5]:
                 symbol = str(_signal_value(signal, "symbol", "") or "").upper()
+                action = _upper(_signal_value(signal, "action", ""))
+                intent = _core_rebalance_intent(signal)
                 quote = dict((prices or {}).get(symbol) or {})
                 decision = dict(decisions.get(symbol) or {})
+
+                if not decision and action in _ENTRY_ACTIONS:
+                    decision = {
+                        "status": "NOT_ROUTED",
+                        "reason": (
+                            "not_routed_to_capital_optimizer"
+                            if intent not in {CORE_REBALANCE_CANDIDATE_INTENT, CORE_REBALANCE_BUY_INTENT}
+                            else "optimizer_decision_not_observed"
+                        ),
+                    }
+
                 sample.append(
                     {
                         "symbol": symbol,
-                        "action": str(_signal_value(signal, "action", "") or "").upper(),
+                        "action": action,
                         "score": _numeric(_signal_value(signal, "score", 0.0)),
                         "confidence": _numeric(_signal_value(signal, "confidence", 0.0)),
-                        "intent": _core_rebalance_intent(signal),
+                        "intent": intent,
                         "signal_id": bool(_signal_value(signal, "signal_id", None)),
                         "forecast_id": bool(_signal_value(signal, "forecast_id", None)),
                         "approved_amount": _numeric(_signal_value(signal, "v39_optimizer_approved_amount", 0.0)),
@@ -75,6 +110,7 @@ def install_core_rebalance_observability(worker: Any) -> None:
                         "optimizer_watch_only": bool(decision.get("watch_only")),
                         "optimizer_proposed_amount": decision.get("proposed_amount"),
                         "meaningful_entry_floor": decision.get("meaningful_entry_floor"),
+                        "entry_floor_mode": decision.get("entry_floor_mode"),
                         "quote_verified": quote.get("quote_verified") is True,
                         "tradeable": quote.get("tradeable") is True,
                         "spread_pct": quote.get("spread_pct"),
@@ -82,12 +118,13 @@ def install_core_rebalance_observability(worker: Any) -> None:
                     }
                 )
             worker.log.info(
-                "CORE_REBALANCE_TRACE | scan=%s | deployment_gap=%.2f | signals=%d | candidates=%d | buys=%d | sample=%s",
+                "CORE_REBALANCE_TRACE | scan=%s | deployment_gap=%.2f | signals=%d | candidates=%d | buys=%d | entry_signals=%d | sample=%s",
                 scan_type,
                 deployment_gap,
                 len(signals or []),
                 len(candidates),
                 len(buys),
+                len(entry_signals),
                 sample,
             )
         return ordered
