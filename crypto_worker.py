@@ -23,6 +23,7 @@ from optimizer_repair_runtime import install_optimizer_repairs
 from paper_autonomous_learning import install_paper_autonomous_learning
 from paper_broker_reference_runtime import install_paper_broker_reference
 from paper_core_rebalance_qualification import install_paper_core_rebalance_qualification
+from paper_crypto_churn_guard import install_paper_crypto_churn_guard
 from paper_crypto_learning_relaxation import install_paper_crypto_learning_relaxation
 from paper_execution_accounting import install_paper_execution_accounting
 from paper_execution_reality import install_paper_execution_reality
@@ -100,6 +101,9 @@ if os.getenv("EXECUTION_MODE", "paper").strip().lower() == "paper":
     # final SELL attribution path and shares the caller's database transaction.
     install_atomic_paper_sell_lot_repair(market_worker)
     install_paper_broker_reference(market_worker)
+    # Prevent fast generic SELL noise from immediately reversing a fresh paper
+    # entry. Protective EXIT/CLOSE/risk-exit paths remain unrestricted.
+    install_paper_crypto_churn_guard(market_worker)
     # The SELL router must be inside the lifecycle observer. This lets the
     # observer see both routed exits and optimized entries in the same returned
     # action list; the previous order made genuine SELLs appear as sells=0.
@@ -116,7 +120,7 @@ install_optimizer_repairs(market_worker)
 
 # Keep this entrypoint in the crypto-worker deploy watch set; readiness helpers are imported above.
 # Production deploy marker: broker-anchored paper BUY/SELL execution, dynamic crypto discovery,
-# provider-health telemetry, adaptive sizing, optimizer tracing, and Massive surveillance are active.
+# provider-health telemetry, adaptive sizing, optimizer tracing, churn control, and Massive surveillance are active.
 
 
 def run_robinhood_startup_preflight() -> None:
