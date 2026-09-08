@@ -31,6 +31,7 @@ from paper_lifecycle_observability import install_paper_lifecycle_observability
 from paper_sell_db_verification import emit_recent_crypto_sell_db_verification
 from paper_sell_execution_router import install_paper_sell_execution_router
 from paper_sell_lot_atomic_repair import install_atomic_paper_sell_lot_repair
+from paper_weekly_risk_period_runtime import install_paper_weekly_risk_period
 from readiness_observability import emit_capital_readiness_report
 from robinhood_current_marketdata_runtime import install_robinhood_current_marketdata
 from robinhood_pagination_compat import install_robinhood_pagination_compat
@@ -88,6 +89,10 @@ install_core_rebalance_observability(market_worker)
 install_selective_model_leakage_fix()
 install_current_model_readiness_fix()
 if os.getenv("EXECUTION_MODE", "paper").strip().lower() == "paper":
+    # Weekly risk must reset at the start of the current UTC calendar week rather
+    # than carrying prior-week losses forward in a rolling seven-day window.
+    # The configured loss threshold itself is unchanged.
+    install_paper_weekly_risk_period()
     install_paper_execution_reality(market_worker)
     install_paper_execution_accounting(market_worker)
     install_fee_aware_fifo_policy()
