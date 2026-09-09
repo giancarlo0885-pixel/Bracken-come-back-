@@ -44,6 +44,8 @@ def _hard_execution_evidence(
     opportunity: dict[str, Any],
     signal: Any,
     prices: dict[str, Any],
+    *,
+    require_risk: bool = True,
 ) -> tuple[bool, dict[str, Any]]:
     symbol = str(patch._signal_value(signal, "symbol", "") or "").upper().strip()
     quote = dict((prices or {}).get(symbol) or {})
@@ -80,7 +82,7 @@ def _hard_execution_evidence(
         and liquidity > 0
         and spread is not None
         and spread >= 0
-        and risk is not None
+        and (risk is not None or not require_risk)
         and signal_id
     )
     return hard_evidence_ok, {
@@ -153,11 +155,12 @@ def install_paper_core_rebalance_qualification(worker: Any) -> None:
     """Open valid crypto BUY samples for autonomous paper learning.
 
     Bounded paper mode keeps the historical core-rebalance forecast exception.
-    Unbounded paper mode additionally treats model qualification and hard-risk
-    thresholds as observations rather than vetoes for genuine BUY signals, while
-    still requiring verified/fresh identity-correct quotes, tradeability,
-    liquidity, finite risk evidence and a real signal id. Invalid/missing market
-    data remains fail-closed because fabricated fills would corrupt learning.
+    Unbounded paper mode treats model qualification, forecast/risk availability,
+    and hard-risk thresholds as observations rather than vetoes for genuine BUY
+    signals. It still requires verified/fresh identity-correct quotes, a tradeable
+    symbol, positive liquidity, finite spread and a real signal id. Invalid or
+    unsupported market data remains fail-closed because fabricated fills would
+    corrupt the learning set.
     """
     _install_unbounded_optimizer_policy()
 
@@ -188,13 +191,21 @@ def install_paper_core_rebalance_qualification(worker: Any) -> None:
         if opportunity.get("qualified_for_capital") is True:
             return opportunity
 
-        hard_evidence_ok, evidence = _hard_execution_evidence(worker, opportunity, signal, prices)
         action = _signal_action(signal)
+        unbounded = _unbounded_paper_learning()
+        hard_evidence_ok, evidence = _hard_execution_evidence(
+            worker,
+            opportunity,
+            signal,
+            prices,
+            require_risk=not unbounded,
+        )
 
-        if _unbounded_paper_learning() and action in _ENTRY_ACTIONS and hard_evidence_ok:
+        if unbounded and action in _ENTRY_ACTIONS and hard_evidence_ok:
             opportunity["qualified_for_capital"] = True
             opportunity["paper_unbounded_learning"] = True
             opportunity["capital_qualification_basis"] = "paper_unbounded_valid_buy_signal"
+            opportunity["tactical_action"] = action
             stages = list(opportunity.get("stages") or [])
             if "paper_unbounded_learning" not in stages:
                 stages.append("paper_unbounded_learning")
@@ -202,13 +213,13 @@ def install_paper_core_rebalance_qualification(worker: Any) -> None:
             worker.log.info(
                 "PAPER UNBOUNDED QUALIFICATION | symbol=%s | action=%s | qualified=True | "
                 "quote_verified=True | identity_verified=True | execution_fresh=True | tradeable=True | "
-                "liquidity=%.2f | spread_pct=%.6f | risk_score=%.4f | model_veto=OBSERVE_ONLY | "
+                "liquidity=%.2f | spread_pct=%.6f | risk_score=%s | model_veto=OBSERVE_ONLY | "
                 "broker_submission=NONE | live_trading=DISARMED",
                 evidence["symbol"],
                 action,
                 evidence["liquidity"],
                 evidence["spread"],
-                evidence["risk"],
+                "missing_observed_only" if evidence["risk"] is None else f"{evidence['risk']:.4f}",
             )
             return opportunity
 
@@ -220,7 +231,7 @@ def install_paper_core_rebalance_qualification(worker: Any) -> None:
             return opportunity
 
         # Existing bounded-paper exception: only forecast authorization may be
-        # absent; all hard execution evidence must still be present.
+        # absent; all hard execution evidence, including risk evidence, remains.
         if not hard_evidence_ok or evidence["forecast_id"]:
             return opportunity
 
