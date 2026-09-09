@@ -31,6 +31,7 @@ from paper_execution_accounting import install_paper_execution_accounting
 from paper_execution_reality import install_paper_execution_reality
 from paper_fee_policy import install_fee_aware_fifo_policy
 from paper_lifecycle_observability import install_paper_lifecycle_observability
+from paper_optimizer_size_handoff import install_paper_optimizer_size_handoff
 from paper_sell_db_verification import emit_recent_crypto_sell_db_verification
 from paper_sell_execution_router import install_paper_sell_execution_router
 from paper_sell_lot_atomic_repair import install_atomic_paper_sell_lot_repair
@@ -123,6 +124,10 @@ install_massive_crypto_websocket(market_worker)
 # Install last so the optimizer repair sees the final wrapped execution chain.
 # The module self-disables unless execution is paper-only and live submission is disarmed.
 install_optimizer_repairs(market_worker)
+# Then make the V39 optimizer-approved paper notional authoritative for ordinary
+# unbounded learning entries, instead of letting the minimum-sample fallback
+# collapse approved allocations to $2. This remains strictly paper-only.
+install_paper_optimizer_size_handoff()
 
 # Keep this entrypoint in the crypto-worker deploy watch set; readiness helpers are imported above.
 # Production deploy marker: broker-anchored paper BUY/SELL execution, dynamic crypto discovery,
