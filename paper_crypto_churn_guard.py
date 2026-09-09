@@ -6,6 +6,8 @@ import time
 from datetime import datetime, timezone
 from typing import Any
 
+from paper_fast_reversal_hysteresis import install_paper_fast_reversal_hysteresis
+
 
 log = logging.getLogger("paper-churn-guard")
 _INSTALLED = False
@@ -112,9 +114,6 @@ def _allow_generic_sell(signal: Any, prices: dict[str, Any]) -> tuple[bool, str]
     current = _current_price(signal, prices, symbol)
     return_pct = ((current / entry) - 1.0) * 100.0 if entry > 0 and current > 0 else None
 
-    # Never delay a genuine protective loss exit. The ordinary risk-exit engine is
-    # separate, but this override prevents a generic SELL guard from trapping a
-    # position if the same signal path sees a material adverse move first.
     if return_pct is not None and return_pct <= -emergency_loss:
         _SELL_CONFIRMATIONS.pop(symbol, None)
         return True, f"emergency_loss_override:{return_pct:.3f}%"
@@ -139,15 +138,17 @@ def _allow_generic_sell(signal: Any, prices: dict[str, Any]) -> tuple[bool, str]
 def install_paper_crypto_churn_guard(worker: Any) -> bool:
     """Block immediate generic paper SELL reversals without weakening risk exits.
 
-    The guard wraps market_worker.process_signals because market_worker imports the
-    function by value. It only filters generic crypto SELL signals in paper-only,
-    broker-disarmed mode. EXIT/CLOSE and the separate risk_exits path are unchanged.
+    Upstream hysteresis first downgrades weak fast SELL flips to HOLD. This
+    downstream guard remains as a second layer around process_signals. EXIT/CLOSE
+    and the separate risk_exits path are unchanged.
     """
     global _INSTALLED
     if _INSTALLED:
         return True
     if not _paper_only():
         return False
+
+    install_paper_fast_reversal_hysteresis(worker)
 
     original = worker.process_signals
     if not callable(original):
@@ -185,7 +186,7 @@ def install_paper_crypto_churn_guard(worker: Any) -> bool:
     min_hold, confirmations, window, emergency_loss = _settings()
     log.info(
         "Installed paper crypto churn guard | min_hold=%.2fm | confirmations=%d | window=%.0fs | "
-        "emergency_loss=%.2f%% | broker_submission=NONE | live_trading=DISARMED",
+        "emergency_loss=%.2f%% | upstream_hysteresis=ACTIVE | broker_submission=NONE | live_trading=DISARMED",
         min_hold,
         confirmations,
         window,
