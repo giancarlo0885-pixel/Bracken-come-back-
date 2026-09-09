@@ -65,6 +65,7 @@ def install_paper_autonomous_learning() -> bool:
     if not _active():
         return False
 
+    logger = logging.getLogger("paper-autonomous-learning")
     import capital_allocator
 
     original_confidence_multiplier = capital_allocator.confidence_multiplier
@@ -152,6 +153,8 @@ def install_paper_autonomous_learning() -> bool:
     capital_allocator.adaptive_capital_allocation = paper_adaptive_capital_allocation
     capital_allocator.PAPER_AUTONOMOUS_LEARNING_ACTIVE = True
 
+    risk_metric_proxies_installed = False
+    risk_metric_proxy_error = "none"
     try:
         import oracle_bot
 
@@ -196,17 +199,24 @@ def install_paper_autonomous_learning() -> bool:
             return original_shared_risk_gate(**updated)
 
         oracle_bot._shared_risk_gate = paper_shared_risk_gate
-    except Exception:
-        pass
+        risk_metric_proxies_installed = True
+    except Exception as exc:
+        risk_metric_proxy_error = exc.__class__.__name__
+        logger.warning(
+            "PAPER AUTONOMOUS LEARNING | risk_metric_proxies=INSTALL_FAILED | error=%s | canonical_risk_gate=UNCHANGED | broker_submission=NONE | live_trading=DISARMED",
+            risk_metric_proxy_error,
+        )
 
     _INSTALLED = True
-    logging.getLogger("paper-autonomous-learning").info(
+    logger.info(
         "PAPER AUTONOMOUS LEARNING | active=True | confidence_floor=%.2f | liquidity_floor=%.2f | "
-        "minimum_sample_notional=%.2f | default_slippage_pct=%.4f | risk_metric_proxies=ENABLED | "
-        "execution_mode=paper | broker_submission=NONE | live_trading=DISARMED",
+        "minimum_sample_notional=%.2f | default_slippage_pct=%.4f | risk_metric_proxies=%s | "
+        "risk_metric_proxy_error=%s | execution_mode=paper | broker_submission=NONE | live_trading=DISARMED",
         confidence_floor,
         liquidity_floor,
         learning_notional,
         default_slippage_pct,
+        "ENABLED" if risk_metric_proxies_installed else "DISABLED_FAIL_CLOSED",
+        risk_metric_proxy_error,
     )
     return True
