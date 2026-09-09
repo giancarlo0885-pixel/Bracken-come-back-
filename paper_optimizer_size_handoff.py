@@ -100,6 +100,18 @@ def install_paper_optimizer_size_handoff() -> bool:
     import capital_allocator
     import oracle_bot
 
+    # The generic execution function historically classified any asset priced in
+    # the penny-stock dollar range as a penny stock, regardless of market. That
+    # incorrectly clipped low-priced crypto (for example DOT/NEAR) to the stock
+    # 1% penny position size even when V39 approved the normal 8% crypto target.
+    # This module exists only in the isolated crypto paper worker, so neutralize
+    # those stock-only caps here without changing the stock-worker process.
+    oracle_bot.PENNY_STOCK_MAX_TRADE_VALUE_PCT = max(
+        _number(getattr(oracle_bot, "PENNY_STOCK_MAX_TRADE_VALUE_PCT", 0.0)),
+        _number(getattr(oracle_bot, "MAX_TRADE_VALUE_PCT", 0.0)),
+    )
+    oracle_bot.PENNY_STOCK_MAX_PORTFOLIO_PCT = 1.0
+
     original_adaptive = oracle_bot.adaptive_capital_allocation
     original_buy = oracle_bot._buy
 
@@ -259,6 +271,8 @@ def install_paper_optimizer_size_handoff() -> bool:
     _INSTALLED = True
     log.info(
         "PAPER OPTIMIZER SIZE HANDOFF | active=True | minimum_sample_clamp=BYPASSED_FOR_OPTIMIZER_APPROVED_BUYS | "
-        "soft_size_scaling=BYPASSED | cash_and_liquidity_capacity=ENFORCED | broker_submission=NONE | live_trading=DISARMED"
+        "stock_penny_crypto_misclassification=BYPASSED | max_trade_pct=%.4f | cash_and_liquidity_capacity=ENFORCED | "
+        "broker_submission=NONE | live_trading=DISARMED",
+        _number(getattr(oracle_bot, "MAX_TRADE_VALUE_PCT", 0.0)),
     )
     return True
