@@ -36,8 +36,8 @@ def emit_paper_accounting_reconciliation(market: str = "crypto") -> dict[str, An
     """Emit SELECT-only P&L/equity diagnostics for the canonical paper account.
 
     This never repairs balances. It explains whether the change from starting
-    capital is supported by persisted realized plus open-position P&L, and keeps
-    the existing canonical accounting invariants authoritative.
+    capital is supported by persisted realized P&L, open-position P&L, and the
+    entry-side fees that reduce cash before a position is closed.
     """
     if not _paper_only():
         return {"ok": False, "status": "DISABLED", "reason": "live_not_disarmed"}
@@ -95,11 +95,11 @@ def emit_paper_accounting_reconciliation(market: str = "crypto") -> dict[str, An
         equity_change = canonical_equity - start
         realized = _finite(sells.get("net_realized_pnl"))
         unrealized = _finite(positions.get("open_unrealized_pnl"))
-        explained_pnl = realized + unrealized
+        buy_fees = _finite(fills.get("buy_fill_fees"))
+        # SELL realized_pnl is already net of exit fees. BUY-side fill fees are
+        # a separate cash reduction and must be included once in the equity bridge.
+        explained_pnl = realized + unrealized - buy_fees
         residual = equity_change - explained_pnl
-        # Residual can legitimately include entry fees/cost-basis conventions and
-        # other persisted financing costs, so this is diagnostic rather than a
-        # balance mutation trigger.
         tolerance = max(0.50, abs(start) * 0.0025)
         pnl_status = "EXPLAINED" if abs(residual) <= tolerance else "REVIEW"
 
@@ -126,7 +126,7 @@ def emit_paper_accounting_reconciliation(market: str = "crypto") -> dict[str, An
             "diagnostic_residual": residual,
             "sell_fees": _finite(sells.get("sell_fees")),
             "all_fill_fees": _finite(fills.get("all_fill_fees")),
-            "buy_fill_fees": _finite(fills.get("buy_fill_fees")),
+            "buy_fill_fees": buy_fees,
             "sell_fill_fees": _finite(fills.get("sell_fill_fees")),
             "sell_count": int(sells.get("sell_count") or 0),
             "fill_count": int(fills.get("fill_count") or 0),
@@ -141,11 +141,11 @@ def emit_paper_accounting_reconciliation(market: str = "crypto") -> dict[str, An
         log.info(
             "PAPER ACCOUNTING RECONCILIATION | status=%s | market=%s | start=%.6f | cash=%.6f | "
             "positions=%.6f | equity=%.6f | equity_change=%.6f | realized=%.6f | unrealized=%.6f | "
-            "explained=%.6f | residual=%.6f | sell_fees=%.6f | all_fill_fees=%.6f | "
+            "buy_fees=%.6f | explained=%.6f | residual=%.6f | sell_fees=%.6f | all_fill_fees=%.6f | "
             "invariant_ok=%s | order_fill_mismatches=%d | lot_mismatches=%d | ledger_mismatches=%d | "
             "invalid_executions=%d | broker_submission=NONE | live_trading=DISARMED",
             status, market, start, cash, position_value, canonical_equity, equity_change,
-            realized, unrealized, explained_pnl, residual, payload["sell_fees"], payload["all_fill_fees"],
+            realized, unrealized, buy_fees, explained_pnl, residual, payload["sell_fees"], payload["all_fill_fees"],
             invariant_ok, payload["order_fill_mismatches"], payload["lot_mismatches"],
             payload["ledger_mismatches"], payload["invalid_executions"],
         )
