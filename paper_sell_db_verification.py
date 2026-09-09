@@ -60,10 +60,9 @@ def _emit_exact_first_sell(rows_fn: Any, cutoff: str) -> dict[str, Any]:
     symbol = str(trade.get("symbol") or "").upper()
     created_at = trade.get("created_at")
     trade_qty = float(trade.get("quantity") or 0.0)
-    # The order is persisted before (or nearly simultaneously with) the trade row.
-    # Match the nearest FILLED SELL for the same symbol/quantity around the trade
-    # timestamp instead of requiring order.created_at >= trade.created_at, which
-    # could falsely fail a valid lifecycle.
+    # Some legacy paper-order quantity columns were persisted as textual numerics.
+    # Cast explicitly before arithmetic so exact verification remains SELECT-only
+    # and schema-compatible across old/new rows.
     order = _first(
         rows_fn,
         """
@@ -78,7 +77,12 @@ def _emit_exact_first_sell(rows_fn: Any, cutoff: str) -> dict[str, Any]:
           AND status='FILLED'
           AND created_at BETWEEN (%s::timestamptz - interval '5 minutes')
                              AND (%s::timestamptz + interval '5 minutes')
-          AND ABS(COALESCE(filled_quantity, requested_quantity, 0) - %s) <= GREATEST(1e-10, ABS(%s) * 1e-6)
+          AND ABS(
+                COALESCE(NULLIF(filled_quantity::text,'' )::numeric,
+                         NULLIF(requested_quantity::text,'')::numeric,
+                         0::numeric)
+                - %s::numeric
+              ) <= GREATEST(1e-10::numeric, ABS(%s::numeric) * 1e-6::numeric)
         ORDER BY ABS(EXTRACT(EPOCH FROM (created_at - %s::timestamptz))) ASC,
                  created_at ASC
         LIMIT 1
@@ -158,11 +162,7 @@ def _emit_exact_first_sell(rows_fn: Any, cutoff: str) -> dict[str, Any]:
 
 
 def emit_recent_crypto_sell_db_verification(*, lookback_minutes: int = 180) -> dict[str, Any]:
-    """Read and summarize persisted crypto paper SELL evidence from Postgres.
-
-    SELECT queries only. If PAPER_SELL_VERIFY_AFTER is set, an exact first-SELL
-    proof is emitted in addition to the rolling summary.
-    """
+    """Read and summarize persisted crypto paper SELL evidence from Postgres."""
     from database import rows
 
     default_cutoff = (datetime.now(timezone.utc) - timedelta(minutes=max(1, lookback_minutes))).isoformat()
