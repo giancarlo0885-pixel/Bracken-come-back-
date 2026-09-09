@@ -86,6 +86,8 @@ def _install_optimizer_account_limit_sync(worker: Any) -> None:
         # Make strategic overrides explicit: only tactical authorization reasons
         # may be waived. Hard-risk, execution, liquidity and account limits remain
         # authoritative.
+        from strategic_rebalance_optimizer_bridge import _strategic_rebalance_gate
+
         by_symbol = {
             str(item.get("symbol") or "").upper().strip(): item
             for item in opportunities or []
@@ -94,7 +96,8 @@ def _install_optimizer_account_limit_sync(worker: Any) -> None:
         for allocation in plan.get("allocations") or []:
             symbol = str(allocation.get("symbol") or "").upper().strip()
             item = by_symbol.get(symbol) or {}
-            tactical_reasons = list(item.get("tactical_authorization_reasons") or [])
+            gate = _strategic_rebalance_gate(item) if item else {}
+            tactical_reasons = list(gate.get("tactical_authorization_reasons") or [])
             allocation["strategic_override_scope"] = "tactical_authorization_only"
             allocation["waived_tactical_reasons"] = tactical_reasons
             allocation["hard_risk_waivers"] = []
@@ -229,9 +232,10 @@ class _ReferenceHandoffLabelFilter(logging.Filter):
         if not isinstance(record.msg, str) or not record.msg.startswith("EXECUTION_QUOTE_HANDOFF |"):
             return True
         args = record.args if isinstance(record.args, tuple) else ()
-        # runtime_integrity_patch handoff args: provider_verified index 8,
-        # paper_reference_verified index 9, verification_kind index 10.
-        if len(args) > 10 and args[9] is True and args[8] is not True:
+        # runtime_integrity_patch handoff args: quote_eligible index 8,
+        # provider_verified index 9, paper_reference_verified index 10,
+        # verification_kind index 11.
+        if len(args) > 11 and args[10] is True and args[9] is not True:
             record.msg = record.msg.replace("EXECUTION_QUOTE_HANDOFF |", "PAPER_REFERENCE_HANDOFF |", 1)
         return True
 
