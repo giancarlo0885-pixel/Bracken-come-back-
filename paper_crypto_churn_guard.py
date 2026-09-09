@@ -26,14 +26,6 @@ def _paper_only() -> bool:
     )
 
 
-def _unbounded_learning() -> bool:
-    return (
-        _paper_only()
-        and _truthy("PAPER_AUTONOMOUS_LEARNING")
-        and _truthy("PAPER_UNBOUNDED_LEARNING")
-    )
-
-
 def _value(signal: Any, name: str, default: Any = None) -> Any:
     if isinstance(signal, dict):
         return signal.get(name, default)
@@ -144,19 +136,17 @@ def _allow_generic_sell(signal: Any, prices: dict[str, Any]) -> tuple[bool, str]
 
 
 def install_paper_crypto_churn_guard(worker: Any) -> bool:
-    """Block immediate generic paper SELL reversals unless unbounded learning is active."""
+    """Block immediate generic paper SELL reversals without weakening risk exits.
+
+    Upstream hysteresis first downgrades weak fast SELL flips to HOLD. This
+    downstream guard remains as a second layer around process_signals. EXIT/CLOSE
+    and the separate risk_exits path are unchanged.
+    """
     global _INSTALLED
     if _INSTALLED:
         return True
     if not _paper_only():
         return False
-    if _unbounded_learning():
-        _INSTALLED = True
-        log.info(
-            "PAPER CHURN GUARD | status=BYPASSED | reason=unbounded_learning | "
-            "upstream_hysteresis=OFF | broker_submission=NONE | live_trading=DISARMED"
-        )
-        return True
 
     install_paper_fast_reversal_hysteresis(worker)
 
