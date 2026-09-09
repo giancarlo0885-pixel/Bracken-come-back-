@@ -22,9 +22,11 @@ def _count(query: str, params: tuple[Any, ...] = ()) -> int:
 def paper_lifecycle_health(market: str = "crypto") -> dict[str, Any]:
     """Return read-only evidence that the paper entry/exit lifecycle has run.
 
-    A later supervised-live readiness state requires both sides of the lifecycle:
-    a persisted paper BUY with a post-execution canonical portfolio reload, and a
-    persisted paper SELL. This never creates trades and cannot authorize capital.
+    Prefer the explicit post-entry portfolio-reload event when it is still retained.
+    Because global decision events are maintenance-pruned while paper orders/fills are
+    durable accounting evidence, a completed BUY+SELL paper round trip also proves the
+    entry lifecycle historically occurred. This diagnostic never creates trades and
+    cannot authorize capital on its own.
     """
     normalized = str(market or "crypto").strip().lower()
     try:
@@ -92,8 +94,18 @@ def paper_lifecycle_health(market: str = "crypto") -> dict[str, Any]:
             (normalized,),
         ) or {}
 
-        entry_proven = buy_orders > 0 and buy_fills > 0 and reload_events > 0
+        durable_entry = buy_orders > 0 and buy_fills > 0
         exit_proven = sell_orders > 0 and sell_fills > 0
+        durable_round_trip = durable_entry and exit_proven
+        explicit_reload_proof = durable_entry and reload_events > 0
+        entry_proven = explicit_reload_proof or durable_round_trip
+        entry_proof_source = (
+            "portfolio_reload_event"
+            if explicit_reload_proof
+            else "durable_round_trip_orders_fills"
+            if durable_round_trip
+            else "none"
+        )
         round_trip_proven = entry_proven and exit_proven
         if round_trip_proven:
             status = "PASS"
@@ -112,6 +124,9 @@ def paper_lifecycle_health(market: str = "crypto") -> dict[str, Any]:
             "market": normalized,
             "paper_only_evidence": True,
             "entry_proven": entry_proven,
+            "entry_proof_source": entry_proof_source,
+            "explicit_reload_proof": explicit_reload_proof,
+            "durable_round_trip_proof": durable_round_trip,
             "exit_proven": exit_proven,
             "round_trip_proven": round_trip_proven,
             "buy_orders": buy_orders,
@@ -132,6 +147,7 @@ def paper_lifecycle_health(market: str = "crypto") -> dict[str, Any]:
             "market": normalized,
             "paper_only_evidence": True,
             "entry_proven": False,
+            "entry_proof_source": "none",
             "exit_proven": False,
             "round_trip_proven": False,
             "reason": exc.__class__.__name__,
