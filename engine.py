@@ -1,6 +1,6 @@
 from __future__ import annotations
 from dataclasses import dataclass, asdict
-import math, os, numpy as np, pandas as pd
+import math, os, re, numpy as np, pandas as pd
 from config import SIGNAL_BUY_THRESHOLD, SIGNAL_SELL_THRESHOLD
 from crypto_mean_reversion import assess_short_horizon_mean_reversion
 from technical_indicators import rsi, macd, atr, bollinger_position
@@ -64,6 +64,47 @@ def _series(frame: pd.DataFrame, column: str) -> pd.Series:
         value = value.iloc[:, -1]
     return pd.to_numeric(value, errors="coerce").dropna()
 
+def _history_interval(history: pd.DataFrame) -> str:
+    """Resolve the source bar interval without guessing from price values."""
+    attrs = dict(getattr(history, "attrs", {}) or {})
+    route = dict(attrs.get("provider_route", {}) or {})
+    return str(
+        route.get("interval")
+        or route.get("source_interval")
+        or attrs.get("interval")
+        or attrs.get("source_interval")
+        or "1d"
+    ).strip().lower()
+
+def _bars_per_year(symbol: str, history: pd.DataFrame) -> float:
+    """Annualization factor matching the actual bar cadence and market calendar.
+
+    Crypto trades continuously, while cash equities use a 252-session calendar.
+    The old fixed sqrt(252) treatment materially understated intraday crypto
+    volatility and distorted the score used by the always-on fast scanner.
+    """
+    interval = _history_interval(history)
+    match = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*([mhd])\s*", interval)
+    crypto = _crypto_symbol(symbol)
+    if not match:
+        return 365.0 if crypto else 252.0
+
+    amount = max(float(match.group(1)), 1e-9)
+    unit = match.group(2)
+    if crypto:
+        if unit == "m":
+            return max(1.0, 365.0 * 24.0 * 60.0 / amount)
+        if unit == "h":
+            return max(1.0, 365.0 * 24.0 / amount)
+        return max(1.0, 365.0 / amount)
+
+    # Approximate regular US equity session: 390 minutes / 6.5 hours, 252 days.
+    if unit == "m":
+        return max(1.0, 252.0 * 390.0 / amount)
+    if unit == "h":
+        return max(1.0, 252.0 * 6.5 / amount)
+    return max(1.0, 252.0 / amount)
+
 def analyze_market(symbol, history, news_sentiment=0.0):
     if history is None or history.empty or len(history)<60:
         return None
@@ -77,7 +118,7 @@ def analyze_market(symbol, history, news_sentiment=0.0):
     m5=float(close.iloc[-1]/close.iloc[-6]-1)
     m20=float(close.iloc[-1]/close.iloc[-21]-1)
     r=rsi(close)
-    vol=float(ret.tail(20).std()*math.sqrt(252))
+    vol=float(ret.tail(20).std()*math.sqrt(_bars_per_year(symbol, history)))
     sma10=float(close.tail(10).mean()); sma30=float(close.tail(30).mean())
     trend=(sma10/sma30)-1 if sma30 else 0
     vr=1.0
