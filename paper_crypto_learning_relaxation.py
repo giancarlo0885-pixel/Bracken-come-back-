@@ -1,13 +1,24 @@
 from __future__ import annotations
 
+import logging
 import os
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 _INSTALLED = False
+log = logging.getLogger("paper-crypto-learning")
 
 
 def _truthy(name: str, default: str = "false") -> bool:
     return str(os.getenv(name, default) or default).strip().lower() == "true"
+
+
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        number = float(value)
+        return number if number == number else default
+    except (TypeError, ValueError):
+        return default
 
 
 def _active() -> bool:
@@ -19,16 +30,23 @@ def _active() -> bool:
     )
 
 
-def install_paper_crypto_learning_relaxation() -> bool:
-    """Relax strategy/capacity vetoes strictly for autonomous crypto paper learning.
+def _paper_limits() -> tuple[float, int, int]:
+    """Return bounded learning limits that are looser than production, not infinite."""
+    max_turnover = max(0.20, min(5.0, _safe_float(os.getenv("PAPER_CRYPTO_MAX_DAILY_TURNOVER_PCT", "1.00"), 1.0)))
+    max_entries = max(3, min(250, int(_safe_float(os.getenv("PAPER_CRYPTO_MAX_DAILY_ENTRIES", "48"), 48))))
+    same_symbol_cooldown = max(1, min(120, int(_safe_float(os.getenv("PAPER_CRYPTO_ENTRY_COOLDOWN_MINUTES", "15"), 15))))
+    return max_turnover, max_entries, same_symbol_cooldown
 
-    Autonomous paper learning is intentionally allowed to keep generating samples
-    without production daily-entry, open-position-count, correlation, or daily-
-    turnover strategy caps. Quote identity/freshness, finite metrics,
+
+def install_paper_crypto_learning_relaxation() -> bool:
+    """Relax production cadence caps without allowing unbounded paper churn.
+
+    Autonomous crypto paper learning may exceed production's conservative daily
+    entry/turnover limits, but it is no longer allowed to treat those metrics as
+    infinite. Paper-specific turnover and entry-count ceilings plus a same-symbol
+    cooldown bound fee-generating churn. Quote identity/freshness, finite metrics,
     spread/slippage, liquidity, cash/buying-power/reserve checks, accounting,
-    duplicate protection, fill realism, execution claims, and every live-order
-    control remain intact. The relaxation cannot activate when broker submission
-    or live trading is armed.
+    execution claims, and every live-order control remain authoritative.
     """
     global _INSTALLED
     if _INSTALLED:
@@ -41,11 +59,43 @@ def install_paper_crypto_learning_relaxation() -> bool:
     original_penny_gate = oracle_bot._penny_stock_gate
     original_shared_risk_gate = oracle_bot._shared_risk_gate
     original_pre_trade_risk_checks = oracle_bot.pre_trade_risk_checks
+    original_recent_trade = oracle_bot.recent_trade
 
     def paper_penny_gate(market: str, symbol: str, price: float, signal: Any, score: float, confidence: float):
         if _active() and str(market or "").strip().lower() == "crypto":
             return True, "not applicable to crypto paper learning"
         return original_penny_gate(market, symbol, price, signal, score, confidence)
+
+    def paper_recent_trade(market: str, symbol: str):
+        market_text = str(market or "").strip().lower()
+        if not (_active() and market_text == "crypto"):
+            return original_recent_trade(market, symbol)
+        _, _, cooldown_minutes = _paper_limits()
+        cutoff = (datetime.now(timezone.utc) - timedelta(minutes=cooldown_minutes)).isoformat()
+        try:
+            recent = oracle_bot.row(
+                """
+                SELECT *
+                FROM trades
+                WHERE market=%s AND symbol=%s AND created_at >= %s
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                (market_text, str(symbol or "").upper().strip(), cutoff),
+            )
+        except Exception:
+            # Fail closed to the original canonical cooldown implementation if the
+            # dedicated paper query cannot be evaluated.
+            return original_recent_trade(market, symbol)
+        if recent:
+            log.info(
+                "PAPER ENTRY PACING | symbol=%s | blocked=True | cooldown=%dm | last_side=%s | "
+                "broker_submission=NONE | live_trading=DISARMED",
+                str(symbol or "").upper().strip(),
+                cooldown_minutes,
+                str(recent.get("side") or "UNKNOWN").upper(),
+            )
+        return recent
 
     def paper_pre_trade_risk_checks(**kwargs):
         market = str(kwargs.get("market") or "").strip().lower()
@@ -55,14 +105,33 @@ def install_paper_crypto_learning_relaxation() -> bool:
         if not (_active() and market == "crypto" and is_entry):
             return original_pre_trade_risk_checks(**kwargs)
 
+        max_turnover, max_entries, _ = _paper_limits()
+        actual_turnover = max(0.0, _safe_float(kwargs.get("turnover_pct_today"), 0.0))
+        actual_entries = max(0, int(_safe_float(kwargs.get("new_entries_today"), 0.0)))
+
         updated = dict(kwargs)
-        # These metrics only impose production cadence/capacity strategy limits.
-        # Neutralize them inside the isolated paper-learning sandbox while the
-        # canonical portfolio remains authoritative for solvency and accounting.
+        # The base engine uses production cadence thresholds (20% turnover and
+        # three entries). Keep those neutral inside the isolated learning sandbox,
+        # then apply explicit paper-learning ceilings to the real observed metrics.
         updated["new_entries_today"] = 0
         updated["positions"] = []
         updated["turnover_pct_today"] = 0.0
-        return original_pre_trade_risk_checks(**updated)
+        result = original_pre_trade_risk_checks(**updated)
+        result.add(
+            "paper_learning_turnover",
+            actual_turnover <= max_turnover,
+            f"paper crypto daily turnover limit reached ({actual_turnover:.2%}/{max_turnover:.2%})",
+        )
+        result.add(
+            "paper_learning_entries",
+            actual_entries < max_entries,
+            f"paper crypto daily entry limit reached ({actual_entries}/{max_entries})",
+        )
+        result.metrics["paper_learning_actual_turnover_pct"] = actual_turnover
+        result.metrics["paper_learning_max_turnover_pct"] = max_turnover
+        result.metrics["paper_learning_actual_entries"] = float(actual_entries)
+        result.metrics["paper_learning_max_entries"] = float(max_entries)
+        return result
 
     def paper_shared_risk_gate(**kwargs):
         market = str(kwargs.get("market") or "").strip().lower()
@@ -81,5 +150,14 @@ def install_paper_crypto_learning_relaxation() -> bool:
     oracle_bot._penny_stock_gate = paper_penny_gate
     oracle_bot.pre_trade_risk_checks = paper_pre_trade_risk_checks
     oracle_bot._shared_risk_gate = paper_shared_risk_gate
+    oracle_bot.recent_trade = paper_recent_trade
     _INSTALLED = True
+    max_turnover, max_entries, cooldown = _paper_limits()
+    log.info(
+        "Installed bounded crypto paper learning | max_daily_turnover=%.0f%% | max_daily_entries=%d | "
+        "same_symbol_cooldown=%dm | broker_submission=NONE | live_trading=DISARMED",
+        max_turnover * 100.0,
+        max_entries,
+        cooldown,
+    )
     return True
