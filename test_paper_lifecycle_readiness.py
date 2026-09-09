@@ -100,10 +100,44 @@ def test_paper_lifecycle_health_requires_entry_reload_and_exit(monkeypatch):
     assert report["ok"] is True
     assert report["status"] == "PASS"
     assert report["entry_proven"] is True
+    assert report["entry_proof_source"] == "portfolio_reload_event"
     assert report["exit_proven"] is True
     assert report["round_trip_proven"] is True
     assert report["portfolio_reload_events"] == 1
     assert report["held_position_count"] == 1
+
+
+def test_paper_lifecycle_health_uses_durable_round_trip_if_reload_event_was_pruned(monkeypatch):
+    def fake_row(query, params=()):
+        compact = " ".join(query.split()).lower()
+        if "from paper_orders" in compact and "side='buy'" in compact and "count" in compact:
+            return {"count": 4}
+        if "from paper_orders" in compact and "side='sell'" in compact and "count" in compact:
+            return {"count": 4}
+        if "from paper_fills" in compact and "side='buy'" in compact:
+            return {"count": 4}
+        if "from paper_fills" in compact and "side='sell'" in compact:
+            return {"count": 4}
+        if "from global_decision_events" in compact:
+            return {"count": 0}
+        if "from paper_orders" in compact and "side='buy'" in compact:
+            return {"order_id": "buy-4", "symbol": "BTC-USD", "status": "FILLED"}
+        if "from paper_orders" in compact and "side='sell'" in compact:
+            return {"order_id": "sell-4", "symbol": "BTC-USD", "status": "FILLED"}
+        return None
+
+    monkeypatch.setattr(readiness, "row", fake_row)
+    monkeypatch.setattr(readiness, "rows", lambda query, params=(): [])
+
+    report = readiness.paper_lifecycle_health("crypto")
+
+    assert report["ok"] is True
+    assert report["status"] == "PASS"
+    assert report["entry_proven"] is True
+    assert report["entry_proof_source"] == "durable_round_trip_orders_fills"
+    assert report["explicit_reload_proof"] is False
+    assert report["durable_round_trip_proof"] is True
+    assert report["round_trip_proven"] is True
 
 
 def test_paper_lifecycle_health_blocks_live_candidate_until_exit(monkeypatch):
