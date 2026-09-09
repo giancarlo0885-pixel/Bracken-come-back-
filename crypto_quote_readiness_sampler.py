@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+import math
 import os
 import time
 from typing import Any
@@ -61,6 +62,77 @@ def _emit_shadow_status(worker: Any, result: dict[str, Any]) -> None:
     )
 
 
+def _finite_positive(value: Any) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(number) or number <= 0:
+        return None
+    return number
+
+
+def _snapshot_payload(snapshot: Any, symbol: str) -> dict[str, Any] | None:
+    """Convert a validated broker snapshot into generic quote-evidence payload."""
+    if snapshot is None:
+        return None
+    if isinstance(snapshot, dict):
+        payload = dict(snapshot)
+    else:
+        converter = getattr(snapshot, "to_quote_payload", None)
+        if not callable(converter):
+            return None
+        try:
+            payload = dict(converter() or {})
+        except Exception:
+            return None
+
+    normalized = str(symbol or "").upper().strip()
+    actual_symbol = str(payload.get("symbol") or normalized).upper().strip()
+    provider_symbol = str(payload.get("provider_symbol") or actual_symbol).upper().strip()
+    requested_symbol = str(payload.get("requested_symbol") or normalized).upper().strip()
+    price = _finite_positive(payload.get("price"))
+    if price is None or actual_symbol != normalized or provider_symbol != normalized or requested_symbol != normalized:
+        return None
+
+    payload["symbol"] = normalized
+    payload["requested_symbol"] = normalized
+    payload["provider_symbol"] = normalized
+    payload["price"] = price
+    payload["provider"] = str(payload.get("provider") or "Robinhood Crypto")
+    payload["provider_quote_verified"] = True
+    payload["quote_verified"] = True
+    payload["execution_quote_eligible"] = True
+    payload.setdefault("stale", False)
+    return payload
+
+
+def _primary_quote(worker: Any, symbol: str, quote_map: dict[str, Any]) -> dict[str, Any] | None:
+    """Prefer the current broker snapshot; fall back to canonical paper reference."""
+    provider = getattr(worker, "_robinhood_current_marketdata_provider", None)
+    if provider is not None:
+        try:
+            snapshots = dict(provider.snapshots([symbol]) or {})
+            payload = _snapshot_payload(snapshots.get(symbol), symbol)
+            if payload is not None:
+                return payload
+        except Exception:
+            # Readiness evidence is best-effort and cannot affect execution. Fall
+            # back to the canonical worker quote path when broker sampling fails.
+            pass
+
+    quote = oracle_bot._verified_quote_for(symbol, quote_map, "crypto")
+    if quote is None:
+        return None
+    payload = dict(quote)
+    provider_name = str(payload.get("provider") or "").strip().lower()
+    if provider_name == "yahoo finance" and not _paper_yahoo_reference(payload):
+        return None
+    if _finite_positive(payload.get("price")) is None:
+        return None
+    return payload
+
+
 def persist_v39_quote_verification_evidence(
     worker: Any,
     signals: Any,
@@ -68,18 +140,20 @@ def persist_v39_quote_verification_evidence(
     *,
     max_samples: int | None = None,
 ) -> int:
-    """Persist bounded Yahoo/Coinbase evidence even when V39 keeps signals on HOLD.
+    """Persist bounded independent Coinbase evidence for current crypto quotes.
 
-    The execution guard still performs the authoritative per-entry consensus gate.
-    This sampler only prevents capital-readiness evidence from depending on an
-    entry action existing. It never changes a signal action, optimizer allocation,
-    quote, or execution decision.
+    Robinhood is the preferred primary current quote authority. Yahoo remains a
+    paper-reference fallback when broker sampling is unavailable. The execution
+    guard still performs the authoritative entry gate. This sampler is evidence-
+    only: it never changes signal actions, optimizer allocations, quotes, or order
+    execution and it never submits broker orders.
     """
     quote_map = prices or {}
     limit = _sample_limit() if max_samples is None else max(1, min(12, int(max_samples)))
     evidence: list[dict[str, Any]] = []
     blocked: dict[str, list[str]] = defaultdict(list)
     seen: set[str] = set()
+    primary_providers: set[str] = set()
 
     for signal in list(signals or []):
         if len(evidence) >= limit:
@@ -89,27 +163,34 @@ def persist_v39_quote_verification_evidence(
             continue
         seen.add(symbol)
 
-        quote = oracle_bot._verified_quote_for(symbol, quote_map, "crypto")
+        quote = _primary_quote(worker, symbol, quote_map)
         if quote is None:
             continue
-        if str(quote.get("provider") or "").strip().lower() != "yahoo finance":
-            continue
-        if not _paper_yahoo_reference(quote):
-            blocked["YAHOO_REFERENCE_NOT_EXECUTION_ELIGIBLE"].append(symbol)
+        provider_name = str(quote.get("provider") or "unknown").strip() or "unknown"
+        if "coinbase" in provider_name.lower():
+            blocked["PRIMARY_ALREADY_COINBASE"].append(symbol)
             continue
 
         validation = _coinbase_reference_validation(symbol, quote.get("price"))
-        evidence.append(_quote_verification_record(symbol, quote, validation))
+        record = _quote_verification_record(symbol, quote, validation)
+        payload = dict(record.get("payload") or {})
+        payload["evidence_kind"] = "independent_crypto_quote_consensus"
+        payload["source"] = "v39_quote_readiness_sampler"
+        payload["primary_provider"] = provider_name
+        record["payload"] = payload
+        evidence.append(record)
+        primary_providers.add(provider_name)
         if validation.get("ok") is not True:
             blocked[str(validation.get("reason") or "COINBASE_REFERENCE_REJECTED")].append(symbol)
 
     persisted = _persist_quote_verifications(evidence)
     if evidence:
         worker.log.info(
-            "CRYPTO | V39 QUOTE VERIFICATION EVIDENCE | persisted=%d | attempted=%d | sample_limit=%d",
+            "CRYPTO | V39 QUOTE VERIFICATION EVIDENCE | persisted=%d | attempted=%d | sample_limit=%d | primary_providers=%s | secondary=Coinbase Exchange | broker_submission=NONE",
             persisted,
             len(evidence),
             limit,
+            ",".join(sorted(primary_providers)) or "unknown",
         )
 
     for reason, affected in blocked.items():
