@@ -14,6 +14,7 @@ from config import (
     ENABLE_NEW_ENTRIES,
     ENABLE_PORTFOLIO_ROTATION,
     ENABLE_STOCK_AUTOTRADE,
+    EXECUTION_MODE,
     GLOBAL_KILL_SWITCH,
     MAX_DAILY_DRAWDOWN_PCT,
     MAX_DAILY_TURNOVER_PCT,
@@ -22,6 +23,7 @@ from config import (
     MAX_POSITION_FRACTION,
     MAX_WEEKLY_LOSS_PCT,
     MIN_CASH_RESERVE_PCT,
+    PAPER_BROKER_MODE,
     QUANT_MAX_SLIPPAGE_PCT,
     QUANT_MAX_SPREAD_PCT,
 )
@@ -147,6 +149,7 @@ def pre_trade_risk_checks(
     forced_exit = intent == "forced_risk_reduction"
     sell_intents = {"exit", "forced_risk_reduction", "rotation_out"}
     entry_intents = {"entry", "rotation_in"}
+    paper_mode = bool(PAPER_BROKER_MODE and str(EXECUTION_MODE or "").lower() == "paper")
     required = {
         "price": quote.get("price"),
         "order_value": order_value,
@@ -156,19 +159,19 @@ def pre_trade_risk_checks(
         "margin_utilization_pct": margin_utilization_pct,
     }
     if intent in entry_intents:
-        required.update(
-            {
-                "daily_loss_pct": daily_loss_pct,
-                "weekly_loss_pct": weekly_loss_pct,
-                "spread_pct": spread_pct,
-                "slippage_pct": slippage_pct,
-                "liquidity_value": liquidity_value,
-                "correlation_exposure_pct": correlation_exposure_pct,
-                "concentration_pct": concentration_pct,
-                "new_entries_today": new_entries_today,
-                "turnover_pct_today": turnover_pct_today,
-            }
-        )
+        entry_required = {
+            "daily_loss_pct": daily_loss_pct,
+            "spread_pct": spread_pct,
+            "slippage_pct": slippage_pct,
+            "liquidity_value": liquidity_value,
+            "correlation_exposure_pct": correlation_exposure_pct,
+            "concentration_pct": concentration_pct,
+            "new_entries_today": new_entries_today,
+            "turnover_pct_today": turnover_pct_today,
+        }
+        if not paper_mode:
+            entry_required["weekly_loss_pct"] = weekly_loss_pct
+        required.update(entry_required)
     elif intent in sell_intents:
         required.update({})
     for name, value in required.items():
@@ -221,7 +224,10 @@ def pre_trade_risk_checks(
                 result.warn(name, detail)
     elif intent in entry_intents:
         result.add("daily_loss", daily_loss <= MAX_DAILY_DRAWDOWN_PCT, "daily loss limit reached")
-        result.add("weekly_loss", weekly_loss <= MAX_WEEKLY_LOSS_PCT, "weekly loss limit reached")
+        if paper_mode:
+            result.warn("weekly_loss", "weekly loss limit disabled in paper mode")
+        else:
+            result.add("weekly_loss", weekly_loss <= MAX_WEEKLY_LOSS_PCT, "weekly loss limit reached")
         result.add("spread", spread is not None and spread <= QUANT_MAX_SPREAD_PCT, "spread exceeds maximum")
         result.add("slippage", slippage is not None and slippage <= QUANT_MAX_SLIPPAGE_PCT, "slippage exceeds maximum")
         result.add("turnover", turnover <= MAX_DAILY_TURNOVER_PCT, "maximum daily turnover reached")
