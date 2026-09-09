@@ -102,8 +102,11 @@ def _should_suppress(signal: Any) -> tuple[bool, str]:
     action = str(getattr(signal, "action", "") or "").upper().strip()
     if not symbol or action != "SELL":
         return False, "not_sell"
+    # A generic fast SELL has no executable meaning when no position exists.
+    # Convert it to HOLD before persistence/routing so it does not consume the
+    # execution/hysteresis pipeline or pollute SELL observability.
     if not _open_position_exists(symbol):
-        return False, "no_open_position"
+        return True, "no_open_position_sell_filtered"
 
     age = _recent_entry_age_minutes(symbol)
     if age is None:
@@ -136,11 +139,11 @@ def _should_suppress(signal: Any) -> tuple[bool, str]:
 
 
 def install_paper_fast_reversal_hysteresis(worker: Any) -> bool:
-    """Downgrade weak fast SELL reversals after a fresh paper BUY to HOLD.
+    """Downgrade weak or non-actionable fast paper SELLs to HOLD upstream.
 
-    This operates upstream of process_signals, so low-quality SELL noise is not
-    persisted/routed as an execution candidate. risk_exits(), EXIT/CLOSE actions,
-    and the existing downstream churn guard remain unchanged.
+    This operates before persistence/process_signals, so no-position SELL noise
+    and weak post-entry reversals do not become execution candidates. risk_exits(),
+    EXIT/CLOSE actions, and the existing downstream churn guard remain unchanged.
     """
     global _INSTALLED
     if _INSTALLED:
@@ -162,11 +165,11 @@ def install_paper_fast_reversal_hysteresis(worker: Any) -> bool:
             previous = str(getattr(signal, "action", "") or "").upper().strip()
             signal.action = "HOLD"
             signal.reason = (
-                f"Fast reversal hysteresis suppressed {previous}: {reason}. "
+                f"Fast SELL suppression converted {previous} to HOLD: {reason}. "
                 + str(getattr(signal, "reason", ""))
             ).strip()
             log.info(
-                "FAST REVERSAL HYSTERESIS | symbol=%s | original=%s | action=HOLD | reason=%s | "
+                "FAST SELL SUPPRESSION | symbol=%s | original=%s | action=HOLD | reason=%s | "
                 "broker_submission=NONE | live_trading=DISARMED",
                 str(symbol or "").upper(),
                 previous,
@@ -184,8 +187,8 @@ def install_paper_fast_reversal_hysteresis(worker: Any) -> bool:
     worker._fast_discover_symbol = wrapped_fast_discover_symbol
     _INSTALLED = True
     log.info(
-        "Installed paper fast reversal hysteresis | recent_entry_window=%sm | strong_sell_score<=%s | "
-        "strong_confidence>=%s | broker_submission=NONE | live_trading=DISARMED",
+        "Installed paper fast reversal hysteresis | no_position_sell_filter=ON | recent_entry_window=%sm | "
+        "strong_sell_score<=%s | strong_confidence>=%s | broker_submission=NONE | live_trading=DISARMED",
         os.getenv("PAPER_FAST_REVERSAL_HYSTERESIS_MINUTES", "15"),
         os.getenv("PAPER_FAST_REVERSAL_STRONG_SELL_SCORE", "0.42"),
         os.getenv("PAPER_FAST_REVERSAL_STRONG_CONFIDENCE", "0.62"),
