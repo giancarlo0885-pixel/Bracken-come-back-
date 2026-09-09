@@ -9,7 +9,7 @@ from accounting_invariants import accounting_health
 from database import row
 
 
-log = logging.getLogger("paper-accounting-reconciliation")
+log = logging.getLogger("crypto-worker")
 
 
 def _truthy(name: str, default: str = "false") -> bool:
