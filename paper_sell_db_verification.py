@@ -39,6 +39,74 @@ def _first(rows_fn: Any, sql: str, params: tuple[Any, ...]) -> dict[str, Any] | 
     return dict(found[0]) if found else None
 
 
+def _parse_ts(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _safe_float(value: Any) -> float | None:
+    if value in (None, ""):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number == number else None
+
+
+def _nearest_matching_order(rows_fn: Any, *, symbol: str, created_at: Any, trade_qty: float) -> dict[str, Any] | None:
+    """Match a filled SELL in Python so legacy SQL column types cannot break proof."""
+    trade_time = _parse_ts(created_at)
+    if trade_time is None:
+        return None
+    lower = (trade_time - timedelta(minutes=5)).isoformat()
+    upper = (trade_time + timedelta(minutes=5)).isoformat()
+    candidates = rows_fn(
+        """
+        SELECT id, order_id, market, symbol, side, status,
+               requested_quantity, requested_notional, filled_quantity,
+               filled_notional, reference_price, average_fill_price,
+               fee_amount, quote_provider, reason, created_at
+        FROM paper_orders
+        WHERE market=%s
+          AND side='SELL'
+          AND symbol=%s
+          AND status='FILLED'
+          AND created_at >= %s
+          AND created_at <= %s
+        ORDER BY created_at ASC
+        LIMIT 50
+        """,
+        ("crypto", symbol, lower, upper),
+    ) or []
+    tolerance = max(1e-10, abs(trade_qty) * 1e-6)
+    matched: list[tuple[float, dict[str, Any]]] = []
+    for raw in candidates:
+        item = dict(raw)
+        qty = _safe_float(item.get("filled_quantity"))
+        if qty is None:
+            qty = _safe_float(item.get("requested_quantity"))
+        stamp = _parse_ts(item.get("created_at"))
+        if qty is None or stamp is None or abs(qty - trade_qty) > tolerance:
+            continue
+        matched.append((abs((stamp - trade_time).total_seconds()), item))
+    if not matched:
+        return None
+    matched.sort(key=lambda pair: pair[0])
+    return matched[0][1]
+
+
 def _emit_exact_first_sell(rows_fn: Any, cutoff: str) -> dict[str, Any]:
     """SELECT-only proof for the first crypto SELL at/after cutoff."""
     trade = _first(
@@ -60,35 +128,7 @@ def _emit_exact_first_sell(rows_fn: Any, cutoff: str) -> dict[str, Any]:
     symbol = str(trade.get("symbol") or "").upper()
     created_at = trade.get("created_at")
     trade_qty = float(trade.get("quantity") or 0.0)
-    # Some legacy paper-order quantity columns were persisted as textual numerics.
-    # Cast explicitly before arithmetic so exact verification remains SELECT-only
-    # and schema-compatible across old/new rows.
-    order = _first(
-        rows_fn,
-        """
-        SELECT id, order_id, market, symbol, side, status,
-               requested_quantity, requested_notional, filled_quantity,
-               filled_notional, reference_price, average_fill_price,
-               fee_amount, quote_provider, reason, created_at
-        FROM paper_orders
-        WHERE market=%s
-          AND side='SELL'
-          AND symbol=%s
-          AND status='FILLED'
-          AND created_at BETWEEN (%s::timestamptz - interval '5 minutes')
-                             AND (%s::timestamptz + interval '5 minutes')
-          AND ABS(
-                COALESCE(NULLIF(filled_quantity::text,'' )::numeric,
-                         NULLIF(requested_quantity::text,'')::numeric,
-                         0::numeric)
-                - %s::numeric
-              ) <= GREATEST(1e-10::numeric, ABS(%s::numeric) * 1e-6::numeric)
-        ORDER BY ABS(EXTRACT(EPOCH FROM (created_at - %s::timestamptz))) ASC,
-                 created_at ASC
-        LIMIT 1
-        """,
-        ("crypto", symbol, created_at, created_at, trade_qty, trade_qty, created_at),
-    )
+    order = _nearest_matching_order(rows_fn, symbol=symbol, created_at=created_at, trade_qty=trade_qty)
     fill = None
     if order and order.get("order_id"):
         fill = _first(
