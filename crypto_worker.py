@@ -10,6 +10,7 @@ from core_rebalance_score_compat import install_core_rebalance_score_compat
 from crypto_dynamic_universe_runtime import install_crypto_dynamic_universe_runtime
 from crypto_execution_guard import install_crypto_execution_quote_guard
 from crypto_forecast_runtime import install_crypto_short_horizon_forecast
+from crypto_pipeline_integrity_runtime import install_crypto_pipeline_integrity_runtime
 from crypto_provider_health_runtime import install_crypto_provider_health_runtime
 from crypto_quote_readiness_sampler import install_v39_quote_verification_sampler
 from crypto_v39_risk_bridge import install_crypto_v39_risk_bridge
@@ -83,6 +84,10 @@ install_crypto_short_horizon_forecast(market_worker)
 install_crypto_v39_risk_bridge(market_worker)
 install_paper_core_rebalance_qualification(market_worker)
 install_strategic_rebalance_optimizer_bridge(market_worker)
+# Synchronize planning with the same paper account limits execution enforces,
+# normalize V39 evidence fields, explain universe shrinkage, and clearly label
+# historical paper references before trace/observability wrappers capture them.
+install_crypto_pipeline_integrity_runtime(market_worker)
 install_core_rebalance_optimizer_trace(market_worker)
 install_core_rebalance_observability(market_worker)
 # Install before prepare_capital_readiness_runtime() so freshly generated model
