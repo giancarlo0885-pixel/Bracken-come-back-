@@ -48,10 +48,11 @@ def install_paper_crypto_learning_relaxation() -> bool:
     """Relax production risk/cadence vetoes for autonomous crypto paper learning.
 
     PAPER_UNBOUNDED_LEARNING removes paper-only cadence, drawdown, concentration,
-    correlation, spread/slippage and same-symbol cooldown vetoes while execution
-    is explicitly paper-only. Quote identity/freshness, finite execution inputs,
-    simulated accounting, execution claims, and every live-order control remain
-    authoritative so learning records are grounded in real market observations.
+    correlation, spread/slippage, position-count and same-symbol cooldown vetoes
+    while execution is explicitly paper-only. Quote identity/freshness, finite
+    execution inputs, simulated accounting, execution claims, and every live-order
+    control remain authoritative so learning records are grounded in real market
+    observations.
     """
     global _INSTALLED
     if _INSTALLED:
@@ -65,6 +66,15 @@ def install_paper_crypto_learning_relaxation() -> bool:
     original_shared_risk_gate = oracle_bot._shared_risk_gate
     original_pre_trade_risk_checks = oracle_bot.pre_trade_risk_checks
     original_recent_trade = oracle_bot.recent_trade
+
+    if _unbounded_learning():
+        # The small-account runtime normally clamps this to 20. In the isolated
+        # crypto paper process, remove that learning-sample concurrency ceiling.
+        oracle_bot.DEFAULT_MAX_OPEN_POSITIONS = max(
+            1000,
+            int(getattr(oracle_bot, "DEFAULT_MAX_OPEN_POSITIONS", 0) or 0),
+        )
+        oracle_bot.EXTRA_OPEN_POSITIONS = 0
 
     def paper_penny_gate(market: str, symbol: str, price: float, signal: Any, score: float, confidence: float):
         if _active() and str(market or "").strip().lower() == "crypto":
@@ -172,7 +182,9 @@ def install_paper_crypto_learning_relaxation() -> bool:
     if _unbounded_learning():
         log.info(
             "Installed UNBOUNDED crypto paper learning | cadence_limits=OFF | cooldown=OFF | "
-            "risk_throttles=OBSERVE_ONLY | broker_submission=NONE | live_trading=DISARMED"
+            "position_cap=OFF | max_open_positions=%d | risk_throttles=OBSERVE_ONLY | "
+            "broker_submission=NONE | live_trading=DISARMED",
+            int(getattr(oracle_bot, "DEFAULT_MAX_OPEN_POSITIONS", 1000)),
         )
     else:
         log.info(
