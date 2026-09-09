@@ -84,6 +84,63 @@ def test_v39_hold_market_persists_consensus_without_promoting_signal(monkeypatch
     assert any("V39 QUOTE VERIFICATION EVIDENCE" in str(args[0]) for level, args in worker.logs if level == "info")
 
 
+def test_v39_sampler_prefers_robinhood_current_snapshot(monkeypatch):
+    class Snapshot:
+        def to_quote_payload(self):
+            return {
+                "symbol": "BTC-USD",
+                "requested_symbol": "BTC-USD",
+                "provider_symbol": "BTC-USD",
+                "provider": "Robinhood Crypto",
+                "price": 100.0,
+                "bid": 99.99,
+                "ask": 100.01,
+                "quote_timestamp": "2026-09-01T14:30:00+00:00",
+                "stale": False,
+            }
+
+    monkeypatch.setattr(
+        sampler.oracle_bot,
+        "_verified_quote_for",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("fallback should not be used")),
+    )
+    monkeypatch.setattr(
+        sampler,
+        "_coinbase_reference_validation",
+        lambda symbol, price: {
+            "ok": True,
+            "reason": "COINBASE_REFERENCE_CONFIRMED",
+            "reference_provider": "Coinbase Exchange",
+            "reference_price": 100.03,
+            "reference_timestamp": "2026-09-01T14:30:01+00:00",
+            "difference_pct": 0.03,
+            "spread_pct": 0.02,
+        },
+    )
+    captured = []
+    monkeypatch.setattr(sampler, "_persist_quote_verifications", lambda records: captured.extend(records) or len(records))
+
+    worker = FakeWorker()
+    worker._robinhood_current_marketdata_provider = SimpleNamespace(
+        snapshots=lambda symbols: {"BTC-USD": Snapshot()}
+    )
+    signal = SimpleNamespace(symbol="BTC-USD", action="HOLD")
+
+    persisted = sampler.persist_v39_quote_verification_evidence(
+        worker,
+        [signal],
+        {"BTC-USD": _yahoo_quote("BTC-USD")},
+        max_samples=1,
+    )
+
+    assert persisted == 1
+    assert signal.action == "HOLD"
+    assert captured[0]["primary_provider"] == "Robinhood Crypto"
+    assert captured[0]["secondary_provider"] == "Coinbase Exchange"
+    assert captured[0]["payload"]["evidence_kind"] == "independent_crypto_quote_consensus"
+    assert captured[0]["payload"]["source"] == "v39_quote_readiness_sampler"
+
+
 def test_v39_sampler_persists_rejection_evidence_without_executing(monkeypatch):
     quote = _yahoo_quote("ETH-USD")
     monkeypatch.setattr(sampler.oracle_bot, "_verified_quote_for", lambda *args, **kwargs: quote)
