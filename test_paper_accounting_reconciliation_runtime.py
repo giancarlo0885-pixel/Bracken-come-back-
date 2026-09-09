@@ -8,7 +8,7 @@ def test_reconciliation_is_select_only_and_explains_equity(monkeypatch):
 
     def fake_row(sql, params=()):
         if "FROM portfolios" in sql:
-            return {"cash": 900.0, "starting_balance": 1000.0, "margin_debt": 0.0, "margin_interest_accrued": 0.0}
+            return {"cash": 899.8, "starting_balance": 1000.0, "margin_debt": 0.0, "margin_interest_accrued": 0.0}
         if "FROM positions" in sql:
             return {"positions_value": 95.0, "open_unrealized_pnl": -2.0, "open_positions": 1}
         if "FROM trades" in sql:
@@ -28,10 +28,10 @@ def test_reconciliation_is_select_only_and_explains_equity(monkeypatch):
 
     result = runtime.emit_paper_accounting_reconciliation("crypto")
     assert result["status"] == "PASS"
-    assert result["canonical_equity"] == 995.0
-    assert result["equity_change"] == -5.0
-    assert result["explained_pnl"] == -5.0
-    assert result["diagnostic_residual"] == 0.0
+    assert result["canonical_equity"] == 994.8
+    assert result["equity_change"] == -5.2
+    assert result["explained_pnl"] == -5.2
+    assert abs(result["diagnostic_residual"]) < 1e-9
 
 
 def test_reconciliation_disables_when_live_is_armed(monkeypatch):
