@@ -48,11 +48,11 @@ def install_paper_crypto_learning_relaxation() -> bool:
     """Relax production risk/cadence vetoes for autonomous crypto paper learning.
 
     PAPER_UNBOUNDED_LEARNING removes paper-only cadence, drawdown, concentration,
-    correlation, spread/slippage, position-count and same-symbol cooldown vetoes
-    while execution is explicitly paper-only. Quote identity/freshness, finite
-    execution inputs, simulated accounting, execution claims, and every live-order
-    control remain authoritative so learning records are grounded in real market
-    observations.
+    correlation, spread/slippage, position-count, duplicate-accumulation and
+    same-symbol cooldown vetoes while execution is explicitly paper-only. Quote
+    identity/freshness, finite execution inputs, simulated accounting, execution
+    claims, and every live-order control remain authoritative so learning records
+    are grounded in real market observations.
     """
     global _INSTALLED
     if _INSTALLED:
@@ -66,6 +66,7 @@ def install_paper_crypto_learning_relaxation() -> bool:
     original_shared_risk_gate = oracle_bot._shared_risk_gate
     original_pre_trade_risk_checks = oracle_bot.pre_trade_risk_checks
     original_recent_trade = oracle_bot.recent_trade
+    original_paper_buy_safeguard = oracle_bot._paper_buy_safeguard
 
     if _unbounded_learning():
         # The small-account runtime normally clamps this to 20. In the isolated
@@ -173,17 +174,24 @@ def install_paper_crypto_learning_relaxation() -> bool:
         updated["quote"] = quote
         return original_shared_risk_gate(**updated)
 
+    def paper_buy_safeguard(*args: Any, **kwargs: Any):
+        market = str(kwargs.get("market") or (args[0] if args else "") or "").strip().lower()
+        if _unbounded_learning() and market == "crypto":
+            return True, "paper unbounded learning: accumulation/concentration safeguard observe-only"
+        return original_paper_buy_safeguard(*args, **kwargs)
+
     oracle_bot._penny_stock_gate = paper_penny_gate
     oracle_bot.pre_trade_risk_checks = paper_pre_trade_risk_checks
     oracle_bot._shared_risk_gate = paper_shared_risk_gate
     oracle_bot.recent_trade = paper_recent_trade
+    oracle_bot._paper_buy_safeguard = paper_buy_safeguard
     _INSTALLED = True
     max_turnover, max_entries, cooldown = _paper_limits()
     if _unbounded_learning():
         log.info(
             "Installed UNBOUNDED crypto paper learning | cadence_limits=OFF | cooldown=OFF | "
-            "position_cap=OFF | max_open_positions=%d | risk_throttles=OBSERVE_ONLY | "
-            "broker_submission=NONE | live_trading=DISARMED",
+            "position_cap=OFF | duplicate_accumulation_cap=OFF | max_open_positions=%d | "
+            "risk_throttles=OBSERVE_ONLY | broker_submission=NONE | live_trading=DISARMED",
             int(getattr(oracle_bot, "DEFAULT_MAX_OPEN_POSITIONS", 1000)),
         )
     else:
