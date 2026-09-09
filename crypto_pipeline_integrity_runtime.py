@@ -29,29 +29,36 @@ def _finite(value: Any, default: float = 0.0) -> float:
 
 def _paper_account_limits_state(worker: Any, portfolio: dict[str, Any]) -> dict[str, Any]:
     """Read the same daily paper-learning cadence that execution enforces."""
+    import oracle_bot
     from paper_crypto_learning_relaxation import _paper_limits
 
     max_turnover, max_entries, _ = _paper_limits()
-    cutoff = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    cutoff = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
     equity = max(
         0.01,
         _finite(portfolio.get("equity") or portfolio.get("total_equity") or portfolio.get("cash"), 0.01),
     )
     with worker.connect() as conn:
-        record = conn.execute(
+        entry_record = conn.execute(
             """
-            SELECT
-                COUNT(*) FILTER (WHERE side='BUY') AS entries,
-                COALESCE(SUM(ABS(value)), 0) AS turnover_value
+            SELECT COUNT(*) AS total
             FROM trades
-            WHERE market='crypto'
-              AND created_at >= %s
+            WHERE market='crypto' AND side='BUY' AND created_at >= %s
             """,
             (cutoff,),
         ).fetchone() or {}
-    entries = max(0, int(_finite(record.get("entries"), 0.0)))
-    turnover_value = max(0.0, _finite(record.get("turnover_value"), 0.0))
-    turnover_pct = turnover_value / equity
+        # Reuse the canonical execution-risk calculation instead of applying SQL
+        # numeric operators directly to a schema that may store legacy values as
+        # textual numerics.
+        turnover_value = oracle_bot._trade_sum(
+            conn,
+            "crypto",
+            "value",
+            cutoff,
+            ("BUY", "SELL"),
+        )
+    entries = max(0, int(_finite(entry_record.get("total"), 0.0)))
+    turnover_pct = max(0.0, _finite(turnover_value, 0.0)) / equity
     reasons: list[str] = []
     if turnover_pct > max_turnover:
         reasons.append(f"daily_turnover:{turnover_pct:.4f}>{max_turnover:.4f}")
@@ -83,9 +90,6 @@ def _install_optimizer_account_limit_sync(worker: Any) -> None:
         if str(engine or "").strip().lower() != "crypto":
             return plan
 
-        # Make strategic overrides explicit: only tactical authorization reasons
-        # may be waived. Hard-risk, execution, liquidity and account limits remain
-        # authoritative.
         from strategic_rebalance_optimizer_bridge import _strategic_rebalance_gate
 
         by_symbol = {
@@ -97,9 +101,8 @@ def _install_optimizer_account_limit_sync(worker: Any) -> None:
             symbol = str(allocation.get("symbol") or "").upper().strip()
             item = by_symbol.get(symbol) or {}
             gate = _strategic_rebalance_gate(item) if item else {}
-            tactical_reasons = list(gate.get("tactical_authorization_reasons") or [])
             allocation["strategic_override_scope"] = "tactical_authorization_only"
-            allocation["waived_tactical_reasons"] = tactical_reasons
+            allocation["waived_tactical_reasons"] = list(gate.get("tactical_authorization_reasons") or [])
             allocation["hard_risk_waivers"] = []
 
         if not _paper_learning_active():
@@ -108,8 +111,6 @@ def _install_optimizer_account_limit_sync(worker: Any) -> None:
         try:
             limits = _paper_account_limits_state(worker, portfolio)
         except Exception as exc:
-            # Fail closed only for proposed paper entries. Existing positions and
-            # risk exits are not touched by this optimizer wrapper.
             limits = {
                 "blocked": True,
                 "reasons": [f"account_limit_state_unavailable:{exc.__class__.__name__}"],
@@ -232,9 +233,6 @@ class _ReferenceHandoffLabelFilter(logging.Filter):
         if not isinstance(record.msg, str) or not record.msg.startswith("EXECUTION_QUOTE_HANDOFF |"):
             return True
         args = record.args if isinstance(record.args, tuple) else ()
-        # runtime_integrity_patch handoff args: quote_eligible index 8,
-        # provider_verified index 9, paper_reference_verified index 10,
-        # verification_kind index 11.
         if len(args) > 11 and args[10] is True and args[9] is not True:
             record.msg = record.msg.replace("EXECUTION_QUOTE_HANDOFF |", "PAPER_REFERENCE_HANDOFF |", 1)
         return True
@@ -248,13 +246,7 @@ def _install_reference_handoff_label(worker: Any) -> None:
 
 
 def install_crypto_pipeline_integrity_runtime(worker: Any) -> bool:
-    """Align crypto planning, evidence, universe and quote observability.
-
-    This module does not enable broker submission or change protective exits. The
-    only behavioral change is paper-only: optimizer allocations are suppressed
-    before promotion when the same autonomous-learning account limits enforced by
-    execution are already exceeded.
-    """
+    """Align crypto planning, evidence, universe and quote observability."""
     if getattr(worker, "_crypto_pipeline_integrity_runtime_installed", False):
         return False
     _install_v39_evidence_normalization(worker)
