@@ -56,6 +56,47 @@ def test_exit_and_close_are_not_delayed():
     assert guard._allow_generic_sell(_signal(action="CLOSE"), {}) == (True, "not_generic_sell")
 
 
+def test_buy_reentry_blocked_after_recent_sell(monkeypatch):
+    monkeypatch.setenv("PAPER_CRYPTO_REENTRY_COOLDOWN_MINUTES", "10")
+    recent_sell = datetime.now(timezone.utc) - timedelta(minutes=2)
+
+    def fake_last_trade_time(symbol, side):
+        if side == "SELL":
+            return recent_sell
+        return recent_sell - timedelta(minutes=15)
+
+    monkeypatch.setattr(guard, "_last_trade_time", fake_last_trade_time)
+    allowed, reason = guard._allow_generic_buy(_signal(action="BUY"))
+    assert allowed is False
+    assert reason.startswith("reentry_cooldown:")
+
+
+def test_buy_reentry_allowed_after_cooldown(monkeypatch):
+    monkeypatch.setenv("PAPER_CRYPTO_REENTRY_COOLDOWN_MINUTES", "10")
+    old_sell = datetime.now(timezone.utc) - timedelta(minutes=20)
+
+    def fake_last_trade_time(symbol, side):
+        if side == "SELL":
+            return old_sell
+        return old_sell - timedelta(minutes=15)
+
+    monkeypatch.setattr(guard, "_last_trade_time", fake_last_trade_time)
+    assert guard._allow_generic_buy(_signal(action="BUY")) == (True, "reentry_cooldown_elapsed")
+
+
+def test_buy_not_blocked_when_already_reentered(monkeypatch):
+    monkeypatch.setenv("PAPER_CRYPTO_REENTRY_COOLDOWN_MINUTES", "10")
+    recent_sell = datetime.now(timezone.utc) - timedelta(minutes=2)
+
+    def fake_last_trade_time(symbol, side):
+        if side == "SELL":
+            return recent_sell
+        return recent_sell + timedelta(seconds=30)
+
+    monkeypatch.setattr(guard, "_last_trade_time", fake_last_trade_time)
+    assert guard._allow_generic_buy(_signal(action="BUY")) == (True, "already_reentered")
+
+
 def test_unbounded_learning_keeps_downstream_churn_guard(monkeypatch):
     monkeypatch.setenv("EXECUTION_MODE", "paper")
     monkeypatch.setenv("PAPER_AUTONOMOUS_LEARNING", "true")
