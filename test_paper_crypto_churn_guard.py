@@ -56,16 +56,22 @@ def test_exit_and_close_are_not_delayed():
     assert guard._allow_generic_sell(_signal(action="CLOSE"), {}) == (True, "not_generic_sell")
 
 
+def _patch_trade_history(monkeypatch, *, sell_age_minutes, sell_price=101.0, buy_price=100.0, reentered=False):
+    now = datetime.now(timezone.utc)
+    sell_time = now - timedelta(minutes=sell_age_minutes)
+    buy_time = sell_time + timedelta(seconds=30) if reentered else sell_time - timedelta(minutes=15)
+
+    def fake_last_trade(symbol, side):
+        if side == "SELL":
+            return {"created_at": sell_time, "price": sell_price}
+        return {"created_at": buy_time, "price": buy_price}
+
+    monkeypatch.setattr(guard, "_last_trade", fake_last_trade)
+
+
 def test_buy_reentry_blocked_after_recent_sell(monkeypatch):
     monkeypatch.setenv("PAPER_CRYPTO_REENTRY_COOLDOWN_MINUTES", "10")
-    recent_sell = datetime.now(timezone.utc) - timedelta(minutes=2)
-
-    def fake_last_trade_time(symbol, side):
-        if side == "SELL":
-            return recent_sell
-        return recent_sell - timedelta(minutes=15)
-
-    monkeypatch.setattr(guard, "_last_trade_time", fake_last_trade_time)
+    _patch_trade_history(monkeypatch, sell_age_minutes=2, sell_price=101.0, buy_price=100.0)
     allowed, reason = guard._allow_generic_buy(_signal(action="BUY"))
     assert allowed is False
     assert reason.startswith("reentry_cooldown:")
@@ -73,27 +79,30 @@ def test_buy_reentry_blocked_after_recent_sell(monkeypatch):
 
 def test_buy_reentry_allowed_after_cooldown(monkeypatch):
     monkeypatch.setenv("PAPER_CRYPTO_REENTRY_COOLDOWN_MINUTES", "10")
-    old_sell = datetime.now(timezone.utc) - timedelta(minutes=20)
-
-    def fake_last_trade_time(symbol, side):
-        if side == "SELL":
-            return old_sell
-        return old_sell - timedelta(minutes=15)
-
-    monkeypatch.setattr(guard, "_last_trade_time", fake_last_trade_time)
+    _patch_trade_history(monkeypatch, sell_age_minutes=20, sell_price=101.0, buy_price=100.0)
     assert guard._allow_generic_buy(_signal(action="BUY")) == (True, "reentry_cooldown_elapsed")
+
+
+def test_losing_exit_gets_longer_reentry_cooldown(monkeypatch):
+    monkeypatch.setenv("PAPER_CRYPTO_REENTRY_COOLDOWN_MINUTES", "10")
+    monkeypatch.setenv("PAPER_CRYPTO_LOSS_REENTRY_COOLDOWN_MULTIPLIER", "2")
+    _patch_trade_history(monkeypatch, sell_age_minutes=15, sell_price=99.0, buy_price=100.0)
+    allowed, reason = guard._allow_generic_buy(_signal(action="BUY"))
+    assert allowed is False
+    assert reason.startswith("loss_reentry_cooldown:")
+    assert reason.endswith("/20.00m")
+
+
+def test_losing_exit_reentry_allowed_after_extended_cooldown(monkeypatch):
+    monkeypatch.setenv("PAPER_CRYPTO_REENTRY_COOLDOWN_MINUTES", "10")
+    monkeypatch.setenv("PAPER_CRYPTO_LOSS_REENTRY_COOLDOWN_MULTIPLIER", "2")
+    _patch_trade_history(monkeypatch, sell_age_minutes=25, sell_price=99.0, buy_price=100.0)
+    assert guard._allow_generic_buy(_signal(action="BUY")) == (True, "loss_reentry_cooldown_elapsed")
 
 
 def test_buy_not_blocked_when_already_reentered(monkeypatch):
     monkeypatch.setenv("PAPER_CRYPTO_REENTRY_COOLDOWN_MINUTES", "10")
-    recent_sell = datetime.now(timezone.utc) - timedelta(minutes=2)
-
-    def fake_last_trade_time(symbol, side):
-        if side == "SELL":
-            return recent_sell
-        return recent_sell + timedelta(seconds=30)
-
-    monkeypatch.setattr(guard, "_last_trade_time", fake_last_trade_time)
+    _patch_trade_history(monkeypatch, sell_age_minutes=2, sell_price=99.0, buy_price=100.0, reentered=True)
     assert guard._allow_generic_buy(_signal(action="BUY")) == (True, "already_reentered")
 
 
