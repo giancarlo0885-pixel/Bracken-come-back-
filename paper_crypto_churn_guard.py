@@ -144,21 +144,22 @@ def _allow_generic_sell(signal: Any, prices: dict[str, Any]) -> tuple[bool, str]
 
 
 def install_paper_crypto_churn_guard(worker: Any) -> bool:
-    """Block immediate generic paper SELL reversals unless unbounded learning is active."""
+    """Reduce fee-heavy paper churn without tightening strategy signal thresholds.
+
+    In unbounded learning mode the downstream minimum-hold/confirmation guard stays
+    active, but the upstream hysteresis layer remains off so the learner still sees
+    and evaluates the relaxed signal stream. EXIT/CLOSE and emergency-loss exits are
+    never delayed. The guard is paper-only and cannot activate broker submission.
+    """
     global _INSTALLED
     if _INSTALLED:
         return True
     if not _paper_only():
         return False
-    if _unbounded_learning():
-        _INSTALLED = True
-        log.info(
-            "PAPER CHURN GUARD | status=BYPASSED | reason=unbounded_learning | "
-            "upstream_hysteresis=OFF | broker_submission=NONE | live_trading=DISARMED"
-        )
-        return True
 
-    install_paper_fast_reversal_hysteresis(worker)
+    unbounded = _unbounded_learning()
+    if not unbounded:
+        install_paper_fast_reversal_hysteresis(worker)
 
     original = worker.process_signals
     if not callable(original):
@@ -195,11 +196,14 @@ def install_paper_crypto_churn_guard(worker: Any) -> bool:
     _INSTALLED = True
     min_hold, confirmations, window, emergency_loss = _settings()
     log.info(
-        "Installed paper crypto churn guard | min_hold=%.2fm | confirmations=%d | window=%.0fs | "
-        "emergency_loss=%.2f%% | upstream_hysteresis=ACTIVE | broker_submission=NONE | live_trading=DISARMED",
+        "Installed paper crypto churn guard | mode=%s | min_hold=%.2fm | confirmations=%d | window=%.0fs | "
+        "emergency_loss=%.2f%% | upstream_hysteresis=%s | relaxed_signal_thresholds=UNCHANGED | "
+        "broker_submission=NONE | live_trading=DISARMED",
+        "UNBOUNDED_CONTROLLED" if unbounded else "BOUNDED",
         min_hold,
         confirmations,
         window,
         emergency_loss,
+        "OFF" if unbounded else "ACTIVE",
     )
     return True
