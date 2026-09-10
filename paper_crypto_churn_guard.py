@@ -66,7 +66,10 @@ def _settings() -> tuple[float, int, float, float, float, float]:
     window = max(10.0, min(600.0, _safe_float(os.getenv("PAPER_CRYPTO_SELL_CONFIRMATION_WINDOW_SECONDS", "120"), 120.0)))
     emergency_loss = max(0.5, min(25.0, _safe_float(os.getenv("PAPER_CRYPTO_EMERGENCY_EXIT_LOSS_PCT", "6"), 6.0)))
     reentry_cooldown = max(0.0, min(120.0, _safe_float(os.getenv("PAPER_CRYPTO_REENTRY_COOLDOWN_MINUTES", "10"), 10.0)))
-    loss_multiplier = max(1.0, min(6.0, _safe_float(os.getenv("PAPER_CRYPTO_LOSS_REENTRY_COOLDOWN_MULTIPLIER", "2"), 2.0)))
+    # Production evidence showed repeated loss -> cooldown expiry -> re-entry -> loss
+    # loops at the former 2x default. Keep normal re-entry at 10m, but give a
+    # losing setup 3x that recovery window before the same symbol can re-enter.
+    loss_multiplier = max(1.0, min(6.0, _safe_float(os.getenv("PAPER_CRYPTO_LOSS_REENTRY_COOLDOWN_MULTIPLIER", "3"), 3.0)))
     return min_hold, confirmations, window, emergency_loss, reentry_cooldown, loss_multiplier
 
 
