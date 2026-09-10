@@ -54,3 +54,35 @@ def test_generic_sell_requires_confirmation_after_hold(monkeypatch):
 def test_exit_and_close_are_not_delayed():
     assert guard._allow_generic_sell(_signal(action="EXIT"), {}) == (True, "not_generic_sell")
     assert guard._allow_generic_sell(_signal(action="CLOSE"), {}) == (True, "not_generic_sell")
+
+
+def test_unbounded_learning_keeps_downstream_churn_guard(monkeypatch):
+    monkeypatch.setenv("EXECUTION_MODE", "paper")
+    monkeypatch.setenv("PAPER_AUTONOMOUS_LEARNING", "true")
+    monkeypatch.setenv("PAPER_UNBOUNDED_LEARNING", "true")
+    monkeypatch.setenv("ENABLE_BROKER_SUBMISSION", "false")
+    monkeypatch.setenv("LIVE_TRADING_ARMED", "false")
+    monkeypatch.setenv("PAPER_CRYPTO_MIN_SIGNAL_HOLD_MINUTES", "5")
+    monkeypatch.setattr(
+        guard,
+        "_position_and_last_buy",
+        lambda symbol: ({"average_price": 100.0}, datetime.now(timezone.utc) - timedelta(seconds=30)),
+    )
+
+    calls = []
+
+    class Worker:
+        def process_signals(self, market, signals, prices=None, *args, **kwargs):
+            calls.append((market, signals, prices))
+            return signals
+
+    previous = guard._INSTALLED
+    guard._INSTALLED = False
+    try:
+        worker = Worker()
+        assert guard.install_paper_crypto_churn_guard(worker) is True
+        result = worker.process_signals("crypto", [_signal(price=99.8)], {"BNB-USD": {"price": 99.8}})
+        assert result == []
+        assert calls == []
+    finally:
+        guard._INSTALLED = previous
