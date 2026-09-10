@@ -60,13 +60,14 @@ def _parse_time(value: Any) -> datetime | None:
         return None
 
 
-def _settings() -> tuple[float, int, float, float, float]:
+def _settings() -> tuple[float, int, float, float, float, float]:
     min_hold = max(0.0, min(60.0, _safe_float(os.getenv("PAPER_CRYPTO_MIN_SIGNAL_HOLD_MINUTES", "5"), 5.0)))
     confirmations = max(1, min(5, int(_safe_float(os.getenv("PAPER_CRYPTO_SELL_CONFIRMATIONS", "2"), 2))))
     window = max(10.0, min(600.0, _safe_float(os.getenv("PAPER_CRYPTO_SELL_CONFIRMATION_WINDOW_SECONDS", "120"), 120.0)))
     emergency_loss = max(0.5, min(25.0, _safe_float(os.getenv("PAPER_CRYPTO_EMERGENCY_EXIT_LOSS_PCT", "6"), 6.0)))
     reentry_cooldown = max(0.0, min(120.0, _safe_float(os.getenv("PAPER_CRYPTO_REENTRY_COOLDOWN_MINUTES", "10"), 10.0)))
-    return min_hold, confirmations, window, emergency_loss, reentry_cooldown
+    loss_multiplier = max(1.0, min(6.0, _safe_float(os.getenv("PAPER_CRYPTO_LOSS_REENTRY_COOLDOWN_MULTIPLIER", "2"), 2.0)))
+    return min_hold, confirmations, window, emergency_loss, reentry_cooldown, loss_multiplier
 
 
 def _position_and_last_buy(symbol: str) -> tuple[dict[str, Any] | None, datetime | None]:
@@ -93,13 +94,13 @@ def _position_and_last_buy(symbol: str) -> tuple[dict[str, Any] | None, datetime
         return None, None
 
 
-def _last_trade_time(symbol: str, side: str) -> datetime | None:
+def _last_trade(symbol: str, side: str) -> dict[str, Any]:
     try:
         import oracle_bot
 
-        trade = oracle_bot.row(
+        return oracle_bot.row(
             """
-            SELECT created_at
+            SELECT created_at, price
             FROM trades
             WHERE market='crypto' AND symbol=%s AND side=%s
             ORDER BY created_at DESC
@@ -107,10 +108,13 @@ def _last_trade_time(symbol: str, side: str) -> datetime | None:
             """,
             (symbol, side.upper()),
         ) or {}
-        return _parse_time(trade.get("created_at"))
     except Exception:
-        log.exception("PAPER CHURN GUARD | symbol=%s | side=%s | trade_time_load=FAIL", symbol, side)
-        return None
+        log.exception("PAPER CHURN GUARD | symbol=%s | side=%s | trade_load=FAIL", symbol, side)
+        return {}
+
+
+def _last_trade_time(symbol: str, side: str) -> datetime | None:
+    return _parse_time(_last_trade(symbol, side).get("created_at"))
 
 
 def _current_price(signal: Any, prices: dict[str, Any], symbol: str) -> float:
@@ -130,22 +134,31 @@ def _allow_generic_buy(signal: Any) -> tuple[bool, str]:
     if action != "BUY" or not symbol:
         return True, "not_generic_buy"
 
-    _, _, _, _, cooldown_minutes = _settings()
+    _, _, _, _, cooldown_minutes, loss_multiplier = _settings()
     if cooldown_minutes <= 0:
         return True, "reentry_cooldown_disabled"
 
-    last_sell = _last_trade_time(symbol, "SELL")
+    sell_trade = _last_trade(symbol, "SELL")
+    last_sell = _parse_time(sell_trade.get("created_at"))
     if last_sell is None:
         return True, "no_prior_sell"
 
-    last_buy = _last_trade_time(symbol, "BUY")
+    buy_trade = _last_trade(symbol, "BUY")
+    last_buy = _parse_time(buy_trade.get("created_at"))
     if last_buy is not None and last_buy > last_sell:
         return True, "already_reentered"
 
+    sell_price = _safe_float(sell_trade.get("price"))
+    buy_price = _safe_float(buy_trade.get("price"))
+    losing_exit = bool(sell_price > 0 and buy_price > 0 and sell_price < buy_price)
+    effective_cooldown = cooldown_minutes * loss_multiplier if losing_exit else cooldown_minutes
+    effective_cooldown = min(360.0, effective_cooldown)
+
     age_minutes = max(0.0, (datetime.now(timezone.utc) - last_sell).total_seconds() / 60.0)
-    if age_minutes < cooldown_minutes:
-        return False, f"reentry_cooldown:{age_minutes:.2f}/{cooldown_minutes:.2f}m"
-    return True, "reentry_cooldown_elapsed"
+    if age_minutes < effective_cooldown:
+        reason = "loss_reentry_cooldown" if losing_exit else "reentry_cooldown"
+        return False, f"{reason}:{age_minutes:.2f}/{effective_cooldown:.2f}m"
+    return True, "loss_reentry_cooldown_elapsed" if losing_exit else "reentry_cooldown_elapsed"
 
 
 def _allow_generic_sell(signal: Any, prices: dict[str, Any]) -> tuple[bool, str]:
@@ -154,7 +167,7 @@ def _allow_generic_sell(signal: Any, prices: dict[str, Any]) -> tuple[bool, str]
     if action != "SELL" or not symbol:
         return True, "not_generic_sell"
 
-    min_hold, required_confirmations, window, emergency_loss, _ = _settings()
+    min_hold, required_confirmations, window, emergency_loss, _, _ = _settings()
     position, last_buy = _position_and_last_buy(symbol)
     if not position:
         return True, "no_open_position"
@@ -192,11 +205,12 @@ def install_paper_crypto_churn_guard(worker: Any) -> bool:
     """Reduce fee-heavy paper churn without tightening strategy signal thresholds.
 
     Generic SELL flips use a minimum hold and confirmation requirement. Fresh BUY
-    re-entry after a completed SELL is also cooled down briefly so the learner does
-    not repeatedly pay simulated round-trip costs on the same symbol. In unbounded
-    mode upstream hysteresis remains off, preserving the relaxed signal stream.
-    EXIT/CLOSE and emergency-loss exits are never delayed. This guard is paper-only
-    and cannot activate broker submission.
+    re-entry after a completed SELL is cooled down, with a longer cooldown after a
+    losing exit so the learner does not repeatedly pay simulated round-trip costs
+    while chasing the same failed setup. In unbounded mode upstream hysteresis
+    remains off, preserving the relaxed signal stream. EXIT/CLOSE and emergency-
+    loss exits are never delayed. This guard is paper-only and cannot activate
+    broker submission.
     """
     global _INSTALLED
     if _INSTALLED:
@@ -256,10 +270,10 @@ def install_paper_crypto_churn_guard(worker: Any) -> bool:
 
     worker.process_signals = guarded_process_signals
     _INSTALLED = True
-    min_hold, confirmations, window, emergency_loss, reentry_cooldown = _settings()
+    min_hold, confirmations, window, emergency_loss, reentry_cooldown, loss_multiplier = _settings()
     log.info(
         "Installed paper crypto churn guard | mode=%s | min_hold=%.2fm | confirmations=%d | window=%.0fs | "
-        "emergency_loss=%.2f%% | reentry_cooldown=%.2fm | upstream_hysteresis=%s | "
+        "emergency_loss=%.2f%% | reentry_cooldown=%.2fm | loss_reentry_multiplier=%.2fx | upstream_hysteresis=%s | "
         "relaxed_signal_thresholds=UNCHANGED | broker_submission=NONE | live_trading=DISARMED",
         "UNBOUNDED_CONTROLLED" if unbounded else "BOUNDED",
         min_hold,
@@ -267,6 +281,7 @@ def install_paper_crypto_churn_guard(worker: Any) -> bool:
         window,
         emergency_loss,
         reentry_cooldown,
+        loss_multiplier,
         "OFF" if unbounded else "ACTIVE",
     )
     return True
