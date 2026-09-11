@@ -32,6 +32,11 @@ def _finite(value: Any, default: float = 0.0) -> float:
     return number if math.isfinite(number) else default
 
 
+def _money(value: Any) -> float:
+    """Normalize persisted paper money arithmetic without hiding real differences."""
+    return round(_finite(value), 10)
+
+
 def emit_paper_accounting_reconciliation(market: str = "crypto") -> dict[str, Any]:
     """Emit SELECT-only P&L/equity diagnostics for the canonical paper account.
 
@@ -86,20 +91,20 @@ def emit_paper_accounting_reconciliation(market: str = "crypto") -> dict[str, An
             (market,),
         ) or {}
 
-        cash = _finite(portfolio.get("cash"))
-        start = _finite(portfolio.get("starting_balance"))
-        position_value = _finite(positions.get("positions_value"))
-        debt = max(0.0, _finite(portfolio.get("margin_debt")))
-        interest = max(0.0, _finite(portfolio.get("margin_interest_accrued")))
-        canonical_equity = cash + position_value - debt - interest
-        equity_change = canonical_equity - start
-        realized = _finite(sells.get("net_realized_pnl"))
-        unrealized = _finite(positions.get("open_unrealized_pnl"))
-        buy_fees = _finite(fills.get("buy_fill_fees"))
+        cash = _money(portfolio.get("cash"))
+        start = _money(portfolio.get("starting_balance"))
+        position_value = _money(positions.get("positions_value"))
+        debt = max(0.0, _money(portfolio.get("margin_debt")))
+        interest = max(0.0, _money(portfolio.get("margin_interest_accrued")))
+        canonical_equity = _money(cash + position_value - debt - interest)
+        equity_change = _money(canonical_equity - start)
+        realized = _money(sells.get("net_realized_pnl"))
+        unrealized = _money(positions.get("open_unrealized_pnl"))
+        buy_fees = _money(fills.get("buy_fill_fees"))
         # SELL realized_pnl is already net of exit fees. BUY-side fill fees are
         # a separate cash reduction and must be included once in the equity bridge.
-        explained_pnl = realized + unrealized - buy_fees
-        residual = equity_change - explained_pnl
+        explained_pnl = _money(realized + unrealized - buy_fees)
+        residual = _money(equity_change - explained_pnl)
         tolerance = max(0.50, abs(start) * 0.0025)
         pnl_status = "EXPLAINED" if abs(residual) <= tolerance else "REVIEW"
 
@@ -120,14 +125,14 @@ def emit_paper_accounting_reconciliation(market: str = "crypto") -> dict[str, An
             "canonical_equity": canonical_equity,
             "equity_change": equity_change,
             "net_realized_pnl": realized,
-            "gross_realized_pnl": _finite(sells.get("gross_realized_pnl")),
+            "gross_realized_pnl": _money(sells.get("gross_realized_pnl")),
             "open_unrealized_pnl": unrealized,
             "explained_pnl": explained_pnl,
             "diagnostic_residual": residual,
-            "sell_fees": _finite(sells.get("sell_fees")),
-            "all_fill_fees": _finite(fills.get("all_fill_fees")),
+            "sell_fees": _money(sells.get("sell_fees")),
+            "all_fill_fees": _money(fills.get("all_fill_fees")),
             "buy_fill_fees": buy_fees,
-            "sell_fill_fees": _finite(fills.get("sell_fill_fees")),
+            "sell_fill_fees": _money(fills.get("sell_fill_fees")),
             "sell_count": int(sells.get("sell_count") or 0),
             "fill_count": int(fills.get("fill_count") or 0),
             "open_positions": int(positions.get("open_positions") or 0),
