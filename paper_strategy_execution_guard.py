@@ -4,6 +4,7 @@ import copy
 import logging
 from typing import Any
 
+import paper_model_validation_gate as regime_gate
 import paper_strategy_economics as economics
 
 
@@ -103,6 +104,10 @@ def install_paper_strategy_execution_guard() -> bool:
         adjusted_target = target_trade_value
         if base_target > 0:
             sized, scorecard, size_reason = economics.adjusted_optimizer_target(signal, base_target)
+            regime_ok, regime_reason = regime_gate.regime_validation_ok(signal)
+            if sized > base_target and not regime_ok:
+                sized = base_target
+                size_reason = f"positive_boost_withheld:{regime_reason}"
             economics.log_economics(
                 scorecard,
                 symbol=symbol,
@@ -138,7 +143,7 @@ def install_paper_strategy_execution_guard() -> bool:
     _INSTALLED = True
     log.info(
         "PAPER STRATEGY EXECUTION GUARD | active=True | fee_aware_entry=ENFORCED_WHEN_EDGE_AVAILABLE | "
-        "adaptive_strategy_sizing=ENABLED | exploration_floor=PRESERVED | final_churn_and_capacity_guards=DOWNSTREAM | "
-        "broker_submission=NONE | live_trading=DISARMED"
+        "adaptive_strategy_sizing=ENABLED | model_regime_boost_gate=ENABLED | exploration_floor=PRESERVED | "
+        "final_churn_and_capacity_guards=DOWNSTREAM | broker_submission=NONE | live_trading=DISARMED"
     )
     return True
