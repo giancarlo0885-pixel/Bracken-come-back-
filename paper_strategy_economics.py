@@ -12,6 +12,7 @@ from typing import Any
 log = logging.getLogger("paper-strategy-economics")
 _CACHE: dict[str, tuple[float, "StrategyEconomics"]] = {}
 _EPOCH_NAME = "post-churn-capacity-economics-v1"
+_ORACLE_COUNCIL_V3_KEY = "oracle_council_v3"
 
 
 @dataclass(frozen=True)
@@ -53,16 +54,36 @@ def _number(value: Any, default: float = 0.0) -> float:
     return number if math.isfinite(number) else default
 
 
+def normalize_strategy_identity(value: Any) -> str:
+    """Return a stable economics key for strategy provenance.
+
+    Crypto Oracle Council signals carry a human-readable rationale in `strategy`
+    whose momentum/RSI/volatility numbers change every scan. Position lots
+    correctly preserve the entry-time text, so exact string matching against a
+    later scan can never accumulate closed-trade samples. Collapse only that
+    known dynamic rationale family to a stable key; preserve explicit strategy
+    names verbatim so unrelated strategies remain independently attributed.
+    """
+    raw = str(value or "").strip()
+    if not raw:
+        return "unattributed"
+    if "oracle council v3" in raw.lower():
+        return _ORACLE_COUNCIL_V3_KEY
+    return raw[:160]
+
+
 def strategy_identity(signal: Any) -> str:
     def value(name: str, default: Any = None) -> Any:
         if isinstance(signal, dict):
             return signal.get(name, default)
         return getattr(signal, name, default)
 
-    for name in ("strategy", "strategy_name", "source_strategy", "advisor_action", "reason"):
+    # Prefer explicit stable strategy provenance when available. `strategy` may
+    # be a dynamic rationale, which normalize_strategy_identity handles below.
+    for name in ("strategy_name", "source_strategy", "strategy", "advisor_action", "reason"):
         candidate = str(value(name, "") or "").strip()
         if candidate:
-            return candidate[:160]
+            return normalize_strategy_identity(candidate)
     return "unattributed"
 
 
@@ -150,32 +171,50 @@ def _epoch_start() -> datetime | None:
 
 
 def _ledger_records(strategy: str) -> list[dict[str, Any]]:
-    """Read canonical lot-attributed closes, with a trades.reason fallback."""
+    """Read canonical lot-attributed closes using stable strategy identity.
+
+    The canonical ledger stores the strategy text captured when each BUY lot is
+    opened. For Oracle Council V3 that text contains live metrics and therefore
+    legitimately differs from the next scan's rationale. Read the bounded
+    post-epoch SELL cohort and compare normalized strategy keys in Python rather
+    than requiring unstable text equality in SQL. The legacy trades.reason
+    fallback remains exact and is used only when canonical attribution is absent.
+    """
+    target = normalize_strategy_identity(strategy)
     try:
         from database import rows
 
         start = _epoch_start()
-        params: tuple[Any, ...]
-        where_time = ""
         if start is not None:
-            where_time = " AND exit_time >= %s"
-            params = (strategy, start)
+            records = rows(
+                """
+                SELECT strategy, symbol, net_pnl, gross_pnl, fees, return_pct,
+                       entry_time, exit_time, model, model_version
+                FROM trade_ledger
+                WHERE market='crypto' AND side='SELL' AND exit_time >= %s
+                ORDER BY exit_time DESC
+                LIMIT 1000
+                """,
+                (start,),
+            )
         else:
-            params = (strategy,)
-        records = rows(
-            f"""
-            SELECT strategy, symbol, net_pnl, gross_pnl, fees, return_pct,
-                   entry_time, exit_time, model, model_version
-            FROM trade_ledger
-            WHERE market='crypto' AND side='SELL' AND COALESCE(strategy,'')=%s
-            {where_time}
-            ORDER BY exit_time DESC
-            LIMIT 250
-            """,
-            params,
-        )
-        if records:
-            return [dict(item) for item in records]
+            records = rows(
+                """
+                SELECT strategy, symbol, net_pnl, gross_pnl, fees, return_pct,
+                       entry_time, exit_time, model, model_version
+                FROM trade_ledger
+                WHERE market='crypto' AND side='SELL'
+                ORDER BY exit_time DESC
+                LIMIT 1000
+                """
+            )
+        matched = [
+            dict(item)
+            for item in (records or [])
+            if normalize_strategy_identity(item.get("strategy")) == target
+        ]
+        if matched:
+            return matched[:250]
     except Exception:
         pass
 
@@ -374,7 +413,7 @@ def install_paper_strategy_economics() -> bool:
         return False
     ensure_post_fix_epoch()
     log.info(
-        "PAPER STRATEGY ECONOMICS | active=True | attribution=trade_ledger_with_trades_fallback | "
+        "PAPER STRATEGY ECONOMICS | active=True | attribution=normalized_trade_ledger_with_trades_fallback | "
         "adaptive_sizing=ENABLED | fee_aware_edge=ENABLED | model_governance_boost_gate=ENABLED | "
         "epoch=%s | broker_submission=NONE | live_trading=DISARMED",
         _EPOCH_NAME,
