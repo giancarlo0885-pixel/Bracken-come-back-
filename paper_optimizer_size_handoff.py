@@ -15,6 +15,7 @@ log = logging.getLogger("paper-optimizer-size-handoff")
 _INSTALLED = False
 _OPTIMIZER_TARGET = ContextVar("paper_optimizer_target", default=0.0)
 _OPTIMIZER_DOLLAR_VOLUME = ContextVar("paper_optimizer_dollar_volume", default=0.0)
+_OPTIMIZER_CRYPTO_PENNY_ISOLATION = ContextVar("paper_optimizer_crypto_penny_isolation", default=False)
 
 
 class _OptimizerSizingAssessment:
@@ -105,6 +106,18 @@ def _is_configured_core(signal: Any) -> bool:
     )
 
 
+def _crypto_penny_compensation(oracle_bot: Any, price: float) -> float:
+    """Neutralize stock penny sizing for low-priced crypto without touching globals."""
+    price = _number(price)
+    penny_min = _number(getattr(oracle_bot, "PENNY_STOCK_MIN_PRICE", 0.0))
+    penny_max = _number(getattr(oracle_bot, "PENNY_STOCK_MAX_PRICE", 0.0))
+    if price < penny_min or price > penny_max:
+        return 1.0
+    penny_pct = max(1e-9, _number(getattr(oracle_bot, "PENNY_STOCK_MAX_TRADE_VALUE_PCT", 0.0)))
+    normal_pct = max(penny_pct, _number(getattr(oracle_bot, "MAX_TRADE_VALUE_PCT", penny_pct)))
+    return max(1.0, normal_pct / penny_pct)
+
+
 def install_paper_optimizer_size_handoff() -> bool:
     """Carry V39-approved paper notional through the final BUY sizing path.
 
@@ -132,6 +145,7 @@ def install_paper_optimizer_size_handoff() -> bool:
 
     original_adaptive = oracle_bot.adaptive_capital_allocation
     original_buy = oracle_bot._buy
+    original_penny_exposure = oracle_bot._penny_portfolio_exposure_after
 
     def optimizer_target_allocation(**kwargs: Any):
         decision = original_adaptive(**kwargs)
@@ -233,6 +247,14 @@ def install_paper_optimizer_size_handoff() -> bool:
             ),
         )
 
+    def market_specific_penny_exposure(*args: Any, **kwargs: Any):
+        # The stock penny portfolio limit in oracle_bot is price-keyed. ContextVar
+        # makes the exception task-local to an optimizer-approved crypto BUY only.
+        # All stock calls and non-optimizer paths continue using the original rule.
+        if _active() and _OPTIMIZER_CRYPTO_PENNY_ISOLATION.get():
+            return 0.0, 0.0
+        return original_penny_exposure(*args, **kwargs)
+
     def optimizer_target_buy(
         market: str,
         symbol: str,
@@ -262,7 +284,6 @@ def install_paper_optimizer_size_handoff() -> bool:
         if (
             not _active()
             or str(market or "").strip().lower() != "crypto"
-            or _is_configured_core(signal)
         ):
             return original_buy(
                 market,
@@ -293,19 +314,22 @@ def install_paper_optimizer_size_handoff() -> bool:
         confidence = oracle_bot.normalized_confidence(signal)
         score = oracle_bot.normalized_score(signal)
         strength = max(0.55, min(1.0, max(confidence, score / 100.0)))
-        compensation_multiplier = 1.0 / max(strength, 1e-9)
+        penny_ratio = _crypto_penny_compensation(oracle_bot, price)
+        compensation_multiplier = penny_ratio / max(strength, 1e-9)
         effective_quant = _OptimizerSizingAssessment(quant_assessment, compensation_multiplier)
 
         target_token = _OPTIMIZER_TARGET.set(target)
         volume_token = _OPTIMIZER_DOLLAR_VOLUME.set(dollar_volume)
+        penny_token = _OPTIMIZER_CRYPTO_PENNY_ISOLATION.set(penny_ratio > 1.0)
         try:
             log.info(
                 "PAPER_OPTIMIZER_HANDOFF | market=crypto | symbol=%s | approved_target=%.2f | "
-                "approved_dollar_volume=%.2f | soft_size_scaling=BYPASSED | mode=paper | "
+                "approved_dollar_volume=%.2f | soft_size_scaling=BYPASSED | crypto_penny_isolation=%s | mode=paper | "
                 "broker_submission=NONE | live_trading=DISARMED",
                 str(symbol or "").upper(),
                 target,
                 dollar_volume,
+                penny_ratio > 1.0,
             )
             return original_buy(
                 market,
@@ -319,15 +343,17 @@ def install_paper_optimizer_size_handoff() -> bool:
                 rotation_verified_quote=rotation_verified_quote,
             )
         finally:
+            _OPTIMIZER_CRYPTO_PENNY_ISOLATION.reset(penny_token)
             _OPTIMIZER_DOLLAR_VOLUME.reset(volume_token)
             _OPTIMIZER_TARGET.reset(target_token)
 
     oracle_bot.adaptive_capital_allocation = optimizer_target_allocation
+    oracle_bot._penny_portfolio_exposure_after = market_specific_penny_exposure
     oracle_bot._buy = optimizer_target_buy
     _INSTALLED = True
     log.info(
         "PAPER OPTIMIZER SIZE HANDOFF | active=True | minimum_sample_clamp=BYPASSED_FOR_OPTIMIZER_APPROVED_BUYS | "
-        "stock_penny_policy=UNCHANGED | final_churn_guard=ENFORCED | gross_execution_capacity=ENFORCED | "
+        "stock_penny_policy=UNCHANGED | crypto_low_price_stock_penny_policy=ISOLATED | final_churn_guard=ENFORCED | gross_execution_capacity=ENFORCED | "
         "max_trade_pct=%.4f | cash_and_liquidity_capacity=ENFORCED | broker_submission=NONE | live_trading=DISARMED",
         _number(getattr(oracle_bot, "MAX_TRADE_VALUE_PCT", 0.0)),
     )
