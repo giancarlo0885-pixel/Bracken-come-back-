@@ -35,6 +35,8 @@ from paper_optimizer_size_handoff import install_paper_optimizer_size_handoff
 from paper_sell_db_verification import emit_recent_crypto_sell_db_verification
 from paper_sell_execution_router import install_paper_sell_execution_router
 from paper_sell_lot_atomic_repair import install_atomic_paper_sell_lot_repair
+from paper_strategy_economics import install_paper_strategy_economics
+from paper_strategy_execution_guard import install_paper_strategy_execution_guard
 from paper_weekly_risk_period_runtime import install_paper_weekly_risk_period
 from readiness_observability import emit_capital_readiness_report
 from robinhood_current_marketdata_runtime import install_robinhood_current_marketdata
@@ -128,10 +130,18 @@ install_optimizer_repairs(market_worker)
 # unbounded learning entries, instead of letting the minimum-sample fallback
 # collapse approved allocations to $2. This remains strictly paper-only.
 install_paper_optimizer_size_handoff()
+# Economic learning is deliberately outside the optimizer handoff: it observes
+# canonical closed-trade attribution, keeps a post-fix epoch, scales paper size
+# from net expectancy after costs, and rejects only explicit edges that cannot
+# clear estimated round-trip costs. Positive size expansion additionally requires
+# current walk-forward/calibration/leakage governance to pass.
+install_paper_strategy_economics()
+install_paper_strategy_execution_guard()
 
 # Keep this entrypoint in the crypto-worker deploy watch set; readiness helpers are imported above.
 # Production deploy marker: broker-anchored paper BUY/SELL execution, dynamic crypto discovery,
-# provider-health telemetry, adaptive sizing, optimizer tracing, churn control, and Massive surveillance are active.
+# provider-health telemetry, adaptive sizing, optimizer tracing, churn control, economics gating,
+# and Massive surveillance are active.
 
 
 def run_robinhood_startup_preflight() -> None:
