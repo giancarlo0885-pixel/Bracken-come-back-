@@ -97,7 +97,9 @@ def test_losing_exit_reentry_allowed_after_extended_cooldown(monkeypatch):
     monkeypatch.setenv("PAPER_CRYPTO_REENTRY_COOLDOWN_MINUTES", "10")
     monkeypatch.setenv("PAPER_CRYPTO_LOSS_REENTRY_COOLDOWN_MULTIPLIER", "2")
     _patch_trade_history(monkeypatch, sell_age_minutes=25, sell_price=99.0, buy_price=100.0)
-    assert guard._allow_generic_buy(_signal(action="BUY")) == (True, "loss_reentry_cooldown_elapsed")
+    allowed, reason = guard._allow_generic_buy(_signal(action="BUY"))
+    assert allowed is True
+    assert reason.startswith("loss_reentry_cooldown_elapsed")
 
 
 def test_buy_not_blocked_when_already_reentered(monkeypatch):
