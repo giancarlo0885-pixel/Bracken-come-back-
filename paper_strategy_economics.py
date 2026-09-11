@@ -173,12 +173,12 @@ def _epoch_start() -> datetime | None:
 def _ledger_records(strategy: str) -> list[dict[str, Any]]:
     """Read canonical lot-attributed closes using stable strategy identity.
 
-    The canonical ledger stores the strategy text captured when each BUY lot is
-    opened. For Oracle Council V3 that text contains live metrics and therefore
-    legitimately differs from the next scan's rationale. Read the bounded
-    post-epoch SELL cohort and compare normalized strategy keys in Python rather
-    than requiring unstable text equality in SQL. The legacy trades.reason
-    fallback remains exact and is used only when canonical attribution is absent.
+    `trade_ledger` persists entry/exit timestamps as ISO text while the learning
+    epoch boundary is TIMESTAMPTZ. Cast those text fields at the query boundary so
+    PostgreSQL compares like types and Python receives typed datetimes for holding
+    time. Strategy matching remains normalized in Python because Council rationale
+    text legitimately changes scan to scan. The trades fallback uses the same
+    timestamp conversion and normalization rules.
     """
     target = normalize_strategy_identity(strategy)
     try:
@@ -189,10 +189,13 @@ def _ledger_records(strategy: str) -> list[dict[str, Any]]:
             records = rows(
                 """
                 SELECT strategy, symbol, net_pnl, gross_pnl, fees, return_pct,
-                       entry_time, exit_time, model, model_version
+                       NULLIF(entry_time,'')::timestamptz AS entry_time,
+                       NULLIF(exit_time,'')::timestamptz AS exit_time,
+                       model, model_version
                 FROM trade_ledger
-                WHERE market='crypto' AND side='SELL' AND exit_time >= %s
-                ORDER BY exit_time DESC
+                WHERE market='crypto' AND side='SELL'
+                  AND NULLIF(exit_time,'')::timestamptz >= %s
+                ORDER BY NULLIF(exit_time,'')::timestamptz DESC
                 LIMIT 1000
                 """,
                 (start,),
@@ -201,10 +204,12 @@ def _ledger_records(strategy: str) -> list[dict[str, Any]]:
             records = rows(
                 """
                 SELECT strategy, symbol, net_pnl, gross_pnl, fees, return_pct,
-                       entry_time, exit_time, model, model_version
+                       NULLIF(entry_time,'')::timestamptz AS entry_time,
+                       NULLIF(exit_time,'')::timestamptz AS exit_time,
+                       model, model_version
                 FROM trade_ledger
                 WHERE market='crypto' AND side='SELL'
-                ORDER BY exit_time DESC
+                ORDER BY NULLIF(exit_time,'')::timestamptz DESC
                 LIMIT 1000
                 """
             )
@@ -215,8 +220,11 @@ def _ledger_records(strategy: str) -> list[dict[str, Any]]:
         ]
         if matched:
             return matched[:250]
-    except Exception:
-        pass
+    except Exception as exc:
+        log.warning(
+            "PAPER STRATEGY ATTRIBUTION | source=trade_ledger | status=UNAVAILABLE | reason=%s",
+            exc.__class__.__name__,
+        )
 
     try:
         from database import rows
@@ -228,14 +236,15 @@ def _ledger_records(strategy: str) -> list[dict[str, Any]]:
                 SELECT reason AS strategy, symbol, realized_pnl AS net_pnl,
                        COALESCE(gross_realized_pnl, realized_pnl) AS gross_pnl,
                        COALESCE(fees,0) AS fees, NULL AS return_pct,
-                       NULL AS entry_time, created_at AS exit_time,
+                       NULL AS entry_time,
+                       NULLIF(created_at,'')::timestamptz AS exit_time,
                        NULL AS model, NULL AS model_version
                 FROM trades
-                WHERE market='crypto' AND side='SELL' AND COALESCE(reason,'')=%s
-                  AND created_at >= %s
-                ORDER BY created_at DESC LIMIT 250
+                WHERE market='crypto' AND side='SELL'
+                  AND NULLIF(created_at,'')::timestamptz >= %s
+                ORDER BY NULLIF(created_at,'')::timestamptz DESC LIMIT 1000
                 """,
-                (strategy, start),
+                (start,),
             )
         else:
             records = rows(
@@ -243,16 +252,24 @@ def _ledger_records(strategy: str) -> list[dict[str, Any]]:
                 SELECT reason AS strategy, symbol, realized_pnl AS net_pnl,
                        COALESCE(gross_realized_pnl, realized_pnl) AS gross_pnl,
                        COALESCE(fees,0) AS fees, NULL AS return_pct,
-                       NULL AS entry_time, created_at AS exit_time,
+                       NULL AS entry_time,
+                       NULLIF(created_at,'')::timestamptz AS exit_time,
                        NULL AS model, NULL AS model_version
                 FROM trades
-                WHERE market='crypto' AND side='SELL' AND COALESCE(reason,'')=%s
-                ORDER BY created_at DESC LIMIT 250
-                """,
-                (strategy,),
+                WHERE market='crypto' AND side='SELL'
+                ORDER BY NULLIF(created_at,'')::timestamptz DESC LIMIT 1000
+                """
             )
-        return [dict(item) for item in records]
-    except Exception:
+        return [
+            dict(item)
+            for item in (records or [])
+            if normalize_strategy_identity(item.get("strategy")) == target
+        ][:250]
+    except Exception as exc:
+        log.warning(
+            "PAPER STRATEGY ATTRIBUTION | source=trades | status=UNAVAILABLE | reason=%s",
+            exc.__class__.__name__,
+        )
         return []
 
 
