@@ -2,6 +2,7 @@ from types import SimpleNamespace
 
 import global_adaptive_engine as adaptive
 import runtime_integrity_patch as patch
+import strategic_rebalance_optimizer_bridge as bridge
 from strategic_rebalance_optimizer_bridge import (
     _strategic_rebalance_gate,
     install_strategic_rebalance_optimizer_bridge,
@@ -155,7 +156,28 @@ def test_crypto_optimizer_converts_tiny_rebalance_to_watch_candidate(monkeypatch
     assert rejection["watch_only"] is True
     assert rejection["proposed_amount"] == 0.10
     assert rejection["meaningful_entry_floor"] == 20.0
-    assert rejection["minimum_notional"] >= 1.0
+    assert rejection["minimum_notional"] >= 2.0
+
+
+def test_crypto_optimizer_uses_locked_execution_minimum_before_approval(monkeypatch):
+    worker = SimpleNamespace(adaptive_portfolio_optimizer=adaptive.adaptive_portfolio_optimizer)
+    monkeypatch.setattr(adaptive, "hard_risk_gate", lambda item: {"allowed": True, "reasons": []})
+    monkeypatch.setattr(bridge, "MIN_TRADE_VALUE", 1.0)
+    monkeypatch.setattr(bridge, "MIN_TRADE_NOTIONAL", 2.0)
+    install_strategic_rebalance_optimizer_bridge(worker)
+
+    plan = worker.adaptive_portfolio_optimizer(
+        [_candidate(core_target_amount=1.05, tactical_action="BUY")],
+        {"cash": 174.65, "equity": 174.65, "buying_power": 174.65},
+        [],
+        engine="crypto",
+    )
+
+    assert plan["allocations"] == []
+    assert plan["rejections"][0]["reason"] == "watch_momentum_candidate"
+    assert plan["rejections"][0]["proposed_amount"] == 1.05
+    assert plan["rejections"][0]["minimum_notional"] == 2.0
+    assert plan["rejections"][0]["meaningful_entry_floor"] >= 2.0
 
 
 def test_crypto_optimizer_keeps_just_under_one_percent_as_watch(monkeypatch):
