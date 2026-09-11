@@ -7,6 +7,7 @@ import math
 import os
 from typing import Any
 
+import paper_crypto_churn_guard as churn_guard
 import runtime_integrity_patch as patch
 
 
@@ -88,8 +89,9 @@ def install_paper_optimizer_size_handoff() -> bool:
     capital. In unbounded paper-learning mode this layer prevents the downstream
     minimum-sample wrapper from collapsing a valid optimizer allocation to $2.
     It remains fail-closed for live trading and still clips to simulated cash,
-    validated buying power, a positive current price, and verified liquidity
-    participation capacity. Quote/execution integrity remains downstream.
+    validated buying power, a positive current price, verified liquidity
+    participation capacity, and the final same-symbol churn cooldown. Quote and
+    execution integrity remain downstream.
     """
     global _INSTALLED
     if _INSTALLED:
@@ -203,6 +205,21 @@ def install_paper_optimizer_size_handoff() -> bool:
         verified_quote: dict[str, Any] | None = None,
         rotation_verified_quote: dict[str, Any] | None = None,
     ):
+        # This wrapper is installed after the process_signals churn guard and can
+        # receive BUYs generated downstream by the strategic/core rebalance path.
+        # Re-check the durable same-symbol cooldown at the final paper BUY handoff
+        # so no optimizer path can bypass a losing-exit lockout.
+        if _active() and str(market or "").strip().lower() == "crypto":
+            allowed, reason = churn_guard._allow_generic_buy(signal)
+            if not allowed:
+                log.info(
+                    "PAPER_OPTIMIZER_PRE_EXECUTION_CHURN_GUARD | symbol=%s | allowed=False | reason=%s | "
+                    "broker_submission=NONE | live_trading=DISARMED",
+                    str(symbol or "").upper(),
+                    reason,
+                )
+                return False
+
         if (
             not _active()
             or str(market or "").strip().lower() != "crypto"
@@ -271,8 +288,8 @@ def install_paper_optimizer_size_handoff() -> bool:
     _INSTALLED = True
     log.info(
         "PAPER OPTIMIZER SIZE HANDOFF | active=True | minimum_sample_clamp=BYPASSED_FOR_OPTIMIZER_APPROVED_BUYS | "
-        "stock_penny_crypto_misclassification=BYPASSED | max_trade_pct=%.4f | cash_and_liquidity_capacity=ENFORCED | "
-        "broker_submission=NONE | live_trading=DISARMED",
+        "stock_penny_crypto_misclassification=BYPASSED | final_churn_guard=ENFORCED | max_trade_pct=%.4f | "
+        "cash_and_liquidity_capacity=ENFORCED | broker_submission=NONE | live_trading=DISARMED",
         _number(getattr(oracle_bot, "MAX_TRADE_VALUE_PCT", 0.0)),
     )
     return True
