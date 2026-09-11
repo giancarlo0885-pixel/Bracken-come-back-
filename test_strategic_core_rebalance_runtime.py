@@ -119,7 +119,7 @@ def test_previous_buy_approval_expires_before_next_optimizer_pass(monkeypatch):
     assert signal.v39_optimizer_approved_amount is None
     assert signal.v39_optimizer_allocation == {}
     assert signal.v39_rebalance_approved_amount is None
-    assert runtime._promotion_rejection_reason(signal) == "optimizer_amount_missing_or_nonpositive"
+    assert runtime._promotion_rejection_reason(signal) == "optimizer_rejected_candidate"
 
 
 def test_previous_buy_approval_is_removed_when_core_gap_disappears(monkeypatch):
