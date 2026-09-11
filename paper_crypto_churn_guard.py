@@ -125,9 +125,9 @@ def _recent_realized_loss_streak(symbol: str, limit: int = 6) -> int:
     still supplies the baseline 30-minute protection.
     """
     try:
-        import oracle_bot
+        from database import rows
 
-        rows = oracle_bot.rows(
+        records = rows(
             """
             SELECT realized_pnl
             FROM trades
@@ -142,8 +142,8 @@ def _recent_realized_loss_streak(symbol: str, limit: int = 6) -> int:
         return 0
 
     streak = 0
-    for row in rows:
-        value = row.get("realized_pnl") if isinstance(row, dict) else None
+    for record in records:
+        value = record.get("realized_pnl") if isinstance(record, dict) else None
         if value is None:
             break
         if _safe_float(value) < 0:
