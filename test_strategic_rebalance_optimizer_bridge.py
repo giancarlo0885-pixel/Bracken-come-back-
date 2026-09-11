@@ -9,6 +9,11 @@ from strategic_rebalance_optimizer_bridge import (
 )
 
 
+class _Log:
+    def info(self, *args, **kwargs):
+        pass
+
+
 def _candidate(**overrides):
     item = {
         "symbol": "BTC-USD",
@@ -24,6 +29,10 @@ def _candidate(**overrides):
     }
     item.update(overrides)
     return item
+
+
+def _worker():
+    return SimpleNamespace(adaptive_portfolio_optimizer=adaptive.adaptive_portfolio_optimizer, log=_Log())
 
 
 def test_explicit_strategic_rebalance_separates_only_tactical_authorization(monkeypatch):
@@ -89,7 +98,7 @@ def test_ordinary_candidate_never_gets_strategic_exception(monkeypatch):
 
 
 def test_crypto_optimizer_allocates_explicit_rebalance_without_using_broker_capital(monkeypatch):
-    worker = SimpleNamespace(adaptive_portfolio_optimizer=adaptive.adaptive_portfolio_optimizer)
+    worker = _worker()
     monkeypatch.setattr(
         adaptive,
         "hard_risk_gate",
@@ -128,7 +137,7 @@ def test_crypto_optimizer_allocates_explicit_rebalance_without_using_broker_capi
 
 
 def test_crypto_optimizer_converts_tiny_rebalance_to_watch_candidate(monkeypatch):
-    worker = SimpleNamespace(adaptive_portfolio_optimizer=adaptive.adaptive_portfolio_optimizer)
+    worker = _worker()
     monkeypatch.setattr(
         adaptive,
         "hard_risk_gate",
@@ -160,7 +169,7 @@ def test_crypto_optimizer_converts_tiny_rebalance_to_watch_candidate(monkeypatch
 
 
 def test_crypto_optimizer_uses_locked_execution_minimum_before_approval(monkeypatch):
-    worker = SimpleNamespace(adaptive_portfolio_optimizer=adaptive.adaptive_portfolio_optimizer)
+    worker = _worker()
     monkeypatch.setattr(adaptive, "hard_risk_gate", lambda item: {"allowed": True, "reasons": []})
     monkeypatch.setattr(bridge, "MIN_TRADE_VALUE", 1.0)
     monkeypatch.setattr(bridge, "MIN_TRADE_NOTIONAL", 2.0)
@@ -181,7 +190,7 @@ def test_crypto_optimizer_uses_locked_execution_minimum_before_approval(monkeypa
 
 
 def test_crypto_optimizer_keeps_just_under_one_percent_as_watch(monkeypatch):
-    worker = SimpleNamespace(adaptive_portfolio_optimizer=adaptive.adaptive_portfolio_optimizer)
+    worker = _worker()
     monkeypatch.setattr(adaptive, "hard_risk_gate", lambda item: {"allowed": True, "reasons": []})
     install_strategic_rebalance_optimizer_bridge(worker)
 
@@ -198,7 +207,7 @@ def test_crypto_optimizer_keeps_just_under_one_percent_as_watch(monkeypatch):
 
 
 def test_crypto_optimizer_keeps_hard_execution_failure_at_zero(monkeypatch):
-    worker = SimpleNamespace(adaptive_portfolio_optimizer=adaptive.adaptive_portfolio_optimizer)
+    worker = _worker()
     monkeypatch.setattr(
         adaptive,
         "hard_risk_gate",
@@ -231,7 +240,7 @@ def test_stock_optimizer_is_unchanged_delegate():
         calls.append(engine)
         return {"allocations": ["delegated"]}
 
-    worker = SimpleNamespace(adaptive_portfolio_optimizer=original)
+    worker = SimpleNamespace(adaptive_portfolio_optimizer=original, log=_Log())
     install_strategic_rebalance_optimizer_bridge(worker)
 
     plan = worker.adaptive_portfolio_optimizer([], {}, [], engine="stock")
