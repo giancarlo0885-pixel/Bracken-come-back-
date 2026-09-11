@@ -74,6 +74,120 @@ def _paper_account_limits_state(worker: Any, portfolio: dict[str, Any]) -> dict[
     }
 
 
+def _execution_capacity_state(plan: dict[str, Any]) -> dict[str, float]:
+    """Mirror the locked paper BUY gross-capacity ceiling before promotion."""
+    import oracle_bot
+
+    equity = max(0.0, _finite(plan.get("equity")))
+    gross_exposure = max(0.0, _finite(plan.get("gross_exposure")))
+    buying_power = max(0.0, _finite(plan.get("buying_power")))
+    leverage_limit = max(1.0, _finite(oracle_bot.market_leverage_limit("crypto"), 1.0))
+    utilization = max(0.0, _finite(getattr(oracle_bot, "PAPER_MAX_MARGIN_UTILIZATION_PCT", 1.0), 1.0))
+    maximum_gross = equity * leverage_limit * utilization
+    gross_room = max(0.0, maximum_gross - gross_exposure)
+    executable_room = min(buying_power, gross_room)
+    return {
+        "equity": equity,
+        "gross_exposure": gross_exposure,
+        "buying_power": buying_power,
+        "leverage_limit": leverage_limit,
+        "utilization": utilization,
+        "maximum_gross": maximum_gross,
+        "gross_room": gross_room,
+        "executable_room": max(0.0, executable_room),
+    }
+
+
+def _apply_optimizer_execution_capacity_sync(worker: Any, plan: dict[str, Any]) -> dict[str, Any]:
+    """Clip/remove planned paper allocations using the same gross room as _buy.
+
+    This executes after the strategic optimizer but before trace/promotion wrappers,
+    so stale cash alone cannot make an economically impossible allocation appear
+    executable. It never expands an allocation and is active only in fail-closed
+    autonomous paper-learning mode.
+    """
+    if not _paper_learning_active():
+        return plan
+
+    allocations = list(plan.get("allocations") or [])
+    if not allocations:
+        plan["paper_execution_capacity"] = _execution_capacity_state(plan)
+        return plan
+
+    capacity = _execution_capacity_state(plan)
+    remaining = capacity["executable_room"]
+    kept: list[dict[str, Any]] = []
+    rejections = list(plan.get("rejections") or [])
+
+    for allocation in allocations:
+        original_amount = max(0.0, _finite(allocation.get("amount")))
+        floor = max(0.0, _finite(allocation.get("meaningful_entry_floor")))
+        executable = min(original_amount, remaining)
+
+        if executable <= 0 or executable + 1e-9 < floor:
+            rejections.append(
+                {
+                    "symbol": allocation.get("symbol"),
+                    "reason": "paper_execution_capacity_below_floor",
+                    "watch_only": True,
+                    "proposed_amount": round(executable, 8),
+                    "optimizer_amount": round(original_amount, 8),
+                    "meaningful_entry_floor": floor,
+                    "execution_capacity_state": dict(capacity),
+                }
+            )
+            worker.log.info(
+                "CRYPTO_OPTIMIZER_EXECUTION_CAPACITY | symbol=%s | status=WATCH | optimizer_amount=%.2f | "
+                "executable_room=%.2f | meaningful_entry_floor=%.2f | gross_room=%.2f | "
+                "buying_power=%.2f | utilization=%.4f | broker_submission=NONE | live_trading=DISARMED",
+                str(allocation.get("symbol") or "").upper(),
+                original_amount,
+                executable,
+                floor,
+                capacity["gross_room"],
+                capacity["buying_power"],
+                capacity["utilization"],
+            )
+            continue
+
+        adjusted = dict(allocation)
+        if executable + 1e-9 < original_amount:
+            adjusted["amount"] = round(executable, 2)
+            adjusted["execution_capacity_clipped"] = True
+            adjusted["optimizer_original_amount"] = round(original_amount, 8)
+            liquidity = adjusted.get("liquidity")
+            if isinstance(liquidity, dict):
+                adjusted["liquidity"] = {
+                    **liquidity,
+                    "executable_order_value": min(
+                        executable,
+                        max(0.0, _finite(liquidity.get("executable_order_value"), executable)),
+                    ),
+                    "partial_sizing": True,
+                }
+            worker.log.info(
+                "CRYPTO_OPTIMIZER_EXECUTION_CAPACITY | symbol=%s | status=CLIPPED | optimizer_amount=%.2f | "
+                "final_amount=%.2f | gross_room=%.2f | buying_power=%.2f | utilization=%.4f | "
+                "broker_submission=NONE | live_trading=DISARMED",
+                str(allocation.get("symbol") or "").upper(),
+                original_amount,
+                executable,
+                capacity["gross_room"],
+                capacity["buying_power"],
+                capacity["utilization"],
+            )
+        kept.append(adjusted)
+        remaining = max(0.0, remaining - executable)
+
+    plan["allocations"] = kept
+    plan["rejections"] = rejections
+    plan["paper_execution_capacity"] = {
+        **capacity,
+        "remaining_after_plan": remaining,
+    }
+    return plan
+
+
 def _install_optimizer_account_limit_sync(worker: Any) -> None:
     original = worker.adaptive_portfolio_optimizer
     if getattr(original, "_oracle_account_limit_synced", False):
@@ -107,6 +221,8 @@ def _install_optimizer_account_limit_sync(worker: Any) -> None:
 
         if not _paper_learning_active():
             return plan
+
+        plan = _apply_optimizer_execution_capacity_sync(worker, plan)
 
         try:
             limits = _paper_account_limits_state(worker, portfolio)
@@ -255,7 +371,8 @@ def install_crypto_pipeline_integrity_runtime(worker: Any) -> bool:
     _install_reference_handoff_label(worker)
     worker._crypto_pipeline_integrity_runtime_installed = True
     worker.log.info(
-        "CRYPTO_PIPELINE_INTEGRITY | account_limit_sync=ON | v39_evidence=EXPLICIT | "
-        "universe_filter_diagnostics=ON | paper_reference_label=ON | live_trading=UNCHANGED"
+        "CRYPTO_PIPELINE_INTEGRITY | account_limit_sync=ON | execution_capacity_sync=ON | "
+        "v39_evidence=EXPLICIT | universe_filter_diagnostics=ON | paper_reference_label=ON | "
+        "live_trading=UNCHANGED"
     )
     return True
