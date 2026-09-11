@@ -58,6 +58,29 @@ def _number(value: Any, default: float = 0.0) -> float:
     return number if math.isfinite(number) else default
 
 
+def _risk_limited_spendable(
+    *,
+    cash: float,
+    buying_power: float,
+    equity: float,
+    current_exposure: float,
+    leverage_limit: float,
+    margin_utilization_pct: float,
+) -> tuple[float, float]:
+    """Return executable paper BUY capacity using the same gross-risk ceiling as _buy."""
+    cash = max(0.0, _number(cash))
+    buying_power = max(0.0, _number(buying_power))
+    equity = max(0.0, _number(equity))
+    current_exposure = max(0.0, _number(current_exposure))
+    leverage_limit = max(1.0, _number(leverage_limit, 1.0))
+    margin_utilization_pct = max(0.0, _number(margin_utilization_pct, 1.0))
+
+    maximum_gross = equity * leverage_limit * margin_utilization_pct
+    gross_room = max(0.0, maximum_gross - current_exposure)
+    spendable = min(cash, buying_power, gross_room)
+    return max(0.0, spendable), gross_room
+
+
 def _optimizer_target(signal: Any) -> tuple[float, float]:
     approved = max(0.0, _number(patch._signal_value(signal, "v39_optimizer_approved_amount", 0.0)))
     allocation = patch._signal_value(signal, "v39_optimizer_allocation", {}) or {}
@@ -89,9 +112,9 @@ def install_paper_optimizer_size_handoff() -> bool:
     capital. In unbounded paper-learning mode this layer prevents the downstream
     minimum-sample wrapper from collapsing a valid optimizer allocation to $2.
     It remains fail-closed for live trading and still clips to simulated cash,
-    validated buying power, a positive current price, verified liquidity
-    participation capacity, and the final same-symbol churn cooldown. Quote and
-    execution integrity remain downstream.
+    validated buying power, remaining gross-exposure capacity, a positive
+    current price, verified liquidity participation capacity, and the final
+    same-symbol churn cooldown. Quote and execution integrity remain downstream.
     """
     global _INSTALLED
     if _INSTALLED:
@@ -138,9 +161,24 @@ def install_paper_optimizer_size_handoff() -> bool:
                 reason="PAPER_OPTIMIZER_TARGET_INVALID_CAPACITY",
             )
 
-        spendable = cash
+        buying_power = cash
         if bool(kwargs.get("buying_power_validated")) and kwargs.get("buying_power") is not None:
-            spendable = min(spendable, max(0.0, _number(kwargs.get("buying_power"))))
+            buying_power = max(0.0, _number(kwargs.get("buying_power")))
+
+        spendable, gross_room = _risk_limited_spendable(
+            cash=cash,
+            buying_power=buying_power,
+            equity=max(0.0, _number(kwargs.get("equity"))),
+            current_exposure=max(0.0, _number(kwargs.get("current_exposure"))),
+            leverage_limit=max(
+                1.0,
+                _number(oracle_bot.market_leverage_limit(str(kwargs.get("market") or "crypto")), 1.0),
+            ),
+            margin_utilization_pct=max(
+                0.0,
+                _number(getattr(oracle_bot, "PAPER_MAX_MARGIN_UTILIZATION_PCT", 1.0), 1.0),
+            ),
+        )
 
         dollar_volume = max(
             0.0,
@@ -176,14 +214,18 @@ def install_paper_optimizer_size_handoff() -> bool:
         quantity = final / price
         cash_after = max(0.0, cash - final)
         prior = max(0.0, _number(getattr(decision, "calculated_notional", 0.0)))
+        capacity_clipped = final + 1e-9 < target
         log.info(
             "PAPER_OPTIMIZER_SIZE_HANDOFF | symbol=%s | approved_target=%.2f | prior_downstream=%.2f | "
-            "final=%.2f | liquidity_room=%.2f | sample_clamp=BYPASSED | broker_submission=NONE | live_trading=DISARMED",
+            "final=%.2f | gross_room=%.2f | liquidity_room=%.2f | capacity_clipped=%s | "
+            "sample_clamp=BYPASSED | broker_submission=NONE | live_trading=DISARMED",
             str(kwargs.get("symbol") or "").upper(),
             target,
             prior,
             final,
+            gross_room,
             liquidity_room,
+            capacity_clipped,
         )
         return replace(
             decision,
@@ -191,7 +233,11 @@ def install_paper_optimizer_size_handoff() -> bool:
             calculated_quantity=round(quantity, 10),
             cash_after_trade=round(cash_after, 2),
             approved=True,
-            reason="PAPER_UNBOUNDED_OPTIMIZER_TARGET",
+            reason=(
+                "PAPER_UNBOUNDED_OPTIMIZER_TARGET_CAPACITY_CLIPPED"
+                if capacity_clipped
+                else "PAPER_UNBOUNDED_OPTIMIZER_TARGET"
+            ),
         )
 
     def optimizer_target_buy(
@@ -288,8 +334,9 @@ def install_paper_optimizer_size_handoff() -> bool:
     _INSTALLED = True
     log.info(
         "PAPER OPTIMIZER SIZE HANDOFF | active=True | minimum_sample_clamp=BYPASSED_FOR_OPTIMIZER_APPROVED_BUYS | "
-        "stock_penny_crypto_misclassification=BYPASSED | final_churn_guard=ENFORCED | max_trade_pct=%.4f | "
-        "cash_and_liquidity_capacity=ENFORCED | broker_submission=NONE | live_trading=DISARMED",
+        "stock_penny_crypto_misclassification=BYPASSED | final_churn_guard=ENFORCED | "
+        "gross_execution_capacity=ENFORCED | max_trade_pct=%.4f | cash_and_liquidity_capacity=ENFORCED | "
+        "broker_submission=NONE | live_trading=DISARMED",
         _number(getattr(oracle_bot, "MAX_TRADE_VALUE_PCT", 0.0)),
     )
     return True
