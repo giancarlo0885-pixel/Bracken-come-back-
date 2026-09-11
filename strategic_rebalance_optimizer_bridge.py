@@ -5,7 +5,7 @@ from typing import Any
 
 import global_adaptive_engine as adaptive
 import runtime_integrity_patch as patch
-from config import MIN_TRADE_VALUE
+from config import MIN_TRADE_NOTIONAL, MIN_TRADE_VALUE
 
 
 _TACTICAL_AUTHORIZATION_REASONS = {
@@ -185,7 +185,10 @@ def install_strategic_rebalance_optimizer_bridge(worker: Any) -> None:
         allocations: list[dict[str, Any]] = []
         rejections: list[dict[str, Any]] = []
         recalc_count = 0
-        minimum_notional = max(0.0, float(MIN_TRADE_VALUE))
+        # Planning must never approve a paper allocation that the locked
+        # execution layer will reject solely for being below its minimum size.
+        # Preserve the stricter of the legacy strategy floor and execution floor.
+        minimum_notional = max(0.0, float(MIN_TRADE_VALUE), float(MIN_TRADE_NOTIONAL))
         base_meaningful_entry_floor = max(
             minimum_notional,
             equity
