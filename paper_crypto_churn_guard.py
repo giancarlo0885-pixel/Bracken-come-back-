@@ -12,6 +12,7 @@ from paper_fast_reversal_hysteresis import install_paper_fast_reversal_hysteresi
 log = logging.getLogger("paper-churn-guard")
 _INSTALLED = False
 _SELL_CONFIRMATIONS: dict[str, tuple[int, float]] = {}
+_ENTRY_ACTIONS = {"BUY", "ACCUMULATE"}
 
 
 def _truthy(name: str, default: str = "false") -> bool:
@@ -169,9 +170,15 @@ def _current_price(signal: Any, prices: dict[str, Any], symbol: str) -> float:
 
 
 def _allow_generic_buy(signal: Any) -> tuple[bool, str]:
+    """Apply the same durable re-entry rule to every paper entry semantic.
+
+    Core-rebalance candidates may arrive as ACCUMULATE even though execution
+    ultimately routes through the BUY function. Treating ACCUMULATE as an entry
+    prevents alternate optimizer paths from bypassing same-symbol loss cooldowns.
+    """
     symbol = str(_value(signal, "symbol", "") or "").upper().strip()
     action = str(_value(signal, "action", "") or "").upper().strip()
-    if action != "BUY" or not symbol:
+    if action not in _ENTRY_ACTIONS or not symbol:
         return True, "not_generic_buy"
 
     _, _, _, _, cooldown_minutes, loss_multiplier = _settings()
@@ -253,12 +260,13 @@ def install_paper_crypto_churn_guard(worker: Any) -> bool:
     """Reduce fee-heavy paper churn without tightening strategy signal thresholds.
 
     Generic SELL flips use a minimum hold and confirmation requirement. Fresh BUY
-    re-entry after a completed SELL is cooled down, with a longer cooldown after a
-    losing exit. Consecutive realized losing exits progressively extend that same-
-    symbol cooldown so repeated failed setups consume fewer simulated fees while
-    exploration remains available. In unbounded mode upstream hysteresis remains
-    off, preserving the relaxed signal stream. EXIT/CLOSE and emergency-loss exits
-    are never delayed. This guard is paper-only and cannot activate broker submission.
+    or ACCUMULATE re-entry after a completed SELL is cooled down, with a longer
+    cooldown after a losing exit. Consecutive realized losing exits progressively
+    extend that same-symbol cooldown so repeated failed setups consume fewer
+    simulated fees while exploration remains available. In unbounded mode upstream
+    hysteresis remains off, preserving the relaxed signal stream. EXIT/CLOSE and
+    emergency-loss exits are never delayed. This guard is paper-only and cannot
+    activate broker submission.
     """
     global _INSTALLED
     if _INSTALLED:
@@ -283,13 +291,14 @@ def install_paper_crypto_churn_guard(worker: Any) -> bool:
             action = str(_value(signal, "action", "") or "").upper().strip()
             symbol = str(_value(signal, "symbol", "") or "").upper().strip()
 
-            if action == "BUY":
+            if action in _ENTRY_ACTIONS:
                 allowed, reason = _allow_generic_buy(signal)
                 if not allowed:
                     log.info(
-                        "PAPER CHURN GUARD | symbol=%s | action=BUY | allowed=False | reason=%s | "
+                        "PAPER CHURN GUARD | symbol=%s | action=%s | allowed=False | reason=%s | "
                         "broker_submission=NONE | live_trading=DISARMED",
                         symbol,
+                        action,
                         reason,
                     )
                     continue
@@ -322,7 +331,8 @@ def install_paper_crypto_churn_guard(worker: Any) -> bool:
     log.info(
         "Installed paper crypto churn guard | mode=%s | min_hold=%.2fm | confirmations=%d | window=%.0fs | "
         "emergency_loss=%.2f%% | reentry_cooldown=%.2fm | loss_reentry_multiplier=%.2fx | loss_streak_step=%.2fx | "
-        "upstream_hysteresis=%s | relaxed_signal_thresholds=UNCHANGED | broker_submission=NONE | live_trading=DISARMED",
+        "entry_actions=BUY,ACCUMULATE | upstream_hysteresis=%s | relaxed_signal_thresholds=UNCHANGED | "
+        "broker_submission=NONE | live_trading=DISARMED",
         "UNBOUNDED_CONTROLLED" if unbounded else "BOUNDED",
         min_hold,
         confirmations,
