@@ -59,7 +59,11 @@ def _effective_meaningful_floor(worker: Any, signal: Any) -> float:
     return 0.0
 
 
-def _promotion_rejection_reason(worker: Any, signal: Any) -> str:
+def _promotion_rejection_reason(worker: Any, signal: Any | None = None) -> str:
+    """Explain promotion state; accept legacy signal-only callers for diagnostics/tests."""
+    if signal is None:
+        signal = worker
+        worker = None
     intent = patch._core_rebalance_intent(signal)
     raw_amount = patch._signal_value(signal, "v39_optimizer_approved_amount", None)
     approved_amount = patch._numeric(raw_amount, default=0.0)
