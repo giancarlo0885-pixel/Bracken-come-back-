@@ -9,7 +9,7 @@ from typing import Any
 
 log = logging.getLogger("paper-regime-entry-signal-fallback")
 _RAW_REGIME_FIELDS = ("trend_strength", "momentum_20d", "volatility_20d")
-_SCHEMA_VERSION = "regime-economics-v1-entry-signal-fallback1"
+_SCHEMA_VERSION = "regime-economics-v1-entry-signal-fallback2"
 
 
 def _truthy(name: str, default: str = "false") -> bool:
@@ -46,13 +46,18 @@ def _json_obj(value: Any) -> dict[str, Any]:
 
 
 def _entry_signal_features(conn: Any, entry_signal_id: Any) -> dict[str, float]:
-    """Read only the exact persisted entry signal identified by immutable provenance."""
+    """Read only the exact persisted entry signal identified by immutable provenance.
+
+    Canonical signal JSON is stored in ``signals.details``. Alias it to ``payload``
+    locally so the remainder of this shadow-only provenance reader can keep a
+    stable internal representation without changing the production schema.
+    """
     signal_id = str(entry_signal_id or "").strip()
     if not signal_id:
         return {}
     try:
         item = conn.execute(
-            "SELECT payload FROM signals WHERE id::text=%s LIMIT 1",
+            "SELECT details AS payload FROM signals WHERE id::text=%s LIMIT 1",
             (signal_id,),
         ).fetchone()
     except Exception:
@@ -131,7 +136,7 @@ def install_entry_signal_regime_fallback(shadow_module: Any | None = None) -> bo
 
     The wrapper never alters orders, sizing, cooldowns, quotes, positions, P&L, or
     accounting. It only improves a regime label when the canonical ledger carries
-    an exact immutable entry_signal_id whose persisted payload has observed fields.
+    an exact immutable entry_signal_id whose persisted signal details have observed fields.
     """
     if not active():
         return False
