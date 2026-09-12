@@ -32,6 +32,7 @@ from paper_execution_reality import install_paper_execution_reality
 from paper_fee_policy import install_fee_aware_fifo_policy
 from paper_lifecycle_observability import install_paper_lifecycle_observability
 from paper_optimizer_size_handoff import install_paper_optimizer_size_handoff
+from paper_regime_economics_shadow import install_paper_regime_economics_shadow
 from paper_sell_db_verification import emit_recent_crypto_sell_db_verification
 from paper_sell_execution_router import install_paper_sell_execution_router
 from paper_sell_lot_atomic_repair import install_atomic_paper_sell_lot_repair
@@ -136,6 +137,9 @@ install_paper_optimizer_size_handoff()
 # clear estimated round-trip costs. Positive size expansion additionally requires
 # current walk-forward/calibration/leakage governance to pass.
 install_paper_strategy_economics()
+# Shadow-only regime segmentation plus forward price-path sampling for MFE/MAE.
+# This writes telemetry only and has no execution/sizing/cooldown effect.
+install_paper_regime_economics_shadow()
 install_paper_strategy_execution_guard()
 
 # Keep this entrypoint in the crypto-worker deploy watch set; readiness helpers are imported above.
