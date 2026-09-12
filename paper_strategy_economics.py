@@ -186,7 +186,9 @@ def _ledger_records(strategy: str) -> list[dict[str, Any]]:
     PostgreSQL compares like types and Python receives typed datetimes for holding
     time. Strategy matching remains normalized in Python because Council rationale
     text legitimately changes scan to scan. The trades fallback uses the same
-    timestamp conversion and normalization rules.
+    timestamp conversion and normalization rules. The SQL query bounds work at
+    1,000 epoch rows; do not apply a smaller post-filter cap because that silently
+    truncates mature strategy samples after normalization.
     """
     target = normalize_strategy_identity(strategy)
     try:
@@ -227,7 +229,7 @@ def _ledger_records(strategy: str) -> list[dict[str, Any]]:
             if normalize_strategy_identity(item.get("strategy")) == target
         ]
         if matched:
-            return matched[:250]
+            return matched
     except Exception as exc:
         log.warning(
             "PAPER STRATEGY ATTRIBUTION | source=trade_ledger | status=UNAVAILABLE | reason=%s",
@@ -272,7 +274,7 @@ def _ledger_records(strategy: str) -> list[dict[str, Any]]:
             dict(item)
             for item in (records or [])
             if normalize_strategy_identity(item.get("strategy")) == target
-        ][:250]
+        ]
     except Exception as exc:
         log.warning(
             "PAPER STRATEGY ATTRIBUTION | source=trades | status=UNAVAILABLE | reason=%s",
