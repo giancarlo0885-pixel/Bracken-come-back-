@@ -360,6 +360,14 @@ def _normalize_starter_action(signal: Any) -> Any:
     return signal
 
 
+def _apply_oracle_council_identity(signal: Any, council: dict[str, Any] | None) -> Any:
+    """Attach stable strategy provenance to Council-generated deep signals."""
+    version = str((council or {}).get("version") or "").strip().lower()
+    if version == "v3":
+        setattr(signal, "strategy", "oracle_council_v3")
+    return signal
+
+
 signal.signal(signal.SIGTERM, _request_stop)
 signal.signal(signal.SIGINT, _request_stop)
 
@@ -1253,6 +1261,7 @@ def scan_market(market: str) -> list[Any]:
             signal = _normalize_starter_action(signal)
             route = _attach_execution_metadata(signal, history, "deep")
             signal.reason = (str(signal.reason) + " " + str(council["explanation"])).strip()
+            signal = _apply_oracle_council_identity(signal, council)
             quote_payload = _execution_quote_payload_from_history(symbol, history, getattr(signal, "price", None), scan_type="deep")
             if quote_payload is None:
                 continue
