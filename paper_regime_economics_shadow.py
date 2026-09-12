@@ -11,7 +11,7 @@ from typing import Any
 
 
 log = logging.getLogger("paper-regime-economics")
-_SCHEMA_VERSION = "regime-economics-v1-shadow"
+_SCHEMA_VERSION = "regime-economics-v1-shadow-anchor-fix1"
 _THREAD: threading.Thread | None = None
 _STOP = threading.Event()
 
@@ -76,6 +76,22 @@ def classify_regime(*, feature_snapshot: Any = None, memory_regime: Any = None) 
     return f"{direction}__{vol}"
 
 
+def _excursion_percentages(entry_price: Any, prices: list[float]) -> tuple[float | None, float | None]:
+    """Return long-position MFE/MAE anchored to the factual entry point.
+
+    Entry itself is a zero-percent excursion. Consequently long MFE can never be
+    negative and long MAE can never be positive, even when all forward samples
+    remain on one side of entry. The observed samples remain the only forward
+    path evidence; this anchor does not invent an unobserved price.
+    """
+    entry = _num(entry_price)
+    observed = [_num(price) for price in prices if _num(price) > 0]
+    if entry <= 0 or not observed:
+        return None, None
+    returns = [((price / entry) - 1.0) * 100.0 for price in observed]
+    return max(0.0, max(returns)), min(0.0, min(returns))
+
+
 def ensure_schema() -> None:
     if not active():
         return
@@ -129,6 +145,26 @@ def ensure_schema() -> None:
             ON paper_regime_trade_metrics(strategy, regime, exit_time)
             """
         )
+
+
+def repair_excursion_anchors() -> int:
+    """Correct only impossible sign states produced by the initial shadow build."""
+    if not active():
+        return 0
+    from database import connect
+
+    with connect() as conn:
+        result = conn.execute(
+            """
+            UPDATE paper_regime_trade_metrics
+            SET mfe_pct=GREATEST(0.0,mfe_pct),
+                mae_pct=LEAST(0.0,mae_pct),
+                schema_version=%s
+            WHERE (mfe_pct < 0.0 OR mae_pct > 0.0)
+            """,
+            (_SCHEMA_VERSION,),
+        )
+        return max(0, int(getattr(result, "rowcount", 0) or 0))
 
 
 def sample_open_positions() -> int:
@@ -239,13 +275,9 @@ def finalize_closed_trades(limit: int = 250) -> int:
                 ).fetchall()
                 prices = [_num(item.get("price")) for item in sampled if _num(item.get("price")) > 0]
 
-            # Entry/exit endpoints are canonical facts, not excursion samples.
+            # Entry is the factual 0% excursion anchor; forward samples supply the path.
             excursion_count = len(prices)
-            mfe_pct = None
-            mae_pct = None
-            if entry_price > 0 and prices:
-                mfe_pct = ((max(prices) / entry_price) - 1.0) * 100.0
-                mae_pct = ((min(prices) / entry_price) - 1.0) * 100.0
+            mfe_pct, mae_pct = _excursion_percentages(entry_price, prices)
 
             conn.execute(
                 """
@@ -323,6 +355,12 @@ def install_paper_regime_economics_shadow() -> bool:
     if not active():
         return False
     ensure_schema()
+    repaired = repair_excursion_anchors()
+    if repaired:
+        log.info(
+            "PAPER REGIME ECONOMICS | excursion_anchor_repair=%s | execution_impact=NONE | live_trading=DISARMED",
+            repaired,
+        )
     # Capture immediately so fresh positions have an initial observed point.
     try:
         sample_open_positions()

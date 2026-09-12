@@ -38,3 +38,26 @@ def test_regime_uses_only_entry_features():
 
 def test_unknown_features_do_not_invent_volatility():
     assert regime.classify_regime(feature_snapshot={}) == "range__vol_unknown"
+
+
+def test_mfe_is_anchored_at_zero_when_all_forward_prices_are_below_entry():
+    mfe, mae = regime._excursion_percentages(100.0, [99.5, 98.0, 99.0])
+    assert mfe == 0.0
+    assert round(mae, 8) == -2.0
+
+
+def test_mae_is_anchored_at_zero_when_all_forward_prices_are_above_entry():
+    mfe, mae = regime._excursion_percentages(100.0, [100.5, 102.0, 101.0])
+    assert round(mfe, 8) == 2.0
+    assert mae == 0.0
+
+
+def test_excursions_preserve_observed_two_sided_path():
+    mfe, mae = regime._excursion_percentages(100.0, [97.5, 103.25, 101.0])
+    assert round(mfe, 8) == 3.25
+    assert round(mae, 8) == -2.5
+
+
+def test_excursions_remain_unavailable_without_forward_samples():
+    assert regime._excursion_percentages(100.0, []) == (None, None)
+    assert regime._excursion_percentages(0.0, [100.0]) == (None, None)
