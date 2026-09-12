@@ -52,7 +52,11 @@ def test_first_entry_is_not_blocked(monkeypatch):
     assert guard._open_position_accumulation_allows("SOL-USD") == (True, "no_open_position")
 
 
-def test_final_buy_wrapper_blocks_repeated_buy_and_accumulate(monkeypatch):
+def test_blocked_buy_result_matches_oracle_buy_contract():
+    assert guard._blocked_buy("paper_guard_reason") == (False, "paper_guard_reason", None)
+
+
+def test_final_buy_wrapper_blocks_repeated_buy_and_accumulate_with_contract(monkeypatch):
     monkeypatch.setenv("EXECUTION_MODE", "paper")
     monkeypatch.setenv("PAPER_AUTONOMOUS_LEARNING", "true")
     monkeypatch.setenv("ENABLE_BROKER_SUBMISSION", "false")
@@ -62,7 +66,7 @@ def test_final_buy_wrapper_blocks_repeated_buy_and_accumulate(monkeypatch):
 
     def original_buy(*args, **kwargs):
         calls.append((args, kwargs))
-        return True
+        return True, "original_buy", None
 
     fake = SimpleNamespace(_buy=original_buy, row=lambda *args, **kwargs: None)
     monkeypatch.setitem(sys.modules, "oracle_bot", fake)
@@ -84,7 +88,44 @@ def test_final_buy_wrapper_blocks_repeated_buy_and_accumulate(monkeypatch):
                 200.0,
                 {"symbol": "SOL-USD", "action": action},
             )
-            assert result is False
+            assert result == (
+                False,
+                "open_position_accumulation_cooldown:1.00/5.00m",
+                None,
+            )
+        assert calls == []
+    finally:
+        guard._INSTALLED = previous
+
+
+def test_fee_rejection_preserves_buy_contract(monkeypatch):
+    monkeypatch.setenv("EXECUTION_MODE", "paper")
+    monkeypatch.setenv("PAPER_AUTONOMOUS_LEARNING", "true")
+    monkeypatch.setenv("ENABLE_BROKER_SUBMISSION", "false")
+    monkeypatch.setenv("LIVE_TRADING_ARMED", "false")
+
+    calls = []
+
+    def original_buy(*args, **kwargs):
+        calls.append((args, kwargs))
+        return True, "original_buy", None
+
+    fake = SimpleNamespace(_buy=original_buy, row=lambda *args, **kwargs: None)
+    monkeypatch.setitem(sys.modules, "oracle_bot", fake)
+    monkeypatch.setattr(guard.economics, "active", lambda: True)
+    monkeypatch.setattr(guard, "_open_position_accumulation_allows", lambda symbol: (True, "no_open_position"))
+    monkeypatch.setattr(
+        guard.economics,
+        "fee_edge_allows_entry",
+        lambda signal: (False, "edge_below_round_trip_cost:test", 0.1, 0.5),
+    )
+
+    previous = guard._INSTALLED
+    guard._INSTALLED = False
+    try:
+        assert guard.install_paper_strategy_execution_guard() is True
+        result = fake._buy("crypto", "SOL-USD", 200.0, {"symbol": "SOL-USD", "action": "BUY"})
+        assert result == (False, "edge_below_round_trip_cost:test", None)
         assert calls == []
     finally:
         guard._INSTALLED = previous

@@ -40,6 +40,11 @@ def _parse_time(value: Any) -> datetime | None:
     return parsed.astimezone(timezone.utc)
 
 
+def _blocked_buy(reason: str) -> tuple[bool, str, None]:
+    """Match oracle_bot._buy's public return contract on paper-only rejection."""
+    return False, str(reason or "paper_strategy_execution_guard_rejected"), None
+
+
 def _open_position_accumulation_allows(symbol: str) -> tuple[bool, str]:
     """Rate-limit repeated paper adds while a same-symbol position is already open.
 
@@ -173,7 +178,7 @@ def install_paper_strategy_execution_guard() -> bool:
                 str(_value(signal, "action", "BUY") or "BUY").upper(),
                 accumulation_reason,
             )
-            return False
+            return _blocked_buy(accumulation_reason)
 
         allowed, edge_reason, edge, cost = economics.fee_edge_allows_entry(signal)
         if not allowed:
@@ -185,7 +190,7 @@ def install_paper_strategy_execution_guard() -> bool:
                 cost,
                 edge_reason,
             )
-            return False
+            return _blocked_buy(edge_reason)
 
         optimizer_target = float(_value(signal, "v39_optimizer_approved_amount", 0.0) or 0.0)
         base_target = optimizer_target if optimizer_target > 0 else float(target_trade_value or 0.0)
@@ -205,7 +210,7 @@ def install_paper_strategy_execution_guard() -> bool:
                 reason=size_reason,
             )
             if sized <= 0:
-                return False
+                return _blocked_buy("strategy_economics_zero_target")
             if optimizer_target > 0:
                 adjusted_signal = _with_optimizer_target(signal, sized)
             else:
