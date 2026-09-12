@@ -93,6 +93,28 @@ def test_oracle_council_dynamic_rationales_share_stable_strategy_identity():
     assert econ.strategy_identity(second) == "oracle_council_v3"
 
 
+def test_always_on_pulse_dynamic_rationales_share_interval_strategy_identity():
+    first = {
+        "reason": "Always-on 5m market pulse. 20d momentum +2.1%; RSI 58.4. Short-horizon reversion BUY: z -2.11."
+    }
+    second = {
+        "reason": "Always-on 5m market pulse. 20d momentum -1.8%; RSI 41.2. Short-horizon reversion BUY: z -1.72."
+    }
+    other_interval = {
+        "reason": "Always-on 15m market pulse. 20d momentum -1.8%; RSI 41.2. Short-horizon reversion BUY: z -1.72."
+    }
+
+    assert econ.strategy_identity(first) == "always_on_5m_market_pulse"
+    assert econ.strategy_identity(second) == "always_on_5m_market_pulse"
+    assert econ.strategy_identity(other_interval) == "always_on_15m_market_pulse"
+    assert econ.strategy_identity(first) != "oracle_council_v3"
+
+
+def test_explicit_non_pulse_strategy_is_not_collapsed():
+    signal = {"strategy": "mean_reversion_v2", "reason": "Always-on 5m market pulse. dynamic context"}
+    assert econ.strategy_identity(signal) == "mean_reversion_v2"
+
+
 def test_ledger_records_match_dynamic_entry_rationale_by_stable_key(monkeypatch):
     start = datetime.now(timezone.utc) - timedelta(hours=1)
     closed_at = datetime.now(timezone.utc)
