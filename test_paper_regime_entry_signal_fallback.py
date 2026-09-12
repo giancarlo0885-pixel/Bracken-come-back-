@@ -24,10 +24,10 @@ def test_merge_entry_features_preserves_immutable_ledger_values():
     assert merged["volatility_20d"] == 0.42
 
 
-def test_entry_signal_features_reads_exact_signal_payload_only():
+def test_entry_signal_features_reads_exact_signal_details_only():
     class Conn:
         def execute(self, sql, params):
-            assert "FROM signals" in sql
+            assert "SELECT details AS payload FROM signals" in sql
             assert params == ("42",)
             return SimpleNamespace(fetchone=lambda: {
                 "payload": {
@@ -41,6 +41,22 @@ def test_entry_signal_features_reads_exact_signal_payload_only():
         "trend_strength": 0.10,
         "momentum_20d": 0.08,
         "volatility_20d": 0.31,
+    }
+
+
+def test_entry_signal_features_accepts_json_encoded_signal_details():
+    class Conn:
+        def execute(self, sql, params):
+            assert "SELECT details AS payload FROM signals" in sql
+            assert params == ("43",)
+            return SimpleNamespace(fetchone=lambda: {
+                "payload": '{"trend_strength": 0.04, "momentum_20d": -0.02, "volatility_20d": 0.44}'
+            })
+
+    assert fallback._entry_signal_features(Conn(), 43) == {
+        "trend_strength": 0.04,
+        "momentum_20d": -0.02,
+        "volatility_20d": 0.44,
     }
 
 
@@ -69,6 +85,7 @@ def test_repair_unknown_regime_uses_entry_signal_without_touching_economics(monk
                     "feature_snapshot": {"trend_strength": 0.09},
                 }])
             if "FROM signals" in sql:
+                assert "details AS payload" in sql
                 assert params == ("77",)
                 return Result(one={"payload": {
                     "trend_strength": 0.09,
@@ -88,7 +105,7 @@ def test_repair_unknown_regime_uses_entry_signal_without_touching_economics(monk
 
     repaired = fallback.repair_unknown_regimes()
     assert repaired == 1
-    assert updates == [(fallback._SCHEMA_VERSION and "trend_up__low_vol", fallback._SCHEMA_VERSION, "trade-1")]
+    assert updates == [("trend_up__low_vol", fallback._SCHEMA_VERSION, "trade-1")]
 
 
 def test_repair_does_not_invent_regime_when_entry_signal_lacks_volatility(monkeypatch):
@@ -114,6 +131,7 @@ def test_repair_does_not_invent_regime_when_entry_signal_lacks_volatility(monkey
                     "feature_snapshot": {},
                 }])
             if "FROM signals" in sql:
+                assert "details AS payload" in sql
                 return Result(one={"payload": {"trend_strength": 0.10, "momentum_20d": 0.09}})
             if "UPDATE paper_regime_trade_metrics" in sql:
                 updates.append(params)
