@@ -249,6 +249,22 @@ def fee_aware_fifo_close_lots(
                 broker_mode=lot.broker_mode,
                 account_environment=lot.account_environment,
                 order_id=order_id,
+                # Preserve the immutable entry identity through partial/FIFO
+                # closes. Exit metadata must not replace the lot's evidence.
+                entry_decision_id=lot.entry_decision_id or lot.decision_id,
+                entry_signal_id=lot.entry_signal_id,
+                entry_forecast_id=lot.entry_forecast_id,
+                entry_quote_id=lot.entry_quote_id,
+                decision_correlation_id=lot.decision_correlation_id,
+                model=lot.model,
+                model_version=lot.model_version,
+                provider=lot.provider,
+                provider_symbol=lot.provider_symbol,
+                quote_timestamp=lot.quote_timestamp,
+                decision_timestamp=lot.decision_timestamp,
+                feature_snapshot=lot.feature_snapshot,
+                risk_snapshot=lot.risk_snapshot,
+                portfolio_snapshot=lot.portfolio_snapshot,
             )
         )
 
