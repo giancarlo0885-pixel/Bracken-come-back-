@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 import logging
 import math
 import os
+import re
 import time
 from typing import Any
 
@@ -60,15 +61,22 @@ def normalize_strategy_identity(value: Any) -> str:
     Crypto Oracle Council signals carry a human-readable rationale in `strategy`
     whose momentum/RSI/volatility numbers change every scan. Position lots
     correctly preserve the entry-time text, so exact string matching against a
-    later scan can never accumulate closed-trade samples. Collapse only that
-    known dynamic rationale family to a stable key; preserve explicit strategy
+    later scan can never accumulate closed-trade samples. Always-on market-pulse
+    signals have the same problem because the engine's rationale is dynamic and
+    the base OracleSignal has no dedicated strategy field. Collapse only these
+    known dynamic provenance families to stable keys; preserve explicit strategy
     names verbatim so unrelated strategies remain independently attributed.
     """
     raw = str(value or "").strip()
     if not raw:
         return "unattributed"
-    if "oracle council v3" in raw.lower():
+    lowered = raw.lower()
+    if "oracle council v3" in lowered:
         return _ORACLE_COUNCIL_V3_KEY
+    pulse = re.match(r"^always-on\s+([0-9]+(?:\.[0-9]+)?[mhd])\s+market pulse\.", lowered)
+    if pulse:
+        interval = pulse.group(1).replace(".", "_")
+        return f"always_on_{interval}_market_pulse"
     return raw[:160]
 
 
