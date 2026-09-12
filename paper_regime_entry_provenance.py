@@ -5,6 +5,7 @@ import os
 from typing import Any
 
 from market_memory import feature_vector
+from paper_regime_entry_signal_fallback import install_entry_signal_regime_fallback
 
 
 _RAW_REGIME_FIELDS = ("trend_strength", "momentum_20d", "volatility_20d")
@@ -67,6 +68,7 @@ def install_paper_regime_entry_provenance(oracle_module: Any | None = None) -> b
 
     original = oracle_module._entry_provenance
     if getattr(original, "_paper_regime_entry_provenance_v1", False):
+        install_entry_signal_regime_fallback()
         return True
 
     def wrapped(*, signal: Any | None, quote_metadata: dict[str, Any] | None, now: str,
@@ -90,4 +92,7 @@ def install_paper_regime_entry_provenance(oracle_module: Any | None = None) -> b
     wrapped._paper_regime_entry_provenance_v1 = True  # type: ignore[attr-defined]
     wrapped._paper_regime_entry_provenance_original = original  # type: ignore[attr-defined]
     oracle_module._entry_provenance = wrapped
+    # Install before the shadow sampler starts so its startup materialization and
+    # every later cycle can repair unknown labels from the exact entry signal.
+    install_entry_signal_regime_fallback()
     return True
