@@ -2,10 +2,13 @@ from __future__ import annotations
 
 """Event-first opportunity discovery for GARIBALDI MARKET ORACLE.
 
-Unlike the symbol-first news pass, this scanner starts with global market events.
-It can retain high-value research opportunities even before a broker-tradable
-symbol exists, then conservatively promote only explicitly identified symbols
-that pass the existing verified-quote identity gate.
+The stock engine is normally symbol-first: establish a universe, then research
+those symbols. This module adds the inverse path. It scans fresh global market
+events, stores high-value research candidates even before a tradable ticker is
+known, and promotes a symbol only after the existing quote/identity path can
+verify it.
+
+Nothing in this module grants execution permission or arms live trading.
 """
 
 from dataclasses import asdict, dataclass
@@ -37,7 +40,7 @@ EVENT_OPPORTUNITY_TIMEOUT_SECONDS = max(5, min(30, int(os.getenv("EVENT_OPPORTUN
 _QUERY_GROUPS: tuple[tuple[str, str], ...] = (
     ("IPO_LISTING", 'IPO OR "initial public offering" OR "public offer" OR "stock exchange listing" OR "share sale" when:2d'),
     ("M&A", 'acquisition OR merger OR takeover OR buyout OR "strategic acquisition" when:2d'),
-    ("REGULATORY", 'approval OR regulator OR FDA OR SEC OR license OR tariff OR sanctions "market" when:2d'),
+    ("REGULATORY", 'approval OR regulator OR FDA OR SEC OR license OR tariff OR sanctions market when:2d'),
     ("CONTRACT_CAPEX", '"wins contract" OR "awarded contract" OR expansion OR refinery OR factory OR datacenter when:2d'),
     ("EARNINGS_GUIDANCE", '"raises guidance" OR "cuts guidance" OR "earnings beat" OR "earnings miss" OR outlook shares when:2d'),
     ("CAPITAL_RAISE", '"capital raise" OR "secondary offering" OR "rights issue" OR "bond sale" OR financing shares when:2d'),
@@ -45,11 +48,47 @@ _QUERY_GROUPS: tuple[tuple[str, str], ...] = (
     ("CRYPTO_MARKET_STRUCTURE", 'crypto ETF approval OR token listing OR exchange listing OR stablecoin law OR crypto regulation when:2d'),
 )
 
+# These patterns intentionally match normal headline grammar, not only exact
+# phrases. For example, "wins major multi-year refinery contract" should be a
+# contract catalyst, while query membership alone is still capped below the
+# actionable-event threshold.
 _CATEGORY_PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("IPO_LISTING", (r"\bipo\b", r"initial public offering", r"public offer", r"stock exchange listing", r"listing on (?:the )?(?:nyse|nasdaq|ngx|lse|tsx|asx)", r"share sale")),
+    (
+        "IPO_LISTING",
+        (
+            r"\bipo\b",
+            r"initial public offering",
+            r"public offer",
+            r"stock exchange listing",
+            r"listing on (?:the )?(?:nyse|nasdaq|ngx|lse|tsx|asx)",
+            r"share sale",
+        ),
+    ),
     ("M&A", (r"\bacquisition\b", r"\bacquire[sd]?\b", r"\bmerger\b", r"\btakeover\b", r"\bbuyout\b")),
-    ("REGULATORY", (r"fda approval", r"sec approval", r"regulator(?:y)? approval", r"license granted", r"court ruling", r"\btariff\b", r"\bsanctions?\b")),
-    ("CONTRACT_CAPEX", (r"wins? (?:a )?contract", r"awarded (?:a )?contract", r"\bexpansion\b", r"new (?:plant|factory|refinery|datacenter|data center)", r"capacity expansion")),
+    (
+        "REGULATORY",
+        (
+            r"fda approval",
+            r"sec approval",
+            r"regulator(?:y)? approval",
+            r"license granted",
+            r"court ruling",
+            r"\btariff\b",
+            r"\bsanctions?\b",
+        ),
+    ),
+    (
+        "CONTRACT_CAPEX",
+        (
+            r"\bwins?\b.{0,60}\bcontract\b",
+            r"\bwon\b.{0,60}\bcontract\b",
+            r"\bawarded\b.{0,60}\bcontract\b",
+            r"\bcontract\b.{0,60}\bawarded\b",
+            r"\bexpansion\b",
+            r"new (?:plant|factory|refinery|datacenter|data center)",
+            r"capacity expansion",
+        ),
+    ),
     ("EARNINGS_GUIDANCE", (r"raises? guidance", r"cuts? guidance", r"earnings beat", r"earnings miss", r"raises? outlook", r"cuts? outlook")),
     ("CAPITAL_RAISE", (r"capital raise", r"secondary offering", r"rights issue", r"bond sale", r"private placement", r"follow-on offering")),
     ("SUPPLY_DISRUPTION", (r"\bshutdown\b", r"\boutage\b", r"\bstrike\b", r"export ban", r"supply disruption", r"production halt", r"pipeline disruption")),
@@ -203,7 +242,7 @@ def _extract_entity(title: str) -> str:
     body, _ = _clean_title_and_source(title)
     body = re.sub(r"^[\"'‘’“”]+|[\"'‘’“”]+$", "", body).strip()
     split = re.split(
-        r"\s+(?:is|are|was|were|will|to|set to|plans? to|files? for|announces?|wins?|gets?|receives?|raises?|cuts?|seeks?|launches?|opens?)\b",
+        r"\s+(?:is|are|was|were|will|to|set to|plans? to|files? for|announces?|wins?|won|gets?|receives?|raises?|cuts?|seeks?|launches?|opens?)\b",
         body,
         maxsplit=1,
         flags=re.IGNORECASE,
@@ -221,7 +260,7 @@ def score_event(
     query_category: str = "EVENT",
     now: datetime | None = None,
 ) -> tuple[float, str, list[str]]:
-    """Return a bounded catalyst score plus category and transparent factors."""
+    """Return a bounded catalyst score, category and transparent factor list."""
     clean, inferred_source = _clean_title_and_source(title)
     source = source or inferred_source
     lowered = clean.lower()
@@ -282,8 +321,10 @@ def score_event(
             score -= 12.0
             factors.append("stale_penalty")
 
+    # A broad discovery query can surface irrelevant headlines. Query membership
+    # alone never creates a promoted event; an actual semantic event pattern must
+    # appear in the headline.
     if not matched_patterns and category == str(query_category or "EVENT").upper():
-        # Query membership alone is not enough to create a high-confidence event.
         score = min(score, 44.0)
         factors.append("query_only_cap")
 
@@ -445,13 +486,11 @@ def scan_event_opportunities(*, force: bool = False) -> list[dict[str, Any]]:
         return recent_event_opportunities()
 
     cursor = int(status.get("cursor") or 0) % len(_QUERY_GROUPS)
-    selected = [
-        _QUERY_GROUPS[(cursor + offset) % len(_QUERY_GROUPS)]
-        for offset in range(EVENT_OPPORTUNITY_QUERIES_PER_CYCLE)
-    ]
+    selected = [_QUERY_GROUPS[(cursor + offset) % len(_QUERY_GROUPS)] for offset in range(EVENT_OPPORTUNITY_QUERIES_PER_CYCLE)]
     next_cursor = (cursor + len(selected)) % len(_QUERY_GROUPS)
     saved = 0
     errors: list[str] = []
+
     for query_category, query in selected:
         try:
             headlines = _fetch_google_news(query)
@@ -518,7 +557,7 @@ def _verified_symbol(symbol: str) -> bool:
 
 
 def active_event_watchlist() -> dict[str, str]:
-    """Return only high-score event symbols that are actually quote-verifiable now."""
+    """Return only high-score event symbols that are quote-verifiable now."""
     opportunities = scan_event_opportunities()
     watchlist: dict[str, str] = {}
     checked: set[str] = set()
@@ -538,7 +577,7 @@ def active_event_watchlist() -> dict[str, str]:
 
 
 def event_context_for_symbol(symbol: str, *, limit: int = 6) -> dict[str, Any]:
-    """Return fresh event evidence for a known symbol without creating a trade signal."""
+    """Return fresh event evidence for a known symbol without creating a trade."""
     normalized = str(symbol or "").upper().strip()
     if not normalized:
         return {"score": 0.0, "headlines": [], "events": []}
