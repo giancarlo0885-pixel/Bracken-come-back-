@@ -115,7 +115,7 @@ def _difficulty_change(payload: Any) -> float | None:
         if isinstance(adjustments, list) and adjustments:
             value = _finite(adjustments[-1].get("adjustment")) if isinstance(adjustments[-1], dict) else None
             if value is not None:
-                # mempool.space mining/hashrate returns an adjustment multiplier near 1.0.
+                # The mining/hashrate endpoint exposes an adjustment multiplier near 1.0.
                 return value - 1.0 if 0.5 <= value <= 1.5 else (value / 100.0 if abs(value) > 1.0 else value)
     return None
 
@@ -127,7 +127,7 @@ def _block_interval_seconds(payload: Any) -> float | None:
         value = _finite(payload.get(key))
         if value is None or value <= 0:
             continue
-        # Some APIs expose milliseconds; values in a plausible seconds range pass through.
+        # mempool.space difficulty telemetry may expose milliseconds.
         if value > 100_000:
             value /= 1000.0
         return value
@@ -140,7 +140,7 @@ def _fee_pressure(fees: dict[str, Any]) -> float | None:
     if fastest is None:
         return None
     baseline = max(1.0, minimum or 1.0)
-    # Log normalization avoids letting temporary fee spikes dominate the feature.
+    # Log normalization prevents temporary fee spikes from dominating learning.
     ratio = max(1.0, fastest / baseline)
     return _clip(math.log1p(ratio - 1.0) / math.log1p(100.0))
 
@@ -149,7 +149,7 @@ def _mempool_pressure(mempool: dict[str, Any]) -> float | None:
     vsize = _finite(mempool.get("vsize"))
     if vsize is None:
         return None
-    # This is a bounded backlog feature, not a claim about node RAM capacity.
+    # Bounded backlog feature only; this is not a node-memory-capacity claim.
     return _clip(vsize / 100_000_000.0)
 
 
@@ -194,16 +194,36 @@ class MempoolSpaceClient:
             raise MempoolSpaceError("INVALID_JSON") from exc
 
     def snapshot(self) -> MempoolSpaceSnapshot:
-        height = _integer(self._get_text("/api/blocks/tip/height").strip())
-        mining = self._get_json("/api/v1/mining/hashrate/1m")
-        difficulty = self._get_json("/api/v1/difficulty-adjustment")
-        mempool = self._get_json("/api/mempool")
-        fees = self._get_json("/api/v1/fees/recommended")
+        failures: list[str] = []
 
-        mining = mining if isinstance(mining, dict) else {}
-        difficulty = difficulty if isinstance(difficulty, dict) else {}
-        mempool = mempool if isinstance(mempool, dict) else {}
-        fees = fees if isinstance(fees, dict) else {}
+        def optional_text(path: str) -> str | None:
+            try:
+                return self._get_text(path)
+            except MempoolSpaceError as exc:
+                failures.append(f"{path}:{exc}")
+                return None
+
+        def optional_json(path: str) -> Any:
+            try:
+                return self._get_json(path)
+            except MempoolSpaceError as exc:
+                failures.append(f"{path}:{exc}")
+                return None
+
+        height_text = optional_text("/api/blocks/tip/height")
+        mining_raw = optional_json("/api/v1/mining/hashrate/1m")
+        difficulty_raw = optional_json("/api/v1/difficulty-adjustment")
+        mempool_raw = optional_json("/api/mempool")
+        fees_raw = optional_json("/api/v1/fees/recommended")
+
+        if len(failures) == 5:
+            raise MempoolSpaceError("ALL_ENDPOINTS_UNAVAILABLE")
+
+        height = _integer(height_text.strip()) if isinstance(height_text, str) else None
+        mining = mining_raw if isinstance(mining_raw, dict) else {}
+        difficulty = difficulty_raw if isinstance(difficulty_raw, dict) else {}
+        mempool = mempool_raw if isinstance(mempool_raw, dict) else {}
+        fees = fees_raw if isinstance(fees_raw, dict) else {}
 
         current_hashrate = _finite(mining.get("currentHashrate"))
         current_difficulty = _finite(mining.get("currentDifficulty"))
