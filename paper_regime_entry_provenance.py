@@ -4,6 +4,7 @@ import math
 import os
 from typing import Any
 
+from entry_pattern_memory_runtime import install_entry_pattern_memory_runtime
 from market_memory import feature_vector
 from paper_regime_entry_signal_fallback import install_entry_signal_regime_fallback
 
@@ -39,12 +40,6 @@ def _runtime_signal_value(signal: Any, key: str) -> Any:
 
 
 def _enrich_persisted_signal_payload(signal: Any, existing: Any) -> dict[str, Any]:
-    """Add only observed entry-time regime inputs to persisted signal JSON.
-
-    This is persistence-only telemetry. It never mutates the runtime signal and
-    never supplies defaults, later prices, realized outcomes, or inferred labels.
-    Existing persisted values remain authoritative.
-    """
     payload = dict(existing) if isinstance(existing, dict) else {}
     for key in _RAW_REGIME_FIELDS:
         if key in payload and _finite(payload.get(key)) is not None:
@@ -73,12 +68,7 @@ def _install_signal_payload_provenance(worker_module: Any) -> bool:
 
 
 def _enrich_entry_features(oracle_module: Any, signal: Any, existing: Any) -> dict[str, Any]:
-    """Preserve exact entry-time regime inputs without using future/P&L data."""
     features = dict(existing) if isinstance(existing, dict) else {}
-
-    # Keep the raw runtime regime inputs when present. These are the same fields
-    # used by the decision/risk pipeline at entry time and are never backfilled
-    # from later prices or realized outcomes.
     for key in _RAW_REGIME_FIELDS:
         if key in features and _finite(features.get(key)) is not None:
             continue
@@ -86,16 +76,14 @@ def _enrich_entry_features(oracle_module: Any, signal: Any, existing: Any) -> di
         if value is not None:
             features[key] = value
 
-    # Some strategy signals do not expose the raw fields directly. In that case,
-    # retain the existing portable entry fingerprint rather than an empty JSON
-    # object. Do not overwrite any exact fields already captured above.
-    if not features and signal is not None:
+    if signal is not None:
         try:
-            fallback = feature_vector(signal)
+            fallback = oracle_module.feature_vector(signal)
         except Exception:
             fallback = {}
         if isinstance(fallback, dict):
-            features.update(fallback)
+            for key, value in fallback.items():
+                features.setdefault(key, value)
     return features
 
 
@@ -107,15 +95,17 @@ def install_paper_regime_entry_provenance(
     if not active():
         return False
 
+    # Install the broader entry fingerprint first so the immutable lot snapshot,
+    # observation store, opportunity engine and analog matcher all see identical
+    # RSI/dip/rebound/reclaim evidence at entry time.
+    install_entry_pattern_memory_runtime()
+
     production_install = oracle_module is None
     if oracle_module is None:
         import oracle_bot as oracle_module
     if worker_module is None and production_install:
         import market_worker as worker_module
 
-    # Persist the observed runtime fields in the immutable signal record before
-    # execution transforms the signal into lots/ledger provenance. This wrapper
-    # changes only JSON persistence; it does not mutate the signal or gate trades.
     if worker_module is not None:
         _install_signal_payload_provenance(worker_module)
 
@@ -145,7 +135,5 @@ def install_paper_regime_entry_provenance(
     wrapped._paper_regime_entry_provenance_v1 = True  # type: ignore[attr-defined]
     wrapped._paper_regime_entry_provenance_original = original  # type: ignore[attr-defined]
     oracle_module._entry_provenance = wrapped
-    # Install before the shadow sampler starts so its startup materialization and
-    # every later cycle can repair unknown labels from the exact entry signal.
     install_entry_signal_regime_fallback()
     return True
