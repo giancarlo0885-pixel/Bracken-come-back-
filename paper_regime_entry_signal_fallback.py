@@ -128,9 +128,14 @@ def repair_unknown_regimes(limit: int = 1000) -> int:
             if not any(key in signal_features for key in missing):
                 continue
             features = _merge_entry_features(existing, signal_features)
+            # Never manufacture a volatility bucket from classifier defaults. A
+            # repaired label is admissible only when volatility is actually
+            # observed in immutable entry evidence or the exact entry signal.
+            if _finite(features.get("volatility_20d")) is None:
+                continue
             regime = classify_regime(feature_snapshot=features, memory_regime=None)
             current = str(row.get("regime") or "")
-            if not regime or regime == current:
+            if not regime or regime.endswith("vol_unknown") or regime == current:
                 continue
             conn.execute(
                 """
