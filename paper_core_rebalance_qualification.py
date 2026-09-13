@@ -113,12 +113,7 @@ def _install_unbounded_optimizer_policy() -> None:
             if not _unbounded_paper_learning():
                 return gate
             action = str(item.get("action") or item.get("tactical_action") or "").upper().strip()
-            explicit_core = bool(
-                item.get("core_rebalance_candidate") is True
-                and str(item.get("portfolio_intent") or "").upper().strip()
-                in {patch.CORE_REBALANCE_CANDIDATE_INTENT, patch.CORE_REBALANCE_STRATEGIC_CANDIDATE_INTENT}
-            )
-            if action not in _ENTRY_ACTIONS and not explicit_core:
+            if action not in _ENTRY_ACTIONS:
                 return gate
             observed = [str(reason) for reason in (gate.get("reasons") or [])]
             return {
