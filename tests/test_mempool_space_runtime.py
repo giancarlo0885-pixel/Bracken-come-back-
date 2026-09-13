@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import io
 import json
+import urllib.error
 from types import SimpleNamespace
 
 import mempool_space_runtime as runtime
@@ -23,16 +23,20 @@ class _Response:
         return False
 
 
-def _opener_factory(payloads):
+def _opener_factory(payloads, failures=None):
+    failures = set(failures or ())
+
     def opener(request, timeout=5.0):
         path = request.full_url.split("mempool.space", 1)[-1]
+        if path in failures:
+            raise urllib.error.URLError("temporary")
         return _Response(payloads[path])
     return opener
 
 
-def test_client_builds_observed_snapshot_from_public_endpoints():
+def _payloads():
     hashrates = [{"timestamp": i, "avgHashrate": 100.0 + i} for i in range(20)]
-    payloads = {
+    return {
         "/api/blocks/tip/height": "900000",
         "/api/v1/mining/hashrate/1m": json.dumps({
             "hashrates": hashrates,
@@ -56,6 +60,10 @@ def test_client_builds_observed_snapshot_from_public_endpoints():
             "minimumFee": 1,
         }),
     }
+
+
+def test_client_builds_observed_snapshot_from_public_endpoints():
+    payloads = _payloads()
     client = MempoolSpaceClient(opener=_opener_factory(payloads))
     snapshot = client.snapshot()
 
@@ -68,6 +76,22 @@ def test_client_builds_observed_snapshot_from_public_endpoints():
     assert snapshot.mempool_pressure == 0.25
     assert snapshot.fee_pressure is not None and 0.0 < snapshot.fee_pressure <= 1.0
     assert snapshot.hash_rate_change is not None and snapshot.hash_rate_change > 0
+
+
+def test_client_keeps_partial_snapshot_when_one_endpoint_is_unavailable():
+    payloads = _payloads()
+    client = MempoolSpaceClient(
+        opener=_opener_factory(payloads, failures={"/api/v1/difficulty-adjustment"})
+    )
+    snapshot = client.snapshot()
+
+    assert snapshot.block_height == 900000
+    assert snapshot.current_hashrate == 123456789.0
+    # Falls back to the mining endpoint's observed adjustment history if available;
+    # this fixture does not provide it, so the missing field stays missing.
+    assert snapshot.difficulty_change is None
+    assert snapshot.mempool_count == 50000
+    assert snapshot.fastest_fee_sat_vb == 25.0
 
 
 def _snapshot() -> MempoolSpaceSnapshot:
