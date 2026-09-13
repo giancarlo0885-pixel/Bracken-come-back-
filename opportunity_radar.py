@@ -181,6 +181,7 @@ def assess_opportunity_radar(signal: Any, *, market: str = "cash") -> RadarAsses
 
     reasons: list[str] = []
     warnings: list[str] = []
+    event_confirmation_missing = bool(external_catalyst >= 75 and abs(m5) < 0.01 and volume < 1.10)
     if setup_score >= 75:
         reasons.append(f"{primary.title()} setup is strongly expressed")
     if durability >= 65:
@@ -199,11 +200,11 @@ def assess_opportunity_radar(signal: Any, *, market: str = "cash") -> RadarAsses
         warnings.append("momentum is extremely extended")
     if volatility >= (1.15 if market == "crypto" else 0.75):
         warnings.append("realized volatility is unusually high")
-    if external_catalyst >= 75 and abs(m5) < 0.01 and volume < 1.10:
+    if event_confirmation_missing:
         warnings.append("event catalyst is strong but price/volume confirmation is still limited")
 
     veto = bool(crowding >= 84 or (setup_score < 48 and durability < 45) or (len(warnings) >= 3 and setup_score < 65))
-    approved = bool(not veto and setup_score >= 58 and durability >= 42)
+    approved = bool(not veto and not event_confirmation_missing and setup_score >= 58 and durability >= 42)
     summary = (
         f"Radar classifies this as {primary.title()} ({setup_score:.0f}/100), "
         f"with urgency {urgency:.0f}, durability {durability:.0f}, catalyst {catalyst:.0f}, "
