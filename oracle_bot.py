@@ -1636,9 +1636,11 @@ def _record_buy_attribution(
     provenance = _entry_provenance(signal=signal, quote_metadata=quote_metadata, now=now)
     if provenance.get("entry_signal_id") and "pattern_schema" not in provenance["feature_snapshot"]:
         # Recover only the exact saved entry signal if an optimizer compacted it.
-        from paper_regime_entry_signal_fallback import _entry_signal_features, _merge_entry_features
+        from paper_regime_entry_signal_fallback import _entry_signal_features
         observed = _entry_signal_features(conn, provenance["entry_signal_id"])
-        provenance["feature_snapshot"] = _merge_entry_features(provenance["feature_snapshot"], observed)
+        for key, value in observed.items():
+            if key.startswith("pattern_"):
+                provenance["feature_snapshot"].setdefault(key, value)
     confidence = safe_float(signal_value(signal, "confidence", None), None) if signal is not None else None
     score = safe_float(signal_value(signal, "score", None), None) if signal is not None else None
     trade_id = f"ledger-buy:{uuid.uuid4()}"
