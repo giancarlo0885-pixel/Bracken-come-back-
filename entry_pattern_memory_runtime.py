@@ -26,7 +26,7 @@ def _clip(value: float, low: float, high: float) -> float:
 
 
 def expanded_feature_vector(signal: Any, base: dict[str, float] | None = None) -> dict[str, float]:
-    """Add entry-shape and chart-structure evidence to Market Memory."""
+    """Add entry-shape, chart-structure, and TA-ensemble evidence to Market Memory."""
     features = dict(base or {})
     features.update({
         "rsi_14": (_clip(_num(_value(signal, "rsi_14", 50.0)), 0.0, 100.0) - 50.0) / 50.0,
@@ -48,6 +48,15 @@ def expanded_feature_vector(signal: Any, base: dict[str, float] | None = None) -
         "schwager_failed_breakout": 1.0 if bool(_value(signal, "schwager_failed_breakout", False)) else 0.0,
         "schwager_support_distance": _clip(_num(_value(signal, "schwager_support_distance_pct", 0.0)), -0.20, 0.20) / 0.20,
         "schwager_resistance_distance": _clip(_num(_value(signal, "schwager_resistance_distance_pct", 0.0)), -0.20, 0.20) / 0.20,
+        "ta_pring": _clip(_num(_value(signal, "ta_pring_score", 0.0)), -1.0, 1.0),
+        "ta_murphy": _clip(_num(_value(signal, "ta_murphy_score", 0.0)), -1.0, 1.0),
+        "ta_oneil": _clip(_num(_value(signal, "ta_oneil_score", 0.0)), -1.0, 1.0),
+        "ta_nison": _clip(_num(_value(signal, "ta_nison_score", 0.0)), -1.0, 1.0),
+        "ta_bulkowski": _clip(_num(_value(signal, "ta_bulkowski_score", 0.0)), -1.0, 1.0),
+        "ta_shannon": _clip(_num(_value(signal, "ta_shannon_score", 0.0)), -1.0, 1.0),
+        "ta_consensus": _clip(_num(_value(signal, "ta_consensus_score", 0.0)), -1.0, 1.0),
+        "ta_conflict": _clip(_num(_value(signal, "ta_conflict_score", 0.0)), 0.0, 1.0),
+        "ta_agreement": _clip(_num(_value(signal, "ta_agreement_count", 0.0)) / 7.0, 0.0, 1.0),
     })
     return features
 
@@ -86,11 +95,17 @@ def install_entry_pattern_memory_runtime() -> bool:
         "schwager_failed_breakout": 1.5,
         "schwager_support_distance": 0.9,
         "schwager_resistance_distance": 0.9,
+        "ta_pring": 0.8,
+        "ta_murphy": 1.0,
+        "ta_oneil": 0.9,
+        "ta_nison": 0.7,
+        "ta_bulkowski": 1.0,
+        "ta_shannon": 1.1,
+        "ta_consensus": 1.3,
+        "ta_conflict": 1.0,
+        "ta_agreement": 1.0,
     })
 
-    # Several modules import feature_vector by value. Rebind those references so
-    # persisted entry provenance and opportunity snapshots use the same expanded
-    # fingerprint as analog matching.
     for module_name in ("oracle_bot", "oracle_intelligence", "opportunity_engine", "paper_regime_entry_provenance"):
         module = sys.modules.get(module_name)
         if module is not None and hasattr(module, "feature_vector"):
@@ -98,6 +113,6 @@ def install_entry_pattern_memory_runtime() -> bool:
 
     _INSTALLED = True
     log.info(
-        "Installed expanded entry-pattern memory | RSI/dip/rebound/reclaim/ATR/Bollinger/MACD + Schwager trend/support-resistance/breakout/failed-breakout/oscillator=ACTIVE | provenance=EXACT_ENTRY_LOTS"
+        "Installed expanded entry-pattern memory | RSI/dip/rebound + Schwager + seven-book TA ensemble=ACTIVE | provenance=EXACT_ENTRY_LOTS | execution_impact=NONE"
     )
     return True

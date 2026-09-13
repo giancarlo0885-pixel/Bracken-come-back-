@@ -6,6 +6,7 @@ from crypto_mean_reversion import assess_short_horizon_mean_reversion
 from dip_rebound_strategy import assess_dip_rebound
 from technical_indicators import rsi, macd, atr, bollinger_position
 from schwager_technical_framework import assess_schwager_technical_structure
+from technical_book_ensemble import assess_technical_book_ensemble
 from regime import detect_regime
 
 @dataclass
@@ -50,6 +51,20 @@ class OracleSignal:
     schwager_suggested_stop:float|None=None
     schwager_objective_1:float|None=None
     schwager_reward_risk_ratio:float|None=None
+    ta_ensemble_available:bool=False
+    ta_pring_score:float=0.0
+    ta_murphy_score:float=0.0
+    ta_oneil_score:float=0.0
+    ta_nison_score:float=0.0
+    ta_bulkowski_score:float=0.0
+    ta_shannon_score:float=0.0
+    ta_consensus_score:float=0.0
+    ta_agreement_count:int=0
+    ta_conflict_score:float=0.0
+    ta_bullish_votes:int=0
+    ta_bearish_votes:int=0
+    ta_neutral_votes:int=0
+    ta_metric_version:str=""
     def to_dict(self): return asdict(self)
 
 def _clip(x,a=-1,b=1): return max(a,min(b,x))
@@ -136,6 +151,7 @@ def analyze_market(symbol, history, news_sentiment=0.0):
     mean_reversion=assess_short_horizon_mean_reversion(symbol,history,rsi_value=r,atr_pct=atr_pct,volume_ratio=vr,regime=reg["name"])
     dip_rebound=assess_dip_rebound(symbol, history)
     schwager=assess_schwager_technical_structure(history)
+    ta_ensemble=assess_technical_book_ensemble(history, schwager_score=schwager.setup_score)
 
     raw=(0.30*_clip(m20/0.15)+0.15*_clip(m5/0.07)+0.20*_clip(trend/0.08)
          +0.10*_clip(news_sentiment)+0.08*_clip(mh/(price*0.01 if price else 1))
@@ -162,8 +178,6 @@ def analyze_market(symbol, history, news_sentiment=0.0):
         action="SELL"
         entry_pattern="dip_rebound_exit"
     elif schwager.available and schwager.pattern_tag and abs(schwager.setup_score) >= 0.55:
-        # Evidence label only. The Schwager framework does not override the
-        # existing Oracle action/score until paper economics validates it.
         entry_pattern=schwager.pattern_tag
 
     confidence=min(0.99,0.50+abs(score-0.5)*1.4)
@@ -176,6 +190,8 @@ def analyze_market(symbol, history, news_sentiment=0.0):
         reason += f" Dip/rebound {dip_rebound.reason} Exit rule: {dip_rebound.exit_rule}."
     if schwager.available:
         reason += f" {schwager.reason}"
+    if ta_ensemble.available:
+        reason += f" {ta_ensemble.reason}"
 
     return OracleSignal(
         symbol,price,score,action,confidence,m5,m20,r,vol,trend,vr,news_sentiment,
@@ -216,4 +232,18 @@ def analyze_market(symbol, history, news_sentiment=0.0):
         schwager_suggested_stop=schwager.suggested_stop,
         schwager_objective_1=schwager.objective_1,
         schwager_reward_risk_ratio=schwager.reward_risk_ratio,
+        ta_ensemble_available=ta_ensemble.available,
+        ta_pring_score=ta_ensemble.pring_cycle_momentum_score,
+        ta_murphy_score=ta_ensemble.murphy_confirmation_score,
+        ta_oneil_score=ta_ensemble.oneil_breakout_quality_score,
+        ta_nison_score=ta_ensemble.nison_candlestick_context_score,
+        ta_bulkowski_score=ta_ensemble.bulkowski_pattern_quality_score,
+        ta_shannon_score=ta_ensemble.shannon_multihorizon_alignment_score,
+        ta_consensus_score=ta_ensemble.consensus_score,
+        ta_agreement_count=ta_ensemble.agreement_count,
+        ta_conflict_score=ta_ensemble.conflict_score,
+        ta_bullish_votes=ta_ensemble.bullish_votes,
+        ta_bearish_votes=ta_ensemble.bearish_votes,
+        ta_neutral_votes=ta_ensemble.neutral_votes,
+        ta_metric_version=ta_ensemble.metric_version,
     )
