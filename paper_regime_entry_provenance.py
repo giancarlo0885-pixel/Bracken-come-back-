@@ -6,10 +6,49 @@ from typing import Any
 
 from entry_pattern_memory_runtime import install_entry_pattern_memory_runtime
 from market_memory import feature_vector
+from mempool_space_runtime import install_mempool_space_network_context
 from paper_regime_entry_signal_fallback import install_entry_signal_regime_fallback
 
 
 _RAW_REGIME_FIELDS = ("trend_strength", "momentum_20d", "volatility_20d")
+_BTC_NETWORK_PAYLOAD_FIELDS = (
+    "btc_network_source",
+    "btc_network_observed_at",
+    "btc_network_block_height",
+    "btc_network_current_hashrate",
+    "btc_network_current_difficulty",
+    "btc_network_hash_rate_change",
+    "btc_network_difficulty_change",
+    "btc_network_block_interval_seconds",
+    "btc_network_mempool_count",
+    "btc_network_mempool_vsize",
+    "btc_network_mempool_total_fee",
+    "btc_network_fastest_fee_sat_vb",
+    "btc_network_half_hour_fee_sat_vb",
+    "btc_network_hour_fee_sat_vb",
+    "btc_network_economy_fee_sat_vb",
+    "btc_network_minimum_fee_sat_vb",
+    "btc_network_fee_pressure",
+    "btc_network_mempool_pressure",
+    "btc_network_available",
+    "btc_network_subsidy_btc",
+    "btc_network_blocks_to_halving",
+    "btc_network_halving_progress",
+    "btc_network_security_score",
+    "btc_network_activity_score",
+    "btc_network_miner_stress_score",
+    "btc_network_execution_impact",
+)
+_BTC_NETWORK_FEATURE_FIELDS = (
+    "btc_network_hash_rate_change",
+    "btc_network_difficulty_change",
+    "btc_network_fee_pressure",
+    "btc_network_mempool_pressure",
+    "btc_network_halving_progress",
+    "btc_network_security_score",
+    "btc_network_activity_score",
+    "btc_network_miner_stress_score",
+)
 
 
 def _truthy(name: str, default: str = "false") -> bool:
@@ -47,6 +86,15 @@ def _enrich_persisted_signal_payload(signal: Any, existing: Any) -> dict[str, An
         value = _finite(_runtime_signal_value(signal, key))
         if value is not None:
             payload[key] = value
+
+    # Preserve only values actually observed/derived from the cached provider snapshot.
+    # This is immutable entry evidence and does not affect action, sizing, or execution.
+    for key in _BTC_NETWORK_PAYLOAD_FIELDS:
+        if key in payload:
+            continue
+        value = _runtime_signal_value(signal, key)
+        if value is not None:
+            payload[key] = value
     return payload
 
 
@@ -73,6 +121,13 @@ def _enrich_entry_features(oracle_module: Any, signal: Any, existing: Any) -> di
         if key in features and _finite(features.get(key)) is not None:
             continue
         value = _finite(oracle_module.signal_value(signal, key, None))
+        if value is not None:
+            features[key] = value
+
+    for key in _BTC_NETWORK_FEATURE_FIELDS:
+        if key in features and _finite(features.get(key)) is not None:
+            continue
+        value = _finite(_runtime_signal_value(signal, key))
         if value is not None:
             features[key] = value
 
@@ -107,6 +162,9 @@ def install_paper_regime_entry_provenance(
         import market_worker as worker_module
 
     if worker_module is not None:
+        # Adds cached, observed-only Bitcoin network context to BTC paper signals.
+        # It is explicitly measurement-only and fails soft on provider errors/429s.
+        install_mempool_space_network_context(worker_module)
         _install_signal_payload_provenance(worker_module)
 
     original = oracle_module._entry_provenance
