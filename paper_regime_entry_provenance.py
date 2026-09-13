@@ -5,6 +5,7 @@ import os
 from typing import Any
 
 from market_memory import feature_vector
+from entry_patterns import pattern_memory_features
 from paper_regime_entry_signal_fallback import install_entry_signal_regime_fallback
 
 
@@ -46,6 +47,9 @@ def _enrich_persisted_signal_payload(signal: Any, existing: Any) -> dict[str, An
     Existing persisted values remain authoritative.
     """
     payload = dict(existing) if isinstance(existing, dict) else {}
+    pattern = _runtime_signal_value(signal, "entry_pattern")
+    if "entry_pattern" not in payload and isinstance(pattern, dict):
+        payload["entry_pattern"] = dict(pattern)
     for key in _RAW_REGIME_FIELDS:
         if key in payload and _finite(payload.get(key)) is not None:
             continue
@@ -75,6 +79,8 @@ def _install_signal_payload_provenance(worker_module: Any) -> bool:
 def _enrich_entry_features(oracle_module: Any, signal: Any, existing: Any) -> dict[str, Any]:
     """Preserve exact entry-time regime inputs without using future/P&L data."""
     features = dict(existing) if isinstance(existing, dict) else {}
+    for key, value in pattern_memory_features(signal).items():
+        features.setdefault(key, value)
 
     # Keep the raw runtime regime inputs when present. These are the same fields
     # used by the decision/risk pipeline at entry time and are never backfilled

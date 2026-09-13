@@ -72,6 +72,7 @@ from oracle_bot import process_signals, risk_exits, snapshot, update_prices
 from oracle_council import deliberate
 from portfolio_rotation import rotation_plan
 from realtime_runtime import cadence_for, seconds_until
+import paper_dip_rebound
 
 log = logging.getLogger("market-worker")
 stop_event = Event()
@@ -1024,7 +1025,11 @@ def _fast_candidate_batch(market: str) -> list[tuple[str, str]]:
     universe = [(str(symbol).upper(), str(name)) for symbol, name in watchlist.items()]
     for symbol, name in _rolling_batch(universe, market, FAST_SCAN_BATCH_SIZE):
         candidates.setdefault(symbol, name)
-    return list(candidates.items())[: max(FAST_SCAN_BATCH_SIZE, FAST_SCAN_TOP_RANKED)]
+    batch = list(candidates.items())[: max(FAST_SCAN_BATCH_SIZE, FAST_SCAN_TOP_RANKED)]
+    if market == "crypto":
+        included = {symbol for symbol, _ in batch}
+        batch.extend((symbol, watchlist.get(symbol, symbol)) for symbol in paper_dip_rebound.open_symbols() if symbol not in included)
+    return batch
 
 
 def _fast_discover_symbol(market: str, symbol: str, name: str) -> tuple[Any, Any] | None:
@@ -1140,6 +1145,8 @@ def fast_scan_market(market: str) -> list[Any]:
         reverse=True,
     )
 
+    if market == "crypto":
+        paper_dip_rebound.maintain(signals, prices)
     actions: list[Any] = []
     with trade_cycle_lock:
         exits_enabled = _execution_enabled(market, "exit")

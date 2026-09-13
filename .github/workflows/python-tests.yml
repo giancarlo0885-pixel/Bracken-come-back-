@@ -102,3 +102,4 @@ jobs:
           test_paper_regime_entry_provenance.py
           test_paper_regime_entry_signal_fallback.py
           test_paper_regime_fifo_provenance.py
+          test_paper_dip_rebound.py

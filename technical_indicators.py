@@ -6,14 +6,24 @@ def _series(value) -> pd.Series:
         value = value.iloc[:, -1]
     return pd.to_numeric(value, errors="coerce").dropna()
 
-def rsi(series: pd.Series, period=14) -> float:
-    series = _series(series)
+def rsi_series(series: pd.Series, period: int = 14) -> pd.Series:
+    """Simple rolling RSI; undefined windows stay missing, never stale or neutral."""
+    if isinstance(period, bool) or not isinstance(period, int) or period < 1:
+        raise ValueError("RSI period must be a positive integer")
+    if isinstance(series, pd.DataFrame):
+        series = series.iloc[:, -1]
+    series = pd.to_numeric(series, errors="coerce").replace([np.inf, -np.inf], np.nan)
     delta = series.diff()
     gains = delta.clip(lower=0).rolling(period).mean()
     losses = -delta.clip(upper=0).rolling(period).mean()
     rs = gains / losses.replace(0, np.nan)
     values = 100 - (100/(1+rs))
-    return float(values.dropna().iloc[-1]) if not values.dropna().empty else 50.0
+    values = values.mask((losses == 0) & (gains > 0), 100.0)
+    return values.mask((losses == 0) & (gains == 0), 50.0)
+
+def rsi(series: pd.Series, period: int = 14) -> float:
+    values = rsi_series(series, period)
+    return float(values.iloc[-1]) if not values.empty else float("nan")
 
 def ema(series: pd.Series, span: int) -> pd.Series:
     series = _series(series)

@@ -39,6 +39,7 @@ from paper_sell_execution_router import install_paper_sell_execution_router
 from paper_sell_lot_atomic_repair import install_atomic_paper_sell_lot_repair
 from paper_strategy_economics import install_paper_strategy_economics
 from paper_strategy_execution_guard import install_paper_strategy_execution_guard
+from paper_dip_rebound import initialize as initialize_dip_rebound_experiment
 from paper_weekly_risk_period_runtime import install_paper_weekly_risk_period
 from readiness_observability import emit_capital_readiness_report
 from robinhood_current_marketdata_runtime import install_robinhood_current_marketdata
@@ -145,6 +146,7 @@ install_paper_regime_entry_provenance()
 # This writes telemetry only and has no execution/sizing/cooldown effect.
 install_paper_regime_economics_shadow()
 install_paper_strategy_execution_guard()
+initialize_dip_rebound_experiment()
 
 # Keep this entrypoint in the crypto-worker deploy watch set; readiness helpers are imported above.
 # Production deploy marker: broker-anchored paper BUY/SELL execution, dynamic crypto discovery,
