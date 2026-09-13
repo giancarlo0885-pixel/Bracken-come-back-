@@ -128,15 +128,10 @@ def assess_schwager_technical_structure(
     failed_breakout = False
     pattern_tag = ""
 
-    if price > resistance and resistance > 0:
-        breakout_state = "upside_breakout"
-        breakout_score = _clip((price / resistance - 1.0) / 0.03, 0.0, 1.0)
-        pattern_tag = "range_breakout_up"
-    elif price < support and support > 0:
-        breakout_state = "downside_breakout"
-        breakout_score = -_clip((support / price - 1.0) / 0.03, 0.0, 1.0)
-        pattern_tag = "range_breakout_down"
-    elif previous_price > previous_resistance > 0 and price <= previous_resistance:
+    # Failed signals take precedence over a fresh generic range classification:
+    # if the prior bar exceeded the old boundary and the current bar re-entered
+    # that range, preserve the failure as the more informative structural event.
+    if previous_price > previous_resistance > 0 and price <= previous_resistance:
         breakout_state = "failed_upside_breakout"
         breakout_score = -0.80
         failed_breakout = True
@@ -146,6 +141,14 @@ def assess_schwager_technical_structure(
         breakout_score = 0.80
         failed_breakout = True
         pattern_tag = "failed_breakout_bullish"
+    elif price > resistance and resistance > 0:
+        breakout_state = "upside_breakout"
+        breakout_score = _clip((price / resistance - 1.0) / 0.03, 0.0, 1.0)
+        pattern_tag = "range_breakout_up"
+    elif price < support and support > 0:
+        breakout_state = "downside_breakout"
+        breakout_score = -_clip((support / price - 1.0) / 0.03, 0.0, 1.0)
+        pattern_tag = "range_breakout_down"
     elif resistance_distance is not None and resistance_distance <= 0.01:
         breakout_state = "testing_resistance"
         breakout_score = 0.15 if trend_score > 0 else -0.10
