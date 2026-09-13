@@ -5,6 +5,7 @@ from config import SIGNAL_BUY_THRESHOLD, SIGNAL_SELL_THRESHOLD
 from crypto_mean_reversion import assess_short_horizon_mean_reversion
 from dip_rebound_strategy import assess_dip_rebound
 from technical_indicators import rsi, macd, atr, bollinger_position
+from schwager_technical_framework import assess_schwager_technical_structure
 from regime import detect_regime
 
 @dataclass
@@ -32,6 +33,23 @@ class OracleSignal:
     rsi_change:float|None=None
     reclaim_strength:float|None=None
     dip_rebound_exit_rule:str=""
+    schwager_ta_available:bool=False
+    schwager_trend_state:str="unknown"
+    schwager_trend_score:float=0.0
+    schwager_support:float|None=None
+    schwager_resistance:float|None=None
+    schwager_support_distance_pct:float|None=None
+    schwager_resistance_distance_pct:float|None=None
+    schwager_breakout_state:str="none"
+    schwager_breakout_score:float=0.0
+    schwager_failed_breakout:bool=False
+    schwager_oscillator_state:str="neutral"
+    schwager_oscillator_score:float=0.0
+    schwager_setup_score:float=0.0
+    schwager_pattern_tag:str=""
+    schwager_suggested_stop:float|None=None
+    schwager_objective_1:float|None=None
+    schwager_reward_risk_ratio:float|None=None
     def to_dict(self): return asdict(self)
 
 def _clip(x,a=-1,b=1): return max(a,min(b,x))
@@ -117,6 +135,7 @@ def analyze_market(symbol, history, news_sentiment=0.0):
     reg=detect_regime(history)
     mean_reversion=assess_short_horizon_mean_reversion(symbol,history,rsi_value=r,atr_pct=atr_pct,volume_ratio=vr,regime=reg["name"])
     dip_rebound=assess_dip_rebound(symbol, history)
+    schwager=assess_schwager_technical_structure(history)
 
     raw=(0.30*_clip(m20/0.15)+0.15*_clip(m5/0.07)+0.20*_clip(trend/0.08)
          +0.10*_clip(news_sentiment)+0.08*_clip(mh/(price*0.01 if price else 1))
@@ -142,15 +161,21 @@ def analyze_market(symbol, history, news_sentiment=0.0):
     elif dip_rebound.available and dip_rebound.side=="SELL" and score<=min(0.56,sell_threshold+0.08):
         action="SELL"
         entry_pattern="dip_rebound_exit"
+    elif schwager.available and schwager.pattern_tag and abs(schwager.setup_score) >= 0.55:
+        # Evidence label only. The Schwager framework does not override the
+        # existing Oracle action/score until paper economics validates it.
+        entry_pattern=schwager.pattern_tag
 
     confidence=min(0.99,0.50+abs(score-0.5)*1.4)
-    if entry_pattern and dip_rebound.confidence>confidence:
+    if entry_pattern=="dip_rebound" and dip_rebound.confidence>confidence:
         confidence=min(0.99,dip_rebound.confidence)
     reason=(f"20d momentum {m20:+.1%}; RSI {r:.1f}; trend {trend:+.1%}; volatility {vol:.1%}; regime {reg['name']}; news {news_sentiment:+.2f}.")
     if mean_reversion.available and mean_reversion.zscore is not None and mean_reversion.horizon_return is not None:
         reason += (f" Short-horizon reversion {mean_reversion.side}: z {mean_reversion.zscore:+.2f}, {mean_reversion.horizon_minutes}m return {mean_reversion.horizon_return:+.2%}, factor {mean_reversion.score:+.2f}.")
     if dip_rebound.available:
         reason += f" Dip/rebound {dip_rebound.reason} Exit rule: {dip_rebound.exit_rule}."
+    if schwager.available:
+        reason += f" {schwager.reason}"
 
     return OracleSignal(
         symbol,price,score,action,confidence,m5,m20,r,vol,trend,vr,news_sentiment,
@@ -174,4 +199,21 @@ def analyze_market(symbol, history, news_sentiment=0.0):
         rsi_change=dip_rebound.rsi_change,
         reclaim_strength=dip_rebound.reclaim_strength,
         dip_rebound_exit_rule=dip_rebound.exit_rule,
+        schwager_ta_available=schwager.available,
+        schwager_trend_state=schwager.trend_state,
+        schwager_trend_score=schwager.trend_score,
+        schwager_support=schwager.support,
+        schwager_resistance=schwager.resistance,
+        schwager_support_distance_pct=schwager.support_distance_pct,
+        schwager_resistance_distance_pct=schwager.resistance_distance_pct,
+        schwager_breakout_state=schwager.breakout_state,
+        schwager_breakout_score=schwager.breakout_score,
+        schwager_failed_breakout=schwager.failed_breakout,
+        schwager_oscillator_state=schwager.oscillator_state,
+        schwager_oscillator_score=schwager.oscillator_score,
+        schwager_setup_score=schwager.setup_score,
+        schwager_pattern_tag=schwager.pattern_tag,
+        schwager_suggested_stop=schwager.suggested_stop,
+        schwager_objective_1=schwager.objective_1,
+        schwager_reward_risk_ratio=schwager.reward_risk_ratio,
     )
