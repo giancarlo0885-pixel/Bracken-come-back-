@@ -38,6 +38,38 @@ def test_fee_edge_blocks_explicit_edge_below_cost(monkeypatch):
     assert reason.startswith("edge_below_round_trip_cost")
 
 
+def test_fee_edge_blocks_negative_directional_forecast_instead_of_abs_flip(monkeypatch):
+    _paper(monkeypatch)
+    monkeypatch.setenv("PAPER_MIN_EDGE_TO_COST_MULTIPLIER", "1.25")
+    signal = {
+        "forecast_return_pct": -1.25,
+        "expected_slippage_pct": 0.05,
+        "fee_pct": 0.05,
+        "spread_pct": 0.01,
+    }
+    allowed, reason, edge, cost = econ.fee_edge_allows_entry(signal)
+    assert allowed is False
+    assert edge == -1.25
+    assert cost > 0
+    assert reason.startswith("edge_below_round_trip_cost")
+
+
+def test_fee_edge_allows_positive_directional_forecast_that_clears_cost(monkeypatch):
+    _paper(monkeypatch)
+    monkeypatch.setenv("PAPER_MIN_EDGE_TO_COST_MULTIPLIER", "1.25")
+    signal = {
+        "forecast_return_pct": 1.25,
+        "expected_slippage_pct": 0.05,
+        "fee_pct": 0.05,
+        "spread_pct": 0.01,
+    }
+    allowed, reason, edge, cost = econ.fee_edge_allows_entry(signal)
+    assert allowed is True
+    assert edge == 1.25
+    assert cost > 0
+    assert reason == "edge_clears_round_trip_cost"
+
+
 def test_fee_edge_preserves_exploration_when_edge_missing(monkeypatch):
     _paper(monkeypatch)
     allowed, reason, edge, cost = econ.fee_edge_allows_entry({"strategy": "explore"})

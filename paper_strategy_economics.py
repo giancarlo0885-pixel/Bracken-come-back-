@@ -86,8 +86,6 @@ def strategy_identity(signal: Any) -> str:
             return signal.get(name, default)
         return getattr(signal, name, default)
 
-    # Prefer explicit stable strategy provenance when available. `strategy` may
-    # be a dynamic rationale, which normalize_strategy_identity handles below.
     for name in ("strategy_name", "source_strategy", "strategy", "advisor_action", "reason"):
         candidate = str(value(name, "") or "").strip()
         if candidate:
@@ -107,11 +105,7 @@ def _model_identity(signal: Any) -> tuple[str, str]:
 
 
 def model_validation_ok(signal: Any) -> bool:
-    """Permit positive size expansion only when current model governance passes.
-
-    Failure or missing evidence never blocks paper exploration; it merely prevents
-    economics from increasing size above the neutral 1.0 multiplier.
-    """
+    """Permit positive size expansion only when current model governance passes."""
     model, version = _model_identity(signal)
     if not model:
         return False
@@ -179,17 +173,7 @@ def _epoch_start() -> datetime | None:
 
 
 def _ledger_records(strategy: str) -> list[dict[str, Any]]:
-    """Read canonical lot-attributed closes using stable strategy identity.
-
-    `trade_ledger` persists entry/exit timestamps as ISO text while the learning
-    epoch boundary is TIMESTAMPTZ. Cast those text fields at the query boundary so
-    PostgreSQL compares like types and Python receives typed datetimes for holding
-    time. Strategy matching remains normalized in Python because Council rationale
-    text legitimately changes scan to scan. The trades fallback uses the same
-    timestamp conversion and normalization rules. The SQL query bounds work at
-    1,000 epoch rows; do not apply a smaller post-filter cap because that silently
-    truncates mature strategy samples after normalization.
-    """
+    """Read canonical lot-attributed closes using stable strategy identity."""
     target = normalize_strategy_identity(strategy)
     try:
         from database import rows
@@ -301,7 +285,6 @@ def _multiplier(*, sample_count: int, expectancy: float, profit_factor: float, m
     if sample_count < min_samples:
         return 1.0
     if expectancy < 0 or profit_factor < 0.90:
-        # Keep exploration alive, but shrink clearly negative-expectancy behavior.
         severity = min(1.0, max(0.0, (0.90 - profit_factor) / 0.90))
         return round(max(exploration_floor, 0.75 - (0.40 * severity)), 4)
     if sample_count >= 30 and expectancy > 0 and profit_factor >= 1.20 and model_validated:
@@ -352,6 +335,13 @@ def strategy_economics(signal: Any) -> StrategyEconomics:
 
 
 def expected_edge_pct(signal: Any) -> float | None:
+    """Return the signed explicit directional edge for a long paper entry.
+
+    Cost-aware execution must compare the forecast in the proposed trade direction
+    against round-trip costs. Converting a negative expected return to its absolute
+    value can turn evidence against a BUY into a false positive edge. Preserve the
+    sign of every explicit edge field; missing evidence remains exploratory.
+    """
     def value(name: str, default: Any = None) -> Any:
         if isinstance(signal, dict):
             return signal.get(name, default)
@@ -370,7 +360,7 @@ def expected_edge_pct(signal: Any) -> float | None:
             continue
         parsed = _number(raw, float("nan"))
         if math.isfinite(parsed):
-            return abs(parsed)
+            return parsed
     return None
 
 
@@ -386,15 +376,11 @@ def estimated_round_trip_cost_pct(signal: Any) -> float:
     slippage = max(0.0, _number(value("expected_slippage_pct", value("slippage_pct", 0.165)), 0.165))
     spread = max(0.0, _number(value("spread_pct", 0.0)))
     fee = max(0.0, _number(value("fee_pct", os.getenv("PAPER_ESTIMATED_FEE_PCT", "0.10")), 0.10))
-    # Entry and exit each pay slippage/fees. Spread is counted once conservatively.
     return (2.0 * slippage) + (2.0 * fee) + spread
 
 
 def fee_edge_allows_entry(signal: Any) -> tuple[bool, str, float | None, float]:
-    """Reject only when explicit forecast edge cannot clear estimated costs.
-
-    Missing edge evidence stays exploratory rather than being fabricated.
-    """
+    """Reject when explicit long-side edge cannot clear estimated costs."""
     edge = expected_edge_pct(signal)
     cost = estimated_round_trip_cost_pct(signal)
     if edge is None:
