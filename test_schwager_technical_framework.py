@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from entry_pattern_memory_runtime import expanded_feature_vector
 from schwager_technical_framework import assess_schwager_technical_structure
@@ -64,12 +65,12 @@ def test_schwager_features_enter_market_memory_vector() -> None:
     )
     features = expanded_feature_vector(signal)
 
-    assert features["schwager_trend_score"] == 0.6
-    assert features["schwager_breakout_score"] == 0.8
-    assert features["schwager_setup_score"] == 0.65
+    assert features["schwager_trend_score"] == pytest.approx(0.6)
+    assert features["schwager_breakout_score"] == pytest.approx(0.8)
+    assert features["schwager_setup_score"] == pytest.approx(0.65)
     assert features["schwager_failed_breakout"] == 1.0
-    assert features["schwager_support_distance"] == 0.1
-    assert features["schwager_resistance_distance"] == 0.2
+    assert features["schwager_support_distance"] == pytest.approx(0.1)
+    assert features["schwager_resistance_distance"] == pytest.approx(0.2)
 
 
 def test_short_history_fails_closed() -> None:
