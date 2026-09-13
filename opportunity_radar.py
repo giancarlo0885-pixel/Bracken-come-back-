@@ -46,7 +46,9 @@ def assess_opportunity_radar(signal: Any, *, market: str = "cash") -> RadarAsses
 
     The radar is intentionally strategy-agnostic. It does not manufacture a BUY;
     it identifies the best-fitting setup and penalizes stale, crowded, or
-    internally conflicting opportunities.
+    internally conflicting opportunities. Independently discovered event evidence
+    can strengthen the catalyst lens, but cannot bypass technical confirmation,
+    quote integrity, allocation, or execution policy.
     """
     m5 = _number(_value(signal, "momentum_5d"))
     m20 = _number(_value(signal, "momentum_20d"))
@@ -59,6 +61,15 @@ def assess_opportunity_radar(signal: Any, *, market: str = "cash") -> RadarAsses
     bollinger = _number(_value(signal, "bollinger_position", 0.5), 0.5)
     volatility = max(0.0, _number(_value(signal, "volatility_20d", 0.25), 0.25))
     regime = str(_value(signal, "regime", "mixed")).lower()
+    external_catalyst = _clip(
+        _number(
+            _value(
+                signal,
+                "external_catalyst_score",
+                _value(signal, "event_catalyst_score", 0.0),
+            )
+        )
+    )
 
     # Independent strategy lenses. Scores are comparable but not probabilities.
     breakout = _clip(
@@ -99,6 +110,7 @@ def assess_opportunity_radar(signal: Any, *, market: str = "cash") -> RadarAsses
         + 10 * max(volume - 1.0, 0)
         + 80 * abs(m5)
         + 15 * min(abs(macd_hist) / max(abs(_number(_value(signal, "price", 1.0), 1.0)) * 0.01, 1e-6), 1.0)
+        + 0.45 * external_catalyst
     )
     defensive_rotation = _clip(
         38
@@ -136,6 +148,7 @@ def assess_opportunity_radar(signal: Any, *, market: str = "cash") -> RadarAsses
         + 10 * max(volume - 1.0, 0)
         + 10 * abs(sentiment)
         + 8 * min(atr_pct / 0.03, 2.0)
+        + 0.06 * external_catalyst
     )
     durability = _clip(
         45
@@ -145,7 +158,8 @@ def assess_opportunity_radar(signal: Any, *, market: str = "cash") -> RadarAsses
         - 24 * max(volatility - 0.55, 0)
         - 0.45 * max(rsi - 80, 0)
     )
-    catalyst = _clip(42 + 26 * abs(sentiment) + 8 * max(volume - 1.0, 0) + 70 * abs(m5))
+    market_catalyst = _clip(42 + 26 * abs(sentiment) + 8 * max(volume - 1.0, 0) + 70 * abs(m5))
+    catalyst = _clip(max(market_catalyst, external_catalyst))
     crowding = _clip(
         10
         + 1.4 * max(rsi - 68, 0)
@@ -175,6 +189,8 @@ def assess_opportunity_radar(signal: Any, *, market: str = "cash") -> RadarAsses
         reasons.append("price and volume conditions are actionable now")
     if catalyst >= 65:
         reasons.append("catalyst intensity is above normal")
+    if external_catalyst >= 70:
+        reasons.append("independent event radar found a high-priority market catalyst")
     if setup_separation < 5:
         warnings.append("setup classification is mixed")
     if crowding >= 65:
@@ -183,6 +199,8 @@ def assess_opportunity_radar(signal: Any, *, market: str = "cash") -> RadarAsses
         warnings.append("momentum is extremely extended")
     if volatility >= (1.15 if market == "crypto" else 0.75):
         warnings.append("realized volatility is unusually high")
+    if external_catalyst >= 75 and abs(m5) < 0.01 and volume < 1.10:
+        warnings.append("event catalyst is strong but price/volume confirmation is still limited")
 
     veto = bool(crowding >= 84 or (setup_score < 48 and durability < 45) or (len(warnings) >= 3 and setup_score < 65))
     approved = bool(not veto and setup_score >= 58 and durability >= 42)
@@ -191,6 +209,8 @@ def assess_opportunity_radar(signal: Any, *, market: str = "cash") -> RadarAsses
         f"with urgency {urgency:.0f}, durability {durability:.0f}, catalyst {catalyst:.0f}, "
         f"and crowding risk {crowding:.0f}."
     )
+    if external_catalyst > 0:
+        summary += f" Independent event catalyst: {external_catalyst:.0f}/100."
     if warnings:
         summary += " Warnings: " + "; ".join(warnings) + "."
 
