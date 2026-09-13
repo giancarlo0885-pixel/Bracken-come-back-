@@ -115,4 +115,15 @@ def install_mempool_space_network_context(worker_module: Any, client: MempoolSpa
     log.info(
         "Installed mempool.space Bitcoin network context | cache=ACTIVE | provenance=OBSERVED_ONLY | execution_impact=NONE"
     )
+
+    # The cohort challenger is strictly shadow-only. It starts only under the
+    # same paper/autonomous/live-disarmed conditions enforced by its own active().
+    try:
+        from paper_btc_network_challenger_shadow import install_btc_network_shadow_challenger
+        install_btc_network_shadow_challenger()
+    except Exception as exc:
+        log.warning(
+            "BTC NETWORK SHADOW | install=DEGRADED | execution_impact=NONE | reason=%s",
+            exc.__class__.__name__,
+        )
     return True
