@@ -3,6 +3,7 @@ from dataclasses import dataclass, asdict
 import math, os, re, numpy as np, pandas as pd
 from config import SIGNAL_BUY_THRESHOLD, SIGNAL_SELL_THRESHOLD
 from crypto_mean_reversion import assess_short_horizon_mean_reversion
+from dip_rebound_strategy import assess_dip_rebound
 from technical_indicators import rsi, macd, atr, bollinger_position
 from regime import detect_regime
 
@@ -20,6 +21,17 @@ class OracleSignal:
     mean_reversion_horizon_minutes:int=0
     mean_reversion_available:bool=False
     mean_reversion_displacement_bps:float|None=None
+    entry_pattern:str=""
+    dip_rebound_available:bool=False
+    dip_rebound_side:str="HOLD"
+    dip_rebound_score:float=0.0
+    dip_rebound_confidence:float=0.0
+    dip_depth_pct:float|None=None
+    rebound_pct:float|None=None
+    drawdown_from_recent_high_pct:float|None=None
+    rsi_change:float|None=None
+    reclaim_strength:float|None=None
+    dip_rebound_exit_rule:str=""
     def to_dict(self): return asdict(self)
 
 def _clip(x,a=-1,b=1): return max(a,min(b,x))
@@ -32,12 +44,6 @@ def _crypto_symbol(symbol: str) -> bool:
     return text.endswith("-USD") or text.endswith("USD")
 
 def _signal_thresholds(symbol: str) -> tuple[float, float]:
-    """Return signal thresholds, relaxing only the isolated crypto paper sandbox.
-
-    Live-capital controls always win. The relaxed band is intentionally narrow
-    enough to generate both entry and exit samples while leaving quote, sizing,
-    accounting, duplicate-order, drawdown, and execution-integrity gates intact.
-    """
     paper_learning = (
         str(os.getenv("EXECUTION_MODE", "paper") or "paper").strip().lower() == "paper"
         and _truthy("PAPER_AUTONOMOUS_LEARNING")
@@ -47,7 +53,6 @@ def _signal_thresholds(symbol: str) -> tuple[float, float]:
     )
     if not paper_learning:
         return float(SIGNAL_BUY_THRESHOLD), float(SIGNAL_SELL_THRESHOLD)
-
     buy = float(os.getenv("PAPER_CRYPTO_BUY_THRESHOLD", "0.52"))
     sell = float(os.getenv("PAPER_CRYPTO_SELL_THRESHOLD", "0.48"))
     buy = max(0.50, min(0.99, buy))
@@ -65,44 +70,24 @@ def _series(frame: pd.DataFrame, column: str) -> pd.Series:
     return pd.to_numeric(value, errors="coerce").dropna()
 
 def _history_interval(history: pd.DataFrame) -> str:
-    """Resolve the source bar interval without guessing from price values."""
     attrs = dict(getattr(history, "attrs", {}) or {})
     route = dict(attrs.get("provider_route", {}) or {})
-    return str(
-        route.get("interval")
-        or route.get("source_interval")
-        or attrs.get("interval")
-        or attrs.get("source_interval")
-        or "1d"
-    ).strip().lower()
+    return str(route.get("interval") or route.get("source_interval") or attrs.get("interval") or attrs.get("source_interval") or "1d").strip().lower()
 
 def _bars_per_year(symbol: str, history: pd.DataFrame) -> float:
-    """Annualization factor matching the actual bar cadence and market calendar.
-
-    Crypto trades continuously, while cash equities use a 252-session calendar.
-    The old fixed sqrt(252) treatment materially understated intraday crypto
-    volatility and distorted the score used by the always-on fast scanner.
-    """
     interval = _history_interval(history)
     match = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*([mhd])\s*", interval)
     crypto = _crypto_symbol(symbol)
     if not match:
         return 365.0 if crypto else 252.0
-
     amount = max(float(match.group(1)), 1e-9)
     unit = match.group(2)
     if crypto:
-        if unit == "m":
-            return max(1.0, 365.0 * 24.0 * 60.0 / amount)
-        if unit == "h":
-            return max(1.0, 365.0 * 24.0 / amount)
+        if unit == "m": return max(1.0, 365.0 * 24.0 * 60.0 / amount)
+        if unit == "h": return max(1.0, 365.0 * 24.0 / amount)
         return max(1.0, 365.0 / amount)
-
-    # Approximate regular US equity session: 390 minutes / 6.5 hours, 252 days.
-    if unit == "m":
-        return max(1.0, 252.0 * 390.0 / amount)
-    if unit == "h":
-        return max(1.0, 252.0 * 6.5 / amount)
+    if unit == "m": return max(1.0, 252.0 * 390.0 / amount)
+    if unit == "h": return max(1.0, 252.0 * 6.5 / amount)
     return max(1.0, 252.0 / amount)
 
 def analyze_market(symbol, history, news_sentiment=0.0):
@@ -130,14 +115,8 @@ def analyze_market(symbol, history, news_sentiment=0.0):
     a=atr(history); atr_pct=a/price if price else 0
     bp=bollinger_position(close)
     reg=detect_regime(history)
-    mean_reversion=assess_short_horizon_mean_reversion(
-        symbol,
-        history,
-        rsi_value=r,
-        atr_pct=atr_pct,
-        volume_ratio=vr,
-        regime=reg["name"],
-    )
+    mean_reversion=assess_short_horizon_mean_reversion(symbol,history,rsi_value=r,atr_pct=atr_pct,volume_ratio=vr,regime=reg["name"])
+    dip_rebound=assess_dip_rebound(symbol, history)
 
     raw=(0.30*_clip(m20/0.15)+0.15*_clip(m5/0.07)+0.20*_clip(trend/0.08)
          +0.10*_clip(news_sentiment)+0.08*_clip(mh/(price*0.01 if price else 1))
@@ -146,26 +125,33 @@ def analyze_market(symbol, history, news_sentiment=0.0):
     elif r>72: raw-=0.12
     if bp>0.95: raw-=0.05
     elif bp<0.05: raw+=0.05
-    # Short-horizon crypto reversal is deliberately a bounded factor rather than
-    # an order authorization. Existing quote, fee, liquidity, sizing and risk
-    # gates remain authoritative downstream.
     if mean_reversion.available:
         raw+=0.12*_clip(mean_reversion.score)
+    if dip_rebound.available:
+        raw+=0.16*_clip(dip_rebound.score)
     raw-=0.12*_clip(vol/1.2,0,1)
     if reg["name"]=="risk-off": raw-=0.06
     score=float(_clip(0.5+raw/2,0,1))
     buy_threshold, sell_threshold = _signal_thresholds(symbol)
     action="BUY" if score>=buy_threshold else "SELL" if score<=sell_threshold else "HOLD"
+
+    entry_pattern=""
+    if dip_rebound.available and dip_rebound.side=="BUY" and dip_rebound.confidence>=0.58 and score>=max(0.48,buy_threshold-0.06):
+        action="BUY"
+        entry_pattern="dip_rebound"
+    elif dip_rebound.available and dip_rebound.side=="SELL" and score<=min(0.56,sell_threshold+0.08):
+        action="SELL"
+        entry_pattern="dip_rebound_exit"
+
     confidence=min(0.99,0.50+abs(score-0.5)*1.4)
-    reason=(f"20d momentum {m20:+.1%}; RSI {r:.1f}; trend {trend:+.1%}; "
-            f"volatility {vol:.1%}; regime {reg['name']}; news {news_sentiment:+.2f}.")
+    if entry_pattern and dip_rebound.confidence>confidence:
+        confidence=min(0.99,dip_rebound.confidence)
+    reason=(f"20d momentum {m20:+.1%}; RSI {r:.1f}; trend {trend:+.1%}; volatility {vol:.1%}; regime {reg['name']}; news {news_sentiment:+.2f}.")
     if mean_reversion.available and mean_reversion.zscore is not None and mean_reversion.horizon_return is not None:
-        reason += (
-            f" Short-horizon reversion {mean_reversion.side}: "
-            f"z {mean_reversion.zscore:+.2f}, "
-            f"{mean_reversion.horizon_minutes}m return {mean_reversion.horizon_return:+.2%}, "
-            f"factor {mean_reversion.score:+.2f}."
-        )
+        reason += (f" Short-horizon reversion {mean_reversion.side}: z {mean_reversion.zscore:+.2f}, {mean_reversion.horizon_minutes}m return {mean_reversion.horizon_return:+.2%}, factor {mean_reversion.score:+.2f}.")
+    if dip_rebound.available:
+        reason += f" Dip/rebound {dip_rebound.reason} Exit rule: {dip_rebound.exit_rule}."
+
     return OracleSignal(
         symbol,price,score,action,confidence,m5,m20,r,vol,trend,vr,news_sentiment,
         mh,atr_pct,bp,reg["name"],reason,
@@ -177,4 +163,15 @@ def analyze_market(symbol, history, news_sentiment=0.0):
         mean_reversion_horizon_minutes=mean_reversion.horizon_minutes,
         mean_reversion_available=mean_reversion.available,
         mean_reversion_displacement_bps=mean_reversion.displacement_bps,
+        entry_pattern=entry_pattern,
+        dip_rebound_available=dip_rebound.available,
+        dip_rebound_side=dip_rebound.side,
+        dip_rebound_score=dip_rebound.score,
+        dip_rebound_confidence=dip_rebound.confidence,
+        dip_depth_pct=dip_rebound.dip_depth_pct,
+        rebound_pct=dip_rebound.rebound_pct,
+        drawdown_from_recent_high_pct=dip_rebound.drawdown_from_recent_high_pct,
+        rsi_change=dip_rebound.rsi_change,
+        reclaim_strength=dip_rebound.reclaim_strength,
+        dip_rebound_exit_rule=dip_rebound.exit_rule,
     )
