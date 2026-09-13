@@ -5,6 +5,7 @@ import logging
 import math
 import os
 from typing import Any
+from entry_patterns import PATTERN_FEATURE_KEYS, pattern_memory_features
 
 
 log = logging.getLogger("paper-regime-entry-signal-fallback")
@@ -65,6 +66,7 @@ def _entry_signal_features(conn: Any, entry_signal_id: Any) -> dict[str, float]:
     payload = _json_obj(item.get("payload")) if item else {}
     nested = _json_obj(payload.get("features"))
     result: dict[str, float] = {}
+    result.update(pattern_memory_features(payload))
     for key in _RAW_REGIME_FIELDS:
         value = _finite(payload.get(key))
         if value is None:
@@ -78,7 +80,7 @@ def _merge_entry_features(existing: Any, persisted_signal: Any) -> dict[str, Any
     """Fill missing regime fields only; immutable ledger values always win."""
     merged = _json_obj(existing)
     source = _json_obj(persisted_signal)
-    for key in _RAW_REGIME_FIELDS:
+    for key in (*_RAW_REGIME_FIELDS, *PATTERN_FEATURE_KEYS):
         if _finite(merged.get(key)) is not None:
             continue
         value = _finite(source.get(key))

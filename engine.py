@@ -1,10 +1,11 @@
 from __future__ import annotations
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 import math, os, re, numpy as np, pandas as pd
 from config import SIGNAL_BUY_THRESHOLD, SIGNAL_SELL_THRESHOLD
 from crypto_mean_reversion import assess_short_horizon_mean_reversion
 from technical_indicators import rsi, macd, atr, bollinger_position
 from regime import detect_regime
+from entry_patterns import extract_entry_pattern
 
 @dataclass
 class OracleSignal:
@@ -20,6 +21,7 @@ class OracleSignal:
     mean_reversion_horizon_minutes:int=0
     mean_reversion_available:bool=False
     mean_reversion_displacement_bps:float|None=None
+    entry_pattern:dict=field(default_factory=dict)
     def to_dict(self): return asdict(self)
 
 def _clip(x,a=-1,b=1): return max(a,min(b,x))
@@ -177,4 +179,5 @@ def analyze_market(symbol, history, news_sentiment=0.0):
         mean_reversion_horizon_minutes=mean_reversion.horizon_minutes,
         mean_reversion_available=mean_reversion.available,
         mean_reversion_displacement_bps=mean_reversion.displacement_bps,
+        entry_pattern=extract_entry_pattern(history),
     )

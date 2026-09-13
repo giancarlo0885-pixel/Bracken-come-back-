@@ -6,6 +6,7 @@ import os
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from typing import Any, Iterable
+from entry_patterns import FEATURE_SCALES, PATTERN_METADATA, compatible_pattern_memory, pattern_memory_features
 
 
 MEMORY_MIN_ANALOGS = max(3, int(os.getenv("MEMORY_MIN_ANALOGS", "5")))
@@ -51,7 +52,7 @@ def _json_object(value: Any) -> dict[str, Any]:
 
 def feature_vector(signal: Any) -> dict[str, float]:
     """Portable setup fingerprint used to compare current and historical trades."""
-    return {
+    features = {
         "alpha": _normalized_score(_value(signal, "score", 50.0)) / 100.0,
         "confidence": _normalized_score(_value(signal, "confidence", 50.0)) / 100.0,
         "momentum_5d": _clip(_num(_value(signal, "momentum_5d", 0.0)), -0.30, 0.30) / 0.30,
@@ -63,6 +64,8 @@ def feature_vector(signal: Any) -> dict[str, float]:
         "relative_strength": _clip(_num(_value(signal, "relative_strength", 0.0)), -0.40, 0.40) / 0.40,
         "event_risk": _clip(_num(_value(signal, "event_risk_score", 20.0)), 0.0, 100.0) / 100.0,
     }
+    features.update(pattern_memory_features(signal))
+    return features
 
 
 WEIGHTS = {
@@ -77,12 +80,15 @@ WEIGHTS = {
     "relative_strength": 1.0,
     "event_risk": 0.9,
 }
+WEIGHTS.update({f"pattern_{key}": 0.8 for key in FEATURE_SCALES})
 
 
 def setup_similarity(current: dict[str, float], historical: dict[str, float]) -> float:
     weighted_distance = 0.0
     total_weight = 0.0
     for key, weight in WEIGHTS.items():
+        if key.startswith("pattern_") and (key not in current or key not in historical):
+            continue
         weighted_distance += weight * (current.get(key, 0.0) - historical.get(key, 0.0)) ** 2
         total_weight += weight
     distance = math.sqrt(weighted_distance / max(total_weight, 1e-9))
@@ -112,7 +118,8 @@ class MarketMemoryAssessment:
 def _record_vector(record: dict[str, Any]) -> dict[str, float]:
     payload = _json_object(record.get("payload"))
     if isinstance(payload.get("features"), dict):
-        return {k: _num(v) for k, v in payload["features"].items()}
+        return {k: _num(v) for k, v in payload["features"].items()
+                if not k.startswith("pattern_") or math.isfinite(_num(v, float("nan")))}
     return {
         "alpha": _num(record.get("alpha_score")) / 100.0,
         "confidence": _num(record.get("probability_of_profit"), 50.0) / 100.0,
@@ -143,7 +150,19 @@ def assess_market_memory(signal: Any, historical_records: Iterable[dict[str, Any
         return_pct = _num(return_pct, float("nan"))
         if not math.isfinite(return_pct):
             continue
-        similarity = setup_similarity(current, _record_vector(record))
+        historical = _record_vector(record)
+        if not compatible_pattern_memory(current, historical):
+            continue
+        if "pattern_schema" in current:
+            try:
+                raw_exit = record.get("exit_time")
+                exit_time = raw_exit if isinstance(raw_exit, datetime) else datetime.fromisoformat(str(raw_exit).replace("Z", "+00:00"))
+                if (exit_time.tzinfo is None or exit_time.timestamp() > current["pattern_bar_end_unix"]
+                        or historical["pattern_bar_end_unix"] >= current["pattern_bar_end_unix"]):
+                    continue
+            except (ValueError, TypeError, KeyError):
+                continue
+        similarity = setup_similarity(current, historical)
         if similarity < 0.45:
             continue
         candidates.append({
@@ -352,6 +371,14 @@ def _weighted_entry_summary(entries: list[dict[str, Any]]) -> dict[str, Any]:
         return sum(value * weight for value, weight in pairs) / denom if denom > 0 else None
 
     feature_keys = sorted({key for item in entries for key in item.get("features", {})})
+    # Averaging incompatible timeframes or regimes must not manufacture a new
+    # pattern identity. Mixed/legacy lots retain only their legacy fingerprint.
+    pattern_identities = {
+        tuple(item.get("features", {}).get(key) for key in (*PATTERN_METADATA, "pattern_bar_end_unix"))
+        for item in entries
+    }
+    if len(pattern_identities) != 1 or any(value is None for value in next(iter(pattern_identities), ())):
+        feature_keys = [key for key in feature_keys if not key.startswith("pattern_")]
     features: dict[str, float] = {}
     for key in feature_keys:
         numerator = 0.0

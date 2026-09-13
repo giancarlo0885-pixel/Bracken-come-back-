@@ -18,6 +18,7 @@ from forecast_quality import model_execution_approved
 from quant_trade_standard import assess_trade
 from oracle_intelligence import evaluate_opportunity
 from market_memory import feature_vector, record_closed_trade_memory
+from entry_patterns import pattern_memory_features
 from market_data import MarketSnapshot
 from provider_router import normalize_symbol
 from risk_engine import ExecutionSwitches, pre_trade_risk_checks
@@ -1578,6 +1579,9 @@ def _entry_provenance(
             feature_snapshot = feature_vector(signal) if signal is not None else {}
         except Exception:
             feature_snapshot = {}
+    feature_snapshot = dict(feature_snapshot)
+    for key, value in pattern_memory_features(signal).items():
+        feature_snapshot.setdefault(key, value)
     return {
         "entry_decision_id": safe_text(entry_decision_id) or None,
         "entry_signal_id": safe_text(signal_id) or None,
@@ -1630,6 +1634,13 @@ def _record_buy_attribution(
     strategy = safe_text(signal_value(signal, "strategy", signal_value(signal, "scan_type", "")))
     decision_id = signal_value(signal, "signal_id", signal_value(signal, "id", None))
     provenance = _entry_provenance(signal=signal, quote_metadata=quote_metadata, now=now)
+    if provenance.get("entry_signal_id") and "pattern_schema" not in provenance["feature_snapshot"]:
+        # Recover only the exact saved entry signal if an optimizer compacted it.
+        from paper_regime_entry_signal_fallback import _entry_signal_features
+        observed = _entry_signal_features(conn, provenance["entry_signal_id"])
+        for key, value in observed.items():
+            if key.startswith("pattern_"):
+                provenance["feature_snapshot"].setdefault(key, value)
     confidence = safe_float(signal_value(signal, "confidence", None), None) if signal is not None else None
     score = safe_float(signal_value(signal, "score", None), None) if signal is not None else None
     trade_id = f"ledger-buy:{uuid.uuid4()}"
