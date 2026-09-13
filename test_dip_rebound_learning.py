@@ -77,13 +77,14 @@ def test_dip_rebound_detects_confirmed_reclaim(monkeypatch):
     values = np.r_[
         np.full(55, 100.0),
         [99.5, 98.8, 98.0, 97.2, 96.5, 95.8, 95.2, 95.0],
-        [95.1, 95.3, 95.6, 95.9, 96.2, 96.5, 96.8, 97.1, 97.4, 97.7],
+        np.linspace(95.1, 97.2, 10),
     ]
     result = assess_dip_rebound("BTC-USD", _history(values))
     assert result.available is True
     assert result.dip_depth_pct >= 0.012
     assert result.rebound_pct >= 0.004
     assert result.rsi_change > 0
+    assert result.rsi_value <= 48.0
     assert result.side == "BUY"
     assert "ATR" in result.exit_rule
 

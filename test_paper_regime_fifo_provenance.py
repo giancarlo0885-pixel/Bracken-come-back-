@@ -219,7 +219,10 @@ def test_postgres_fee_aware_regime_provenance_lifecycle(paper_provenance_db, cap
     before = conn.execute(
         "SELECT * FROM paper_regime_trade_metrics WHERE trade_id=%s", (closed["trade_id"],),
     ).fetchone()
-    assert before["regime"] == ("trend_up__low_vol" if capture_entry_features else "range__vol_unknown")
+    # The exact persisted signal now preserves volatility evidence even when the
+    # lot snapshot omits expanded entry features; the fallback later restores the
+    # full trend/momentum classification from that same attributable signal ID.
+    assert before["regime"] == ("trend_up__low_vol" if capture_entry_features else "range__low_vol")
     shadow.finalize_closed_trades()
     after = conn.execute(
         "SELECT * FROM paper_regime_trade_metrics WHERE trade_id=%s", (closed["trade_id"],),

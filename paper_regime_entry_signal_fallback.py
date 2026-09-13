@@ -9,7 +9,7 @@ from typing import Any
 
 log = logging.getLogger("paper-regime-entry-signal-fallback")
 _RAW_REGIME_FIELDS = ("trend_strength", "momentum_20d", "volatility_20d")
-_SCHEMA_VERSION = "regime-economics-v1-entry-signal-fallback2"
+_SCHEMA_VERSION = "regime-economics-v1-entry-signal-fallback3"
 
 
 def _truthy(name: str, default: str = "false") -> bool:
@@ -88,7 +88,16 @@ def _merge_entry_features(existing: Any, persisted_signal: Any) -> dict[str, Any
 
 
 def repair_unknown_regimes(limit: int = 1000) -> int:
-    """Reclassify only unknown-volatility shadow rows from exact entry-signal evidence."""
+    """Enrich incomplete shadow regime labels from the exact persisted entry signal.
+
+    Earlier versions only revisited ``*vol_unknown`` rows. Once volatility began
+    persisting earlier in the signal pipeline, a partially observed row could be
+    materialized as ``range__low_vol`` and then become ineligible for enrichment,
+    even though the same immutable entry signal also contained trend/momentum.
+    Re-evaluate recent attributable rows only when the ledger snapshot is missing
+    at least one raw regime field and the exact entry signal supplies additional
+    evidence. This remains measurement-only and never touches execution state.
+    """
     if not active():
         return 0
     from database import connect
@@ -103,7 +112,6 @@ def repair_unknown_regimes(limit: int = 1000) -> int:
                 FROM paper_regime_trade_metrics m
                 JOIN trade_ledger tl ON tl.trade_id=m.trade_id
                 WHERE m.market='crypto'
-                  AND m.regime LIKE '%%vol_unknown'
                   AND tl.entry_signal_id IS NOT NULL
                 ORDER BY m.exit_time DESC
                 LIMIT %s
@@ -112,20 +120,30 @@ def repair_unknown_regimes(limit: int = 1000) -> int:
             ).fetchall()
         )
         for row in rows:
-            signal_features = _entry_signal_features(conn, row.get("entry_signal_id"))
-            if not signal_features:
+            existing = _json_obj(row.get("feature_snapshot"))
+            missing = {key for key in _RAW_REGIME_FIELDS if _finite(existing.get(key)) is None}
+            if not missing:
                 continue
-            features = _merge_entry_features(row.get("feature_snapshot"), signal_features)
+            signal_features = _entry_signal_features(conn, row.get("entry_signal_id"))
+            if not any(key in signal_features for key in missing):
+                continue
+            features = _merge_entry_features(existing, signal_features)
+            # Never manufacture a volatility bucket from classifier defaults. A
+            # repaired label is admissible only when volatility is actually
+            # observed in immutable entry evidence or the exact entry signal.
+            if _finite(features.get("volatility_20d")) is None:
+                continue
             regime = classify_regime(feature_snapshot=features, memory_regime=None)
-            if not regime or regime.endswith("vol_unknown") or regime == row.get("regime"):
+            current = str(row.get("regime") or "")
+            if not regime or regime.endswith("vol_unknown") or regime == current:
                 continue
             conn.execute(
                 """
                 UPDATE paper_regime_trade_metrics
                 SET regime=%s, schema_version=%s
-                WHERE trade_id=%s AND regime LIKE '%%vol_unknown'
+                WHERE trade_id=%s AND regime=%s
                 """,
-                (regime, _SCHEMA_VERSION, str(row.get("trade_id") or "")),
+                (regime, _SCHEMA_VERSION, str(row.get("trade_id") or ""), current),
             )
             repaired += 1
     return repaired
@@ -136,7 +154,8 @@ def install_entry_signal_regime_fallback(shadow_module: Any | None = None) -> bo
 
     The wrapper never alters orders, sizing, cooldowns, quotes, positions, P&L, or
     accounting. It only improves a regime label when the canonical ledger carries
-    an exact immutable entry_signal_id whose persisted signal details have observed fields.
+    an exact immutable entry_signal_id whose persisted signal details add observed
+    regime fields missing from the immutable ledger snapshot.
     """
     if not active():
         return False
