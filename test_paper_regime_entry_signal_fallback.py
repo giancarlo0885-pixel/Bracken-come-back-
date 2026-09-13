@@ -105,7 +105,50 @@ def test_repair_unknown_regime_uses_entry_signal_without_touching_economics(monk
 
     repaired = fallback.repair_unknown_regimes()
     assert repaired == 1
-    assert updates == [("trend_up__low_vol", fallback._SCHEMA_VERSION, "trade-1")]
+    assert updates == [("trend_up__low_vol", fallback._SCHEMA_VERSION, "trade-1", "range__vol_unknown")]
+
+
+def test_repair_partial_range_regime_recovers_missing_trend_and_momentum(monkeypatch):
+    _paper(monkeypatch)
+    updates = []
+
+    class Result:
+        def __init__(self, rows=None, one=None):
+            self._rows = rows or []
+            self._one = one
+        def fetchall(self):
+            return self._rows
+        def fetchone(self):
+            return self._one
+
+    class Conn:
+        def execute(self, sql, params=None):
+            if "FROM paper_regime_trade_metrics" in sql:
+                return Result(rows=[{
+                    "trade_id": "trade-partial",
+                    "regime": "range__low_vol",
+                    "entry_signal_id": "91",
+                    "feature_snapshot": {"volatility_20d": 0.25},
+                }])
+            if "FROM signals" in sql:
+                assert params == ("91",)
+                return Result(one={"payload": {
+                    "trend_strength": 0.09,
+                    "momentum_20d": 0.06,
+                    "volatility_20d": 0.25,
+                }})
+            if "UPDATE paper_regime_trade_metrics" in sql:
+                updates.append(params)
+                return Result()
+            raise AssertionError(sql)
+
+    @contextmanager
+    def connect():
+        yield Conn()
+
+    monkeypatch.setitem(sys.modules, "database", SimpleNamespace(connect=connect))
+    assert fallback.repair_unknown_regimes() == 1
+    assert updates == [("trend_up__low_vol", fallback._SCHEMA_VERSION, "trade-partial", "range__low_vol")]
 
 
 def test_repair_does_not_invent_regime_when_entry_signal_lacks_volatility(monkeypatch):
