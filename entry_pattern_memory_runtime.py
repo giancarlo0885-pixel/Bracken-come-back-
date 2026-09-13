@@ -26,7 +26,7 @@ def _clip(value: float, low: float, high: float) -> float:
 
 
 def expanded_feature_vector(signal: Any, base: dict[str, float] | None = None) -> dict[str, float]:
-    """Add entry-shape evidence to the durable Market Memory fingerprint."""
+    """Add entry-shape and chart-structure evidence to Market Memory."""
     features = dict(base or {})
     features.update({
         "rsi_14": (_clip(_num(_value(signal, "rsi_14", 50.0)), 0.0, 100.0) - 50.0) / 50.0,
@@ -41,6 +41,13 @@ def expanded_feature_vector(signal: Any, base: dict[str, float] | None = None) -
         "recent_drawdown": _clip(_num(_value(signal, "drawdown_from_recent_high_pct", 0.0)), 0.0, 0.20) / 0.20,
         "reclaim_strength": _clip(_num(_value(signal, "reclaim_strength", 0.0)), -0.10, 0.10) / 0.10,
         "dip_rebound_pattern": 1.0 if str(_value(signal, "entry_pattern", "")).strip().lower() == "dip_rebound" else 0.0,
+        "schwager_trend_score": _clip(_num(_value(signal, "schwager_trend_score", 0.0)), -1.0, 1.0),
+        "schwager_breakout_score": _clip(_num(_value(signal, "schwager_breakout_score", 0.0)), -1.0, 1.0),
+        "schwager_oscillator_score": _clip(_num(_value(signal, "schwager_oscillator_score", 0.0)), -1.0, 1.0),
+        "schwager_setup_score": _clip(_num(_value(signal, "schwager_setup_score", 0.0)), -1.0, 1.0),
+        "schwager_failed_breakout": 1.0 if bool(_value(signal, "schwager_failed_breakout", False)) else 0.0,
+        "schwager_support_distance": _clip(_num(_value(signal, "schwager_support_distance_pct", 0.0)), -0.20, 0.20) / 0.20,
+        "schwager_resistance_distance": _clip(_num(_value(signal, "schwager_resistance_distance_pct", 0.0)), -0.20, 0.20) / 0.20,
     })
     return features
 
@@ -72,6 +79,13 @@ def install_entry_pattern_memory_runtime() -> bool:
         "recent_drawdown": 0.9,
         "reclaim_strength": 1.0,
         "dip_rebound_pattern": 1.5,
+        "schwager_trend_score": 1.1,
+        "schwager_breakout_score": 1.3,
+        "schwager_oscillator_score": 0.9,
+        "schwager_setup_score": 1.4,
+        "schwager_failed_breakout": 1.5,
+        "schwager_support_distance": 0.9,
+        "schwager_resistance_distance": 0.9,
     })
 
     # Several modules import feature_vector by value. Rebind those references so
@@ -84,6 +98,6 @@ def install_entry_pattern_memory_runtime() -> bool:
 
     _INSTALLED = True
     log.info(
-        "Installed expanded entry-pattern memory | RSI/dip/rebound/reclaim/ATR/Bollinger/MACD=ACTIVE | provenance=EXACT_ENTRY_LOTS"
+        "Installed expanded entry-pattern memory | RSI/dip/rebound/reclaim/ATR/Bollinger/MACD + Schwager trend/support-resistance/breakout/failed-breakout/oscillator=ACTIVE | provenance=EXACT_ENTRY_LOTS"
     )
     return True
