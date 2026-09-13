@@ -1,23 +1,53 @@
 from __future__ import annotations
 import numpy as np, pandas as pd
 
+
 def _series(value) -> pd.Series:
     if isinstance(value, pd.DataFrame):
         value = value.iloc[:, -1]
     return pd.to_numeric(value, errors="coerce").dropna()
 
+
 def rsi(series: pd.Series, period=14) -> float:
+    """Return Wilder RSI with correct monotonic/flat-series handling.
+
+    The previous implementation replaced zero average losses with NaN. That made
+    a persistent rally fall through to the neutral 50 fallback instead of 100,
+    which directly corrupted overbought/oversold evidence. Wilder smoothing is
+    used here after a simple-average seed, matching the conventional RSI(14)
+    definition while remaining deterministic for short test fixtures.
+    """
     series = _series(series)
-    delta = series.diff()
-    gains = delta.clip(lower=0).rolling(period).mean()
-    losses = -delta.clip(upper=0).rolling(period).mean()
-    rs = gains / losses.replace(0, np.nan)
-    values = 100 - (100/(1+rs))
-    return float(values.dropna().iloc[-1]) if not values.dropna().empty else 50.0
+    period = max(1, int(period))
+    if len(series) < period + 1:
+        return 50.0
+
+    delta = series.diff().dropna()
+    gains = delta.clip(lower=0.0)
+    losses = (-delta.clip(upper=0.0))
+
+    avg_gain = float(gains.iloc[:period].mean())
+    avg_loss = float(losses.iloc[:period].mean())
+    for i in range(period, len(delta)):
+        avg_gain = ((avg_gain * (period - 1)) + float(gains.iloc[i])) / period
+        avg_loss = ((avg_loss * (period - 1)) + float(losses.iloc[i])) / period
+
+    if avg_loss <= 0.0 and avg_gain <= 0.0:
+        return 50.0
+    if avg_loss <= 0.0:
+        return 100.0
+    if avg_gain <= 0.0:
+        return 0.0
+
+    rs = avg_gain / avg_loss
+    value = 100.0 - (100.0 / (1.0 + rs))
+    return float(max(0.0, min(100.0, value)))
+
 
 def ema(series: pd.Series, span: int) -> pd.Series:
     series = _series(series)
     return series.ewm(span=span, adjust=False).mean()
+
 
 def macd(series: pd.Series) -> tuple[float,float,float]:
     series = _series(series)
@@ -25,6 +55,7 @@ def macd(series: pd.Series) -> tuple[float,float,float]:
     signal = ema(line,9)
     hist = line-signal
     return float(line.iloc[-1]), float(signal.iloc[-1]), float(hist.iloc[-1])
+
 
 def atr(frame: pd.DataFrame, period=14) -> float:
     close = _series(frame["Close"])
@@ -41,6 +72,7 @@ def atr(frame: pd.DataFrame, period=14) -> float:
     ],axis=1).max(axis=1)
     val = tr.rolling(period).mean().dropna()
     return float(val.iloc[-1]) if not val.empty else 0.0
+
 
 def bollinger_position(series: pd.Series, period=20, std_mult=2.0) -> float:
     series = _series(series)
