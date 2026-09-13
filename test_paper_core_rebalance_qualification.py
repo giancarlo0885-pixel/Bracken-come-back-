@@ -12,6 +12,17 @@ def _enable_unbounded_paper(monkeypatch):
     monkeypatch.setenv("ENABLE_BROKER_SUBMISSION", "false")
     monkeypatch.setenv("LIVE_TRADING_ARMED", "false")
 
+    # The installer intentionally changes these process-local paper-learning
+    # limits. Register their current values with monkeypatch so each test fully
+    # restores the shared adaptive module before the rest of the suite runs.
+    for name in (
+        "GLOBAL_PIT_RESERVE_PCT",
+        "GLOBAL_PIT_TARGET_INVESTED_PCT",
+        "GLOBAL_PIT_MAX_POSITION_PCT",
+        "MAX_SECTOR_EXPOSURE_PCT",
+    ):
+        monkeypatch.setattr(adaptive, name, getattr(adaptive, name))
+
 
 def test_unbounded_gate_does_not_promote_hold_core_candidate(monkeypatch):
     _enable_unbounded_paper(monkeypatch)
