@@ -83,4 +83,5 @@ def test_event_catalyst_strengthens_radar_without_bypassing_confirmation():
     assert with_event.catalyst_score == 92.0
     assert with_event.setup_score > without_event.setup_score
     assert with_event.primary_setup == "EVENT DRIVEN"
+    assert with_event.approved is False
     assert "event catalyst is strong but price/volume confirmation is still limited" in with_event.warnings
