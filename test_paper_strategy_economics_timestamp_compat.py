@@ -45,7 +45,10 @@ def test_canonical_ledger_casts_text_timestamps_before_epoch_filter(monkeypatch)
     assert records[0]["symbol"] == "DOT-USD"
     assert "NULLIF(entry_time,'')::timestamptz AS entry_time" in captured["sql"]
     assert "NULLIF(exit_time,'')::timestamptz AS exit_time" in captured["sql"]
-    assert captured["params"] == (start,)
+    # The epoch remains the first parameter; strategy identity parameters are
+    # now intentionally appended so filtering occurs before the history LIMIT.
+    assert captured["params"][0] == start
+    assert captured["params"][1:] == ("oracle_council_v3", "%oracle council v3%")
     assert round(econ._holding_minutes(records[0]), 6) == 9.0
 
 
