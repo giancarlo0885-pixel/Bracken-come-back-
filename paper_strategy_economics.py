@@ -172,6 +172,27 @@ def _epoch_start() -> datetime | None:
         return None
 
 
+def _strategy_sql_filter(column: str, target: str) -> tuple[str, tuple[str, ...]]:
+    """Return a SQL predicate matching the same stable identity as normalization.
+
+    The predicate is applied before the history-depth LIMIT so unrelated closes
+    cannot evict samples from a strategy's economics window.
+    """
+    if target == _ORACLE_COUNCIL_V3_KEY:
+        return (
+            f"(LOWER(COALESCE({column},'')) = %s OR LOWER(COALESCE({column},'')) LIKE %s)",
+            (_ORACLE_COUNCIL_V3_KEY, "%oracle council v3%"),
+        )
+    pulse = re.match(r"^always_on_(.+)_market_pulse$", target)
+    if pulse:
+        interval = pulse.group(1).replace("_", ".")
+        return (
+            f"(LOWER(COALESCE({column},'')) = %s OR LOWER(COALESCE({column},'')) LIKE %s)",
+            (target.lower(), f"always-on {interval} market pulse.%"),
+        )
+    return f"LEFT(BTRIM(COALESCE({column},'')),160) = %s", (target,)
+
+
 def _ledger_records(strategy: str) -> list[dict[str, Any]]:
     """Read canonical lot-attributed closes using stable strategy identity."""
     target = normalize_strategy_identity(strategy)
@@ -179,9 +200,10 @@ def _ledger_records(strategy: str) -> list[dict[str, Any]]:
         from database import rows
 
         start = _epoch_start()
+        predicate, strategy_params = _strategy_sql_filter("strategy", target)
         if start is not None:
             records = rows(
-                """
+                f"""
                 SELECT strategy, symbol, net_pnl, gross_pnl, fees, return_pct,
                        NULLIF(entry_time,'')::timestamptz AS entry_time,
                        NULLIF(exit_time,'')::timestamptz AS exit_time,
@@ -189,23 +211,26 @@ def _ledger_records(strategy: str) -> list[dict[str, Any]]:
                 FROM trade_ledger
                 WHERE market='crypto' AND side='SELL'
                   AND NULLIF(exit_time,'')::timestamptz >= %s
+                  AND {predicate}
                 ORDER BY NULLIF(exit_time,'')::timestamptz DESC
                 LIMIT 1000
                 """,
-                (start,),
+                (start, *strategy_params),
             )
         else:
             records = rows(
-                """
+                f"""
                 SELECT strategy, symbol, net_pnl, gross_pnl, fees, return_pct,
                        NULLIF(entry_time,'')::timestamptz AS entry_time,
                        NULLIF(exit_time,'')::timestamptz AS exit_time,
                        model, model_version
                 FROM trade_ledger
                 WHERE market='crypto' AND side='SELL'
+                  AND {predicate}
                 ORDER BY NULLIF(exit_time,'')::timestamptz DESC
                 LIMIT 1000
-                """
+                """,
+                strategy_params,
             )
         matched = [
             dict(item)
@@ -224,9 +249,10 @@ def _ledger_records(strategy: str) -> list[dict[str, Any]]:
         from database import rows
 
         start = _epoch_start()
+        predicate, strategy_params = _strategy_sql_filter("reason", target)
         if start is not None:
             records = rows(
-                """
+                f"""
                 SELECT reason AS strategy, symbol, realized_pnl AS net_pnl,
                        COALESCE(gross_realized_pnl, realized_pnl) AS gross_pnl,
                        COALESCE(fees,0) AS fees, NULL AS return_pct,
@@ -236,13 +262,14 @@ def _ledger_records(strategy: str) -> list[dict[str, Any]]:
                 FROM trades
                 WHERE market='crypto' AND side='SELL'
                   AND NULLIF(created_at,'')::timestamptz >= %s
+                  AND {predicate}
                 ORDER BY NULLIF(created_at,'')::timestamptz DESC LIMIT 1000
                 """,
-                (start,),
+                (start, *strategy_params),
             )
         else:
             records = rows(
-                """
+                f"""
                 SELECT reason AS strategy, symbol, realized_pnl AS net_pnl,
                        COALESCE(gross_realized_pnl, realized_pnl) AS gross_pnl,
                        COALESCE(fees,0) AS fees, NULL AS return_pct,
@@ -251,8 +278,10 @@ def _ledger_records(strategy: str) -> list[dict[str, Any]]:
                        NULL AS model, NULL AS model_version
                 FROM trades
                 WHERE market='crypto' AND side='SELL'
+                  AND {predicate}
                 ORDER BY NULLIF(created_at,'')::timestamptz DESC LIMIT 1000
-                """
+                """,
+                strategy_params,
             )
         return [
             dict(item)
