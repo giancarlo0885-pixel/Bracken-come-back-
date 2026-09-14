@@ -16,6 +16,14 @@ def _health_score(events: deque[tuple[float, int, int]]) -> float:
     return round(max(0.0, min(100.0, resolved / requested * 100.0)), 2)
 
 
+def _quality_quarantined_symbols(provider: Any) -> set[str]:
+    return {
+        str(symbol or "").upper().strip()
+        for symbol in (getattr(provider, "_oracle_quality_quarantined_symbols", set()) or set())
+        if str(symbol or "").strip()
+    }
+
+
 def install_crypto_provider_health_runtime(worker: Any) -> bool:
     """Track broker quote health without counting unsupported symbols as failures.
 
@@ -51,18 +59,17 @@ def install_crypto_provider_health_runtime(worker: Any) -> bool:
         except Exception:
             supported = set(requested)
 
-        quality_quarantined = {
-            str(symbol or "").upper().strip()
-            for symbol in (getattr(provider, "_oracle_quality_quarantined_symbols", set()) or set())
-            if str(symbol or "").strip()
-        }
         coverage_gaps = [symbol for symbol in requested if symbol not in supported]
+
+        # The resilience wrapper can place a symbol into quality quarantine while
+        # resolving this very snapshots() call. Read quarantine state only after
+        # that call so telemetry reflects the final post-retry provider state.
+        result = dict(original_snapshots(requested) or {})
+        quality_quarantined = _quality_quarantined_symbols(provider)
         health_eligible = [
             symbol for symbol in requested
             if symbol in supported and symbol not in quality_quarantined
         ]
-
-        result = dict(original_snapshots(requested) or {})
         resolved = sum(1 for symbol in health_eligible if symbol in result)
         events.append((time.monotonic(), len(health_eligible), resolved))
 
