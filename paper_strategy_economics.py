@@ -409,11 +409,30 @@ def estimated_round_trip_cost_pct(signal: Any) -> float:
 
 
 def fee_edge_allows_entry(signal: Any) -> tuple[bool, str, float | None, float]:
-    """Reject when explicit long-side edge cannot clear estimated costs."""
+    """Reject when explicit edge misses costs or mature economics are known negative.
+
+    A missing forecast is exploratory only while strategy evidence is insufficient.
+    Once a strategy has a mature post-cost sample and both expectancy is negative
+    and profit factor is at or below one, missing edge must not bypass that evidence.
+    """
     edge = expected_edge_pct(signal)
     cost = estimated_round_trip_cost_pct(signal)
     if edge is None:
-        return True, "edge_unavailable_exploration", None, cost
+        economics = strategy_economics(signal)
+        min_samples = max(3, int(os.getenv("PAPER_KNOWN_NEGATIVE_EDGE_MIN_SAMPLES", "30")))
+        if (
+            economics.sample_count >= min_samples
+            and economics.expectancy < 0.0
+            and economics.profit_factor <= 1.0
+        ):
+            return (
+                False,
+                f"edge_unavailable_known_negative_economics:samples={economics.sample_count}:"
+                f"expectancy={economics.expectancy:.6f}:pf={economics.profit_factor:.4f}",
+                None,
+                cost,
+            )
+        return True, "edge_unavailable_insufficient_evidence_exploration", None, cost
     margin = max(1.0, _number(os.getenv("PAPER_MIN_EDGE_TO_COST_MULTIPLIER", "1.25"), 1.25))
     required = cost * margin
     if edge + 1e-12 < required:
