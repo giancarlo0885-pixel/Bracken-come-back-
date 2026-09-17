@@ -1,4 +1,10 @@
-from paper_aeve_generation_controller import AEVEGenerationConfig, BatchDiagnostics, BATCH_SIZE, next_generation
+from paper_aeve_generation_controller import (
+    AEVEGenerationConfig,
+    BatchDiagnostics,
+    BATCH_SIZE,
+    _missing_research_relations,
+    next_generation,
+)
 
 
 def d(**overrides):
@@ -54,3 +60,31 @@ def test_active_requires_paper_and_disarmed(monkeypatch):
     assert c.active() is True
     monkeypatch.setenv('LIVE_TRADING_ARMED','true')
     assert c.active() is False
+
+
+class _RelationResult:
+    def __init__(self, value):
+        self.value = value
+
+    def fetchone(self):
+        return {'relation': self.value}
+
+
+class _RelationConn:
+    def __init__(self, present):
+        self.present = set(present)
+
+    def execute(self, sql, params):
+        assert 'to_regclass' in sql
+        relation = params[0]
+        return _RelationResult(relation if relation in self.present else None)
+
+
+def test_missing_research_relations_names_exact_dependency():
+    conn = _RelationConn({'trade_ledger'})
+    assert _missing_research_relations(conn) == ['paper_regime_trade_metrics']
+
+
+def test_research_schema_guard_passes_when_both_relations_exist():
+    conn = _RelationConn({'paper_regime_trade_metrics', 'trade_ledger'})
+    assert _missing_research_relations(conn) == []
