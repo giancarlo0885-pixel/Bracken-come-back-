@@ -74,7 +74,7 @@ def test_fee_edge_preserves_exploration_when_edge_missing(monkeypatch):
     _paper(monkeypatch)
     allowed, reason, edge, cost = econ.fee_edge_allows_entry({"strategy": "explore"})
     assert allowed is True
-    assert reason == "edge_unavailable_exploration"
+    assert reason == "edge_unavailable_insufficient_evidence_exploration"
     assert edge is None
     assert cost > 0
 
@@ -223,3 +223,57 @@ def test_strategy_economics_accumulates_normalized_post_fix_closes(monkeypatch):
     assert round(result.net_pnl, 6) == 0.10
     assert round(result.fees, 6) == 0.08
     assert result.average_holding_minutes > 0
+
+
+def test_missing_edge_blocks_when_mature_strategy_economics_are_known_negative(monkeypatch):
+    _paper(monkeypatch)
+    monkeypatch.setenv("PAPER_KNOWN_NEGATIVE_EDGE_MIN_SAMPLES", "30")
+    known_negative = econ.StrategyEconomics(
+        strategy="oracle_council_v3",
+        sample_count=1000,
+        net_pnl=-15.0166,
+        gross_pnl=-11.4955,
+        fees=3.5211,
+        win_rate=0.198,
+        average_win=0.01,
+        average_loss=-0.01,
+        profit_factor=0.2316,
+        expectancy=-0.015017,
+        average_holding_minutes=20.0,
+        size_multiplier=0.4530,
+        model_validated=False,
+    )
+    monkeypatch.setattr(econ, "strategy_economics", lambda signal: known_negative)
+    allowed, reason, edge, cost = econ.fee_edge_allows_entry(
+        {"strategy": "Oracle Council V3 consensus BUY"}
+    )
+    assert allowed is False
+    assert edge is None
+    assert cost > 0
+    assert reason.startswith("edge_unavailable_known_negative_economics:samples=1000")
+
+
+def test_missing_edge_still_explores_when_evidence_is_insufficient(monkeypatch):
+    _paper(monkeypatch)
+    monkeypatch.setenv("PAPER_KNOWN_NEGATIVE_EDGE_MIN_SAMPLES", "30")
+    immature = econ.StrategyEconomics(
+        strategy="new_challenger",
+        sample_count=12,
+        net_pnl=-0.12,
+        gross_pnl=-0.08,
+        fees=0.04,
+        win_rate=0.25,
+        average_win=0.02,
+        average_loss=-0.02,
+        profit_factor=0.50,
+        expectancy=-0.01,
+        average_holding_minutes=5.0,
+        size_multiplier=0.5,
+        model_validated=False,
+    )
+    monkeypatch.setattr(econ, "strategy_economics", lambda signal: immature)
+    allowed, reason, edge, cost = econ.fee_edge_allows_entry({"strategy": "new_challenger"})
+    assert allowed is True
+    assert edge is None
+    assert cost > 0
+    assert reason == "edge_unavailable_insufficient_evidence_exploration"
