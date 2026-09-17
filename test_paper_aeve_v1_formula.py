@@ -39,7 +39,11 @@ def test_generation_excursion_and_cost_thresholds_are_consumed():
 
 
 def test_generation_rebound_score_and_loss_streak_thresholds_are_consumed():
-    assert score_entry(**candidate(), config=AEVEScoringConfig(rebound_gate=0.95)).would_trade is False
+    # Use a non-saturated rebound fixture: quality=0.20/(2*0.15)=0.667,
+    # which clears the default 0.50 gate but must fail a stricter 0.95 gate.
+    rebound_candidate = candidate(rebound_from_low_pct=0.20)
+    assert score_entry(**rebound_candidate).would_trade is True
+    assert score_entry(**rebound_candidate, config=AEVEScoringConfig(rebound_gate=0.95)).would_trade is False
     assert score_entry(**candidate(), config=AEVEScoringConfig(score_gate=2.0)).would_trade is False
     assert score_entry(**candidate(loss_streak=3), config=AEVEScoringConfig(max_loss_streak=2)).would_trade is False
 
@@ -47,7 +51,6 @@ def test_generation_rebound_score_and_loss_streak_thresholds_are_consumed():
 def test_generation_regime_requirement_is_consumed():
     relaxed = AEVEScoringConfig(require_positive_regime=False)
     result = score_entry(**candidate(regime_expectancy_positive=False), config=relaxed)
-    # The regime hard gate is disabled; score can still independently reject weak economics.
     assert isinstance(result.would_trade, bool)
 
 
