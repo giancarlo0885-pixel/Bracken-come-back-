@@ -19,6 +19,7 @@ log = logging.getLogger("paper-aeve-generation-controller")
 _THREAD: threading.Thread | None = None
 _STOP = threading.Event()
 BATCH_SIZE = 1000
+_REQUIRED_RESEARCH_RELATIONS = ("paper_regime_trade_metrics", "trade_ledger")
 
 
 def _truthy(name: str, default: str = "false") -> bool:
@@ -82,8 +83,6 @@ def next_generation(config: AEVEGenerationConfig, d: BatchDiagnostics) -> tuple[
         return config, "insufficient_samples"
 
     if d.economically_positive and d.excursion_ratio > 1.0:
-        # Do not chase noise once the batch is economically positive. Keep the
-        # formula stable so the next 1,000 trades can test durability OOS.
         return replace(config, generation=g), "hold_positive_formula_for_oos_confirmation"
 
     if d.avg_mfe_pct <= abs(d.avg_mae_pct):
@@ -117,9 +116,26 @@ def next_generation(config: AEVEGenerationConfig, d: BatchDiagnostics) -> tuple[
     return replace(config, generation=g, score_gate=min(0.60, config.score_gate + 0.025)), "weak_selection_quality"
 
 
+def _missing_research_relations(conn: Any) -> list[str]:
+    """Return required relations absent from the current PostgreSQL schema."""
+    missing: list[str] = []
+    for relation in _REQUIRED_RESEARCH_RELATIONS:
+        row = conn.execute("SELECT to_regclass(%s) AS relation", (relation,)).fetchone() or {}
+        value = row.get("relation") if hasattr(row, "get") else row[0]
+        if value is None:
+            missing.append(relation)
+    return missing
+
+
 def ensure_schema() -> None:
     if not active():
         return
+
+    # The AEVE research query consumes Regime Economics output. Initialize that
+    # paper-only schema first so service start ordering cannot produce UndefinedTable.
+    from paper_regime_economics_shadow import ensure_schema as ensure_regime_schema
+    ensure_regime_schema()
+
     from database import connect
     with connect() as conn:
         conn.execute("""
@@ -160,6 +176,14 @@ def maybe_advance_generation() -> bool:
         return False
     from database import connect
     with connect() as conn:
+        missing = _missing_research_relations(conn)
+        if missing:
+            log.warning(
+                "AEVE GENERATION CONTROLLER | status=WAITING_FOR_SCHEMA | missing_relations=%s | mode=shadow | execution_impact=NONE | broker_submission=NONE | live_trading=DISARMED",
+                ",".join(missing),
+            )
+            return False
+
         cfg, row = _load_active(conn)
         if not row:
             return False
@@ -219,7 +243,10 @@ def _loop(interval_seconds: float) -> None:
         try:
             maybe_advance_generation()
         except Exception as exc:
-            log.warning("AEVE GENERATION CONTROLLER | status=ERROR | reason=%s", exc.__class__.__name__)
+            log.warning(
+                "AEVE GENERATION CONTROLLER | status=ERROR | reason=%s | detail=%s | mode=shadow | execution_impact=NONE | broker_submission=NONE | live_trading=DISARMED",
+                exc.__class__.__name__, str(exc).replace("\n", " ")[:240],
+            )
 
 
 def install_aeve_generation_controller() -> bool:
