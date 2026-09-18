@@ -19,7 +19,7 @@ log = logging.getLogger("paper-aeve-generation-controller")
 _THREAD: threading.Thread | None = None
 _STOP = threading.Event()
 BATCH_SIZE = 1000
-_REQUIRED_RESEARCH_RELATIONS = ("paper_regime_trade_metrics", "trade_ledger")
+_REQUIRED_RESEARCH_RELATIONS = ("paper_aeve_generation_outcomes",)
 
 
 def _truthy(name: str, default: str = "false") -> bool:
@@ -150,6 +150,23 @@ def ensure_schema() -> None:
                 status TEXT NOT NULL DEFAULT 'ACTIVE'
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS paper_aeve_generation_outcomes (
+                id BIGSERIAL PRIMARY KEY,
+                generation INTEGER NOT NULL,
+                observed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                net_pnl DOUBLE PRECISION NOT NULL,
+                mfe_pct DOUBLE PRECISION,
+                mae_pct DOUBLE PRECISION,
+                excursion_sample_count INTEGER NOT NULL DEFAULT 0,
+                cost_pct DOUBLE PRECISION,
+                config_json JSONB NOT NULL
+            )
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_paper_aeve_generation_outcomes_generation_observed
+            ON paper_aeve_generation_outcomes(generation, observed_at)
+        """)
         row = conn.execute("SELECT generation FROM paper_aeve_generations ORDER BY generation DESC LIMIT 1").fetchone()
         if not row:
             cfg = AEVEGenerationConfig()
@@ -190,13 +207,10 @@ def maybe_advance_generation() -> bool:
         started_at = row.get("started_at")
         batch = conn.execute("""
             WITH x AS (
-                SELECT m.net_pnl,m.mfe_pct,m.mae_pct,m.excursion_sample_count,
-                       CASE WHEN l.quantity>0 AND l.entry_price>0
-                            THEN (l.fees/(l.quantity*l.entry_price))*100.0 END AS cost_pct
-                FROM paper_regime_trade_metrics m
-                JOIN trade_ledger l ON l.trade_id=m.trade_id
-                WHERE m.strategy='oracle_council_v3' AND m.exit_time >= %s
-                ORDER BY m.exit_time ASC
+                SELECT net_pnl,mfe_pct,mae_pct,excursion_sample_count,cost_pct
+                FROM paper_aeve_generation_outcomes
+                WHERE generation=%s AND observed_at >= %s
+                ORDER BY observed_at ASC
                 LIMIT %s
             )
             SELECT COUNT(*) AS samples,
@@ -208,7 +222,7 @@ def maybe_advance_generation() -> bool:
                    AVG(mae_pct) FILTER (WHERE excursion_sample_count>0) AS avg_mae,
                    AVG(cost_pct) AS avg_cost
             FROM x
-        """, (started_at, BATCH_SIZE)).fetchone() or {}
+        """, (cfg.generation, started_at, BATCH_SIZE)).fetchone() or {}
         samples = int(batch.get("samples") or 0)
         if samples < BATCH_SIZE:
             return False
