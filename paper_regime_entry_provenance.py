@@ -11,6 +11,12 @@ from paper_regime_entry_signal_fallback import install_entry_signal_regime_fallb
 
 
 _RAW_REGIME_FIELDS = ("trend_strength", "momentum_20d", "volatility_20d")
+_AEVE_ENTRY_FIELDS = (
+    "net_expected_value_pct", "expected_return_pct", "forecast_return_pct",
+    "possible_move_pct", "expected_move_pct", "edge_pct",
+    "dip_depth_pct", "rebound_pct", "drawdown_from_recent_high_pct",
+    "rsi_14", "rsi_change", "reclaim_strength",
+)
 _BTC_NETWORK_PAYLOAD_FIELDS = (
     "btc_network_source",
     "btc_network_observed_at",
@@ -80,7 +86,7 @@ def _runtime_signal_value(signal: Any, key: str) -> Any:
 
 def _enrich_persisted_signal_payload(signal: Any, existing: Any) -> dict[str, Any]:
     payload = dict(existing) if isinstance(existing, dict) else {}
-    for key in _RAW_REGIME_FIELDS:
+    for key in _RAW_REGIME_FIELDS + _AEVE_ENTRY_FIELDS:
         if key in payload and _finite(payload.get(key)) is not None:
             continue
         value = _finite(_runtime_signal_value(signal, key))
@@ -117,7 +123,7 @@ def _install_signal_payload_provenance(worker_module: Any) -> bool:
 
 def _enrich_entry_features(oracle_module: Any, signal: Any, existing: Any) -> dict[str, Any]:
     features = dict(existing) if isinstance(existing, dict) else {}
-    for key in _RAW_REGIME_FIELDS:
+    for key in _RAW_REGIME_FIELDS + _AEVE_ENTRY_FIELDS:
         if key in features and _finite(features.get(key)) is not None:
             continue
         value = _finite(oracle_module.signal_value(signal, key, None))
