@@ -192,3 +192,45 @@ def test_signed_my_filters_uses_weight_40_and_does_not_send_secret():
     assert "signature" in session.params
     assert "super-secret" not in str(session.params)
     assert session.headers["X-MBX-APIKEY"] == "public-key"
+
+
+
+def test_signed_user_stream_subscription_and_envelope():
+    import binance_us_execution_compat as compat
+
+    request = compat.signed_user_stream_subscription(
+        api_key="public-key",
+        secret_key="super-secret",
+        request_id="oracle-1",
+        timestamp_ms=1700000000000,
+    )
+    assert request["method"] == "userDataStream.subscribe.signature"
+    assert request["params"]["apiKey"] == "public-key"
+    assert "signature" in request["params"]
+    assert "super-secret" not in str(request)
+
+    normalized = compat.unwrap_user_stream_event({
+        "subscriptionId": 7,
+        "event": {"e": "executionReport", "s": "BTCUSD", "X": "FILLED"},
+    })
+    assert normalized["subscription_id"] == 7
+    assert normalized["event_type"] == "executionReport"
+    assert normalized["event"]["X"] == "FILLED"
+
+
+def test_user_stream_termination_requires_reconnect_and_external_lock_is_visible():
+    import binance_us_execution_compat as compat
+
+    guard = compat.BinanceUsWebSocketGuard()
+    guard.on_open()
+    assert guard.on_text_event({
+        "subscriptionId": 1,
+        "event": {"e": "eventStreamTerminated"},
+    }) is True
+    assert guard.reconnect_reason == "BINANCE_US_USER_STREAM_TERMINATED"
+
+    lock = compat.unwrap_user_stream_event({
+        "subscriptionId": 1,
+        "event": {"e": "externalLockUpdate", "a": "BTC", "d": "-0.1"},
+    })
+    assert lock["external_lock_update"] is True
