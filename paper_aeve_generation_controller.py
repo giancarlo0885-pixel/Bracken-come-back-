@@ -213,7 +213,7 @@ def record_generation_outcomes(limit: int = 250) -> int:
         config_snapshot = asdict(cfg)
         rows = list(conn.execute("""
             SELECT m.trade_id,m.regime,m.entry_time,m.exit_time,m.net_pnl,m.mfe_pct,m.mae_pct,
-                   m.excursion_sample_count,l.quantity,l.entry_price,l.fees
+                   m.excursion_sample_count,l.quantity,l.entry_price,l.fees,l.feature_snapshot
             FROM paper_regime_trade_metrics m
             JOIN trade_ledger l ON l.trade_id=m.trade_id
             WHERE m.strategy='oracle_council_v3' AND m.exit_time >= %s
@@ -243,17 +243,26 @@ def record_generation_outcomes(limit: int = 250) -> int:
             qty, price = _f(row.get("quantity")), _f(row.get("entry_price"))
             if qty > 0 and price > 0:
                 cost_pct = max(0.0, (_f(row.get("fees")) / (qty * price)) * 100.0)
-            # AEVE has no contemporaneous directional edge/rebound feed yet.
-            # Fail closed instead of substituting future outcome data.
+            features = row.get("feature_snapshot") if isinstance(row.get("feature_snapshot"), dict) else {}
+            edge = None
+            for key in ("net_expected_value_pct","expected_return_pct","forecast_return_pct","possible_move_pct","expected_move_pct","edge_pct"):
+                if key in features and features.get(key) is not None:
+                    edge = _f(features.get(key))
+                    break
+            dip_depth = features.get("dip_depth_pct")
+            rebound = features.get("rebound_pct")
+            # Fail closed when immutable entry-time AEVE evidence is absent. Never
+            # substitute post-entry excursion or realized P&L for candidate inputs.
+            entry_evidence_complete = edge is not None and dip_depth is not None and rebound is not None
             decision = score_entry(
-                expected_net_edge_pct=0.0,
+                expected_net_edge_pct=edge if entry_evidence_complete else 0.0,
                 mfe_pct=max(0.0, _f(prior.get("mfe"))),
                 mae_pct=min(0.0, _f(prior.get("mae"))),
                 round_trip_cost_pct=cost_pct,
                 loss_streak=0,
-                price_above_recent_low_pct=0.0,
-                rebound_from_low_pct=0.0,
-                rsi=None,
+                price_above_recent_low_pct=(max(0.0, _f(rebound)) * 100.0) if entry_evidence_complete else 0.0,
+                rebound_from_low_pct=(max(0.0, _f(rebound)) * 100.0) if entry_evidence_complete else 0.0,
+                rsi=(_f(features.get("rsi_14"), 50.0) if features.get("rsi_14") is not None else None),
                 trend_confirmed=False,
                 regime_expectancy_positive=bool(samples >= 30 and _f(prior.get("expectancy")) > 0),
                 profit_factor=pf,
@@ -269,7 +278,7 @@ def record_generation_outcomes(limit: int = 250) -> int:
             """, (
                 cfg.generation,row.get("trade_id"),row.get("exit_time"),_f(row.get("net_pnl")),
                 row.get("mfe_pct"),row.get("mae_pct"),int(row.get("excursion_sample_count") or 0),
-                cost_pct,decision.would_trade,decision.score,json.dumps(config_snapshot),
+                cost_pct,(decision.would_trade if entry_evidence_complete else False),decision.score,json.dumps(config_snapshot),
             ))
             created += 1
     return created

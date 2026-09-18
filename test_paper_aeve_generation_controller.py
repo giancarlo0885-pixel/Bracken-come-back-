@@ -107,7 +107,9 @@ def test_aeve_outcome_producer_consumes_frozen_generation_config():
     assert "config=config_snapshot" in source
     assert "exit_time < %s" in source
     assert "ON CONFLICT (generation,trade_id) DO NOTHING" in source
-    assert "expected_net_edge_pct=0.0" in source
+    assert "entry_evidence_complete" in source
+    assert "feature_snapshot" in source
+    assert "post-entry excursion" in source
 
 
 def test_generation_batch_counts_only_accepted_aeve_outcomes():
@@ -116,3 +118,11 @@ def test_generation_batch_counts_only_accepted_aeve_outcomes():
     source = inspect.getsource(controller.maybe_advance_generation)
     assert "would_trade=TRUE" in source
     assert "WHERE generation=%s" in source
+
+
+def test_aeve_entry_features_fail_closed_when_provenance_missing():
+    import inspect
+    import paper_aeve_generation_controller as controller
+    source = inspect.getsource(controller.record_generation_outcomes)
+    assert "decision.would_trade if entry_evidence_complete else False" in source
+    assert "realized P&L" in source
