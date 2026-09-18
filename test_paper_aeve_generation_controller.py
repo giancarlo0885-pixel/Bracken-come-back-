@@ -98,3 +98,21 @@ def test_generation_controller_uses_only_generation_isolated_outcomes():
     assert "WHERE generation=%s" in source
     assert "oracle_council_v3" not in source
     assert "paper_regime_trade_metrics" not in source
+
+
+def test_aeve_outcome_producer_consumes_frozen_generation_config():
+    import inspect
+    import paper_aeve_generation_controller as controller
+    source = inspect.getsource(controller.record_generation_outcomes)
+    assert "config=config_snapshot" in source
+    assert "exit_time < %s" in source
+    assert "ON CONFLICT (generation,trade_id) DO NOTHING" in source
+    assert "expected_net_edge_pct=0.0" in source
+
+
+def test_generation_batch_counts_only_accepted_aeve_outcomes():
+    import inspect
+    import paper_aeve_generation_controller as controller
+    source = inspect.getsource(controller.maybe_advance_generation)
+    assert "would_trade=TRUE" in source
+    assert "WHERE generation=%s" in source
