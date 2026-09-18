@@ -19,7 +19,7 @@ log = logging.getLogger("paper-aeve-generation-controller")
 _THREAD: threading.Thread | None = None
 _STOP = threading.Event()
 BATCH_SIZE = 1000
-_REQUIRED_RESEARCH_RELATIONS = ("paper_regime_trade_metrics", "trade_ledger")
+_REQUIRED_RESEARCH_RELATIONS = ("paper_aeve_generation_outcomes",)
 
 
 def _truthy(name: str, default: str = "false") -> bool:
@@ -150,6 +150,27 @@ def ensure_schema() -> None:
                 status TEXT NOT NULL DEFAULT 'ACTIVE'
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS paper_aeve_generation_outcomes (
+                id BIGSERIAL PRIMARY KEY,
+                generation INTEGER NOT NULL,
+                observed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                trade_id TEXT NOT NULL,
+                net_pnl DOUBLE PRECISION NOT NULL,
+                mfe_pct DOUBLE PRECISION,
+                mae_pct DOUBLE PRECISION,
+                excursion_sample_count INTEGER NOT NULL DEFAULT 0,
+                cost_pct DOUBLE PRECISION,
+                would_trade BOOLEAN NOT NULL,
+                score DOUBLE PRECISION NOT NULL,
+                config_json JSONB NOT NULL,
+                UNIQUE(generation, trade_id)
+            )
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_paper_aeve_generation_outcomes_generation_observed
+            ON paper_aeve_generation_outcomes(generation, observed_at)
+        """)
         row = conn.execute("SELECT generation FROM paper_aeve_generations ORDER BY generation DESC LIMIT 1").fetchone()
         if not row:
             cfg = AEVEGenerationConfig()
@@ -170,6 +191,90 @@ def _load_active(conn: Any) -> tuple[AEVEGenerationConfig, Any]:
     return cfg, row
 
 
+
+def record_generation_outcomes(limit: int = 250) -> int:
+    """Materialize forward AEVE shadow outcomes with immutable generation config.
+
+    Council remains the factual control outcome. AEVE acceptance is recomputed only
+    from information available before each Council entry; future P&L is used solely
+    as the measured counterfactual outcome after the frozen decision is recorded.
+    """
+    if not active():
+        return 0
+    from database import connect
+    from paper_aeve_v1_formula import score_entry
+
+    created = 0
+    with connect() as conn:
+        cfg, generation_row = _load_active(conn)
+        if not generation_row:
+            return 0
+        started_at = generation_row.get("started_at")
+        config_snapshot = asdict(cfg)
+        rows = list(conn.execute("""
+            SELECT m.trade_id,m.regime,m.entry_time,m.exit_time,m.net_pnl,m.mfe_pct,m.mae_pct,
+                   m.excursion_sample_count,l.quantity,l.entry_price,l.fees
+            FROM paper_regime_trade_metrics m
+            JOIN trade_ledger l ON l.trade_id=m.trade_id
+            WHERE m.strategy='oracle_council_v3' AND m.exit_time >= %s
+              AND m.entry_time IS NOT NULL AND m.exit_time IS NOT NULL
+              AND NOT EXISTS (
+                  SELECT 1 FROM paper_aeve_generation_outcomes o
+                  WHERE o.generation=%s AND o.trade_id=m.trade_id
+              )
+            ORDER BY m.exit_time ASC LIMIT %s
+        """, (started_at, cfg.generation, max(1, int(limit)))).fetchall())
+
+        for row in rows:
+            entry_time = row.get("entry_time")
+            prior = conn.execute("""
+                SELECT COUNT(*) AS samples,AVG(net_pnl) AS expectancy,
+                       SUM(CASE WHEN net_pnl>0 THEN net_pnl ELSE 0 END) AS gross_win,
+                       ABS(SUM(CASE WHEN net_pnl<0 THEN net_pnl ELSE 0 END)) AS gross_loss,
+                       AVG(mfe_pct) FILTER (WHERE excursion_sample_count>0) AS mfe,
+                       AVG(mae_pct) FILTER (WHERE excursion_sample_count>0) AS mae
+                FROM paper_regime_trade_metrics
+                WHERE strategy='oracle_council_v3' AND regime=%s AND exit_time < %s
+            """, (row.get("regime"), entry_time)).fetchone() or {}
+            samples = int(prior.get("samples") or 0)
+            gross_loss = _f(prior.get("gross_loss"))
+            pf = (_f(prior.get("gross_win")) / gross_loss) if gross_loss > 0 else 0.0
+            cost_pct = 0.0
+            qty, price = _f(row.get("quantity")), _f(row.get("entry_price"))
+            if qty > 0 and price > 0:
+                cost_pct = max(0.0, (_f(row.get("fees")) / (qty * price)) * 100.0)
+            # AEVE has no contemporaneous directional edge/rebound feed yet.
+            # Fail closed instead of substituting future outcome data.
+            decision = score_entry(
+                expected_net_edge_pct=0.0,
+                mfe_pct=max(0.0, _f(prior.get("mfe"))),
+                mae_pct=min(0.0, _f(prior.get("mae"))),
+                round_trip_cost_pct=cost_pct,
+                loss_streak=0,
+                price_above_recent_low_pct=0.0,
+                rebound_from_low_pct=0.0,
+                rsi=None,
+                trend_confirmed=False,
+                regime_expectancy_positive=bool(samples >= 30 and _f(prior.get("expectancy")) > 0),
+                profit_factor=pf,
+                min_samples=samples,
+                config=config_snapshot,
+            )
+            conn.execute("""
+                INSERT INTO paper_aeve_generation_outcomes(
+                    generation,trade_id,observed_at,net_pnl,mfe_pct,mae_pct,
+                    excursion_sample_count,cost_pct,would_trade,score,config_json
+                ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb)
+                ON CONFLICT (generation,trade_id) DO NOTHING
+            """, (
+                cfg.generation,row.get("trade_id"),row.get("exit_time"),_f(row.get("net_pnl")),
+                row.get("mfe_pct"),row.get("mae_pct"),int(row.get("excursion_sample_count") or 0),
+                cost_pct,decision.would_trade,decision.score,json.dumps(config_snapshot),
+            ))
+            created += 1
+    return created
+
+
 def maybe_advance_generation() -> bool:
     """Advance after exactly one new 1,000-trade forward window; paper telemetry only."""
     if not active():
@@ -184,19 +289,17 @@ def maybe_advance_generation() -> bool:
             )
             return False
 
+        record_generation_outcomes()
         cfg, row = _load_active(conn)
         if not row:
             return False
         started_at = row.get("started_at")
         batch = conn.execute("""
             WITH x AS (
-                SELECT m.net_pnl,m.mfe_pct,m.mae_pct,m.excursion_sample_count,
-                       CASE WHEN l.quantity>0 AND l.entry_price>0
-                            THEN (l.fees/(l.quantity*l.entry_price))*100.0 END AS cost_pct
-                FROM paper_regime_trade_metrics m
-                JOIN trade_ledger l ON l.trade_id=m.trade_id
-                WHERE m.strategy='oracle_council_v3' AND m.exit_time >= %s
-                ORDER BY m.exit_time ASC
+                SELECT net_pnl,mfe_pct,mae_pct,excursion_sample_count,cost_pct
+                FROM paper_aeve_generation_outcomes
+                WHERE generation=%s AND observed_at >= %s AND would_trade=TRUE
+                ORDER BY observed_at ASC
                 LIMIT %s
             )
             SELECT COUNT(*) AS samples,
@@ -208,7 +311,7 @@ def maybe_advance_generation() -> bool:
                    AVG(mae_pct) FILTER (WHERE excursion_sample_count>0) AS avg_mae,
                    AVG(cost_pct) AS avg_cost
             FROM x
-        """, (started_at, BATCH_SIZE)).fetchone() or {}
+        """, (cfg.generation, started_at, BATCH_SIZE)).fetchone() or {}
         samples = int(batch.get("samples") or 0)
         if samples < BATCH_SIZE:
             return False
