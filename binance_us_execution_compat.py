@@ -276,6 +276,55 @@ def normalize_execution_report(event: Mapping[str, Any]) -> dict[str, Any] | Non
     }
 
 
+BINANCE_US_USER_STREAM_SUBSCRIBE_METHOD = "userDataStream.subscribe.signature"
+BINANCE_US_USER_STREAM_UNSUBSCRIBE_METHOD = "userDataStream.unsubscribe"
+BINANCE_US_USER_STREAM_WEIGHT = 2
+
+
+def signed_user_stream_subscription(
+    *,
+    api_key: str,
+    secret_key: str,
+    request_id: str,
+    timestamp_ms: int | None = None,
+    recv_window: int = 5000,
+) -> dict[str, Any]:
+    """Build the replacement signed WebSocket User Data Stream request."""
+    key = str(api_key or "").strip()
+    secret = str(secret_key or "")
+    if not key or not secret:
+        raise ValueError("BINANCE_US_API_CREDENTIALS_MISSING")
+    window = max(1, min(60_000, int(recv_window)))
+    ts = int(timestamp_ms if timestamp_ms is not None else time.time() * 1000)
+    unsigned = [("apiKey", key), ("recvWindow", window), ("timestamp", ts)]
+    _, signature = sign_percent_encoded_payload(unsigned, secret)
+    return {
+        "id": str(request_id),
+        "method": BINANCE_US_USER_STREAM_SUBSCRIBE_METHOD,
+        "params": {
+            "apiKey": key,
+            "recvWindow": window,
+            "timestamp": ts,
+            "signature": signature,
+        },
+    }
+
+
+def unwrap_user_stream_event(message: Mapping[str, Any]) -> dict[str, Any]:
+    """Normalize the 2026 signed-subscription envelope and control events."""
+    wrapped = message.get("event")
+    event = dict(wrapped) if isinstance(wrapped, Mapping) else dict(message)
+    subscription_id = message.get("subscriptionId") if isinstance(wrapped, Mapping) else None
+    event_type = str(event.get("e") or "")
+    return {
+        "subscription_id": subscription_id,
+        "event": event,
+        "event_type": event_type,
+        "terminated": event_type == "eventStreamTerminated",
+        "external_lock_update": event_type == "externalLockUpdate",
+    }
+
+
 @dataclass
 class BinanceUsWebSocketGuard:
     """Protocol guard for Binance.US WebSocket heartbeat and shutdown semantics."""
@@ -302,9 +351,15 @@ class BinanceUsWebSocketGuard:
         self.last_pong_at = self.clock()
 
     def on_text_event(self, event: Mapping[str, Any]) -> bool:
-        if str(event.get("e") or "") == "serverShutdown":
+        normalized = unwrap_user_stream_event(event)
+        payload = normalized["event"]
+        if str(payload.get("e") or "") == "serverShutdown":
             self.reconnect_required = True
             self.reconnect_reason = "BINANCE_US_SERVER_SHUTDOWN"
+            return True
+        if normalized["terminated"]:
+            self.reconnect_required = True
+            self.reconnect_reason = "BINANCE_US_USER_STREAM_TERMINATED"
             return True
         return False
 
