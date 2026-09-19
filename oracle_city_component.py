@@ -55,10 +55,16 @@ input[type=range]{width:100%;accent-color:#55d4ff}
 .fallback-card b{font-size:11px}.fallback-card span{display:block;color:#8ba8b8;font-size:9px;margin-top:3px}
 #status{position:absolute;z-index:6;left:50%;top:50%;transform:translate(-50%,-50%);padding:8px 10px;border-radius:9px;background:rgba(2,8,12,.88);border:1px solid #244d65;color:#9ec2d4;font-size:10px}
 @media(max-width:720px){
-  #app{min-height:760px}.brand{max-width:240px}.brand span{display:none}
-  .toolbar{display:grid;grid-template-columns:1fr 1fr}.legend{display:none}
-  .replay{left:14px;right:14px;width:auto;bottom:14px}
-  .inspector{left:14px;right:14px;width:auto;bottom:112px}
+  #app{min-height:820px}
+  .topbar{left:8px;right:8px;top:8px;gap:6px}
+  .brand{max-width:165px;padding:8px 9px}.brand b{font-size:10px}.brand span{display:none}
+  .toolbar{display:grid;grid-template-columns:1fr 1fr;gap:4px;padding:4px}
+  button{padding:6px 7px;font-size:9px}
+  .legend{display:none}
+  .label{display:none}
+  .replay{left:8px;right:8px;width:auto;bottom:8px;padding:8px 9px}
+  .inspector{left:8px;right:8px;width:auto;bottom:96px;padding:10px;max-height:150px;overflow:auto}
+  .inspector h3{font-size:14px}.inspector .metric{font-size:11px}.inspector p{font-size:10px}
 }
 </style>
 <script type="importmap">
@@ -447,8 +453,18 @@ document.getElementById("autorotate").onclick=function(){
   controls.autoRotate=!controls.autoRotate;controls.autoRotateSpeed=.65;
   this.classList.toggle("active",controls.autoRotate);
 };
+function mobileView(){
+  return window.matchMedia && window.matchMedia("(max-width:720px)").matches;
+}
 function resetView(){
-  camera.position.set(17,18,27);controls.target.set(2.5,1.8,0);controls.update();
+  if(mobileView()){
+    camera.position.set(2.5,31,28);
+    controls.target.set(2.5,1.4,0);
+  }else{
+    camera.position.set(17,18,27);
+    controls.target.set(2.5,1.8,0);
+  }
+  controls.update();
 }
 document.getElementById("reset").onclick=resetView;
 document.getElementById("topview").onclick=function(){
@@ -509,11 +525,17 @@ play.onclick=function(){
 };
 showReplay(replayIndex);
 
+let lastMobileView=null;
 function resize(){
   const width=app.clientWidth,height=app.clientHeight;
   camera.aspect=width/height;camera.updateProjectionMatrix();
   renderer.setSize(width,height,false);
   labelRenderer.setSize(width,height);
+  const isMobile=mobileView();
+  if(lastMobileView===null || lastMobileView!==isMobile){
+    lastMobileView=isMobile;
+    if(!brainMode)resetView();
+  }
 }
 new ResizeObserver(resize).observe(app);
 resize();
