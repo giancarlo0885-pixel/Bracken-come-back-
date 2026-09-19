@@ -15,6 +15,13 @@ from explainable_ai import build_explainability
 from research_lab import build_research_report
 from portfolio_supercomputer import assess_portfolio_supercomputer
 from oracle_one import finalize_decision
+from hybrid_confluence import assess_hybrid_confluence
+from config import (
+    EXECUTION_MODE,
+    PAPER_BROKER_MODE,
+    SUPER_HYBRID_ENABLED,
+    SUPER_HYBRID_PAPER_IMPACT_ENABLED,
+)
 
 
 def _value(obj: Any, name: str, default: Any = None) -> Any:
@@ -52,6 +59,7 @@ class OracleDecision:
     radar: dict[str, Any]
     explainability: dict[str, Any]
     research: dict[str, Any]
+    hybrid: dict[str, Any]
     portfolio_supercomputer: dict[str, Any]
     oracle_one: dict[str, Any]
     base_opportunity_score: float
@@ -97,7 +105,16 @@ def evaluate_opportunity(
     base_quality = assessment.trade_quality
     global_intelligence = assess_global_intelligence(signal, global_context, market=market)
     radar = assess_opportunity_radar(signal, market=market)
-    adjusted_quality = max(0.0, min(100.0, base_quality + memory.score_adjustment + global_intelligence.score_adjustment + radar.radar_adjustment))
+    pre_hybrid_quality = max(
+        0.0,
+        min(
+            100.0,
+            base_quality
+            + memory.score_adjustment
+            + global_intelligence.score_adjustment
+            + radar.radar_adjustment,
+        ),
+    )
 
     atr_pct = max(0.004, _number(_value(signal, "atr_pct", 0.02), 0.02))
     expected_upside = max(0.012, atr_pct * 2.2)
@@ -110,6 +127,39 @@ def evaluate_opportunity(
     expected_upside = max(expected_upside, scenario.upside_capture_pct / 100.0)
     expected_downside = max(expected_downside, scenario.downside_risk_pct / 100.0)
     rr = expected_upside / expected_downside if expected_downside else 0.0
+
+    hybrid_assessment = assess_hybrid_confluence(
+        signal,
+        market=market,
+        quant=assessment,
+        memory=memory,
+        global_intelligence=global_intelligence,
+        radar=radar,
+        scenario=scenario,
+    )
+    paper_hybrid_impact = bool(
+        SUPER_HYBRID_ENABLED
+        and SUPER_HYBRID_PAPER_IMPACT_ENABLED
+        and PAPER_BROKER_MODE
+        and EXECUTION_MODE == "paper"
+    )
+    applied_hybrid_adjustment = (
+        hybrid_assessment.score_adjustment if paper_hybrid_impact else 0.0
+    )
+    adjusted_quality = max(
+        0.0,
+        min(100.0, pre_hybrid_quality + applied_hybrid_adjustment),
+    )
+    hybrid_payload = {
+        **hybrid_assessment.to_dict(),
+        "enabled": bool(SUPER_HYBRID_ENABLED),
+        "paper_score_impact_applied": paper_hybrid_impact,
+        "applied_adjustment": round(applied_hybrid_adjustment, 2),
+        "pre_hybrid_quality": round(pre_hybrid_quality, 2),
+        "post_hybrid_quality": round(adjusted_quality, 2),
+        "execution_authority": "NONE",
+        "live_money_impact": "NONE",
+    }
 
     if adjusted_quality >= 90:
         grade = "ELITE"
@@ -157,6 +207,7 @@ def evaluate_opportunity(
         "recommendation": preliminary_recommendation,
         "quant": assessment.to_dict(),
         "scenario": scenario.to_dict(),
+        "hybrid": hybrid_payload,
     }
     capital = assess_capital_allocation(
         signal,
@@ -215,8 +266,10 @@ def evaluate_opportunity(
         f"{grade}: quality {adjusted_quality:.1f} (base {base_quality:.1f}, memory {memory.score_adjustment:+.1f}), "
         f"net EV {assessment.net_expected_value_pct:.2%}, execution {assessment.execution_score:.0f}, "
         f"risk {assessment.risk_score:.0f}, relative value {assessment.relative_value_score:.0f}, global {global_intelligence.global_score:.0f}, "
-        f"radar {radar.setup_score:.0f} ({radar.primary_setup.title()}). "
-        f"{memory.summary} {global_intelligence.summary} {radar.summary} {scenario.summary} {capital.summary} "
+        f"radar {radar.setup_score:.0f} ({radar.primary_setup.title()}), "
+        f"hybrid {hybrid_assessment.score:.1f} ({applied_hybrid_adjustment:+.2f} applied). "
+        f"{memory.summary} {global_intelligence.summary} {radar.summary} {scenario.summary} "
+        f"{hybrid_assessment.summary} {capital.summary} "
         f"{portfolio_supercomputer.summary} {oracle_one.summary}"
     )
     return OracleDecision(
@@ -239,6 +292,7 @@ def evaluate_opportunity(
         radar=radar.to_dict(),
         explainability=explainability.to_dict(),
         research=research.to_dict(),
+        hybrid=hybrid_payload,
         portfolio_supercomputer=portfolio_supercomputer.to_dict(),
         oracle_one=oracle_one.to_dict(),
         base_opportunity_score=round(base_quality, 2),
