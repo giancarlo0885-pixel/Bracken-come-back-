@@ -81,13 +81,15 @@ input[type=range]{width:100%;accent-color:#55d4ff}
       <button id="flows" class="active">FLOWS ON</button>
       <button id="autorotate">AUTO ROTATE</button>
       <button id="topview">TOP VIEW</button>
+      <button id="brain">BRAIN MAP</button>
     </div>
   </div>
   <div class="legend">
     <div><i class="dot" style="background:#4df49b"></i>healthy / live state</div>
     <div><i class="dot" style="background:#ffd166"></i>waiting / partial state</div>
     <div><i class="dot" style="background:#ff6767"></i>offline / error state</div>
-    <div><i class="dot" style="background:#59cfff"></i>data flow / replay path</div>
+    <div><i class="dot" style="background:#59cfff"></i>data flow / evidence</div>
+    <div><i class="dot" style="background:#a86dff"></i>decision node in Brain Map</div>
   </div>
   <div class="inspector" id="inspector">
     <div class="eyebrow">ORACLE CITY</div>
