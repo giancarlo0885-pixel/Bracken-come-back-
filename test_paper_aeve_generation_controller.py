@@ -2,6 +2,7 @@ from paper_aeve_generation_controller import (
     AEVEGenerationConfig,
     BatchDiagnostics,
     BATCH_SIZE,
+    PROVENANCE_VERSION,
     _decode_generation_row,
     _missing_research_relations,
     generation_config_hash,
@@ -125,6 +126,18 @@ def test_generation_batch_counts_only_accepted_aeve_outcomes():
     assert "would_trade=TRUE" in source
     assert "WHERE generation=%s" in source
     assert "config_hash=%s" in source
+    assert "provenance_version=%s" in source
+    assert PROVENANCE_VERSION == 2
+
+
+def test_legacy_outcomes_are_not_retroactively_certified_for_advancement():
+    import inspect
+    import paper_aeve_generation_controller as controller
+    schema_source = inspect.getsource(controller.ensure_schema)
+    producer_source = inspect.getsource(controller.record_generation_outcomes)
+    assert "provenance_version SMALLINT NOT NULL DEFAULT 1" in schema_source
+    assert "config_hash=%s AND provenance_version=%s" in inspect.getsource(controller.maybe_advance_generation)
+    assert "json.dumps(config_snapshot),config_hash,PROVENANCE_VERSION" in producer_source
 
 
 def test_aeve_entry_features_fail_closed_when_provenance_missing():

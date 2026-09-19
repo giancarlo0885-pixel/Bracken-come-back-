@@ -20,6 +20,7 @@ log = logging.getLogger("paper-aeve-generation-controller")
 _THREAD: threading.Thread | None = None
 _STOP = threading.Event()
 BATCH_SIZE = 1000
+PROVENANCE_VERSION = 2
 _REQUIRED_RESEARCH_RELATIONS = ("paper_aeve_generation_outcomes",)
 
 
@@ -203,11 +204,15 @@ def ensure_schema() -> None:
                 score DOUBLE PRECISION NOT NULL,
                 config_json JSONB NOT NULL,
                 config_hash TEXT,
+                provenance_version SMALLINT NOT NULL DEFAULT 1,
                 UNIQUE(generation, trade_id)
             )
         """)
         conn.execute("ALTER TABLE paper_aeve_generations ADD COLUMN IF NOT EXISTS config_hash TEXT")
         conn.execute("ALTER TABLE paper_aeve_generation_outcomes ADD COLUMN IF NOT EXISTS config_hash TEXT")
+        conn.execute(
+            "ALTER TABLE paper_aeve_generation_outcomes ADD COLUMN IF NOT EXISTS provenance_version SMALLINT NOT NULL DEFAULT 1"
+        )
         generation_rows = list(conn.execute(
             "SELECT generation,config_json,config_hash FROM paper_aeve_generations"
         ).fetchall())
@@ -238,7 +243,7 @@ def ensure_schema() -> None:
         """)
         conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_paper_aeve_generation_outcomes_identity_observed
-            ON paper_aeve_generation_outcomes(generation, config_hash, observed_at)
+            ON paper_aeve_generation_outcomes(generation, config_hash, provenance_version, observed_at)
         """)
         row = conn.execute("SELECT generation FROM paper_aeve_generations ORDER BY generation DESC LIMIT 1").fetchone()
         if not row:
@@ -280,9 +285,10 @@ def record_generation_outcomes(limit: int = 250) -> int:
         if not active_generation_row:
             return 0
         log.info(
-            "AEVE EVALUATOR HANDSHAKE | generation=%s | config_hash=%s | config=%s | mode=shadow | execution_impact=NONE | broker_submission=NONE | live_trading=DISARMED",
+            "AEVE EVALUATOR HANDSHAKE | generation=%s | config_hash=%s | provenance_version=%s | config=%s | mode=shadow | execution_impact=NONE | broker_submission=NONE | live_trading=DISARMED",
             active_cfg.generation,
             active_generation_row.get("config_hash"),
+            PROVENANCE_VERSION,
             json.dumps(generation_config_payload(active_cfg), sort_keys=True, separators=(",", ":")),
         )
         rows = list(conn.execute("""
@@ -363,18 +369,19 @@ def record_generation_outcomes(limit: int = 250) -> int:
             conn.execute("""
                 INSERT INTO paper_aeve_generation_outcomes(
                     generation,trade_id,observed_at,net_pnl,mfe_pct,mae_pct,
-                    excursion_sample_count,cost_pct,would_trade,score,config_json,config_hash
-                ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s)
+                    excursion_sample_count,cost_pct,would_trade,score,config_json,config_hash,
+                    provenance_version
+                ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s)
                 ON CONFLICT (generation,trade_id) DO NOTHING
             """, (
                 cfg.generation,row.get("trade_id"),row.get("exit_time"),_f(row.get("net_pnl")),
                 row.get("mfe_pct"),row.get("mae_pct"),int(row.get("excursion_sample_count") or 0),
                 cost_pct,(decision.would_trade if entry_evidence_complete else False),decision.score,
-                json.dumps(config_snapshot),config_hash,
+                json.dumps(config_snapshot),config_hash,PROVENANCE_VERSION,
             ))
             log.info(
-                "AEVE SHADOW RESULT | trade_id=%s | generation=%s | config_hash=%s | would_trade=%s | score=%.6f | mode=shadow | execution_impact=NONE | broker_submission=NONE | live_trading=DISARMED",
-                row.get("trade_id"), cfg.generation, config_hash,
+                "AEVE SHADOW RESULT | trade_id=%s | generation=%s | config_hash=%s | provenance_version=%s | would_trade=%s | score=%.6f | mode=shadow | execution_impact=NONE | broker_submission=NONE | live_trading=DISARMED",
+                row.get("trade_id"), cfg.generation, config_hash, PROVENANCE_VERSION,
                 bool(decision.would_trade if entry_evidence_complete else False), decision.score,
             )
             created += 1
@@ -404,7 +411,8 @@ def maybe_advance_generation() -> bool:
             WITH x AS (
                 SELECT net_pnl,mfe_pct,mae_pct,excursion_sample_count,cost_pct
                 FROM paper_aeve_generation_outcomes
-                WHERE generation=%s AND config_hash=%s AND would_trade=TRUE
+                WHERE generation=%s AND config_hash=%s AND provenance_version=%s
+                  AND would_trade=TRUE
                 ORDER BY observed_at ASC
                 LIMIT %s
             )
@@ -417,7 +425,7 @@ def maybe_advance_generation() -> bool:
                    AVG(mae_pct) FILTER (WHERE excursion_sample_count>0) AS avg_mae,
                    AVG(cost_pct) AS avg_cost
             FROM x
-        """, (cfg.generation, config_hash, BATCH_SIZE)).fetchone() or {}
+        """, (cfg.generation, config_hash, PROVENANCE_VERSION, BATCH_SIZE)).fetchone() or {}
         samples = int(batch.get("samples") or 0)
         if samples < BATCH_SIZE:
             return False
