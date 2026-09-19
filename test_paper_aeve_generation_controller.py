@@ -2,9 +2,12 @@ from paper_aeve_generation_controller import (
     AEVEGenerationConfig,
     BatchDiagnostics,
     BATCH_SIZE,
+    _decode_generation_row,
     _missing_research_relations,
+    generation_config_hash,
     next_generation,
 )
+from paper_aeve_v1_formula import score_entry
 
 
 def d(**overrides):
@@ -107,6 +110,9 @@ def test_aeve_outcome_producer_consumes_frozen_generation_config():
     assert "config=config_snapshot" in source
     assert "exit_time < %s" in source
     assert "ON CONFLICT (generation,trade_id) DO NOTHING" in source
+    assert "WHERE started_at <= m.entry_time" in source
+    assert "o.config_hash=g.config_hash" in source
+    assert "AEVE SHADOW RESULT" in source
     assert "entry_evidence_complete" in source
     assert "feature_snapshot" in source
     assert "post-entry excursion" in source
@@ -118,6 +124,7 @@ def test_generation_batch_counts_only_accepted_aeve_outcomes():
     source = inspect.getsource(controller.maybe_advance_generation)
     assert "would_trade=TRUE" in source
     assert "WHERE generation=%s" in source
+    assert "config_hash=%s" in source
 
 
 def test_aeve_entry_features_fail_closed_when_provenance_missing():
@@ -126,3 +133,70 @@ def test_aeve_entry_features_fail_closed_when_provenance_missing():
     source = inspect.getsource(controller.record_generation_outcomes)
     assert "decision.would_trade if entry_evidence_complete else False" in source
     assert "realized P&L" in source
+
+
+def _score_with_persisted_row(row):
+    cfg, identity = _decode_generation_row(row)
+    decision = score_entry(
+        expected_net_edge_pct=0.20,
+        mfe_pct=1.0,
+        mae_pct=-0.10,
+        round_trip_cost_pct=0.05,
+        loss_streak=0,
+        price_above_recent_low_pct=0.10,
+        rebound_from_low_pct=1.0,
+        rsi=43.5,
+        trend_confirmed=True,
+        regime_expectancy_positive=True,
+        profit_factor=1.5,
+        min_samples=100,
+        config=cfg.__dict__,
+    )
+    return identity, decision
+
+
+def test_persisted_generation_config_changes_evaluator_input_and_identity():
+    permissive = AEVEGenerationConfig(generation=7, min_edge_pct=0.05)
+    restrictive = AEVEGenerationConfig(generation=8, min_edge_pct=0.30)
+    permissive_hash, permissive_decision = _score_with_persisted_row({
+        "generation": 7,
+        "config_json": permissive.__dict__,
+        "config_hash": generation_config_hash(permissive),
+    })
+    restrictive_hash, restrictive_decision = _score_with_persisted_row({
+        "generation": 8,
+        "config_json": restrictive.__dict__,
+        "config_hash": generation_config_hash(restrictive),
+    })
+    assert permissive_hash != restrictive_hash
+    assert permissive_decision.would_trade is True
+    assert restrictive_decision.would_trade is False
+
+
+def test_generation_config_hash_rejects_mutated_persisted_config():
+    original = AEVEGenerationConfig(generation=3, min_edge_pct=0.05)
+    mutated = {**original.__dict__, "min_edge_pct": 0.25}
+    try:
+        _decode_generation_row({
+            "generation": 3,
+            "config_json": mutated,
+            "config_hash": generation_config_hash(original),
+        })
+    except ValueError as exc:
+        assert "config hash mismatch" in str(exc)
+    else:
+        raise AssertionError("mutated generation configuration must fail closed")
+
+
+def test_generation_identity_rejects_config_from_another_generation():
+    cfg = AEVEGenerationConfig(generation=4)
+    try:
+        _decode_generation_row({
+            "generation": 5,
+            "config_json": cfg.__dict__,
+            "config_hash": generation_config_hash(cfg),
+        })
+    except ValueError as exc:
+        assert "generation identity mismatch" in str(exc)
+    else:
+        raise AssertionError("cross-generation configuration must fail closed")
