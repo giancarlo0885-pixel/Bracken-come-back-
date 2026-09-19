@@ -230,6 +230,7 @@ def build_decisions(
         fc = matching_forecast((market, symbol), sig)
         payload = _payload(op.get("payload"))
         payload_route = _payload(payload.get("market_data_route"))
+        hybrid = _payload(payload.get("hybrid"))
         confidence = _f(sig.get("confidence"), _f(payload.get("confidence"), score))
         if confidence <= 1:
             confidence *= 100
@@ -333,6 +334,13 @@ def build_decisions(
             "execution_quote_verified": execution_verified,
             "provider_quote_verified": payload.get("provider_quote_verified") is True,
             "paper_reference_verified": payload.get("paper_reference_verified") is True,
+            "hybrid_score": round(_f(hybrid.get("score")), 1) if hybrid else None,
+            "hybrid_tier": str(hybrid.get("tier") or "") if hybrid else "",
+            "hybrid_agreement": round(_f(hybrid.get("cross_signal_agreement")), 1) if hybrid else None,
+            "hybrid_regime_fit": round(_f(hybrid.get("regime_fit")), 1) if hybrid else None,
+            "hybrid_execution_quality": round(_f(hybrid.get("execution_quality")), 1) if hybrid else None,
+            "hybrid_uncertainty": round(_f(hybrid.get("uncertainty_penalty")), 1) if hybrid else None,
+            "hybrid_applied_adjustment": round(_f(hybrid.get("applied_adjustment")), 2) if hybrid else 0.0,
         })
 
     # Trade-ready BUYs first, then other current decisions, with incomplete/stale
