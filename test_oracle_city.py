@@ -147,3 +147,12 @@ def test_oracle_city_component_escapes_script_breakout_payloads():
     rendered = render_oracle_city_component(snapshot)
     assert "</script><script>alert(1)</script>" not in rendered
     assert "\\u003c/script\\u003e" in rendered
+
+
+def test_oracle_city_mobile_layout_suppresses_label_collisions_and_resets_camera():
+    rendered = render_oracle_city_component({"nodes": [], "flows": [], "replay": []})
+    assert "@media(max-width:720px)" in rendered
+    assert ".label{display:none}" in rendered
+    assert 'window.matchMedia("(max-width:720px)")' in rendered
+    assert "camera.position.set(2.5,31,28)" in rendered
+    assert "lastMobileView" in rendered
