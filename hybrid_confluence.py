@@ -5,6 +5,15 @@ import math
 from statistics import pstdev
 from typing import Any
 
+from config import (
+    SUPER_HYBRID_MAX_NEGATIVE_ADJUSTMENT,
+    SUPER_HYBRID_MAX_POSITIVE_ADJUSTMENT,
+    SUPER_HYBRID_MAX_UNCERTAINTY,
+    SUPER_HYBRID_MIN_AGREEMENT,
+    SUPER_HYBRID_MIN_EVIDENCE_COMPLETENESS,
+    SUPER_HYBRID_MIN_EXECUTION_QUALITY,
+)
+
 
 def _get(obj: Any, key: str, default: Any = None) -> Any:
     if isinstance(obj, dict):
@@ -191,16 +200,19 @@ def assess_hybrid_confluence(
         not explicit_veto
         and scenario_ev > 0.0
         and net_ev_raw > 0.0
-        and execution_quality >= 65.0
-        and cross_signal_agreement >= 58.0
-        and uncertainty_penalty <= 45.0
-        and evidence_completeness >= 50.0
+        and execution_quality >= SUPER_HYBRID_MIN_EXECUTION_QUALITY
+        and cross_signal_agreement >= SUPER_HYBRID_MIN_AGREEMENT
+        and uncertainty_penalty <= SUPER_HYBRID_MAX_UNCERTAINTY
+        and evidence_completeness >= SUPER_HYBRID_MIN_EVIDENCE_COMPLETENESS
     )
 
     raw_adjustment = (hybrid_score - 60.0) * 0.10
     if raw_adjustment > 0.0 and not positive_boost_eligible:
         raw_adjustment = 0.0
-    score_adjustment = max(-5.0, min(4.0, raw_adjustment))
+    score_adjustment = max(
+        -SUPER_HYBRID_MAX_NEGATIVE_ADJUSTMENT,
+        min(SUPER_HYBRID_MAX_POSITIVE_ADJUSTMENT, raw_adjustment),
+    )
 
     if hybrid_score >= 82.0 and positive_boost_eligible:
         tier = "SUPER_HYBRID"
