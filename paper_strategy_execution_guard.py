@@ -101,6 +101,40 @@ def _open_position_accumulation_allows(symbol: str) -> tuple[bool, str]:
     return True, f"open_position_accumulation_cooldown_elapsed:{age_minutes:.2f}/{interval:.2f}m"
 
 
+def _with_entry_economics_provenance(signal: Any, verified_quote: dict[str, Any] | None) -> Any:
+    """Attach observed entry-time spread to the paper economics view.
+
+    The worker already verifies quote integrity before this final paper-only guard.
+    Preserve an existing signal spread; otherwise copy the verified quote spread so
+    transaction-cost estimates cannot silently fall back below observed spread.
+    Source signal objects are never mutated.
+    """
+    if not isinstance(verified_quote, dict):
+        return signal
+    observed_spread = verified_quote.get("spread_pct")
+    if observed_spread is None:
+        return signal
+    try:
+        spread = float(observed_spread)
+    except (TypeError, ValueError):
+        return signal
+    if spread < 0 or spread != spread:
+        return signal
+    existing = _value(signal, "spread_pct", None)
+    if existing is not None:
+        return signal
+    if isinstance(signal, dict):
+        clone = dict(signal)
+        clone["spread_pct"] = spread
+        return clone
+    try:
+        clone = copy.copy(signal)
+        setattr(clone, "spread_pct", spread)
+        return clone
+    except Exception:
+        return signal
+
+
 def _with_optimizer_target(signal: Any, target: float) -> Any:
     """Return a shallow signal copy with the paper optimizer target adjusted.
 
@@ -180,7 +214,8 @@ def install_paper_strategy_execution_guard() -> bool:
             )
             return _blocked_buy(accumulation_reason)
 
-        allowed, edge_reason, edge, cost = economics.fee_edge_allows_entry(signal)
+        economics_signal = _with_entry_economics_provenance(signal, verified_quote)
+        allowed, edge_reason, edge, cost = economics.fee_edge_allows_entry(economics_signal)
         if not allowed:
             log.info(
                 "PAPER FEE AWARE ENTRY | symbol=%s | allowed=False | expected_edge_pct=%s | "
