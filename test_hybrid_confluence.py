@@ -66,6 +66,9 @@ def test_super_hybrid_rewards_broad_high_quality_confluence():
     assert result.score >= 70
     assert result.cross_signal_agreement >= 58
     assert result.execution_quality >= 65
+    assert result.source_diversity >= 70
+    assert result.cost_adjusted_conviction >= 50
+    assert result.adversarial_margin > 0
     assert result.positive_boost_eligible is True
     assert result.score_adjustment > 0
     assert result.score_adjustment <= 4.0
@@ -132,3 +135,73 @@ def test_oracle_exposes_hybrid_without_execution_authority():
     assert payload["hybrid"]["execution_authority"] == "NONE"
     assert payload["hybrid"]["live_money_impact"] == "NONE"
     assert -5.0 <= payload["hybrid"]["applied_adjustment"] <= 4.0
+
+
+
+def test_super_hybrid_withholds_boost_when_costs_consume_the_edge():
+    inputs = _strong_inputs()
+    inputs["quant"] = {
+        **inputs["quant"],
+        "net_expected_value_pct": 0.004,
+        "estimated_cost_pct": 0.012,
+    }
+    result = assess_hybrid_confluence(
+        _strong_signal(),
+        market="crypto",
+        **inputs,
+    )
+    assert result.cost_adjusted_conviction < 50
+    assert result.positive_boost_eligible is False
+    assert result.score_adjustment <= 0
+
+
+def test_super_hybrid_regime_memory_distinguishes_bad_matching_history():
+    inputs = _strong_inputs()
+    inputs["memory"] = {
+        **inputs["memory"],
+        "analogs": [
+            {"regime": "risk_on", "return_pct": -0.04},
+            {"regime": "risk_on", "return_pct": -0.03},
+            {"regime": "risk_on", "return_pct": -0.02},
+            {"regime": "neutral", "return_pct": 0.05},
+        ],
+    }
+    result = assess_hybrid_confluence(
+        _strong_signal(regime="risk_on"),
+        market="crypto",
+        **inputs,
+    )
+    assert result.regime_memory_quality < 50
+
+
+def test_super_hybrid_tracks_persistence_and_forecast_calibration():
+    result = assess_hybrid_confluence(
+        _strong_signal(
+            regime="risk_on",
+            consecutive_confirmations=4,
+            forecast_validation_samples=60,
+            directional_accuracy=0.66,
+            calibration_error=0.08,
+        ),
+        market="crypto",
+        **_strong_inputs(),
+    )
+    assert result.edge_persistence >= 85
+    assert result.calibration_confidence > 60
+    assert result.source_diversity == 100
+
+
+def test_super_hybrid_reads_real_market_memory_win_rate_field():
+    inputs = _strong_inputs()
+    inputs["memory"] = {
+        "analog_count": 20,
+        "win_rate": 0.70,
+        "analogs": [],
+        "veto": False,
+    }
+    result = assess_hybrid_confluence(
+        _strong_signal(regime="risk_on"),
+        market="crypto",
+        **inputs,
+    )
+    assert result.historical_edge_quality > 50
