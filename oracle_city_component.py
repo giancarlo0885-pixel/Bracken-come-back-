@@ -75,25 +75,27 @@ input[type=range]{width:100%;accent-color:#55d4ff}
   <div id="fallback"></div>
   <div id="status">Loading Oracle City WebGL...</div>
   <div class="topbar">
-    <div class="brand"><b>GARIBALDI MARKET ORACLE · CITY V2</b><span>Interactive read-only digital twin. Drag to orbit · wheel to zoom · click any building, agent, or position tower.</span></div>
+    <div class="brand"><b>GARIBALDI MARKET ORACLE · CITY V3</b><span>Interactive read-only digital twin + decision provenance brain map. Drag to orbit · wheel to zoom · click any node.</span></div>
     <div class="toolbar">
       <button id="reset">RESET VIEW</button>
       <button id="flows" class="active">FLOWS ON</button>
       <button id="autorotate">AUTO ROTATE</button>
       <button id="topview">TOP VIEW</button>
+      <button id="brain">BRAIN MAP</button>
     </div>
   </div>
   <div class="legend">
     <div><i class="dot" style="background:#4df49b"></i>healthy / live state</div>
     <div><i class="dot" style="background:#ffd166"></i>waiting / partial state</div>
     <div><i class="dot" style="background:#ff6767"></i>offline / error state</div>
-    <div><i class="dot" style="background:#59cfff"></i>data flow / replay path</div>
+    <div><i class="dot" style="background:#59cfff"></i>data flow / evidence</div>
+    <div><i class="dot" style="background:#a86dff"></i>decision node in Brain Map</div>
   </div>
   <div class="inspector" id="inspector">
     <div class="eyebrow">ORACLE CITY</div>
     <h3>Interactive system map</h3>
     <div class="metric">Read-only observability</div>
-    <p>Select a district to inspect its current state. Position towers around Portfolio Vault scale with known marked exposure.</p>
+    <p>Select a district or switch to Brain Map to inspect persisted evidence, decision gates, execution links, and outcomes.</p>
   </div>
   <div class="replay">
     <div class="replay-head">
@@ -289,6 +291,103 @@ function curveFor(source,target){
   flowObjects.push({line:line,particle:particle,curve:curve});
 });
 
+
+const cityVisuals=scene.children.filter(function(object){return !object.isLight;});
+const brainGroup=new THREE.Group();
+brainGroup.visible=false;
+scene.add(brainGroup);
+const brainObjects=new Map();
+const brainEdgeObjects=[];
+const brainData=DATA.decision_graph || {nodes:[],edges:[],summary:{}};
+let brainMode=false;
+
+function brainColor(node){
+  if(node.state==="offline") return 0xff6767;
+  if(node.state==="waiting") return 0xffd166;
+  const byKind={feature:0x59cfff,decision:0xa86dff,gate:0x4df49b,outcome:0x55b8ff};
+  return byKind[node.kind] || 0x9ccfe6;
+}
+function addBrainLabel(mesh,node){
+  if(!node.label)return;
+  const div=document.createElement("div");
+  div.className="label";
+  div.innerHTML=esc(node.title)+"<small>"+esc(node.metric)+"</small>";
+  const label=new CSS2DObject(div);
+  label.position.set(0,Number(node.size || .28)*2.2,0);
+  mesh.add(label);
+}
+(brainData.nodes || []).forEach(function(node){
+  const radius=Math.max(.12,Number(node.size || .28));
+  const color=brainColor(node);
+  const mesh=new THREE.Mesh(
+    new THREE.IcosahedronGeometry(radius,1),
+    new THREE.MeshStandardMaterial({
+      color:color,
+      emissive:color,
+      emissiveIntensity:node.kind==="decision"?.72:.42,
+      metalness:.28,
+      roughness:.3
+    })
+  );
+  mesh.position.set(Number(node.x || 0),Number(node.y || 0),Number(node.z || 0));
+  mesh.userData={type:"brain",data:node,phase:Math.random()*6.28,baseScale:1};
+  addBrainLabel(mesh,node);
+  brainGroup.add(mesh);
+  brainObjects.set(node.id,mesh);
+  interactables.push(mesh);
+});
+(brainData.edges || []).forEach(function(edge,index){
+  const source=brainObjects.get(edge.source);
+  const target=brainObjects.get(edge.target);
+  if(!source || !target)return;
+  const a=source.position.clone();
+  const b=target.position.clone();
+  const mid=a.clone().lerp(b,.5);
+  mid.y+=.35+Math.min(1.2,a.distanceTo(b)*.05);
+  const curve=new THREE.QuadraticBezierCurve3(a,mid,b);
+  const geometry=new THREE.BufferGeometry().setFromPoints(curve.getPoints(24));
+  const blocked=edge.kind==="blocked";
+  const color=blocked?0xff6767:0x59cfff;
+  const line=new THREE.Line(
+    geometry,
+    new THREE.LineBasicMaterial({
+      color:color,
+      transparent:true,
+      opacity:blocked?.8:.28
+    })
+  );
+  brainGroup.add(line);
+  const particle=new THREE.Mesh(
+    new THREE.SphereGeometry(blocked?.055:.045,8,8),
+    new THREE.MeshBasicMaterial({color:blocked?0xff6767:0x7de4ff})
+  );
+  particle.userData={curve:curve,phase:index/Math.max(1,(brainData.edges || []).length)};
+  brainGroup.add(particle);
+  brainEdgeObjects.push({line:line,particle:particle,curve:curve});
+});
+function setBrainMode(enabled){
+  brainMode=enabled;
+  cityVisuals.forEach(function(object){object.visible=!brainMode;});
+  brainGroup.visible=brainMode;
+  const button=document.getElementById("brain");
+  button.classList.toggle("active",brainMode);
+  button.textContent=brainMode?"CITY MAP":"BRAIN MAP";
+  if(brainMode){
+    camera.position.set(14,10,19);
+    controls.target.set(0,2,0);
+    inspector.innerHTML="<div class='eyebrow'>ORACLE BRAIN MAP</div><h3>Decision provenance network</h3><div class='metric'>"+
+      String((brainData.summary || {}).traced_decisions || 0)+" decisions · "+
+      String((brainData.summary || {}).linked_outcomes || 0)+" linked outcomes</div><p>"+
+      "Blue nodes are persisted evidence, purple nodes are decisions, green/red nodes are downstream gates, and outcome nodes carry recorded execution state. This layer is SELECT-only."+
+      "</p>";
+  }else{
+    resetView();
+    inspector.innerHTML="<div class='eyebrow'>ORACLE CITY</div><h3>Interactive system map</h3><div class='metric'>Read-only observability</div><p>Select a district or switch to Brain Map to inspect persisted evidence, decision gates, execution links, and outcomes.</p>";
+  }
+  controls.update();
+}
+document.getElementById("brain").onclick=function(){setBrainMode(!brainMode);};
+
 function inspect(kind,data){
   let eyebrow="ORACLE NODE",title="",metric="",detail="";
   if(kind==="node"){
@@ -303,6 +402,11 @@ function inspect(kind,data){
     title=data.title;
     metric=data.symbol+" · "+data.action+" · score "+Number(data.score || 0).toFixed(1);
     detail="Observed strategy identity: "+data.strategy+". This agent is visualization-only.";
+  } else if(kind==="brain"){
+    eyebrow="ORACLE BRAIN · "+String(data.kind || "node").toUpperCase();
+    title=data.title;
+    metric=data.metric;
+    detail=data.detail;
   }
   inspector.innerHTML="<div class='eyebrow'>"+esc(eyebrow)+"</div><h3>"+esc(title)+"</h3><div class='metric'>"+esc(metric)+"</div><p>"+esc(detail)+"</p>";
 }
@@ -314,14 +418,21 @@ function updatePointer(event){
   pointer.x=((event.clientX-rect.left)/rect.width)*2-1;
   pointer.y=-((event.clientY-rect.top)/rect.height)*2+1;
 }
+function visibleHit(){
+  const hits=raycaster.intersectObjects(interactables,false);
+  return hits.find(function(hit){
+    const isBrain=hit.object.userData.type==="brain";
+    return brainMode?isBrain:!isBrain;
+  });
+}
 renderer.domElement.addEventListener("pointermove",function(event){
   updatePointer(event);raycaster.setFromCamera(pointer,camera);
-  const hit=raycaster.intersectObjects(interactables,false)[0];
+  const hit=visibleHit();
   renderer.domElement.style.cursor=hit?"pointer":"grab";
 });
 renderer.domElement.addEventListener("click",function(event){
   updatePointer(event);raycaster.setFromCamera(pointer,camera);
-  const hit=raycaster.intersectObjects(interactables,false)[0];
+  const hit=visibleHit();
   if(hit){inspect(hit.object.userData.type,hit.object.userData.data);}
 });
 
@@ -416,6 +527,17 @@ function animate(){
     const phase=(elapsed*.13+item.particle.userData.phase)%1;
     item.particle.position.copy(item.curve.getPointAt(phase));
   });
+  brainEdgeObjects.forEach(function(item){
+    const phase=(elapsed*.18+item.particle.userData.phase)%1;
+    item.particle.position.copy(item.curve.getPointAt(phase));
+  });
+  if(brainMode){
+    brainObjects.forEach(function(object){
+      const pulse=1+Math.sin(elapsed*2.4+object.userData.phase)*.06;
+      object.scale.setScalar(pulse);
+      object.rotation.y+=.004;
+    });
+  }
   interactables.forEach(function(object){
     if(object.userData.type==="agent"){
       object.position.y=object.userData.baseY+Math.sin(elapsed*2.2+object.userData.phase)*.09;

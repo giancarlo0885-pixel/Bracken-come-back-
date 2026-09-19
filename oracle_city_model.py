@@ -128,6 +128,308 @@ def _node(
     }
 
 
+
+_GRAPH_PREFERRED_FEATURES = (
+    "rsi", "rsi_14", "momentum", "momentum_pct", "volume_ratio",
+    "volatility", "volatility_20d", "spread_pct", "distance_from_vwap_pct",
+    "breakout_score", "regime", "market_regime", "confidence",
+    "expected_edge_pct", "expected_move_pct", "data_quality_score",
+    "buying_power", "cash", "gross_exposure", "margin_utilization_pct",
+)
+_GRAPH_SKIP_FEATURES = {
+    "id", "signal_id", "forecast_id", "decision_id", "quote_id",
+    "correlation_id", "symbol", "market", "created_at", "timestamp",
+    "quote_timestamp", "decision_timestamp", "provider_symbol",
+}
+
+
+def _graph_scalar(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        number = _number(value)
+        if number is None:
+            return None
+        if abs(number) >= 1000:
+            return f"{number:,.0f}"
+        if abs(number) >= 10:
+            return f"{number:.2f}"
+        return f"{number:.4f}".rstrip("0").rstrip(".")
+    if isinstance(value, str):
+        text = value.strip()
+        return text[:48] if text else None
+    return None
+
+
+def _flatten_graph_features(value: Any, prefix: str = "") -> dict[str, str]:
+    source = _payload(value) if not isinstance(value, dict) else value
+    result: dict[str, str] = {}
+    for raw_key, raw_value in source.items():
+        key = str(raw_key or "").strip()
+        if not key:
+            continue
+        path = f"{prefix}.{key}" if prefix else key
+        scalar = _graph_scalar(raw_value)
+        if scalar is not None:
+            result[path] = scalar
+            continue
+        if isinstance(raw_value, dict) and path.count(".") < 2:
+            result.update(_flatten_graph_features(raw_value, path))
+    return result
+
+
+def _decision_feature_items(record: dict[str, Any], limit: int = 6) -> list[tuple[str, str]]:
+    flattened = _flatten_graph_features(record.get("features"))
+    portfolio = _flatten_graph_features(record.get("portfolio_context"), "portfolio")
+    flattened.update(portfolio)
+
+    usable = {
+        key: value
+        for key, value in flattened.items()
+        if key.split(".")[-1].lower() not in _GRAPH_SKIP_FEATURES
+    }
+    ordered: list[tuple[str, str]] = []
+    seen: set[str] = set()
+
+    for preferred in _GRAPH_PREFERRED_FEATURES:
+        for key, value in usable.items():
+            if key in seen:
+                continue
+            if key.split(".")[-1].lower() == preferred:
+                ordered.append((key, value))
+                seen.add(key)
+                break
+        if len(ordered) >= limit:
+            return ordered
+
+    for key in sorted(usable):
+        if key in seen:
+            continue
+        ordered.append((key, usable[key]))
+        if len(ordered) >= limit:
+            break
+    return ordered
+
+
+def _brain_node(
+    node_id: str,
+    title: str,
+    kind: str,
+    state: str,
+    metric: str,
+    detail: str,
+    x: float,
+    y: float,
+    z: float,
+    *,
+    size: float = 0.28,
+    label: bool = False,
+) -> dict[str, Any]:
+    return {
+        "id": node_id,
+        "title": title,
+        "kind": kind,
+        "state": state if state in {"online", "waiting", "offline"} else "waiting",
+        "metric": metric,
+        "detail": detail,
+        "x": round(x, 3),
+        "y": round(y, 3),
+        "z": round(z, 3),
+        "size": size,
+        "label": label,
+    }
+
+
+def _build_decision_graph(
+    decisions: list[dict[str, Any]],
+    events: list[dict[str, Any]],
+    ledger: list[dict[str, Any]],
+    trades: list[dict[str, Any]],
+) -> dict[str, Any]:
+    recent = decisions[:18]
+    event_map: dict[str, list[dict[str, Any]]] = {}
+    for event in events:
+        decision_id = str(event.get("decision_id") or "").strip()
+        if decision_id:
+            event_map.setdefault(decision_id, []).append(event)
+
+    ledger_map: dict[str, dict[str, Any]] = {}
+    for item in ledger:
+        for raw_key in (item.get("entry_decision_id"), item.get("decision_id")):
+            key = str(raw_key or "").strip()
+            if key and key not in ledger_map:
+                ledger_map[key] = item
+
+    trade_by_id = {
+        str(item.get("id")): item
+        for item in trades
+        if item.get("id") is not None
+    }
+
+    nodes: list[dict[str, Any]] = []
+    edges: list[dict[str, Any]] = []
+    downstream_block_ids: set[str] = set()
+    linked_outcomes = 0
+
+    for row_index, decision in enumerate(recent):
+        decision_id = str(decision.get("decision_id") or "").strip()
+        if not decision_id:
+            continue
+        symbol = str(decision.get("symbol") or "").upper() or "UNKNOWN"
+        market = str(decision.get("market") or "").lower() or "unknown"
+        action = str(decision.get("decision") or "OBSERVED").upper()
+        row_z = (row_index - (len(recent) - 1) / 2.0) * 1.65
+        decision_state = "online" if action in {
+            "BUY", "STRONG_BUY", "STRONG BUY", "SELL", "REDUCE", "HOLD"
+        } else "waiting"
+        decision_node_id = f"decision:{decision_id}"
+        nodes.append(_brain_node(
+            decision_node_id,
+            f"{symbol} · {action}",
+            "decision",
+            decision_state,
+            market.upper(),
+            f"Decision {decision_id} · {decision.get('created_at') or 'time unavailable'}",
+            -1.8, 2.0, row_z, size=0.42, label=True,
+        ))
+
+        feature_items = _decision_feature_items(decision)
+        for feature_index, (name, value) in enumerate(feature_items):
+            short_name = name.replace("portfolio.", "portfolio · ").replace("_", " ")
+            feature_node_id = f"feature:{decision_id}:{feature_index}"
+            nodes.append(_brain_node(
+                feature_node_id,
+                short_name.title(),
+                "feature",
+                "online",
+                value,
+                f"Persisted entry-time feature for {symbol}.",
+                -7.4 - (feature_index % 2) * 0.75,
+                0.65 + (feature_index % 3) * 0.72,
+                row_z + (feature_index - 2.5) * 0.12,
+                size=0.18,
+                label=False,
+            ))
+            edges.append({
+                "source": feature_node_id,
+                "target": decision_node_id,
+                "kind": "evidence",
+                "weight": 1.0,
+            })
+
+        decision_events = sorted(
+            event_map.get(decision_id, []),
+            key=lambda item: _parse_time(item.get("created_at"))
+            or datetime.min.replace(tzinfo=timezone.utc),
+        )
+        seen_stages: set[str] = set()
+        previous_node = decision_node_id
+        stage_index = 0
+        for event in decision_events:
+            stage = str(event.get("stage") or "stage").strip().lower()
+            rejection = str(event.get("rejection_reason") or "").strip()
+            stage_key = f"{stage}:{rejection}" if rejection else stage
+            if stage_key in seen_stages:
+                continue
+            seen_stages.add(stage_key)
+            if rejection:
+                downstream_block_ids.add(decision_id)
+            stage_state = "offline" if rejection else "online"
+            stage_node_id = f"stage:{decision_id}:{stage_index}"
+            nodes.append(_brain_node(
+                stage_node_id,
+                stage.replace("_", " ").title(),
+                "gate",
+                stage_state,
+                "BLOCKED" if rejection else "PASSED / OBSERVED",
+                rejection or f"Persisted decision event for {symbol}.",
+                1.25 + min(stage_index, 3) * 1.45,
+                2.0,
+                row_z,
+                size=0.26,
+                label=stage_index < 2,
+            ))
+            edges.append({
+                "source": previous_node,
+                "target": stage_node_id,
+                "kind": "blocked" if rejection else "gate",
+                "weight": 1.2 if rejection else 1.0,
+            })
+            previous_node = stage_node_id
+            stage_index += 1
+            if stage_index >= 4:
+                break
+
+        outcome = ledger_map.get(decision_id)
+        exact_provenance = outcome is not None
+        if outcome is None and decision.get("trade_id") is not None:
+            outcome = trade_by_id.get(str(decision.get("trade_id")))
+
+        if outcome is not None:
+            linked_outcomes += 1
+            status = str(outcome.get("status") or "recorded").upper()
+            net_pnl = _number(outcome.get("net_pnl"))
+            if net_pnl is None:
+                net_pnl = _number(outcome.get("realized_pnl"))
+            side = str(outcome.get("side") or "TRADE").upper()
+            outcome_state = "waiting"
+            if status in {"CLOSED", "FILLED", "COMPLETE", "COMPLETED", "RECORDED"}:
+                if net_pnl is not None and net_pnl < 0:
+                    outcome_state = "offline"
+                else:
+                    outcome_state = "online"
+            metric = status
+            if net_pnl is not None:
+                metric += " · P/L $" + f"{net_pnl:+,.2f}"
+            outcome_id = f"outcome:{decision_id}"
+            nodes.append(_brain_node(
+                outcome_id,
+                f"{side} {symbol}",
+                "outcome",
+                outcome_state,
+                metric,
+                (
+                    "Exact immutable decision provenance link."
+                    if exact_provenance
+                    else "Linked through global decision trade reference."
+                ),
+                8.4, 2.0, row_z, size=0.38, label=True,
+            ))
+            edges.append({
+                "source": previous_node,
+                "target": outcome_id,
+                "kind": "execution",
+                "weight": 1.35,
+            })
+
+    recent_closed = [
+        item for item in ledger[:80]
+        if str(item.get("status") or "").upper() in {"CLOSED", "COMPLETE", "COMPLETED"}
+    ]
+    provenance_gaps = sum(
+        1 for item in recent_closed
+        if not str(item.get("entry_decision_id") or item.get("decision_id") or "").strip()
+    )
+
+    return {
+        "nodes": nodes,
+        "edges": edges,
+        "summary": {
+            "traced_decisions": len({
+                str(item.get("decision_id") or "").strip()
+                for item in recent
+                if str(item.get("decision_id") or "").strip()
+            }),
+            "linked_outcomes": linked_outcomes,
+            "downstream_blocks": len(downstream_block_ids),
+            "recent_closed_provenance_gaps": provenance_gaps,
+        },
+        "read_only": True,
+    }
+
+
 def build_oracle_city_snapshot(
     fetch_rows: FetchRows = rows,
     *,
@@ -167,6 +469,18 @@ def build_oracle_city_snapshot(
     events = _safe_select(
         fetch_rows, "SELECT * FROM intelligence_events ORDER BY id DESC LIMIT 60", (),
         warnings, "intelligence unavailable",
+    )
+    decision_ledger = _safe_select(
+        fetch_rows, "SELECT * FROM global_decision_ledger ORDER BY created_at DESC LIMIT 40", (),
+        warnings, "decision ledger unavailable",
+    )
+    decision_events = _safe_select(
+        fetch_rows, "SELECT * FROM global_decision_events ORDER BY id DESC LIMIT 180", (),
+        warnings, "decision event trace unavailable",
+    )
+    canonical_trade_ledger = _safe_select(
+        fetch_rows, "SELECT * FROM trade_ledger ORDER BY id DESC LIMIT 120", (),
+        warnings, "trade provenance unavailable",
     )
 
     worker_map = {str(item.get("market") or "").lower(): item for item in workers}
@@ -357,6 +671,13 @@ def build_oracle_city_snapshot(
         or datetime.min.replace(tzinfo=timezone.utc)
     )
 
+    decision_graph = _build_decision_graph(
+        decision_ledger,
+        decision_events,
+        canonical_trade_ledger,
+        trades,
+    )
+
     return {
         "generated_at": now.isoformat(),
         "read_only": True,
@@ -376,6 +697,7 @@ def build_oracle_city_snapshot(
         "strategy_agents": strategy_agents,
         "opportunities": opportunity_views[:24],
         "replay": replay[-80:],
+        "decision_graph": decision_graph,
     }
 
 

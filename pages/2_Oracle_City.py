@@ -15,7 +15,7 @@ except ImportError:
 
 
 st.set_page_config(
-    page_title="Oracle City V2 - GARIBALDI MARKET ORACLE",
+    page_title="Oracle City V3 - GARIBALDI MARKET ORACLE",
     page_icon="ORCL",
     layout="wide",
 )
@@ -39,9 +39,9 @@ if auto_refresh and st_autorefresh is not None:
 snapshot = build_oracle_city_snapshot(rows)
 summary = snapshot["summary"]
 
-st.title("Oracle City V2")
+st.title("Oracle City V3")
 st.caption(
-    "Interactive 3D digital twin of GARIBALDI MARKET ORACLE. "
+    "Interactive 3D digital twin and immutable decision-provenance brain map for GARIBALDI MARKET ORACLE. "
     "This interface is read-only and has no order-submission authority."
 )
 
@@ -51,6 +51,19 @@ c2.metric("Open positions", summary["open_positions"])
 c3.metric("Ranked opportunities", summary["ranked_opportunities"])
 c4.metric("Recent trades", summary["recent_trades"])
 c5.metric("Known exposure", "$" + f"{summary['known_exposure']:,.2f}")
+
+brain_summary = snapshot.get("decision_graph", {}).get("summary", {})
+b1, b2, b3, b4 = st.columns(4)
+b1.metric("Brain-map decisions", int(brain_summary.get("traced_decisions") or 0))
+b2.metric("Linked outcomes", int(brain_summary.get("linked_outcomes") or 0))
+b3.metric("Downstream blocks", int(brain_summary.get("downstream_blocks") or 0))
+brain_gaps = int(brain_summary.get("recent_closed_provenance_gaps") or 0)
+b4.metric("Closed-trade provenance gaps", brain_gaps)
+if brain_gaps:
+    st.error(
+        f"{brain_gaps} recent closed trade(s) lack a canonical decision provenance link. "
+        "Treat those rows as unsuitable for strategy-learning attribution until repaired."
+    )
 
 if snapshot["warnings"]:
     st.warning("Partial Oracle City feeds: " + "; ".join(snapshot["warnings"]))
@@ -108,7 +121,7 @@ if replay:
 else:
     st.info("Replay data is not available yet.")
 
-with st.expander("Oracle City V2 architecture and safety boundary"):
+with st.expander("Oracle City V3 architecture and safety boundary"):
     st.markdown(
         """
 **Interactive layer**
@@ -117,6 +130,12 @@ with st.expander("Oracle City V2 architecture and safety boundary"):
   strategy agents, capital-weighted position towers, and animated data-flow paths.
 - Historical replay uses persisted Oracle decisions, intelligence events, and paper trades
   to illuminate the path that evidence took through the system.
+- **Brain Map** traces persisted entry-time features into immutable decision IDs, downstream
+  decision-event gates, and execution/outcome records when a canonical link exists.
+- Brain Map exposes downstream blocks separately from upstream decisions so an approved
+  candidate cannot visually masquerade as an executable or completed trade.
+- Closed trades without decision provenance are counted explicitly and are not presented as
+  trustworthy strategy-learning evidence.
 - Position towers around Portfolio Vault scale only from available persisted marked values.
 
 **Hard boundary**
