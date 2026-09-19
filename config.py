@@ -426,6 +426,17 @@ TRADE_COOLDOWN_MINUTES = int(os.getenv("TRADE_COOLDOWN_MINUTES", "15"))
 MAX_DAILY_DRAWDOWN_PCT = float(os.getenv("MAX_DAILY_DRAWDOWN_PCT", "0.12"))
 MIN_COUNCIL_AGREEMENT = float(os.getenv("MIN_COUNCIL_AGREEMENT", "0.52"))
 
+# Super Hybrid confluence layer. The layer can shape paper opportunity quality,
+# but cannot approve a trade, bypass a veto, or change live-money controls.
+SUPER_HYBRID_ENABLED = os.getenv("SUPER_HYBRID_ENABLED", "true").lower() == "true"
+SUPER_HYBRID_PAPER_IMPACT_ENABLED = os.getenv("SUPER_HYBRID_PAPER_IMPACT_ENABLED", "true").lower() == "true"
+SUPER_HYBRID_MAX_POSITIVE_ADJUSTMENT = max(0.0, min(6.0, float(os.getenv("SUPER_HYBRID_MAX_POSITIVE_ADJUSTMENT", "4.0"))))
+SUPER_HYBRID_MAX_NEGATIVE_ADJUSTMENT = max(0.0, min(8.0, float(os.getenv("SUPER_HYBRID_MAX_NEGATIVE_ADJUSTMENT", "5.0"))))
+SUPER_HYBRID_MIN_AGREEMENT = max(0.0, min(100.0, float(os.getenv("SUPER_HYBRID_MIN_AGREEMENT", "58.0"))))
+SUPER_HYBRID_MAX_UNCERTAINTY = max(0.0, min(100.0, float(os.getenv("SUPER_HYBRID_MAX_UNCERTAINTY", "45.0"))))
+SUPER_HYBRID_MIN_EXECUTION_QUALITY = max(0.0, min(100.0, float(os.getenv("SUPER_HYBRID_MIN_EXECUTION_QUALITY", "65.0"))))
+SUPER_HYBRID_MIN_EVIDENCE_COMPLETENESS = max(0.0, min(100.0, float(os.getenv("SUPER_HYBRID_MIN_EVIDENCE_COMPLETENESS", "50.0"))))
+
 # Extra settings consumed by oracle_bot.py through `from config import *`.
 FLEXIBLE_COOLDOWN_FACTOR = float(os.getenv("FLEXIBLE_COOLDOWN_FACTOR", "0.10"))
 HIGH_CONFIDENCE_THRESHOLD = float(
