@@ -208,12 +208,10 @@ def test_oracle_city_component_contains_interactive_webgl_controls():
     assert "portfolio_towers" in rendered
     assert "Recent decision replay" in rendered
     assert "READ-ONLY" not in rendered or "read-only" in rendered.lower()
-    assert "WORKERS ON" in rendered
+    assert 'id="workers" class="active">WORKERS<' in rendered
     assert "resident_agents" in rendered
     assert "workerObjects" in rendered
     assert "Strategy Arena" in rendered
-    assert "Work with discipline. Learn from results. Progress earns rewards." in rendered
-    assert "Living Financial Metropolis" in rendered
     assert "createAmbientBuilding" in rendered
     assert "createCouncil" in rendered
     assert "createExchange" in rendered
@@ -222,6 +220,13 @@ def test_oracle_city_component_contains_interactive_webgl_controls():
     assert "makeVehicle" in rendered
     assert "STREET VIEW" in rendered
     assert "CINEMATIC" in rendered
+    assert 'id="hovercard"' in rendered
+    assert ".inspector{display:none" in rendered
+    assert ".replay{display:none" in rendered
+    assert 'id="replayToggle">REPLAY<' in rendered
+    assert "function clearHover()" in rendered
+    assert 'inspector.classList.add("open")' in rendered
+    assert "function addLabel(group,title,metric,y){ return; }" in rendered
 
 
 def test_oracle_city_component_escapes_script_breakout_payloads():
@@ -238,7 +243,7 @@ def test_oracle_city_component_escapes_script_breakout_payloads():
 def test_oracle_city_mobile_layout_suppresses_label_collisions_and_resets_camera():
     rendered = render_oracle_city_component({"nodes": [], "flows": [], "replay": []})
     assert "@media(max-width:720px)" in rendered
-    assert ".label{display:none}" in rendered
+    assert ".legend,.minimap,.label{display:none}" in rendered
     assert 'window.matchMedia("(max-width:720px)")' in rendered
     assert "camera.position.set(2.5,31,28)" in rendered
     assert "lastMobileView" in rendered
@@ -298,3 +303,18 @@ def test_oracle_city_page_leads_with_cinematic_city():
     assert city < status
     assert "Cinematic Metropolis" in source
     assert "height=980" in source
+    assert 'auto_refresh = st.toggle("Auto refresh", value=False)' in source
+
+
+def test_oracle_city_defaults_to_city_first_uncluttered_view():
+    rendered = render_oracle_city_component({"nodes": [], "flows": [], "replay": []})
+    assert "City Districts" not in rendered
+    assert "healthy / active" not in rendered
+    assert "A living Wall Street + crypto research metropolis" not in rendered
+    assert ".inspector{display:none" in rendered
+    assert ".replay{display:none" in rendered
+    assert ".legend,.minimap,.label{display:none}" in rendered
+    assert 'id="hovercard"' in rendered
+    assert 'renderer.domElement.addEventListener("pointermove"' in rendered
+    assert 'renderer.domElement.addEventListener("pointerleave",clearHover)' in rendered
+    assert 'else inspector.classList.remove("open")' in rendered
