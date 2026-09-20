@@ -40,11 +40,6 @@ snapshot = build_oracle_city_snapshot(rows)
 summary = snapshot["summary"]
 
 st.title("Oracle City — Cinematic Metropolis")
-st.caption(
-    "Explore Oracle as a real 3D financial city: research campuses, exchanges, Council, risk, paper execution, homes, parks, workers, and market traffic. "
-    "The city is read-only; persisted Oracle state drives the information shown."
-)
-
 if snapshot["warnings"]:
     st.warning("Partial Oracle City feeds: " + "; ".join(snapshot["warnings"]))
 
