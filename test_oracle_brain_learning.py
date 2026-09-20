@@ -156,8 +156,9 @@ def test_learning_schema_and_runtime_are_research_only():
     assert "LIVE_TRADING_ARMED=true" not in source
     assert "brain_learning_executor" in worker
     assert "_run_brain_learning_sync" in worker
-    assert "next_brain_learning_due = time.monotonic()" in worker
-    assert "next_brain_learning_due = time.monotonic() + 20.0" not in worker
+    assert "brain_learning_future = brain_learning_executor.submit(_run_brain_learning_sync, market)" in worker
+    assert "next_brain_learning_due = time.monotonic() + brain_learning_seconds" in worker
+    assert "Oracle Brain learning launched before market scans" in worker
     assert "execution_impact=NONE" in worker
     assert "existing_episode" in source
     assert "if not existing_episode" in source
@@ -170,6 +171,13 @@ def test_learning_schema_and_runtime_are_research_only():
         "oracle_brain_contradictions",
         "oracle_brain_research_queue",
         "oracle_brain_learning_state",
+        "oracle_brain_source_clusters",
+        "oracle_brain_provider_reputation",
+        "oracle_brain_counterfactuals",
+        "oracle_brain_drift_events",
+        "oracle_brain_working_memory",
+        "oracle_brain_experiments",
+        "oracle_brain_learning_runs",
     ):
         assert table in database.CANONICAL_PROTECTED_TABLES
 
@@ -183,3 +191,7 @@ def test_brain_page_visualizes_sources_episodes_links_and_queue():
     assert "Active contradictions" in source
     assert "Exact trade episodes" in source
     assert "execution authority: NONE" in source
+    assert "Counterfactual abstention learning" in source
+    assert "Active regime drift" in source
+    assert "Paper research experiments" in source
+    assert "Source corroboration and provider reputation" in source
