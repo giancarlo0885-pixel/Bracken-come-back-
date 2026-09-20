@@ -41,6 +41,22 @@ neural_payload = {
          "expectancy": item["expectancy"], "state": item["evidence_state"]}
         for item in snapshot["regime_economics"][:30]
     ],
+    "sources": [
+        {"title": item["title"], "provider": item.get("provider"), "category": item.get("category"),
+         "confidence": item.get("confidence"), "freshness": item.get("freshness_score"),
+         "symbol": item.get("symbol")}
+        for item in snapshot["sources"][:24]
+    ],
+    "episodes": [
+        {"symbol": item["symbol"], "strategy": item["strategy"], "regime": item["regime"],
+         "pnl": item["net_pnl"], "confidence": item["confidence"]}
+        for item in snapshot["episodes"][:24]
+    ],
+    "links": [
+        {"source": item["source_key"], "target": item["target_key"], "relation": item["relation"],
+         "confidence": item["confidence"], "evidence_count": item["evidence_count"]}
+        for item in snapshot["concept_links"][:40]
+    ],
 }
 import json
 _payload = json.dumps(neural_payload).replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
@@ -55,8 +71,13 @@ html,body{{margin:0;background:#05080e;color:#eaf6ff;font-family:system-ui;overf
 <script id="data" type="application/json">{_payload}</script><script>
 const D=JSON.parse(document.getElementById("data").textContent),c=document.getElementById("brain"),x=c.getContext("2d");let W,H,t=0,nodes=[];
 function resize(){{const r=c.getBoundingClientRect();c.width=Math.max(1,r.width*devicePixelRatio);c.height=Math.max(1,r.height*devicePixelRatio);W=r.width;H=r.height;x.setTransform(devicePixelRatio,0,0,devicePixelRatio,0,0);make();}}
-function make(){{nodes=[];const src=[...D.entries.map((v,i)=>({{...v,kind:"knowledge",value:v.confidence||.5,label:v.title}})),...D.regimes.map((v,i)=>({{...v,kind:"regime",value:Math.min(1,(v.samples||0)/200),label:v.strategy+" · "+v.regime}}))];const count=Math.max(18,src.length);for(let i=0;i<count;i++){{const a=(i/count)*Math.PI*2*3.7,r=(.08+.38*Math.sqrt((i+1)/count))*Math.min(W,H),v=src[i%Math.max(1,src.length)]||{{kind:"idle",value:.2,label:"awaiting evidence"}};nodes.push({{x:W*.5+Math.cos(a)*r*.72,y:H*.52+Math.sin(a)*r*.46,v,phase:i*.71}});}}}}
-function color(v,a){{if(v.state==="negative")return "rgba(255,82,112,"+a+")";if(v.state==="positive")return "rgba(75,245,164,"+a+")";if(v.kind==="knowledge")return "rgba(177,102,255,"+a+")";return "rgba(80,199,255,"+a+")";}}
+function make(){{nodes=[];const src=[
+...D.entries.map(v=>({{...v,kind:"knowledge",value:v.confidence||.5,label:v.title}})),
+...D.regimes.map(v=>({{...v,kind:"regime",value:Math.min(1,(v.samples||0)/200),label:v.strategy+" · "+v.regime}})),
+...D.sources.map(v=>({{...v,kind:"source",value:(v.confidence||.3)*(v.freshness||.5),label:v.title}})),
+...D.episodes.map(v=>({{...v,kind:"episode",value:v.confidence||.5,state:(v.pnl||0)>0?"positive":((v.pnl||0)<0?"negative":"mixed"),label:v.symbol+" · "+v.strategy}}))
+];const count=Math.max(18,src.length);for(let i=0;i<count;i++){{const a=(i/count)*Math.PI*2*3.7,r=(.08+.38*Math.sqrt((i+1)/count))*Math.min(W,H),v=src[i%Math.max(1,src.length)]||{{kind:"idle",value:.2,label:"awaiting evidence"}};nodes.push({{x:W*.5+Math.cos(a)*r*.72,y:H*.52+Math.sin(a)*r*.46,v,phase:i*.71}});}}}}
+function color(v,a){{if(v.state==="negative")return "rgba(255,82,112,"+a+")";if(v.state==="positive")return "rgba(75,245,164,"+a+")";if(v.kind==="knowledge")return "rgba(177,102,255,"+a+")";if(v.kind==="source")return "rgba(255,194,94,"+a+")";if(v.kind==="episode")return "rgba(95,234,205,"+a+")";return "rgba(80,199,255,"+a+")";}}
 function frame(){{t+=.018;x.clearRect(0,0,W,H);x.save();x.translate(Math.sin(t*.2)*2,Math.cos(t*.17)*2);for(let i=0;i<nodes.length;i++){{let a=nodes[i],b=nodes[(i*7+5)%nodes.length],d=Math.hypot(a.x-b.x,a.y-b.y);if(d<Math.min(W,H)*.38){{x.strokeStyle=color(a.v,.08+.08*Math.sin(t+a.phase));x.lineWidth=.7;x.beginPath();x.moveTo(a.x,a.y);x.quadraticCurveTo(W*.5,H*.5,b.x,b.y);x.stroke();}}}}for(const n of nodes){{let pulse=1+.35*Math.sin(t*2.4+n.phase),r=2.4+5*(n.v.value||.2)*pulse;x.shadowBlur=16;x.shadowColor=color(n.v,.8);x.fillStyle=color(n.v,.9);x.beginPath();x.arc(n.x,n.y,r,0,Math.PI*2);x.fill();}}x.restore();requestAnimationFrame(frame);}}
 new ResizeObserver(resize).observe(c);resize();frame();
 </script></body></html>""", height=440, scrolling=False)
@@ -67,9 +88,15 @@ st.caption(
 
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("Active knowledge entries", summary["active_entries"])
-c2.metric("Tracked experiments", summary["experiments"])
-c3.metric("Mature negative regimes", summary["mature_negative_regimes"])
-c4.metric("Mature positive regimes", summary["mature_positive_regimes"])
+c2.metric("Exact trade episodes", summary["exact_episodes"])
+c3.metric("Knowledge sources", summary["knowledge_sources"])
+c4.metric("Concept links", summary["concept_links"])
+
+l1, l2, l3, l4 = st.columns(4)
+l1.metric("Research topics", summary["research_topics"])
+l2.metric("Open contradictions", summary["active_contradictions"])
+l3.metric("High-confidence links", summary["high_confidence_links"])
+l4.metric("Stale sources", summary["stale_sources"])
 
 if safety["safe_research_boundary"]:
     st.success(
@@ -96,6 +123,110 @@ if snapshot["derived_lessons"]:
             st.warning(f"**{lesson['title']}** — {lesson['body']}")
         else:
             st.info(f"**{lesson['title']}** — {lesson['body']}")
+
+st.subheader("Learning system")
+st.caption(
+    "Orange nodes are acquired source facts, green/red nodes are exact-provenance outcome episodes, "
+    "purple nodes are durable lessons, and blue nodes are regime evidence. None has execution authority."
+)
+
+if snapshot["research_queue"]:
+    st.markdown("**Research queue**")
+    st.dataframe(
+        pd.DataFrame(
+            [
+                {
+                    "Topic": item["topic"],
+                    "Market": item["market"],
+                    "Priority": item["priority"],
+                    "Reason": item["reason"],
+                    "Updated": item["updated_at"],
+                }
+                for item in snapshot["research_queue"]
+            ]
+        ),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+if snapshot["contradictions"]:
+    st.markdown("**Active contradictions**")
+    for item in snapshot["contradictions"]:
+        st.warning(
+            f"{item['subject_key']}: {item.get('prior_polarity') or 'unknown'} → "
+            f"{item.get('current_polarity') or 'unknown'} — {item['reason']}"
+        )
+
+with st.expander("Recent acquired knowledge sources"):
+    if snapshot["sources"]:
+        st.dataframe(
+            pd.DataFrame(
+                [
+                    {
+                        "Provider": item["provider"],
+                        "Category": item["category"],
+                        "Symbol": item["symbol"],
+                        "Title": item["title"],
+                        "Quality": item["source_quality"],
+                        "Freshness": item["freshness_score"],
+                        "Confidence": item["confidence"],
+                        "Status": item["status"],
+                    }
+                    for item in snapshot["sources"]
+                ]
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
+    else:
+        st.info("No acquired source facts are available yet.")
+
+with st.expander("Recent exact-provenance episodes"):
+    if snapshot["episodes"]:
+        st.dataframe(
+            pd.DataFrame(
+                [
+                    {
+                        "Market": item["market"],
+                        "Symbol": item["symbol"],
+                        "Strategy": item["strategy"],
+                        "Regime": item["regime"],
+                        "Net P&L": item["net_pnl"],
+                        "MFE %": item["mfe_pct"],
+                        "MAE %": item["mae_pct"],
+                        "Confidence": item["confidence"],
+                        "Exit": item["exit_time"],
+                    }
+                    for item in snapshot["episodes"]
+                ]
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
+    else:
+        st.info("No exact-provenance outcome episodes are available yet.")
+
+with st.expander("Strongest concept relationships"):
+    if snapshot["concept_links"]:
+        st.dataframe(
+            pd.DataFrame(
+                [
+                    {
+                        "From": item["source_key"],
+                        "Relation": item["relation"],
+                        "To": item["target_key"],
+                        "Evidence": item["evidence_count"],
+                        "Confidence": item["confidence"],
+                        "Weight": item["weight"],
+                    }
+                    for item in snapshot["concept_links"][:50]
+                ]
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
+    else:
+        st.info("Concept links will appear as the learner observes repeated relationships.")
 
 st.subheader("Persistent knowledge ledger")
 entries = snapshot["entries"]
@@ -156,10 +287,10 @@ else:
 with st.expander("Brain safety boundary"):
     st.markdown(
         """
-- Oracle Brain is not imported into the worker hot path.
 - The dashboard performs SELECT-only evidence reads.
-- Brain ledger entries have execution impact NONE enforced by the database.
-- The write helper exists only for explicit engineering/research workflows.
-- Brain entries cannot arm live trading, submit orders, or bypass Council/risk/capacity gates.
+- The learning worker runs asynchronously after scans and does not participate in order approval.
+- Durable sources, episodes, links, contradictions, and Brain ledger entries enforce execution impact NONE.
+- Exact trade provenance is required before an outcome becomes a durable episode.
+- Brain knowledge cannot arm live trading, submit orders, size positions, or bypass Council/risk/capacity gates.
 """
     )
