@@ -39,10 +39,10 @@ if auto_refresh and st_autorefresh is not None:
 snapshot = build_oracle_city_snapshot(rows)
 summary = snapshot["summary"]
 
-st.title("Oracle City — System Overview")
+st.title("Oracle City — Living Research Campus")
 st.caption(
-    "A readable view of what Oracle is doing now: system health, opportunities, positions, decisions, safety blocks, and paper-trade outcomes. "
-    "This page is monitoring only and cannot place trades."
+    "A living, read-only visualization of Oracle research, Council decisions, risk controls, paper execution, learning, and worker activity. "
+    "Worker movement is illustrative; persisted Oracle state drives assignments. This page cannot place trades."
 )
 
 c1, c2, c3, c4, c5 = st.columns(5)
@@ -51,6 +51,16 @@ c2.metric("Open positions", summary["open_positions"])
 c3.metric("Trade ideas", summary["ranked_opportunities"])
 c4.metric("Recent trades", summary["recent_trades"])
 c5.metric("Money in positions", "$" + f"{summary['known_exposure']:,.2f}")
+
+aeve = snapshot.get("aeve", {})
+safety = snapshot.get("safety", {})
+aeve_progress = "Unavailable / 1000" if aeve.get("accepted") is None else f"{aeve['accepted']} / {aeve.get('target', 1000)}"
+m1, m2, m3, m4, m5 = st.columns(5)
+m1.metric("City mood", snapshot.get("city_mood") or "UNKNOWN")
+m2.metric("AEVE progress", aeve_progress)
+m3.metric("Execution mode", str(safety.get("execution_mode") or snapshot.get("execution_mode") or "unknown").upper())
+m4.metric("Broker submission", "ENABLED" if safety.get("broker_submission_enabled") else "DISABLED")
+m5.metric("Live trading", "ARMED" if safety.get("live_trading_armed") else "DISARMED")
 
 brain_summary = snapshot.get("decision_graph", {}).get("summary", {})
 b1, b2, b3, b4 = st.columns(4)
@@ -70,7 +80,7 @@ if snapshot["warnings"]:
 
 components.html(
     render_oracle_city_component(snapshot),
-    height=820,
+    height=900,
     scrolling=False,
 )
 
@@ -126,8 +136,10 @@ with st.expander("Oracle City V3 architecture and safety boundary"):
         """
 **Interactive layer**
 
-- WebGL/Three.js scene with orbit, zoom, top view, reset view, clickable districts,
-  strategy agents, capital-weighted position towers, and animated data-flow paths.
+- WebGL/Three.js scene with orbit, zoom, top view, reset view, clickable operational and community districts,
+  moving visualization workers, strategy evidence cohorts, capital-weighted position towers, and animated data-flow paths.
+- Worker assignments are derived from persisted Oracle state. Their walking, resting, and recreation movement is illustrative only.
+- Strategy Arena and AEVE Research Center expose read-only evidence; they cannot promote a strategy or change execution behavior.
 - Historical replay uses persisted Oracle decisions, intelligence events, and paper trades
   to illuminate the path that evidence took through the system.
 - **Brain Map** traces persisted entry-time features into immutable decision IDs, downstream
