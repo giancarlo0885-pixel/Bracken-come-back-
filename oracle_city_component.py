@@ -485,8 +485,10 @@ let brainMode=false,workersVisible=true,trafficVisible=true;
 function showCityObjects(on){cityObjects.forEach(o=>{if(o!==brainGroup&&!o.isLight)o.visible=on;});workerObjects.forEach(o=>o.visible=on&&workersVisible);vehicleObjects.forEach(o=>o.visible=on&&trafficVisible);}
 function setBrainMode(on){
   brainMode=on;showCityObjects(!on);brainGroup.visible=on;
-  const b=document.getElementById("brain");b.classList.toggle("active",on);b.textContent=on?"CITY MAP":"BRAIN MAP";
-  if(on){camera.position.set(14,10,19);controls.target.set(0,2,0);inspector.innerHTML="<div class='eyebrow'>ORACLE BRAIN MAP</div><h3>Decision provenance network</h3><div class='metric'>"+String((brainData.summary||{}).traced_decisions||0)+" decisions · "+String((brainData.summary||{}).linked_outcomes||0)+" linked outcomes</div><p>Evidence, decisions, downstream gates, and recorded outcomes. This view is read-only and has no execution authority.</p>";}
+  const b=document.getElementById("brain");b.classList.toggle("active",on);b.textContent=on?"CITY":"BRAIN";
+  inspector.classList.remove("open");
+  hovercard.classList.remove("show");
+  if(on){camera.position.set(14,10,19);controls.target.set(0,2,0);}
   else resetView();
   controls.update();
 }
@@ -499,29 +501,67 @@ function inspect(kind,data){
   else if(kind==="cohort"){eyebrow=data.control?"STRATEGY ARENA · CONTROL":"STRATEGY ARENA · PAPER EVIDENCE";title=String(data.strategy||"unknown").replaceAll("_"," ")+" · "+String(data.regime||"unknown");metric=String(data.evidence_state||"RESEARCH ONLY")+" · "+String(data.samples||0)+" samples";detail=(data.expectancy==null?"Expectancy unavailable":"Expectancy "+Number(data.expectancy).toFixed(6))+" · "+(data.profit_factor==null?"PF unavailable":"PF "+Number(data.profit_factor).toFixed(3))+". Visual evidence does not grant promotion or execution authority.";}
   else if(kind==="brain"){eyebrow="ORACLE BRAIN · "+String(data.kind||"NODE").toUpperCase();title=data.title;metric=data.metric;detail=data.detail;}
   inspector.innerHTML="<div class='eyebrow'>"+esc(eyebrow)+"</div><h3>"+esc(title)+"</h3><div class='metric'>"+esc(metric)+"</div><p>"+esc(detail)+"</p>";
+  inspector.classList.add("open");
 }
 
 const Raycaster=THREE.Raycaster;
 const raycaster=new Raycaster(),pointer=new THREE.Vector2();
 function pointerFrom(e){const r=renderer.domElement.getBoundingClientRect();pointer.x=((e.clientX-r.left)/r.width)*2-1;pointer.y=-((e.clientY-r.top)/r.height)*2+1;}
 function hit(){const hits=raycaster.intersectObjects(interactables,false);return hits.find(h=>brainMode?h.object.userData.type==="brain":h.object.userData.type!=="brain");}
-renderer.domElement.addEventListener("pointermove",e=>{pointerFrom(e);raycaster.setFromCamera(pointer,camera);renderer.domElement.style.cursor=hit()?"pointer":"grab";});
-renderer.domElement.addEventListener("click",e=>{pointerFrom(e);raycaster.setFromCamera(pointer,camera);const h=hit();if(h)inspect(h.object.userData.type,h.object.userData.data);});
+let hoveredObject=null,hoveredIntensity=0;
+function clearHover(){
+  if(hoveredObject&&hoveredObject.material&&"emissiveIntensity" in hoveredObject.material){hoveredObject.material.emissiveIntensity=hoveredIntensity;}
+  hoveredObject=null;
+  hovercard.classList.remove("show");
+}
+function hoverText(kind,data){
+  if(kind==="node")return [data.title,data.metric];
+  if(kind==="resident")return [data.title,String(data.state||"IDLE").replaceAll("_"," ")];
+  if(kind==="position")return [data.symbol+" · "+String(data.market||"").toUpperCase(),money(data.value)];
+  if(kind==="cohort")return [String(data.strategy||"strategy").replaceAll("_"," "),String(data.evidence_state||"RESEARCH ONLY")];
+  if(kind==="brain")return [data.title,data.metric];
+  return ["Oracle City","Select for details"];
+}
+renderer.domElement.addEventListener("pointermove",e=>{
+  pointerFrom(e);raycaster.setFromCamera(pointer,camera);const h=hit();renderer.domElement.style.cursor=h?"pointer":"grab";
+  if(!h){clearHover();return;}
+  if(hoveredObject!==h.object){
+    clearHover();hoveredObject=h.object;
+    if(hoveredObject.material&&"emissiveIntensity" in hoveredObject.material){
+      hoveredIntensity=Number(hoveredObject.material.emissiveIntensity||0);
+      hoveredObject.material.emissiveIntensity=Math.max(.7,hoveredIntensity+.45);
+    }
+  }
+  const text=hoverText(h.object.userData.type,h.object.userData.data);
+  hovercard.innerHTML="<b>"+esc(text[0])+"</b><span>"+esc(text[1])+"</span>";
+  const r=app.getBoundingClientRect();
+  const x=Math.min(app.clientWidth-245,Math.max(8,e.clientX-r.left+14));
+  const y=Math.min(app.clientHeight-80,Math.max(8,e.clientY-r.top+14));
+  hovercard.style.left=x+"px";hovercard.style.top=y+"px";hovercard.classList.add("show");
+});
+renderer.domElement.addEventListener("pointerleave",clearHover);
+renderer.domElement.addEventListener("click",e=>{
+  pointerFrom(e);raycaster.setFromCamera(pointer,camera);const h=hit();
+  if(h)inspect(h.object.userData.type,h.object.userData.data);
+  else inspector.classList.remove("open");
+});
 
 function mobileView(){return window.matchMedia&&window.matchMedia("(max-width:720px)").matches;}
 function resetView(){
   if(mobileView()){camera.position.set(2.5,31,28);controls.target.set(2.5,2.2,0);}
   else{camera.position.set(30,22,38);controls.target.set(2.5,2.7,0);}
   controls.update();
-  if(!brainMode)inspector.innerHTML="<div class='eyebrow'>ORACLE CITY</div><h3>Living Financial Metropolis</h3><div class='metric'>"+esc(String(DATA.city_mood||"UNKNOWN"))+" · "+String((DATA.resident_agents||[]).length)+" workers</div><p>Real city-style districts, streets, buildings, parks, workers, and market traffic. Worker motion is illustrative; persisted Oracle state drives work assignments.</p>";
+  inspector.classList.remove("open");
+  hovercard.classList.remove("show");
 }
 document.getElementById("reset").onclick=()=>{if(brainMode)setBrainMode(false);else resetView();};
 document.getElementById("street").onclick=()=>{if(brainMode)setBrainMode(false);camera.position.set(-2,3.0,18);controls.target.set(3,2.4,0);controls.update();};
 document.getElementById("topview").onclick=()=>{if(brainMode)setBrainMode(false);camera.position.set(2.5,48,.01);controls.target.set(2.5,0,0);controls.update();};
 document.getElementById("autorotate").onclick=function(){controls.autoRotate=!controls.autoRotate;controls.autoRotateSpeed=.48;this.classList.toggle("active",controls.autoRotate);};
 document.getElementById("brain").onclick=()=>setBrainMode(!brainMode);
-document.getElementById("workers").onclick=function(){workersVisible=!workersVisible;workerObjects.forEach(w=>w.visible=!brainMode&&workersVisible);this.textContent=workersVisible?"WORKERS ON":"WORKERS OFF";this.classList.toggle("active",workersVisible);};
-document.getElementById("traffic").onclick=function(){trafficVisible=!trafficVisible;vehicleObjects.forEach(v=>v.visible=!brainMode&&trafficVisible);this.textContent=trafficVisible?"TRAFFIC ON":"TRAFFIC OFF";this.classList.toggle("active",trafficVisible);};
+document.getElementById("workers").onclick=function(){workersVisible=!workersVisible;workerObjects.forEach(w=>w.visible=!brainMode&&workersVisible);this.textContent=workersVisible?"WORKERS":"WORKERS OFF";this.classList.toggle("active",workersVisible);};
+document.getElementById("traffic").onclick=function(){trafficVisible=!trafficVisible;vehicleObjects.forEach(v=>v.visible=!brainMode&&trafficVisible);this.textContent=trafficVisible?"TRAFFIC":"TRAFFIC OFF";this.classList.toggle("active",trafficVisible);};
+document.getElementById("replayToggle").onclick=function(){replayPanel.classList.toggle("open");this.classList.toggle("active",replayPanel.classList.contains("open"));};
 
 const replay=DATA.replay||[],timeline=document.getElementById("timeline"),replayTitle=document.getElementById("replayTitle"),replayDetail=document.getElementById("replayDetail"),play=document.getElementById("play");
 timeline.max=String(Math.max(0,replay.length-1));timeline.value=String(Math.max(0,replay.length-1));let replayIndex=Number(timeline.value||0),replayTimer=null;
