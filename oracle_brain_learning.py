@@ -6,13 +6,14 @@ import json
 import math
 import os
 import re
+import time
 from typing import Any, Iterable
 
 
 BRAIN_LEARNING_SYNC_SECONDS = max(300, int(os.getenv("ORACLE_BRAIN_SYNC_SECONDS", "900")))
 MIN_MATURE_SAMPLES = max(20, int(os.getenv("ORACLE_BRAIN_MATURE_SAMPLES", "30")))
 _SOURCE_BATCH = max(25, int(os.getenv("ORACLE_BRAIN_SOURCE_BATCH", "250")))
-_EPISODE_BATCH = max(25, int(os.getenv("ORACLE_BRAIN_EPISODE_BATCH", "250")))
+_EPISODE_BATCH = max(25, int(os.getenv("ORACLE_BRAIN_EPISODE_BATCH", "75")))
 
 
 def _num(value: Any, default: float = 0.0) -> float:
@@ -112,6 +113,7 @@ def episode_from_row(row: dict[str, Any], *, now: datetime | None = None) -> dic
     feature_snapshot = _json_obj(row.get("feature_snapshot"))
     if not trade_id or not signal_id or not feature_snapshot:
         return None
+    from oracle_brain_learning_v3 import feature_schema_hash, feature_value_hash
 
     entry_price = _num(row.get("entry_price"))
     quantity = abs(_num(row.get("quantity")))
@@ -145,6 +147,11 @@ def episode_from_row(row: dict[str, Any], *, now: datetime | None = None) -> dic
         "source_quality": 1.0,
         "freshness_score": fresh,
         "confidence": round(confidence, 6),
+        "model": row.get("model"),
+        "model_version": row.get("model_version"),
+        "strategy_version": row.get("strategy_version") or row.get("model_version"),
+        "feature_schema_hash": feature_schema_hash(feature_snapshot),
+        "feature_value_hash": feature_value_hash(feature_snapshot),
         "feature_snapshot": feature_snapshot,
         "outcome_snapshot": {
             "outcome": outcome,
@@ -384,8 +391,18 @@ def _sync_intelligence_sources(conn: Any, *, limit: int = _SOURCE_BATCH) -> int:
 
 
 def _sync_curated_crypto_history(conn: Any) -> int:
-    """Persist deterministic crypto history as durable context, never as a price signal."""
+    """Persist deterministic crypto history once per catalog version."""
     from crypto_history_memory import CATALOG_VERSION, EVENTS
+
+    state = conn.execute(
+        """
+        SELECT last_result FROM oracle_brain_learning_state
+        WHERE pipeline_key='curated_crypto_history' AND market='crypto'
+        """
+    ).fetchone() or {}
+    last_result = _json_obj(state.get("last_result"))
+    if str(last_result.get("catalog_version") or "") == str(CATALOG_VERSION):
+        return 0
 
     inserted = 0
     for event in EVENTS:
@@ -458,10 +475,27 @@ def _sync_curated_crypto_history(conn: Any) -> int:
                     observed_at=observed,
                     metadata={"context_only": True},
                 )
+    conn.execute(
+        """
+        INSERT INTO oracle_brain_learning_state(pipeline_key,market,last_sync_at,last_result)
+        VALUES ('curated_crypto_history','crypto',NOW(),%s::jsonb)
+        ON CONFLICT (pipeline_key,market) DO UPDATE SET
+            last_sync_at=NOW(),last_result=EXCLUDED.last_result
+        """,
+        (json.dumps({"catalog_version": CATALOG_VERSION, "inserted": inserted}),),
+    )
     return inserted
 
 
 def _sync_trade_episodes(conn: Any, market: str, *, limit: int = _EPISODE_BATCH) -> tuple[int, int]:
+    state = conn.execute(
+        """
+        SELECT last_episode_exit_at FROM oracle_brain_learning_state
+        WHERE pipeline_key='episodes' AND market=%s
+        """,
+        (market,),
+    ).fetchone() or {}
+    last_exit = _dt(state.get("last_episode_exit_at"))
     rows = list(
         conn.execute(
             """
@@ -469,14 +503,15 @@ def _sync_trade_episodes(conn: Any, market: str, *, limit: int = _EPISODE_BATCH)
                    m.entry_price,m.exit_price,m.net_pnl,m.fees,m.mfe_pct,m.mae_pct,
                    m.excursion_sample_count,
                    t.quantity,t.entry_signal_id,t.entry_decision_id,t.entry_forecast_id,
-                   t.entry_quote_id,t.feature_snapshot
+                   t.entry_quote_id,t.feature_snapshot,t.model,t.model_version
             FROM paper_regime_trade_metrics m
             LEFT JOIN trade_ledger t ON t.trade_id=m.trade_id
             WHERE m.market=%s AND m.exit_time IS NOT NULL
-            ORDER BY m.exit_time DESC
+              AND (%s::timestamptz IS NULL OR m.exit_time>%s::timestamptz)
+            ORDER BY m.exit_time ASC
             LIMIT %s
             """,
-            (market, max(1, int(limit))),
+            (market, last_exit, last_exit, max(1, int(limit))),
         ).fetchall()
     )
     inserted = 0
@@ -498,10 +533,11 @@ def _sync_trade_episodes(conn: Any, market: str, *, limit: int = _EPISODE_BATCH)
             INSERT INTO oracle_brain_episodes(
                 episode_key,trade_id,market,symbol,strategy,regime,entry_time,exit_time,
                 net_pnl,fees,return_pct,mfe_pct,mae_pct,provenance_status,
-                source_quality,freshness_score,confidence,feature_snapshot,outcome_snapshot,
+                source_quality,freshness_score,confidence,model,model_version,strategy_version,
+                feature_schema_hash,feature_value_hash,feature_snapshot,outcome_snapshot,
                 tags,execution_impact
             )
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'exact',%s,%s,%s,%s::jsonb,%s::jsonb,%s::jsonb,'NONE')
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'exact',%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s::jsonb,%s::jsonb,'NONE')
             ON CONFLICT (episode_key) DO UPDATE SET
                 net_pnl=EXCLUDED.net_pnl,
                 fees=EXCLUDED.fees,
@@ -510,6 +546,11 @@ def _sync_trade_episodes(conn: Any, market: str, *, limit: int = _EPISODE_BATCH)
                 mae_pct=EXCLUDED.mae_pct,
                 freshness_score=EXCLUDED.freshness_score,
                 confidence=EXCLUDED.confidence,
+                model=EXCLUDED.model,
+                model_version=EXCLUDED.model_version,
+                strategy_version=EXCLUDED.strategy_version,
+                feature_schema_hash=EXCLUDED.feature_schema_hash,
+                feature_value_hash=EXCLUDED.feature_value_hash,
                 outcome_snapshot=EXCLUDED.outcome_snapshot,
                 tags=EXCLUDED.tags
             """,
@@ -530,6 +571,11 @@ def _sync_trade_episodes(conn: Any, market: str, *, limit: int = _EPISODE_BATCH)
                 episode["source_quality"],
                 episode["freshness_score"],
                 episode["confidence"],
+                episode["model"],
+                episode["model_version"],
+                episode["strategy_version"],
+                episode["feature_schema_hash"],
+                episode["feature_value_hash"],
                 json.dumps(episode["feature_snapshot"]),
                 json.dumps(episode["outcome_snapshot"]),
                 json.dumps(episode["tags"]),
@@ -826,6 +872,13 @@ def sync_brain_learning(market: str, *, source_limit: int = _SOURCE_BATCH, episo
     boundary remains paper-only and live submission is disarmed.
     """
     from oracle_brain import runtime_safety_state
+    from oracle_brain_learning_v3 import (
+        SYNC_BUDGET_SECONDS,
+        begin_learning_run,
+        finish_learning_run,
+        record_learning_stage,
+        sync_v3_extensions,
+    )
 
     safety = runtime_safety_state()
     if not safety["safe_research_boundary"]:
@@ -841,14 +894,29 @@ def sync_brain_learning(market: str, *, source_limit: int = _SOURCE_BATCH, episo
         raise ValueError("market must be cash or crypto")
 
     from database import connect
+    started = time.monotonic()
+    run_key = begin_learning_run(normalized_market)
+    deadline = started + SYNC_BUDGET_SECONDS
 
-    with connect() as conn:
-        sources = _sync_intelligence_sources(conn, limit=source_limit) if normalized_market == "cash" else 0
-        curated_history = _sync_curated_crypto_history(conn) if normalized_market == "crypto" else 0
-        episodes, skipped = _sync_trade_episodes(conn, normalized_market, limit=episode_limit)
-        lessons, queued = _sync_regime_lessons_and_queue(conn, normalized_market)
-        refreshed = _refresh_source_freshness(conn) if normalized_market == "cash" else 0
-        result = {
+    try:
+        record_learning_stage(run_key, normalized_market, "v2_sources")
+        with connect() as conn:
+            sources = _sync_intelligence_sources(conn, limit=source_limit) if normalized_market == "cash" else 0
+            record_learning_stage(run_key, normalized_market, "v2_curated_history")
+            curated_history = _sync_curated_crypto_history(conn) if normalized_market == "crypto" else 0
+            record_learning_stage(run_key, normalized_market, "v2_episodes")
+            episodes, skipped = _sync_trade_episodes(conn, normalized_market, limit=episode_limit)
+            record_learning_stage(run_key, normalized_market, "v2_lessons")
+            lessons, queued = _sync_regime_lessons_and_queue(conn, normalized_market)
+            refreshed = _refresh_source_freshness(conn) if normalized_market == "cash" else 0
+            record_learning_stage(run_key, normalized_market, "v3_extensions")
+            v3 = sync_v3_extensions(
+                conn,
+                normalized_market,
+                run_key=run_key,
+                deadline_monotonic=deadline,
+            )
+            result = {
             "status": "ok",
             "market": normalized_market,
             "sources_ingested": sources,
@@ -857,19 +925,37 @@ def sync_brain_learning(market: str, *, source_limit: int = _SOURCE_BATCH, episo
             "episodes_skipped_missing_exact_provenance": skipped,
             "lessons_updated": lessons,
             "research_topics_queued": queued,
-            "source_freshness_refreshed": refreshed,
-            "execution_impact": "NONE",
-        }
-        conn.execute(
-            """
-            INSERT INTO oracle_brain_learning_state(pipeline_key,market,last_sync_at,last_result)
-            VALUES ('brain_v2',%s,NOW(),%s::jsonb)
-            ON CONFLICT (pipeline_key,market) DO UPDATE SET
-                last_sync_at=EXCLUDED.last_sync_at,last_result=EXCLUDED.last_result
-            """,
-            (normalized_market, json.dumps(result)),
+                "source_freshness_refreshed": refreshed,
+                "v3": v3,
+                "execution_impact": "NONE",
+            }
+            conn.execute(
+                """
+                INSERT INTO oracle_brain_learning_state(pipeline_key,market,last_sync_at,last_result)
+                VALUES ('brain_v3',%s,NOW(),%s::jsonb)
+                ON CONFLICT (pipeline_key,market) DO UPDATE SET
+                    last_sync_at=EXCLUDED.last_sync_at,last_result=EXCLUDED.last_result
+                """,
+                (normalized_market, json.dumps(result)),
+            )
+        elapsed_ms = int((time.monotonic() - started) * 1000)
+        finish_learning_run(
+            run_key,
+            normalized_market,
+            status="partial" if v3.get("status") == "partial" else "ok",
+            elapsed_ms=elapsed_ms,
+            details={"episodes": episodes, "sources": sources, "v3_status": v3.get("status")},
         )
         return result
+    except Exception as exc:
+        finish_learning_run(
+            run_key,
+            normalized_market,
+            status="failed",
+            elapsed_ms=int((time.monotonic() - started) * 1000),
+            details={"error_type": exc.__class__.__name__},
+        )
+        raise
 
 
 def retrieve_brain_context(
