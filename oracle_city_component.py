@@ -32,9 +32,9 @@ html,body{margin:0;height:100%;overflow:hidden;background:#02070c;color:#eef8ff;
 .brand,.toolbar,.inspector,.replay{pointer-events:auto;border:1px solid rgba(74,143,176,.38);background:rgba(2,10,16,.82);backdrop-filter:blur(14px);box-shadow:0 15px 48px rgba(0,0,0,.28)}
 .brand{border-radius:15px;padding:14px 16px;max-width:520px}
 .brand b{font-size:16px;letter-spacing:.12em;text-transform:uppercase}
-.brand span{display:block;margin-top:3px;color:#c0d3dd;font-size:12px;line-height:1.45}
+.brand span{display:block;margin-top:3px;color:#c0d3dd;font-size:12px;line-height:1.45}.chips{display:flex;flex-wrap:wrap;gap:5px;margin-top:8px}.chip{display:inline-flex;align-items:center;min-height:24px;padding:3px 7px;border:1px solid #28516a;border-radius:999px;background:rgba(7,23,34,.82);font-size:10px;font-weight:800;color:#dff5ff}
 .toolbar{display:flex;gap:6px;border-radius:13px;padding:6px}
-button{appearance:none;border:1px solid #28516a;border-radius:9px;background:#071722;color:#e9f7ff;padding:9px 11px;font-size:12px;font-weight:800;cursor:pointer}
+button{appearance:none;border:1px solid #28516a;border-radius:9px;background:#071722;color:#e9f7ff;padding:9px 11px;min-height:38px;font-size:12px;font-weight:800;cursor:pointer}
 button:hover{border-color:#5cbbe5;background:#0c2432}
 button.active{border-color:#4bf49b;color:#4bf49b}
 .inspector{position:absolute;z-index:5;left:14px;bottom:14px;width:min(360px,calc(100% - 28px));border-radius:16px;padding:13px}
@@ -57,9 +57,9 @@ input[type=range]{width:100%;accent-color:#55d4ff}
 @media(max-width:720px){
   #app{min-height:820px}
   .topbar{left:8px;right:8px;top:8px;gap:6px}
-  .brand{max-width:165px;padding:8px 9px}.brand b{font-size:10px}.brand span{display:none}
+  .brand{max-width:190px;padding:8px 9px}.brand b{font-size:10px}.brand span{display:none}.chips{margin-top:5px;gap:3px}.chip{font-size:8px;min-height:20px;padding:2px 5px}
   .toolbar{display:grid;grid-template-columns:1fr 1fr;gap:4px;padding:4px}
-  button{padding:6px 7px;font-size:9px}
+  button{padding:7px 8px;min-height:44px;font-size:10px}
   .legend{display:none}
   .label{display:none}
   .replay{left:8px;right:8px;width:auto;bottom:8px;padding:8px 9px}
@@ -81,13 +81,14 @@ input[type=range]{width:100%;accent-color:#55d4ff}
   <div id="fallback"></div>
   <div id="status">Loading Oracle City WebGL...</div>
   <div class="topbar">
-    <div class="brand"><b>GARIBALDI MARKET ORACLE · CITY V3</b><span>System map: green = healthy, yellow = waiting, red = problem. Drag to move · wheel to zoom · click a building for details.</span></div>
+    <div class="brand"><b>GARIBALDI MARKET ORACLE · LIVING CITY</b><span>Workers move through research, Council, risk, paper execution, learning, homes, and recovery spaces. Motion is visualization-only.</span><div class="chips"><span class="chip" id="cityMood">CITY MOOD: --</span><span class="chip" id="aeveProgress">AEVE: -- / 1000</span><span class="chip">PAPER ONLY</span></div></div>
     <div class="toolbar">
       <button id="reset">RESET VIEW</button>
       <button id="flows" class="active">FLOWS ON</button>
       <button id="autorotate">AUTO ROTATE</button>
       <button id="topview">TOP VIEW</button>
       <button id="brain">BRAIN MAP</button>
+      <button id="workers" class="active">WORKERS ON</button>
     </div>
   </div>
   <div class="legend">
@@ -96,12 +97,13 @@ input[type=range]{width:100%;accent-color:#55d4ff}
     <div><i class="dot" style="background:#ff6767"></i>offline / error state</div>
     <div><i class="dot" style="background:#59cfff"></i>data flow / evidence</div>
     <div><i class="dot" style="background:#a86dff"></i>decision node in Brain Map</div>
+    <div><i class="dot" style="background:#f5f7ff"></i>living-city worker / research agent</div>
   </div>
   <div class="inspector" id="inspector">
     <div class="eyebrow">ORACLE CITY</div>
-    <h3>Interactive system map</h3>
-    <div class="metric">Read-only observability</div>
-    <p>Select a district or switch to Brain Map to inspect persisted evidence, decision gates, execution links, and outcomes.</p>
+    <h3>Living Oracle City</h3>
+    <div class="metric">Work with discipline. Learn from results. Progress earns rewards.</div>
+    <p>Workers travel to districts based on persisted Oracle state. Research hard. Protect capital. Let evidence earn conviction. The city cannot place trades.</p>
   </div>
   <div class="replay">
     <div class="replay-head">
@@ -124,6 +126,9 @@ const fallback = document.getElementById("fallback");
 const status = document.getElementById("status");
 const inspector = document.getElementById("inspector");
 const colors = {online:0x4df49b,waiting:0xffd166,offline:0xff6767};
+const aeveData=DATA.aeve || {};
+document.getElementById("cityMood").textContent="CITY MOOD: "+String(DATA.city_mood || "UNKNOWN");
+document.getElementById("aeveProgress").textContent="AEVE: "+(aeveData.accepted==null?"UNAVAILABLE":String(aeveData.accepted))+" / "+String(aeveData.target || 1000);
 
 (DATA.nodes || []).forEach(function(node){
   const card=document.createElement("div");
@@ -142,6 +147,15 @@ function money(value){
   return "$"+n.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2});
 }
 function nodeColor(state){ return colors[state] || colors.waiting; }
+function districtColor(id){
+  const palette={
+    data:0x12344a,intel:0x15334b,patterns:0x2a2048,council:0x183b35,risk:0x432d19,
+    execution:0x17364a,portfolio:0x193d31,stock:0x173b4d,crypto:0x30214a,
+    academy:0x24354d,aeve:0x33235a,arena:0x49351b,residential:0x263845,
+    wellness:0x1f463c,community:0x48351f,recreation:0x1d4531
+  };
+  return palette[id] || 0x0b2635;
+}
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x02070c);
@@ -192,6 +206,21 @@ grid.material.opacity=.38;
 grid.material.transparent=true;
 scene.add(grid);
 
+function addRoad(x,z,w,d){
+  const road=new THREE.Mesh(
+    new THREE.PlaneGeometry(w,d),
+    new THREE.MeshStandardMaterial({color:0x07131b,roughness:1,metalness:0})
+  );
+  road.rotation.x=-Math.PI/2;
+  road.position.set(x,.018,z);
+  road.receiveShadow=true;
+  scene.add(road);
+}
+addRoad(2.5,0,38,1.25);
+addRoad(4,0,1.25,21);
+addRoad(10,0,1.0,19);
+addRoad(-5,2,1.0,17);
+
 const nodeObjects=new Map();
 const interactables=[];
 const flowObjects=[];
@@ -215,7 +244,7 @@ function addBuilding(node){
   const height=Number(node.height || 4)*scale;
   const geometry=new THREE.BoxGeometry(2.35*scale,height,2.35*scale);
   const material=new THREE.MeshStandardMaterial({
-    color:0x0b2635,metalness:.62,roughness:.32,
+    color:districtColor(node.id),metalness:.62,roughness:.32,
     emissive:stateColor,emissiveIntensity:.16
   });
   const tower=new THREE.Mesh(geometry,material);
@@ -271,6 +300,72 @@ function addBuilding(node){
   mesh.userData={type:"agent",data:agent,baseY:.55,phase:Math.random()*6.28};
   scene.add(mesh);interactables.push(mesh);
 });
+
+const cohortObjects=[];
+const arena=nodeObjects.get("arena");
+(DATA.strategy_arena || []).slice(0,10).forEach(function(item,index){
+  if(!arena)return;
+  const angle=(index/Math.max(1,Math.min(10,(DATA.strategy_arena || []).length)))*Math.PI*2;
+  const samples=Math.max(0,Number(item.samples || 0));
+  const height=.35+Math.min(2.4,samples/80);
+  const negative=String(item.evidence_state || "").includes("NEGATIVE");
+  const promising=String(item.evidence_state || "").includes("PROMISING");
+  const color=negative?0xff6767:(promising?0x4df49b:0xffd166);
+  const mesh=new THREE.Mesh(
+    new THREE.CylinderGeometry(.16,.21,height,10),
+    new THREE.MeshStandardMaterial({color:0x172631,emissive:color,emissiveIntensity:.42,metalness:.3,roughness:.42})
+  );
+  mesh.position.set(arena.position.x+Math.cos(angle)*2.15,height/2,arena.position.z+Math.sin(angle)*2.15);
+  mesh.userData={type:"cohort",data:item};
+  scene.add(mesh);interactables.push(mesh);cohortObjects.push(mesh);
+});
+
+const workerObjects=[];
+function workerTint(state){
+  const value=String(state || "");
+  if(value==="RISK_REVIEW") return 0xffd166;
+  if(value==="LEARNING" || value==="TRAINING") return 0xa86dff;
+  if(value==="RESTING" || value==="RECREATION") return 0x59cfff;
+  return 0xf5f7ff;
+}
+(DATA.resident_agents || []).forEach(function(worker,index){
+  const home=nodeObjects.get(worker.home);
+  const destination=nodeObjects.get(worker.destination);
+  if(!home || !destination)return;
+  const group=new THREE.Group();
+  const body=new THREE.Mesh(
+    new THREE.CylinderGeometry(.09,.13,.34,8),
+    new THREE.MeshStandardMaterial({color:0x233947,emissive:workerTint(worker.state),emissiveIntensity:.24,roughness:.5})
+  );
+  body.position.y=.24;
+  const head=new THREE.Mesh(
+    new THREE.SphereGeometry(.095,10,10),
+    new THREE.MeshStandardMaterial({color:workerTint(worker.state),roughness:.45})
+  );
+  head.position.y=.49;
+  group.add(body);group.add(head);
+  const homePos=home.position.clone();
+  const workPos=destination.position.clone();
+  const offset=((index%4)-1.5)*.24;
+  homePos.x+=offset;homePos.z+=((index%3)-1)*.18;
+  workPos.x+=offset;workPos.z+=((index%3)-1)*.18;
+  group.position.copy(homePos);
+  group.userData={type:"resident",data:worker,home:homePos,work:workPos,phase:index*.57,speed:.18+(index%4)*.025};
+  body.userData=group.userData;head.userData=group.userData;
+  scene.add(group);interactables.push(body);interactables.push(head);workerObjects.push(group);
+});
+
+const recreation=nodeObjects.get("recreation");
+if(recreation){
+  for(let i=0;i<9;i++){
+    const a=(i/9)*Math.PI*2;
+    const trunk=new THREE.Mesh(new THREE.CylinderGeometry(.035,.05,.36,6),new THREE.MeshStandardMaterial({color:0x392918}));
+    const crown=new THREE.Mesh(new THREE.ConeGeometry(.22,.55,7),new THREE.MeshStandardMaterial({color:0x1d6b45,roughness:.9}));
+    trunk.position.set(recreation.position.x+Math.cos(a)*2.2,.18,recreation.position.z+Math.sin(a)*1.7);
+    crown.position.set(trunk.position.x,.65,trunk.position.z);
+    scene.add(trunk);scene.add(crown);
+  }
+}
 
 function curveFor(source,target){
   const a=nodeObjects.get(source).position.clone();
@@ -388,7 +483,7 @@ function setBrainMode(enabled){
       "</p>";
   }else{
     resetView();
-    inspector.innerHTML="<div class='eyebrow'>ORACLE CITY</div><h3>Oracle system overview</h3><div class='metric'>Click a building to see what it is doing</div><p>City Map shows Oracle components. Brain Map shows evidence, decisions, safety checks, paper trades, and outcomes.</p>";
+    inspector.innerHTML="<div class='eyebrow'>ORACLE CITY</div><h3>Living Oracle City</h3><div class='metric'>"+esc(String(DATA.city_mood || "UNKNOWN"))+" · "+String((DATA.resident_agents || []).length)+" workers</div><p>Workers move between homes, research, Council, risk, paper execution, training, and recovery districts. Motion is illustrative; persisted Oracle state drives their assigned work.</p>";
   }
   controls.update();
 }
@@ -413,6 +508,18 @@ function inspect(kind,data){
     title=data.title;
     metric=data.metric;
     detail=data.detail;
+  } else if(kind==="resident"){
+    eyebrow="ORACLE CITY WORKER · VISUAL ONLY";
+    title=data.title;
+    metric=String(data.state || "IDLE").replaceAll("_"," ");
+    detail=data.detail+" Assigned district: "+String(data.destination || "unknown")+". This worker cannot place or approve trades.";
+  } else if(kind==="cohort"){
+    eyebrow=data.control?"STRATEGY ARENA · CONTROL":"STRATEGY ARENA · PAPER EVIDENCE";
+    title=String(data.strategy || "unknown").replaceAll("_"," ")+" · "+String(data.regime || "unknown");
+    metric=String(data.evidence_state || "RESEARCH ONLY")+" · "+String(data.samples || 0)+" samples";
+    const ex=data.expectancy==null?"expectancy unavailable":"expectancy "+Number(data.expectancy).toFixed(6);
+    const pf=data.profit_factor==null?"PF unavailable":"PF "+Number(data.profit_factor).toFixed(3);
+    detail=ex+" · "+pf+". No visual ranking grants execution or promotion authority.";
   }
   inspector.innerHTML="<div class='eyebrow'>"+esc(eyebrow)+"</div><h3>"+esc(title)+"</h3><div class='metric'>"+esc(metric)+"</div><p>"+esc(detail)+"</p>";
 }
@@ -452,6 +559,13 @@ document.getElementById("flows").onclick=function(){
 document.getElementById("autorotate").onclick=function(){
   controls.autoRotate=!controls.autoRotate;controls.autoRotateSpeed=.65;
   this.classList.toggle("active",controls.autoRotate);
+};
+let workersVisible=true;
+document.getElementById("workers").onclick=function(){
+  workersVisible=!workersVisible;
+  workerObjects.forEach(function(worker){worker.visible=workersVisible;});
+  this.textContent=workersVisible?"WORKERS ON":"WORKERS OFF";
+  this.classList.toggle("active",workersVisible);
 };
 function mobileView(){
   return window.matchMedia && window.matchMedia("(max-width:720px)").matches;
@@ -565,6 +679,15 @@ function animate(){
       object.position.y=object.userData.baseY+Math.sin(elapsed*2.2+object.userData.phase)*.09;
       object.rotation.y+=.012;
     }
+  });
+  workerObjects.forEach(function(worker){
+    const cycle=(Math.sin(elapsed*worker.userData.speed+worker.userData.phase)+1)/2;
+    const state=String(worker.userData.data.state || "");
+    const restBias=(state==="RESTING" || state==="HOME")?0.18:(state==="RECREATION"?0.72:cycle);
+    worker.position.lerpVectors(worker.userData.home,worker.userData.work,restBias);
+    worker.position.y=.02+Math.abs(Math.sin(elapsed*5+worker.userData.phase))*.035;
+    const direction=worker.userData.work.clone().sub(worker.userData.home);
+    if(direction.lengthSq()>0.001)worker.rotation.y=Math.atan2(direction.x,direction.z);
   });
   (DATA.nodes || []).forEach(function(node){
     const object=nodeObjects.get(node.id);

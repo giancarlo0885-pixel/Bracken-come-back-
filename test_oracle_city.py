@@ -89,6 +89,64 @@ def _fake_rows(sql, params=()):
                 "created_at": "2026-09-18T23:56:00+00:00",
             }
         ]
+    if "paper_aeve_generations" in sql:
+        return [
+            {
+                "generation": 1,
+                "started_at": "2026-09-18T00:00:00+00:00",
+                "config_json": {
+                    "generation": 1,
+                    "min_edge_pct": 0.05,
+                    "min_profit_factor": 1.0,
+                    "min_mfe_mae_ratio": 1.0,
+                    "min_mfe_cost_multiple": 2.0,
+                    "max_loss_streak": 8,
+                    "score_gate": 0.25,
+                    "rebound_gate": 0.5,
+                    "require_positive_regime": True,
+                },
+                "config_hash": "abc123",
+                "diagnosis": "initial_aeve_v1",
+                "status": "ACTIVE",
+            }
+        ]
+    if "paper_aeve_generation_outcomes" in sql:
+        return [
+            {
+                "provenance_version": 2,
+                "observed": 180,
+                "accepted": 137,
+                "expectancy": 0.14,
+                "gross_win": 19.0,
+                "gross_loss": 11.0,
+                "avg_mfe_pct": 0.7,
+                "avg_mae_pct": -0.3,
+                "avg_cost_pct": 0.08,
+            }
+        ]
+    if "paper_regime_trade_metrics" in sql:
+        return [
+            {
+                "strategy": "oracle_council_v3",
+                "regime": "trend_up",
+                "samples": 42,
+                "expectancy": 0.12,
+                "gross_win": 12.0,
+                "gross_loss": 6.0,
+                "avg_mfe_pct": 0.8,
+                "avg_mae_pct": -0.35,
+            },
+            {
+                "strategy": "mean_reversion",
+                "regime": "range_high_vol",
+                "samples": 36,
+                "expectancy": -0.08,
+                "gross_win": 4.0,
+                "gross_loss": 9.0,
+                "avg_mfe_pct": 0.4,
+                "avg_mae_pct": -0.7,
+            },
+        ]
     return []
 
 
@@ -122,6 +180,20 @@ def test_oracle_city_snapshot_builds_workers_exposure_agents_and_replay():
     assert len(snapshot["portfolio_towers"]) == 2
     assert {item["kind"] for item in snapshot["replay"]} == {"decision", "trade", "intel"}
     assert any(flow["source"] == "council" and flow["target"] == "risk" for flow in snapshot["flows"])
+    assert snapshot["aeve"]["generation"] == 1
+    assert snapshot["aeve"]["accepted"] == 137
+    assert snapshot["aeve"]["target"] == 1000
+    assert snapshot["aeve"]["provenance_version"] == 2
+    assert snapshot["aeve"]["execution_impact"] == "NONE"
+    assert snapshot["city_mood"] == "RESEARCHING"
+    assert len(snapshot["resident_agents"]) >= 10
+    assert {item["state"] for item in snapshot["resident_agents"]} >= {"MONITORING", "LEARNING", "TRAINING"}
+    node_ids = {item["id"] for item in snapshot["nodes"]}
+    assert {"academy", "aeve", "arena", "residential", "wellness", "community", "recreation"} <= node_ids
+    arena = {(item["strategy"], item["regime"]): item for item in snapshot["strategy_arena"]}
+    assert arena[("oracle_council_v3", "trend_up")]["evidence_state"] == "PROMISING — PAPER ONLY"
+    assert arena[("oracle_council_v3", "trend_up")]["control"] is True
+    assert arena[("mean_reversion", "range_high_vol")]["evidence_state"] == "NEGATIVE EVIDENCE"
 
 
 def test_oracle_city_component_contains_interactive_webgl_controls():
@@ -136,6 +208,11 @@ def test_oracle_city_component_contains_interactive_webgl_controls():
     assert "portfolio_towers" in rendered
     assert "Recent decision replay" in rendered
     assert "READ-ONLY" not in rendered or "read-only" in rendered.lower()
+    assert "WORKERS ON" in rendered
+    assert "resident_agents" in rendered
+    assert "workerObjects" in rendered
+    assert "Strategy Arena" in rendered
+    assert "Work with discipline. Learn from results. Progress earns rewards." in rendered
 
 
 def test_oracle_city_component_escapes_script_breakout_payloads():
@@ -156,3 +233,34 @@ def test_oracle_city_mobile_layout_suppresses_label_collisions_and_resets_camera
     assert 'window.matchMedia("(max-width:720px)")' in rendered
     assert "camera.position.set(2.5,31,28)" in rendered
     assert "lastMobileView" in rendered
+    assert "min-height:44px" in rendered
+
+
+def test_oracle_city_missing_aeve_progress_stays_unavailable():
+    def empty_rows(sql, params=()):
+        return []
+
+    snapshot = build_oracle_city_snapshot(
+        empty_rows,
+        now=datetime(2026, 9, 19, 0, 0, tzinfo=timezone.utc),
+    )
+    assert snapshot["aeve"]["available"] is False
+    assert snapshot["aeve"]["accepted"] is None
+    assert snapshot["aeve"]["observed"] is None
+    assert snapshot["aeve"]["profit_factor"] is None
+    rendered = render_oracle_city_component(snapshot)
+    assert "UNAVAILABLE" in rendered
+
+
+def test_oracle_city_worker_and_strategy_layers_are_visual_only():
+    source = Path("oracle_city_component.py").read_text(encoding="utf-8")
+    model = Path("oracle_city_model.py").read_text(encoding="utf-8")
+    assert "visualization-only" in source.lower() or "visual only" in source.lower()
+    assert "cannot place or approve trades" in source
+    assert "submit_order(" not in source
+    assert "INSERT INTO" not in model
+    assert "UPDATE " not in model
+    assert "DELETE FROM" not in model
+    assert "paper_aeve_generations" in model
+    assert "paper_aeve_generation_outcomes" in model
+    assert "paper_regime_trade_metrics" in model
