@@ -156,6 +156,8 @@ def test_learning_schema_and_runtime_are_research_only():
     assert "LIVE_TRADING_ARMED=true" not in source
     assert "brain_learning_executor" in worker
     assert "_run_brain_learning_sync" in worker
+    assert "next_brain_learning_due = time.monotonic()" in worker
+    assert "next_brain_learning_due = time.monotonic() + 20.0" not in worker
     assert "execution_impact=NONE" in worker
     assert "existing_episode" in source
     assert "if not existing_episode" in source
