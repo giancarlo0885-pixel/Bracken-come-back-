@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 from datetime import datetime, timezone
 from typing import Any, Callable
 
@@ -482,6 +483,55 @@ def build_oracle_city_snapshot(
         fetch_rows, "SELECT * FROM trade_ledger ORDER BY id DESC LIMIT 120", (),
         warnings, "trade provenance unavailable",
     )
+    active_aeve_rows = _safe_select(
+        fetch_rows,
+        """SELECT generation,started_at,config_json,config_hash,diagnosis,
+                  source_samples,source_expectancy,source_profit_factor,status
+           FROM paper_aeve_generations
+           WHERE status='ACTIVE'
+           ORDER BY generation DESC
+           LIMIT 1""",
+        (), warnings, "AEVE generation unavailable",
+    )
+    active_aeve = active_aeve_rows[0] if active_aeve_rows else {}
+    aeve_outcomes: list[dict[str, Any]] = []
+    if active_aeve:
+        aeve_outcomes = _safe_select(
+            fetch_rows,
+            """SELECT provenance_version,
+                      COUNT(*)::int AS observed,
+                      COUNT(*) FILTER (WHERE would_trade=TRUE)::int AS accepted,
+                      AVG(net_pnl) FILTER (WHERE would_trade=TRUE) AS expectancy,
+                      SUM(CASE WHEN would_trade=TRUE AND net_pnl>0 THEN net_pnl ELSE 0 END) AS gross_win,
+                      ABS(SUM(CASE WHEN would_trade=TRUE AND net_pnl<0 THEN net_pnl ELSE 0 END)) AS gross_loss,
+                      AVG(mfe_pct) FILTER (WHERE would_trade=TRUE AND excursion_sample_count>0) AS avg_mfe_pct,
+                      AVG(mae_pct) FILTER (WHERE would_trade=TRUE AND excursion_sample_count>0) AS avg_mae_pct,
+                      AVG(cost_pct) FILTER (WHERE would_trade=TRUE) AS avg_cost_pct
+               FROM paper_aeve_generation_outcomes
+               WHERE generation=%s AND config_hash=%s
+               GROUP BY provenance_version
+               ORDER BY provenance_version DESC
+               LIMIT 1""",
+            (
+                int(active_aeve.get("generation") or 0),
+                str(active_aeve.get("config_hash") or ""),
+            ),
+            warnings, "AEVE progress unavailable",
+        )
+    regime_economics = _safe_select(
+        fetch_rows,
+        """SELECT strategy,regime,COUNT(*)::int AS samples,
+                  AVG(net_pnl) AS expectancy,
+                  SUM(CASE WHEN net_pnl>0 THEN net_pnl ELSE 0 END) AS gross_win,
+                  ABS(SUM(CASE WHEN net_pnl<0 THEN net_pnl ELSE 0 END)) AS gross_loss,
+                  AVG(mfe_pct) FILTER (WHERE excursion_sample_count>0) AS avg_mfe_pct,
+                  AVG(mae_pct) FILTER (WHERE excursion_sample_count>0) AS avg_mae_pct
+           FROM paper_regime_trade_metrics
+           GROUP BY strategy,regime
+           ORDER BY samples DESC
+           LIMIT 40""",
+        (), warnings, "strategy evidence unavailable",
+    )
 
     worker_map = {str(item.get("market") or "").lower(): item for item in workers}
     worker_views: list[dict[str, Any]] = []
@@ -582,6 +632,29 @@ def build_oracle_city_snapshot(
               ("Heartbeat age unknown." if crypto["age_seconds"] is None
                else f"Heartbeat {crypto['age_seconds']:.0f}s old. {crypto['message']}"),
               4, -5, height=4.8),
+        _node("academy", "Training Academy", "online",
+              "Learning campus", "Workers study market structure, technical analysis, data quality, and prior outcomes.",
+              -11, 8, height=3.8),
+        _node("aeve", "AEVE Research Center", "online" if active_aeve else "waiting",
+              (f"Generation {int(active_aeve.get('generation') or 0)}" if active_aeve else "No active generation"),
+              "Paper-only challenger research. It has no execution authority.",
+              -5, 8, height=4.6),
+        _node("arena", "Strategy Arena", "online" if regime_economics else "waiting",
+              f"{len(regime_economics)} evidence cohorts",
+              "Council remains the control. Challengers compete only on forward evidence.",
+              1, 8, height=4.2),
+        _node("residential", "Residential District", "online",
+              "Worker homes", "Visualization workers return here for rest and idle states.",
+              10, 8, height=3.5),
+        _node("wellness", "Wellness Center", "online",
+              "Recovery & focus", "Gym, quiet rooms, and recovery space for visualization workers.",
+              15, 7, height=3.2),
+        _node("community", "Community Plaza", "online",
+              "Food & social", "Cafe, meals, and community space for visualization workers.",
+              11, -8, height=3.0),
+        _node("recreation", "Recreation Park", "online",
+              "Recharge", "Park and recreation area used during low-activity worker states.",
+              16, -6, height=2.4),
     ]
 
     flows = [
@@ -597,6 +670,10 @@ def build_oracle_city_snapshot(
             ("risk", "execution", "approval"),
             ("execution", "portfolio", "fills/outcomes"),
             ("portfolio", "patterns", "learning feedback"),
+            ("portfolio", "aeve", "forward outcomes"),
+            ("patterns", "arena", "strategy evidence"),
+            ("aeve", "arena", "challenger evidence"),
+            ("arena", "academy", "lessons"),
         ]
     ]
 
@@ -678,11 +755,146 @@ def build_oracle_city_snapshot(
         trades,
     )
 
+    def _env_true(name: str) -> bool:
+        return str(os.getenv(name, "false") or "false").strip().lower() in {"1", "true", "yes", "on"}
+
+    safety = {
+        "execution_mode": str(EXECUTION_MODE).lower(),
+        "broker_submission_enabled": _env_true("ENABLE_BROKER_SUBMISSION"),
+        "live_trading_armed": _env_true("LIVE_TRADING_ARMED"),
+    }
+
+    aeve_progress_row = aeve_outcomes[0] if aeve_outcomes else {}
+    aeve_accepted = (
+        int(aeve_progress_row.get("accepted") or 0)
+        if aeve_progress_row
+        else None
+    )
+    aeve_observed = (
+        int(aeve_progress_row.get("observed") or 0)
+        if aeve_progress_row
+        else None
+    )
+    aeve_gross_loss = _number(aeve_progress_row.get("gross_loss")) if aeve_progress_row else None
+    aeve_profit_factor = None
+    if aeve_progress_row:
+        gross_win = _number(aeve_progress_row.get("gross_win")) or 0.0
+        if aeve_gross_loss is not None and aeve_gross_loss > 0:
+            aeve_profit_factor = gross_win / aeve_gross_loss
+    aeve_config = _payload(active_aeve.get("config_json")) if active_aeve else {}
+    aeve_summary = {
+        "available": bool(active_aeve),
+        "generation": int(active_aeve.get("generation") or 0) if active_aeve else None,
+        "target": 1000,
+        "accepted": aeve_accepted,
+        "observed": aeve_observed,
+        "config_hash": str(active_aeve.get("config_hash") or "") or None,
+        "provenance_version": (
+            int(aeve_progress_row.get("provenance_version") or 0)
+            if aeve_progress_row
+            else None
+        ),
+        "diagnosis": str(active_aeve.get("diagnosis") or "") or None,
+        "config": aeve_config,
+        "expectancy": (
+            None if not aeve_progress_row or aeve_progress_row.get("expectancy") is None
+            else round(_number(aeve_progress_row.get("expectancy")) or 0.0, 8)
+        ),
+        "profit_factor": None if aeve_profit_factor is None else round(aeve_profit_factor, 4),
+        "avg_mfe_pct": (
+            None if not aeve_progress_row or aeve_progress_row.get("avg_mfe_pct") is None
+            else round(_number(aeve_progress_row.get("avg_mfe_pct")) or 0.0, 6)
+        ),
+        "avg_mae_pct": (
+            None if not aeve_progress_row or aeve_progress_row.get("avg_mae_pct") is None
+            else round(_number(aeve_progress_row.get("avg_mae_pct")) or 0.0, 6)
+        ),
+        "avg_cost_pct": (
+            None if not aeve_progress_row or aeve_progress_row.get("avg_cost_pct") is None
+            else round(_number(aeve_progress_row.get("avg_cost_pct")) or 0.0, 6)
+        ),
+        "mode": "shadow",
+        "execution_impact": "NONE",
+    }
+
+    strategy_arena: list[dict[str, Any]] = []
+    for row in regime_economics:
+        samples = int(row.get("samples") or 0)
+        expectancy = _number(row.get("expectancy"))
+        gross_win = _number(row.get("gross_win")) or 0.0
+        gross_loss = _number(row.get("gross_loss")) or 0.0
+        profit_factor = (gross_win / gross_loss) if gross_loss > 0 else None
+        if samples < 30:
+            evidence_state = "INSUFFICIENT EVIDENCE"
+        elif expectancy is not None and expectancy < 0:
+            evidence_state = "NEGATIVE EVIDENCE"
+        elif profit_factor is not None and profit_factor <= 1.0:
+            evidence_state = "NEGATIVE EVIDENCE"
+        elif expectancy is not None and expectancy > 0 and profit_factor is not None and profit_factor > 1.0:
+            evidence_state = "PROMISING — PAPER ONLY"
+        else:
+            evidence_state = "RESEARCH ONLY"
+        strategy_arena.append({
+            "strategy": str(row.get("strategy") or "unknown"),
+            "regime": str(row.get("regime") or "unknown"),
+            "samples": samples,
+            "expectancy": None if expectancy is None else round(expectancy, 8),
+            "profit_factor": None if profit_factor is None else round(profit_factor, 4),
+            "avg_mfe_pct": None if row.get("avg_mfe_pct") is None else round(_number(row.get("avg_mfe_pct")) or 0.0, 6),
+            "avg_mae_pct": None if row.get("avg_mae_pct") is None else round(_number(row.get("avg_mae_pct")) or 0.0, 6),
+            "evidence_state": evidence_state,
+            "control": str(row.get("strategy") or "") == "oracle_council_v3",
+        })
+
+    active_work = len(opportunity_views) + len(trades)
+    block_count = int(decision_graph.get("summary", {}).get("downstream_blocks") or 0)
+    if warnings:
+        city_mood = "DEGRADED"
+    elif block_count >= 3:
+        city_mood = "DEFENSIVE"
+    elif aeve_summary["available"] and (aeve_accepted or 0) < 1000:
+        city_mood = "RESEARCHING"
+    elif active_work > 0:
+        city_mood = "PRODUCTIVE"
+    else:
+        city_mood = "CAUTIOUS"
+
+    resident_agents = [
+        {"id": "resident-data", "title": "Data Scout", "state": "MONITORING" if not warnings else "MAINTENANCE", "home": "residential", "destination": "data", "detail": "Checks persisted market and provider state."},
+        {"id": "resident-intel", "title": "Macro Analyst", "state": "ANALYZING" if events else "RESEARCHING", "home": "residential", "destination": "intel", "detail": "Studies macro, news, and external context."},
+        {"id": "resident-pattern", "title": "Pattern Researcher", "state": "ANALYZING" if opportunities else "RESEARCHING", "home": "residential", "destination": "patterns", "detail": "Studies setups, regimes, and entry evidence."},
+        {"id": "resident-council", "title": "Council Analyst", "state": "COUNCIL_REVIEW" if opportunities else "IDLE", "home": "residential", "destination": "council", "detail": "Observes Council decisions without execution authority."},
+        {"id": "resident-risk", "title": "Risk Guardian", "state": "RISK_REVIEW" if block_count else "MONITORING", "home": "residential", "destination": "risk", "detail": "Tracks safety gates, blocks, and capacity constraints."},
+        {"id": "resident-execution", "title": "Paper Execution Operator", "state": "PAPER_TRADING" if trades else "MONITORING", "home": "residential", "destination": "execution", "detail": "Visualizes persisted paper execution activity only."},
+        {"id": "resident-stock", "title": "Stock Desk Worker", "state": "PAPER_TRADING" if stock["actions_last_cycle"] else "MONITORING", "home": "residential", "destination": "stock", "detail": "Represents the stock worker's persisted runtime state."},
+        {"id": "resident-crypto", "title": "Crypto Desk Worker", "state": "PAPER_TRADING" if crypto["actions_last_cycle"] else "MONITORING", "home": "residential", "destination": "crypto", "detail": "Represents the crypto worker's persisted runtime state."},
+        {"id": "resident-aeve", "title": "AEVE Researcher", "state": "LEARNING" if aeve_summary["available"] else "RESEARCHING", "home": "residential", "destination": "aeve", "detail": "Studies the current paper-only AEVE generation."},
+        {"id": "resident-arena", "title": "Strategy Coach", "state": "ANALYZING" if strategy_arena else "TRAINING", "home": "residential", "destination": "arena", "detail": "Compares evidence cohorts without promoting them."},
+        {"id": "resident-academy", "title": "Training Engineer", "state": "TRAINING", "home": "residential", "destination": "academy", "detail": "Studies prior outcomes and market structure."},
+        {"id": "resident-wellness", "title": "Recovery Worker", "state": "RECREATION" if active_work == 0 else "RESTING", "home": "residential", "destination": "recreation" if active_work == 0 else "wellness", "detail": "Cosmetic city-life worker; does not affect Oracle logic."},
+    ]
+
+    rewards: list[dict[str, str]] = []
+    if not warnings:
+        rewards.append({"title": "Stable Runtime", "reason": "Oracle City data feeds are available."})
+    if int(decision_graph.get("summary", {}).get("recent_closed_provenance_gaps") or 0) == 0 and int(decision_graph.get("summary", {}).get("linked_outcomes") or 0) > 0:
+        rewards.append({"title": "Reliable Provenance", "reason": "Recent linked outcomes have canonical decision history."})
+    if aeve_accepted is not None and aeve_accepted >= 1000:
+        rewards.append({"title": "1,000-Trade Generation Complete", "reason": "AEVE reached its accepted-outcome research target."})
+    if any(item["evidence_state"] == "PROMISING — PAPER ONLY" for item in strategy_arena):
+        rewards.append({"title": "Positive Post-Cost Cohort", "reason": "A mature paper evidence cohort is positive and remains research-only."})
+
     return {
         "generated_at": now.isoformat(),
         "read_only": True,
         "execution_mode": EXECUTION_MODE,
         "warnings": warnings,
+        "safety": safety,
+        "city_mood": city_mood,
+        "aeve": aeve_summary,
+        "strategy_arena": strategy_arena,
+        "resident_agents": resident_agents,
+        "rewards": rewards,
         "summary": {
             "workers_online": sum(1 for item in worker_views if item["state"] == "online"),
             "workers_total": len(worker_views),
