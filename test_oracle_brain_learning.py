@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import inspect
 
+import database
 import oracle_brain
 import oracle_brain_learning as learning
 
@@ -156,6 +157,19 @@ def test_learning_schema_and_runtime_are_research_only():
     assert "brain_learning_executor" in worker
     assert "_run_brain_learning_sync" in worker
     assert "execution_impact=NONE" in worker
+    assert "existing_episode" in source
+    assert "if not existing_episode" in source
+    assert "_sync_curated_crypto_history" in source
+    for table in (
+        "oracle_brain_entries",
+        "oracle_brain_sources",
+        "oracle_brain_episodes",
+        "oracle_brain_links",
+        "oracle_brain_contradictions",
+        "oracle_brain_research_queue",
+        "oracle_brain_learning_state",
+    ):
+        assert table in database.CANONICAL_PROTECTED_TABLES
 
 
 def test_brain_page_visualizes_sources_episodes_links_and_queue():
