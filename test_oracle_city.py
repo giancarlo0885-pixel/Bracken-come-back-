@@ -218,6 +218,12 @@ def test_oracle_city_component_contains_interactive_webgl_controls():
     assert "createResidential" in rendered
     assert "createPark" in rendered
     assert "makeVehicle" in rendered
+    assert "function daylightForHour" in rendered
+    assert "function twilightForHour" in rendered
+    assert "function applyTimeOfDay()" in rendered
+    assert "sunVisual" in rendered
+    assert "moonVisual" in rendered
+    assert "setInterval(applyTimeOfDay,60000)" in rendered
     assert "STREET VIEW" in rendered
     assert "CINEMATIC" in rendered
     assert 'id="hovercard"' in rendered
@@ -318,3 +324,15 @@ def test_oracle_city_defaults_to_city_first_uncluttered_view():
     assert 'renderer.domElement.addEventListener("pointermove"' in rendered
     assert 'renderer.domElement.addEventListener("pointerleave",clearHover)' in rendered
     assert 'else inspector.classList.remove("open")' in rendered
+
+
+def test_oracle_city_day_night_cycle_uses_viewer_local_clock():
+    rendered = render_oracle_city_component({"nodes": [], "flows": [], "replay": []})
+    assert "new Date()" in rendered
+    assert "now.getHours()" in rendered
+    assert "daylightForHour" in rendered
+    assert "scene.background.copy(sky)" in rendered
+    assert "scene.fog.color.copy(fogColor)" in rendered
+    assert "renderer.toneMappingExposure=1.02+daylight*.50+twilight*.10" in rendered
+    assert "sunLight.intensity=daylight" in rendered
+    assert "starMaterial.opacity" in rendered
