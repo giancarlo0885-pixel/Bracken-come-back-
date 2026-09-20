@@ -1549,7 +1549,7 @@ def run_worker(market: str) -> None:
     next_fast_due = time.monotonic()
     next_intelligence_due = time.monotonic()
     next_maintenance_due = time.monotonic()
-    next_brain_learning_due = time.monotonic() + 20.0
+    next_brain_learning_due = time.monotonic()
     brain_learning_seconds = max(300, int(os.getenv("ORACLE_BRAIN_SYNC_SECONDS", "900")))
     last_deep_actions = 0
     last_fast_actions = 0
