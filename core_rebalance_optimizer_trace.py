@@ -11,6 +11,31 @@ from strategic_rebalance_optimizer_bridge import _strategic_rebalance_gate
 _ENTRY_ACTIONS = {"BUY", "STRONG_BUY", "STRONG BUY", "ACCUMULATE", "LONG"}
 
 
+def _trace_state_changed(worker: Any, decisions: dict[str, dict[str, Any]]) -> bool:
+    states = getattr(worker, "_core_rebalance_trace_states", None)
+    if not isinstance(states, dict):
+        states = {}
+        worker._core_rebalance_trace_states = states
+    changed = False
+    active_symbols = set(decisions)
+    for symbol, decision in decisions.items():
+        proposed = adaptive._finite(decision.get("proposed_amount"))
+        floor = adaptive._finite(decision.get("meaningful_entry_floor"))
+        fingerprint = (
+            decision.get("status"),
+            decision.get("reason"),
+            bool(proposed + 1e-9 >= floor) if floor > 0 else None,
+            decision.get("approved_amount"),
+        )
+        if states.get(symbol) != fingerprint:
+            changed = True
+        states[symbol] = fingerprint
+    for symbol in set(states) - active_symbols:
+        states.pop(symbol, None)
+        changed = True
+    return changed
+
+
 def _upper(value: Any) -> str:
     return str(value or "").strip().upper()
 
@@ -188,7 +213,9 @@ def install_core_rebalance_optimizer_trace(worker: Any) -> None:
                                 or ("hard_risk_gate" if strategic_gate.get("allowed") else "blocked_by_hard_risk_gate"),
                             }
                         )
-                    worker.log.info(
+                    state_changed = _trace_state_changed(worker, decisions)
+                    logger = worker.log.info if state_changed else getattr(worker.log, "debug", lambda *args, **kwargs: None)
+                    logger(
                         "CORE_REBALANCE_OPTIMIZER | candidates=%s | entry_ideas=%s | hard_gate=%s | gate_scope=TACTICAL | "
                         "strategic_authorization=%s | allocations=%s | rejections=%s | decisions=%s | cash=%s | equity=%s | positions=%s",
                         [

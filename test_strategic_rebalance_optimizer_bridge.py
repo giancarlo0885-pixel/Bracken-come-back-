@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import global_adaptive_engine as adaptive
 import runtime_integrity_patch as patch
 import strategic_rebalance_optimizer_bridge as bridge
+from core_rebalance_optimizer_trace import _trace_state_changed
 from strategic_rebalance_optimizer_bridge import (
     _strategic_rebalance_gate,
     install_strategic_rebalance_optimizer_bridge,
@@ -10,8 +11,15 @@ from strategic_rebalance_optimizer_bridge import (
 
 
 class _Log:
+    def __init__(self):
+        self.info_records = []
+        self.debug_records = []
+
     def info(self, *args, **kwargs):
-        pass
+        self.info_records.append((args, kwargs))
+
+    def debug(self, *args, **kwargs):
+        self.debug_records.append((args, kwargs))
 
 
 def _candidate(**overrides):
@@ -166,6 +174,76 @@ def test_crypto_optimizer_converts_tiny_rebalance_to_watch_candidate(monkeypatch
     assert rejection["proposed_amount"] == 0.10
     assert rejection["meaningful_entry_floor"] == 10.0
     assert rejection["minimum_notional"] >= 2.0
+    assert rejection["tiny_gap_cooldown"] is True
+    assert rejection["cooldown_active"] is False
+    assert rejection["cooldown_scope"] == "symbol"
+
+
+def test_tiny_gap_cooldown_is_per_symbol_and_repeated_watch_logs_debug(monkeypatch):
+    worker = _worker()
+    monkeypatch.setattr(adaptive, "hard_risk_gate", lambda item: {"allowed": True, "reasons": []})
+    monkeypatch.setenv("CRYPTO_TINY_GAP_COOLDOWN_SECONDS", "300")
+    install_strategic_rebalance_optimizer_bridge(worker)
+    portfolio = {"cash": 2000.0, "equity": 2000.0, "buying_power": 2000.0}
+
+    first = worker.adaptive_portfolio_optimizer(
+        [_candidate(symbol="BNB-USD", core_target_amount=0.10)], portfolio, [], engine="crypto"
+    )
+    repeated = worker.adaptive_portfolio_optimizer(
+        [_candidate(symbol="BNB-USD", core_target_amount=0.10)], portfolio, [], engine="crypto"
+    )
+    other_symbol = worker.adaptive_portfolio_optimizer(
+        [_candidate(symbol="ADA-USD", core_target_amount=0.10)], portfolio, [], engine="crypto"
+    )
+
+    assert first["rejections"][0]["cooldown_active"] is False
+    assert repeated["rejections"][0]["cooldown_active"] is True
+    assert other_symbol["rejections"][0]["cooldown_active"] is False
+    assert len(worker.log.info_records) == 2
+    assert len(worker.log.debug_records) == 1
+
+
+def test_tiny_gap_state_change_breaks_quiet_period(monkeypatch):
+    worker = _worker()
+    monkeypatch.setattr(adaptive, "hard_risk_gate", lambda item: {"allowed": True, "reasons": []})
+    monkeypatch.setenv("CRYPTO_TINY_GAP_COOLDOWN_SECONDS", "300")
+    install_strategic_rebalance_optimizer_bridge(worker)
+    portfolio = {"cash": 2000.0, "equity": 2000.0, "buying_power": 2000.0}
+
+    worker.adaptive_portfolio_optimizer(
+        [_candidate(symbol="BNB-USD", core_target_amount=0.10, regime="range")], portfolio, [], engine="crypto"
+    )
+    changed = worker.adaptive_portfolio_optimizer(
+        [_candidate(symbol="BNB-USD", core_target_amount=0.10, regime="trend")], portfolio, [], engine="crypto"
+    )
+
+    assert changed["rejections"][0]["cooldown_active"] is False
+    assert len(worker.log.info_records) == 2
+    assert worker.log.debug_records == []
+
+
+def test_core_rebalance_trace_changes_only_when_symbol_state_changes():
+    worker = _worker()
+    tiny = {
+        "BNB-USD": {
+            "status": "REJECTED",
+            "reason": "watch_momentum_candidate",
+            "proposed_amount": 0.10,
+            "meaningful_entry_floor": 10.0,
+        }
+    }
+    executable = {
+        "BNB-USD": {
+            "status": "APPROVED",
+            "reason": "capital_allocated",
+            "approved_amount": 25.0,
+            "meaningful_entry_floor": 10.0,
+        }
+    }
+
+    assert _trace_state_changed(worker, tiny) is True
+    assert _trace_state_changed(worker, tiny) is False
+    assert _trace_state_changed(worker, executable) is True
 
 
 def test_crypto_optimizer_uses_locked_execution_minimum_before_approval(monkeypatch):
@@ -251,7 +329,12 @@ def test_stock_optimizer_is_unchanged_delegate():
 
 def test_crypto_optimizer_does_not_approve_known_negative_economics(monkeypatch):
     worker = _worker()
-    monkeypatch.setattr(adaptive, "hard_risk_gate", lambda item: {"allowed": True, "reasons": []})
+    hard_gate_calls = []
+    monkeypatch.setattr(
+        adaptive,
+        "hard_risk_gate",
+        lambda item: hard_gate_calls.append(item) or {"allowed": True, "reasons": []},
+    )
     monkeypatch.setattr(
         bridge,
         "fee_edge_allows_entry",
@@ -265,7 +348,7 @@ def test_crypto_optimizer_does_not_approve_known_negative_economics(monkeypatch)
     install_strategic_rebalance_optimizer_bridge(worker)
 
     plan = worker.adaptive_portfolio_optimizer(
-        [_candidate(tactical_action="BUY")],
+        [_candidate(tactical_action="BUY", cohort="core_alt", strategy_name="oracle_council_v3", regime="range")],
         {"cash": 2000.0, "equity": 2000.0, "buying_power": 2000.0},
         [],
         engine="crypto",
@@ -276,6 +359,12 @@ def test_crypto_optimizer_does_not_approve_known_negative_economics(monkeypatch)
     assert plan["rejections"][0]["watch_only"] is True
     assert plan["rejections"][0]["expected_edge_pct"] is None
     assert plan["rejections"][0]["estimated_round_trip_cost_pct"] == 0.6501
+    assert plan["rejections"][0]["economics_identity"] == {
+        "cohort": "core_alt",
+        "strategy": "oracle_council_v3",
+        "regime": "range",
+    }
+    assert hard_gate_calls == []
 
 
 def test_crypto_optimizer_preserves_economics_exploration_when_allowed(monkeypatch):
