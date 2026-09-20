@@ -78,41 +78,29 @@ input[type=range]{width:100%;accent-color:#55d4ff}
 <div id="app">
   <div id="stage"></div>
   <div id="status">Building cinematic Oracle City…</div>
+  <div id="hovercard"></div>
   <div class="hud topbar">
     <div class="brand">
       <b>GARIBALDI MARKET ORACLE · ORACLE CITY</b>
-      <span class="sub">A living Wall Street + crypto research metropolis. Workers, districts, roads, parks, towers, and market activity are visualization-only; Oracle data remains the source of truth.</span>
       <div class="chips">
-        <span class="chip" id="cityMood">CITY MOOD: --</span>
+        <span class="chip" id="cityMood">CITY: --</span>
         <span class="chip" id="aeveProgress">AEVE: -- / 1000</span>
-        <span class="chip" id="paperState">PAPER ONLY</span>
+        <span class="chip" id="paperState">PAPER</span>
       </div>
     </div>
     <div class="toolbar">
-      <button id="reset">CITY VIEW</button>
-      <button id="street">STREET VIEW</button>
-      <button id="topview">TOP VIEW</button>
-      <button id="workers" class="active">WORKERS ON</button>
-      <button id="traffic" class="active">TRAFFIC ON</button>
-      <button id="autorotate">CINEMATIC</button>
-      <button id="brain">BRAIN MAP</button>
+      <button id="reset">CITY</button>
+      <button id="street">STREET</button>
+      <button id="topview">TOP</button>
+      <button id="workers" class="active">WORKERS</button>
+      <button id="traffic" class="active">TRAFFIC</button>
+      <button id="autorotate">CINEMA</button>
+      <button id="brain">BRAIN</button>
+      <button id="replayToggle">REPLAY</button>
     </div>
   </div>
-  <div class="hud minimap"><b>City Districts</b><span>Central financial core · Research campus · Exchange corridor · Residential quarter · Community plaza · Recreation park.</span></div>
-  <div class="hud legend">
-    <div><i class="dot" style="background:#4df49b"></i>healthy / active</div>
-    <div><i class="dot" style="background:#ffd166"></i>waiting / research</div>
-    <div><i class="dot" style="background:#ff6767"></i>blocked / degraded</div>
-    <div><i class="dot" style="background:#59cfff"></i>data / evidence</div>
-    <div><i class="dot" style="background:#a86dff"></i>learning / AEVE</div>
-  </div>
-  <div class="hud inspector" id="inspector">
-    <div class="eyebrow">ORACLE CITY</div>
-    <h3>Living Financial Metropolis</h3>
-    <div class="metric">Work with discipline. Learn from results. Progress earns rewards.</div>
-    <p>Click a real city district, tower, worker, strategy cohort, or portfolio tower. Research hard. Protect capital. Let evidence earn conviction. Visualization workers cannot place or approve trades.</p>
-  </div>
-  <div class="hud replay">
+  <div class="hud inspector" id="inspector"></div>
+  <div class="hud replay" id="replayPanel">
     <div class="replay-head">
       <button id="play">PLAY</button>
       <div class="replay-title"><b id="replayTitle">Recent decision replay</b><span id="replayDetail">Review persisted Oracle decisions, intelligence events, and paper trades.</span></div>
