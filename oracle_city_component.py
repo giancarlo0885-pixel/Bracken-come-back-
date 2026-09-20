@@ -323,7 +323,7 @@ function createResidential(node){
   const g=new THREE.Group(),state=stateColor(node.state);
   const towers=[[-1.25,0,3.2], [1.15,.35,4.4],[0,-1.05,2.7]];
   towers.forEach((t,i)=>{const h=t[2];const b=box(g,1.45,h,1.45,t[0],h/2,t[1],mat(i===1?0x263642:0x202f38,.55,.2,state,.05));windowGrid(b,1.45,h,1.45,0xffd98e,Math.floor(h*2),4);});
-  addPlane(node.x||0,node.z||0,0,0,0);return g;
+  return g;
 }
 function createPark(node){
   const g=new THREE.Group();
@@ -557,7 +557,7 @@ function animate(){
   brainObjects.forEach(o=>{if(brainMode){const p=1+Math.sin(elapsed*2.4+o.userData.phase)*.055;o.scale.setScalar(p);o.rotation.y+=.004;}});
   workerObjects.forEach(w=>{
     const state=String(w.userData.data.state||""),cycle=(Math.sin(elapsed*w.userData.speed+w.userData.phase)+1)/2;
-    const t=(state==="RESTING"||state==="HOME")?.16:(state==="RECREATION"?.72:cycle);
+    const t=(state==="RESTING"||state==="HOME")?0.16:(state==="RECREATION"?0.72:cycle);
     w.position.lerpVectors(w.userData.home,w.userData.work,t);w.position.y=.02+Math.abs(Math.sin(elapsed*5+w.userData.phase))*.024;
     const dir=w.userData.work.clone().sub(w.userData.home);if(dir.lengthSq()>.001)w.rotation.y=Math.atan2(dir.x,dir.z);
     const step=Math.sin(elapsed*8+w.userData.phase)*.4;w.userData.leg1.rotation.x=step;w.userData.leg2.rotation.x=-step;
