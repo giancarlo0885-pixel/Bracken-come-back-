@@ -213,6 +213,15 @@ def test_oracle_city_component_contains_interactive_webgl_controls():
     assert "workerObjects" in rendered
     assert "Strategy Arena" in rendered
     assert "Work with discipline. Learn from results. Progress earns rewards." in rendered
+    assert "Living Financial Metropolis" in rendered
+    assert "createAmbientBuilding" in rendered
+    assert "createCouncil" in rendered
+    assert "createExchange" in rendered
+    assert "createResidential" in rendered
+    assert "createPark" in rendered
+    assert "makeVehicle" in rendered
+    assert "STREET VIEW" in rendered
+    assert "CINEMATIC" in rendered
 
 
 def test_oracle_city_component_escapes_script_breakout_payloads():
@@ -234,6 +243,8 @@ def test_oracle_city_mobile_layout_suppresses_label_collisions_and_resets_camera
     assert "camera.position.set(2.5,31,28)" in rendered
     assert "lastMobileView" in rendered
     assert "min-height:44px" in rendered
+    assert "isMobileDevice?26:68" in rendered
+    assert "isMobileDevice?6:16" in rendered
 
 
 def test_oracle_city_missing_aeve_progress_stays_unavailable():
@@ -264,3 +275,26 @@ def test_oracle_city_worker_and_strategy_layers_are_visual_only():
     assert "paper_aeve_generations" in model
     assert "paper_aeve_generation_outcomes" in model
     assert "paper_regime_trade_metrics" in model
+
+
+def test_oracle_city_cinematic_renderer_remains_data_driven_and_read_only():
+    source = Path("oracle_city_component.py").read_text(encoding="utf-8")
+    assert "DATA.nodes" in source
+    assert "DATA.resident_agents" in source
+    assert "DATA.strategy_arena" in source
+    assert "DATA.portfolio_towers" in source
+    assert "submit_order(" not in source
+    assert "fetch(" not in source
+    assert "XMLHttpRequest" not in source
+    assert "WebSocket(" not in source
+    assert "ENABLE_BROKER_SUBMISSION=true" not in source
+    assert "LIVE_TRADING_ARMED=true" not in source
+
+
+def test_oracle_city_page_leads_with_cinematic_city():
+    source = Path("pages/2_Oracle_City.py").read_text(encoding="utf-8")
+    city = source.index("components.html")
+    status = source.index('st.subheader("City status")')
+    assert city < status
+    assert "Cinematic Metropolis" in source
+    assert "height=980" in source
