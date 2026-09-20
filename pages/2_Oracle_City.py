@@ -39,26 +39,26 @@ if auto_refresh and st_autorefresh is not None:
 snapshot = build_oracle_city_snapshot(rows)
 summary = snapshot["summary"]
 
-st.title("Oracle City V3")
+st.title("Oracle City — System Overview")
 st.caption(
-    "Interactive 3D digital twin and immutable decision-provenance brain map for GARIBALDI MARKET ORACLE. "
-    "This interface is read-only and has no order-submission authority."
+    "A readable view of what Oracle is doing now: system health, opportunities, positions, decisions, safety blocks, and paper-trade outcomes. "
+    "This page is monitoring only and cannot place trades."
 )
 
 c1, c2, c3, c4, c5 = st.columns(5)
-c1.metric("Workers online", f"{summary['workers_online']}/{summary['workers_total']}")
+c1.metric("Systems online", f"{summary['workers_online']}/{summary['workers_total']}")
 c2.metric("Open positions", summary["open_positions"])
-c3.metric("Ranked opportunities", summary["ranked_opportunities"])
+c3.metric("Trade ideas", summary["ranked_opportunities"])
 c4.metric("Recent trades", summary["recent_trades"])
-c5.metric("Known exposure", "$" + f"{summary['known_exposure']:,.2f}")
+c5.metric("Money in positions", "$" + f"{summary['known_exposure']:,.2f}")
 
 brain_summary = snapshot.get("decision_graph", {}).get("summary", {})
 b1, b2, b3, b4 = st.columns(4)
-b1.metric("Brain-map decisions", int(brain_summary.get("traced_decisions") or 0))
-b2.metric("Linked outcomes", int(brain_summary.get("linked_outcomes") or 0))
-b3.metric("Downstream blocks", int(brain_summary.get("downstream_blocks") or 0))
+b1.metric("Decisions tracked", int(brain_summary.get("traced_decisions") or 0))
+b2.metric("Trades with results", int(brain_summary.get("linked_outcomes") or 0))
+b3.metric("Safety blocks", int(brain_summary.get("downstream_blocks") or 0))
 brain_gaps = int(brain_summary.get("recent_closed_provenance_gaps") or 0)
-b4.metric("Closed-trade provenance gaps", brain_gaps)
+b4.metric("Trades missing history link", brain_gaps)
 if brain_gaps:
     st.error(
         f"{brain_gaps} recent closed trade(s) lack a canonical decision provenance link. "
@@ -74,7 +74,7 @@ components.html(
     scrolling=False,
 )
 
-st.subheader("Top ranked opportunities")
+st.subheader("Current trade ideas")
 opportunities = snapshot["opportunities"]
 if opportunities:
     st.dataframe(
@@ -99,7 +99,7 @@ if opportunities:
 else:
     st.info("No ranked opportunity records are currently available.")
 
-st.subheader("Decision / execution replay ledger")
+st.subheader("Recent Oracle decisions and paper trades")
 replay = list(reversed(snapshot["replay"]))
 if replay:
     st.dataframe(
