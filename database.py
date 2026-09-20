@@ -111,6 +111,13 @@ CANONICAL_PROTECTED_TABLES = {
     "oracle_brain_contradictions",
     "oracle_brain_research_queue",
     "oracle_brain_learning_state",
+    "oracle_brain_source_clusters",
+    "oracle_brain_provider_reputation",
+    "oracle_brain_counterfactuals",
+    "oracle_brain_drift_events",
+    "oracle_brain_working_memory",
+    "oracle_brain_experiments",
+    "oracle_brain_learning_runs",
 }
 DATABASE_RETENTION_POLICIES = {
     "signals": {"keep_rows": 6000, "batch_size": DATABASE_RETENTION_BATCH_SIZE, "classification": "append-only analytical/ephemeral"},
@@ -169,6 +176,13 @@ DATABASE_TABLE_GROWTH_AUDIT = {
     "oracle_brain_contradictions": {"class": "research governance/audit records", "inserted_by": "Oracle Brain contradiction engine", "frequency": "evidence polarity changes", "retention": "never auto-delete"},
     "oracle_brain_research_queue": {"class": "research governance records", "inserted_by": "Oracle Brain uncertainty engine", "frequency": "under-sampled/conflicting cohorts", "retention": "preserve until resolved/retired"},
     "oracle_brain_learning_state": {"class": "research cursor/state records", "inserted_by": "Oracle Brain learner", "frequency": "periodic learning sync", "retention": "never auto-delete"},
+    "oracle_brain_source_clusters": {"class": "durable source-corroboration memory", "inserted_by": "Oracle Brain V3 source clustering", "frequency": "one per deduplicated event cluster", "retention": "never auto-delete"},
+    "oracle_brain_provider_reputation": {"class": "durable source-quality memory", "inserted_by": "Oracle Brain V3 corroboration learner", "frequency": "provider rollup", "retention": "never auto-delete"},
+    "oracle_brain_counterfactuals": {"class": "durable counterfactual research memory", "inserted_by": "Oracle Brain V3 abstention learner", "frequency": "one per rejected/watched decision horizon", "retention": "never auto-delete"},
+    "oracle_brain_drift_events": {"class": "research governance/drift records", "inserted_by": "Oracle Brain V3 drift detector", "frequency": "cohort drift refresh", "retention": "never auto-delete"},
+    "oracle_brain_working_memory": {"class": "temporary research working memory", "inserted_by": "Oracle Brain V3", "frequency": "active drift/experiment refresh", "retention": "expires explicitly; never generic auto-delete"},
+    "oracle_brain_experiments": {"class": "research experiment governance", "inserted_by": "Oracle Brain V3 self-directed research", "frequency": "uncertainty/drift/contradiction triggers", "retention": "never auto-delete"},
+    "oracle_brain_learning_runs": {"class": "research learner observability", "inserted_by": "Oracle Brain V3 learner", "frequency": "one per scheduled learning pass", "retention": "never auto-delete"},
 }
 
 
