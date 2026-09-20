@@ -194,7 +194,8 @@ def build_oracle_brain_snapshot(fetch_rows: FetchRows) -> dict[str, Any]:
         fetch_rows,
         """
         SELECT source_key,source_type,provider,category,symbol,title,source_ref,
-               observed_at,source_quality,freshness_score,confidence,status,metadata
+               observed_at,source_quality,freshness_score,confidence,status,metadata,
+               cluster_key,adaptive_reputation,corroboration_count
         FROM oracle_brain_sources
         ORDER BY confidence DESC,freshness_score DESC,observed_at DESC NULLS LAST
         LIMIT 80
@@ -205,7 +206,8 @@ def build_oracle_brain_snapshot(fetch_rows: FetchRows) -> dict[str, Any]:
         """
         SELECT episode_key,trade_id,market,symbol,strategy,regime,entry_time,exit_time,
                net_pnl,fees,return_pct,mfe_pct,mae_pct,provenance_status,
-               source_quality,freshness_score,confidence,outcome_snapshot,tags
+               source_quality,freshness_score,confidence,outcome_snapshot,tags,
+               model,model_version,strategy_version,feature_schema_hash,feature_value_hash
         FROM oracle_brain_episodes
         WHERE provenance_status='exact'
         ORDER BY exit_time DESC NULLS LAST
@@ -249,6 +251,81 @@ def build_oracle_brain_snapshot(fetch_rows: FetchRows) -> dict[str, Any]:
         SELECT pipeline_key,market,last_source_id,last_episode_exit_at,last_sync_at,last_result
         FROM oracle_brain_learning_state
         ORDER BY pipeline_key,market
+        """,
+    )
+    source_clusters = _safe_rows(
+        fetch_rows,
+        """
+        SELECT cluster_key,canonical_title,symbol,category,source_count,provider_count,
+               providers,first_observed_at,last_observed_at,corroboration_score,metadata
+        FROM oracle_brain_source_clusters
+        ORDER BY corroboration_score DESC,last_observed_at DESC NULLS LAST
+        LIMIT 60
+        """,
+    )
+    provider_reputation = _safe_rows(
+        fetch_rows,
+        """
+        SELECT provider,base_quality,total_events,corroborated_events,reputation_score,updated_at,metadata
+        FROM oracle_brain_provider_reputation
+        ORDER BY reputation_score DESC,total_events DESC
+        LIMIT 60
+        """,
+    )
+    counterfactuals = _safe_rows(
+        fetch_rows,
+        """
+        SELECT decision_audit_id,horizon_minutes,market,symbol,strategy,regime,
+               recommendation,approved,reason,observed_at,entry_price,due_at,resolved_at,
+               future_price,gross_return_pct,estimated_cost_pct,net_return_pct,
+               classification,feature_schema_hash
+        FROM oracle_brain_counterfactuals
+        ORDER BY observed_at DESC,id DESC
+        LIMIT 160
+        """,
+    )
+    drift_events = _safe_rows(
+        fetch_rows,
+        """
+        SELECT event_key,market,strategy,regime,baseline_samples,recent_samples,
+               baseline_expectancy,recent_expectancy,baseline_win_rate,recent_win_rate,
+               z_score,sign_flip,drift_detected,severity,status,detected_at,last_observed_at,metadata
+        FROM oracle_brain_drift_events
+        WHERE status='active' AND drift_detected=TRUE
+        ORDER BY CASE severity WHEN 'high' THEN 3 WHEN 'medium' THEN 2 ELSE 1 END DESC,
+                 last_observed_at DESC
+        LIMIT 60
+        """,
+    )
+    working_memory = _safe_rows(
+        fetch_rows,
+        """
+        SELECT memory_key,market,symbol,kind,topic,payload,importance,updated_at,expires_at
+        FROM oracle_brain_working_memory
+        WHERE expires_at>NOW()
+        ORDER BY importance DESC,updated_at DESC
+        LIMIT 80
+        """,
+    )
+    brain_experiments = _safe_rows(
+        fetch_rows,
+        """
+        SELECT experiment_key,market,strategy,regime,hypothesis,trigger_type,baseline_cutoff,
+               target_samples,observed_samples,status,priority,evidence,result,created_at,
+               updated_at,ready_at
+        FROM oracle_brain_experiments
+        WHERE status IN ('collecting','ready_for_review')
+        ORDER BY priority DESC,updated_at DESC
+        LIMIT 80
+        """,
+    )
+    learning_runs = _safe_rows(
+        fetch_rows,
+        """
+        SELECT run_key,market,started_at,finished_at,stage,status,elapsed_ms,details
+        FROM oracle_brain_learning_runs
+        ORDER BY started_at DESC
+        LIMIT 40
         """,
     )
 
@@ -315,6 +392,40 @@ def build_oracle_brain_snapshot(fetch_rows: FetchRows) -> dict[str, Any]:
         item for item in links
         if _num(item.get("confidence"), 0.0) >= 0.70 and int(_num(item.get("evidence_count"), 0.0)) >= 3
     ]
+    missed_winners = [item for item in counterfactuals if item.get("classification") == "missed_winner"]
+    avoided_losses = [item for item in counterfactuals if item.get("classification") == "avoided_loss"]
+    completed_counterfactuals = [
+        item for item in counterfactuals
+        if item.get("classification") in {"missed_winner", "avoided_loss", "neutral"}
+    ]
+    ready_experiments = [item for item in brain_experiments if item.get("status") == "ready_for_review"]
+    failed_runs = [item for item in learning_runs if item.get("status") == "failed"]
+    recent_run = learning_runs[0] if learning_runs else None
+
+    if drift_events:
+        derived_lessons.append(
+            {
+                "level": "warning",
+                "title": "Recent evidence drift detected",
+                "body": (
+                    f"{len(drift_events)} cohort(s) show a material recent-vs-historical shift. "
+                    "Treat older evidence as less transferable until forward paper experiments resolve the drift."
+                ),
+                "source": "oracle_brain_drift_events",
+            }
+        )
+    if completed_counterfactuals:
+        derived_lessons.append(
+            {
+                "level": "info",
+                "title": "Abstentions are now producing learning evidence",
+                "body": (
+                    f"Among the recent resolved abstention horizons shown here, {len(avoided_losses)} avoided losses "
+                    f"and {len(missed_winners)} missed winners were observed. Use both sides to calibrate gates."
+                ),
+                "source": "oracle_brain_counterfactuals",
+            }
+        )
 
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -331,6 +442,13 @@ def build_oracle_brain_snapshot(fetch_rows: FetchRows) -> dict[str, Any]:
         "contradictions": contradictions,
         "research_queue": research_queue,
         "learning_state": learning_state,
+        "source_clusters": source_clusters,
+        "provider_reputation": provider_reputation,
+        "counterfactuals": counterfactuals,
+        "drift_events": drift_events,
+        "working_memory": working_memory,
+        "brain_experiments": brain_experiments,
+        "learning_runs": learning_runs,
         "derived_lessons": derived_lessons,
         "safety": runtime_safety_state(),
         "summary": {
@@ -346,6 +464,19 @@ def build_oracle_brain_snapshot(fetch_rows: FetchRows) -> dict[str, Any]:
             "high_confidence_links": len(high_confidence_links),
             "active_contradictions": len(contradictions),
             "research_topics": len(research_queue),
+            "source_clusters": len(source_clusters),
+            "providers_scored": len(provider_reputation),
+            "counterfactuals_resolved": len(completed_counterfactuals),
+            "avoided_losses": len(avoided_losses),
+            "missed_winners": len(missed_winners),
+            "active_drift_events": len(drift_events),
+            "working_memory_items": len(working_memory),
+            "active_brain_experiments": len(brain_experiments),
+            "ready_brain_experiments": len(ready_experiments),
+            "learning_run_failures": len(failed_runs),
+            "latest_learning_run_status": None if recent_run is None else recent_run.get("status"),
+            "latest_learning_run_stage": None if recent_run is None else recent_run.get("stage"),
+            "latest_learning_run_ms": None if recent_run is None else recent_run.get("elapsed_ms"),
         },
     }
 
