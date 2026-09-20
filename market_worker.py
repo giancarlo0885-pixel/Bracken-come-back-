@@ -8,6 +8,7 @@ import uuid
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 import math
+import os
 from threading import Event, Lock
 from typing import Any
 
@@ -410,6 +411,29 @@ def _run_scheduled_database_maintenance(label: str) -> None:
             log.info("%s database maintenance complete: %s", label, result.get("deleted", {}))
     except Exception as exc:
         log.warning("%s database maintenance failed; worker will retry later: %s", label, exc)
+
+
+def _run_brain_learning_sync(market: str) -> dict[str, Any]:
+    """Run research-only Brain learning outside the scan/execution path."""
+    try:
+        from oracle_brain_learning import sync_brain_learning
+
+        result = sync_brain_learning(market)
+        log.info(
+            "ORACLE BRAIN LEARNING | market=%s | status=%s | sources=%s | episodes=%s | "
+            "skipped_provenance=%s | lessons=%s | research_topics=%s | execution_impact=NONE",
+            market,
+            result.get("status"),
+            result.get("sources_ingested", 0),
+            result.get("episodes_processed", 0),
+            result.get("episodes_skipped_missing_exact_provenance", 0),
+            result.get("lessons_updated", 0),
+            result.get("research_topics_queued", 0),
+        )
+        return result
+    except Exception as exc:
+        log.warning("ORACLE BRAIN LEARNING | market=%s | status=UNAVAILABLE | reason=%s", market, exc.__class__.__name__)
+        return {"status": "unavailable", "market": market, "execution_impact": "NONE"}
 
 
 def _ensure_status_table() -> None:
@@ -1516,13 +1540,17 @@ def run_worker(market: str) -> None:
     deep_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"{market}-deep")
     fast_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"{market}-fast")
     intelligence_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="market-intelligence") if market == "cash" else None
+    brain_learning_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"{market}-brain-learning")
     deep_future: Future[list[Any]] | None = None
     fast_future: Future[list[Any]] | None = None
     intelligence_future: Future[None] | None = None
+    brain_learning_future: Future[dict[str, Any]] | None = None
     next_deep_due = time.monotonic()
     next_fast_due = time.monotonic()
     next_intelligence_due = time.monotonic()
     next_maintenance_due = time.monotonic()
+    next_brain_learning_due = time.monotonic() + 20.0
+    brain_learning_seconds = max(300, int(os.getenv("ORACLE_BRAIN_SYNC_SECONDS", "900")))
     last_deep_actions = 0
     last_fast_actions = 0
     consecutive_errors = 0
@@ -1617,6 +1645,16 @@ def run_worker(market: str) -> None:
                         intelligence_future = intelligence_executor.submit(_collect_stock_intelligence)
                         next_intelligence_due = now_monotonic + INTELLIGENCE_REFRESH_SECONDS
 
+                if brain_learning_future is not None and brain_learning_future.done():
+                    try:
+                        brain_learning_future.result()
+                    except Exception as exc:
+                        log.warning("Oracle Brain learning future failed: %s", exc.__class__.__name__)
+                    brain_learning_future = None
+                if brain_learning_future is None and now_monotonic >= next_brain_learning_due:
+                    brain_learning_future = brain_learning_executor.submit(_run_brain_learning_sync, market)
+                    next_brain_learning_due = now_monotonic + brain_learning_seconds
+
                 pulse_actions: list[Any] = []
                 refreshed = 0
                 provider_text = "none"
@@ -1678,6 +1716,7 @@ def run_worker(market: str) -> None:
     finally:
         deep_executor.shutdown(wait=False, cancel_futures=True)
         fast_executor.shutdown(wait=False, cancel_futures=True)
+        brain_learning_executor.shutdown(wait=False, cancel_futures=True)
         if intelligence_executor is not None:
             intelligence_executor.shutdown(wait=False, cancel_futures=True)
 
