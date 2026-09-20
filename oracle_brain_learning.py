@@ -383,6 +383,79 @@ def _sync_intelligence_sources(conn: Any, *, limit: int = _SOURCE_BATCH) -> int:
     return inserted
 
 
+def _sync_curated_crypto_history(conn: Any) -> int:
+    """Persist deterministic crypto history as durable context, never as a price signal."""
+    from crypto_history_memory import CATALOG_VERSION, EVENTS
+
+    inserted = 0
+    for event in EVENTS:
+        observed = _dt(f"{event.event_date}T00:00:00+00:00")
+        source_key = f"crypto_history:{event.event_id}"
+        result = conn.execute(
+            """
+            INSERT INTO oracle_brain_sources(
+                source_key,source_type,provider,category,symbol,title,body,source_ref,
+                observed_at,source_quality,freshness_score,confidence,stale_after,status,
+                metadata,execution_impact
+            )
+            VALUES (%s,'curated_history','primary-source catalog',%s,%s,%s,%s,%s,%s,0.94,1.0,0.94,NULL,'active',%s::jsonb,'NONE')
+            ON CONFLICT (source_key) DO UPDATE SET
+                title=EXCLUDED.title,
+                body=EXCLUDED.body,
+                source_ref=EXCLUDED.source_ref,
+                metadata=EXCLUDED.metadata,
+                source_quality=EXCLUDED.source_quality,
+                freshness_score=1.0,
+                confidence=EXCLUDED.confidence,
+                status=CASE WHEN oracle_brain_sources.status='retired' THEN 'retired' ELSE 'active' END
+            """,
+            (
+                source_key,
+                event.category,
+                event.assets[0] if event.assets else None,
+                event.title,
+                event.context,
+                event.primary_source,
+                observed,
+                json.dumps(
+                    {
+                        "catalog_version": CATALOG_VERSION,
+                        "event_id": event.event_id,
+                        "assets": list(event.assets),
+                        "tags": list(event.tags),
+                        "durable_lesson": event.durable_lesson,
+                        "context_only": True,
+                        "influences_decision": False,
+                    }
+                ),
+            ),
+        )
+        inserted += max(0, int(getattr(result, "rowcount", 1) or 0))
+        event_node = f"source:{source_key}"
+        _upsert_link(
+            conn,
+            source_key=event_node,
+            target_key=f"category:{_slug(event.category)}",
+            relation="classified_as",
+            weight=0.0,
+            confidence=0.94,
+            observed_at=observed,
+            metadata={"context_only": True},
+        )
+        for asset in event.assets:
+            _upsert_link(
+                conn,
+                source_key=event_node,
+                target_key=f"symbol:{_slug(asset)}",
+                relation="historical_context_for",
+                weight=0.0,
+                confidence=0.94,
+                observed_at=observed,
+                metadata={"context_only": True},
+            )
+    return inserted
+
+
 def _sync_trade_episodes(conn: Any, market: str, *, limit: int = _EPISODE_BATCH) -> tuple[int, int]:
     rows = list(
         conn.execute(
@@ -713,7 +786,8 @@ def _refresh_source_freshness(conn: Any) -> int:
             """
             SELECT source_key,category,observed_at,status
             FROM oracle_brain_sources
-            WHERE status IN ('active','stale')
+            WHERE source_type='intelligence_event'
+              AND status IN ('active','stale')
             ORDER BY observed_at DESC NULLS LAST
             LIMIT 2000
             """
@@ -765,6 +839,7 @@ def sync_brain_learning(market: str, *, source_limit: int = _SOURCE_BATCH, episo
 
     with connect() as conn:
         sources = _sync_intelligence_sources(conn, limit=source_limit) if normalized_market == "cash" else 0
+        curated_history = _sync_curated_crypto_history(conn) if normalized_market == "crypto" else 0
         episodes, skipped = _sync_trade_episodes(conn, normalized_market, limit=episode_limit)
         lessons, queued = _sync_regime_lessons_and_queue(conn, normalized_market)
         refreshed = _refresh_source_freshness(conn) if normalized_market == "cash" else 0
@@ -772,6 +847,7 @@ def sync_brain_learning(market: str, *, source_limit: int = _SOURCE_BATCH, episo
             "status": "ok",
             "market": normalized_market,
             "sources_ingested": sources,
+            "curated_history_ingested": curated_history,
             "episodes_processed": episodes,
             "episodes_skipped_missing_exact_provenance": skipped,
             "lessons_updated": lessons,
