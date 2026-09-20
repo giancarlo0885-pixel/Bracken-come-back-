@@ -419,9 +419,13 @@ def _run_brain_learning_sync(market: str) -> dict[str, Any]:
         from oracle_brain_learning import sync_brain_learning
 
         result = sync_brain_learning(market)
+        v3 = result.get("v3") or {}
+        counterfactuals = v3.get("counterfactuals") or {}
         log.info(
             "ORACLE BRAIN LEARNING | market=%s | status=%s | sources=%s | episodes=%s | "
-            "skipped_provenance=%s | lessons=%s | research_topics=%s | execution_impact=NONE",
+            "skipped_provenance=%s | lessons=%s | research_topics=%s | v3_status=%s | "
+            "clusters=%s | counterfactual_resolved=%s | drift=%s | experiments=%s | "
+            "working_memory=%s | execution_impact=NONE",
             market,
             result.get("status"),
             result.get("sources_ingested", 0),
@@ -429,6 +433,12 @@ def _run_brain_learning_sync(market: str) -> dict[str, Any]:
             result.get("episodes_skipped_missing_exact_provenance", 0),
             result.get("lessons_updated", 0),
             result.get("research_topics_queued", 0),
+            v3.get("status", "none"),
+            v3.get("clusters_touched", 0),
+            counterfactuals.get("resolved", 0),
+            v3.get("drift", 0),
+            v3.get("experiments_updated", 0),
+            v3.get("working_memory_items", 0),
         )
         return result
     except Exception as exc:
@@ -1549,8 +1559,10 @@ def run_worker(market: str) -> None:
     next_fast_due = time.monotonic()
     next_intelligence_due = time.monotonic()
     next_maintenance_due = time.monotonic()
-    next_brain_learning_due = time.monotonic()
     brain_learning_seconds = max(300, int(os.getenv("ORACLE_BRAIN_SYNC_SECONDS", "900")))
+    brain_learning_future = brain_learning_executor.submit(_run_brain_learning_sync, market)
+    next_brain_learning_due = time.monotonic() + brain_learning_seconds
+    log.info("%s Oracle Brain learning launched before market scans.", label)
     last_deep_actions = 0
     last_fast_actions = 0
     consecutive_errors = 0
