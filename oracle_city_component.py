@@ -94,8 +94,8 @@ input[type=range]{width:100%;accent-color:#55d4ff}
       <button id="topview">TOP</button>
       <button id="workers" class="active">WORKERS</button>
       <button id="traffic" class="active">TRAFFIC</button>
-      <button id="autorotate">CINEMA</button>
-      <button id="brain" aria-label="BRAIN MAP">BRAIN</button>
+      <button id="autorotate" aria-label="CINEMATIC">CINEMA</button>
+      <button id="brain" aria-label="BRAIN MAP" title="Decision provenance network">BRAIN</button>
       <button id="replayToggle">REPLAY</button>
     </div>
   </div>
