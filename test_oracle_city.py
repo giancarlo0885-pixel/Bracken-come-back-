@@ -134,7 +134,7 @@ def test_oracle_city_component_contains_interactive_webgl_controls():
     assert "OrbitControls" in rendered
     assert "Raycaster" in rendered
     assert "portfolio_towers" in rendered
-    assert "Decision / execution replay" in rendered
+    assert "Recent decision replay" in rendered
     assert "READ-ONLY" not in rendered or "read-only" in rendered.lower()
 
 
