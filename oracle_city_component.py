@@ -465,7 +465,7 @@ if(plaza){
   }
 }
 
-const flowObjects=[];
+
 function curveFor(source,target){
   const a=nodeObjects.get(source)?.position.clone(),b=nodeObjects.get(target)?.position.clone();if(!a||!b)return null;
   a.y=.55;b.y=.55;const mid=a.clone().lerp(b,.5);mid.y=2.0+Math.min(3.6,a.distanceTo(b)*.1);return new THREE.QuadraticBezierCurve3(a,mid,b);
