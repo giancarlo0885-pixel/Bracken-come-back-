@@ -140,9 +140,28 @@ function mat(color,rough=.5,metal=.18,emissive=0,ei=0){
   return new THREE.MeshStandardMaterial({color,roughness:rough,metalness:metal,emissive,emissiveIntensity:ei});
 }
 
+function localClockHour(){
+  const now=new Date();
+  return now.getHours()+now.getMinutes()/60+now.getSeconds()/3600;
+}
+function daylightForHour(hour){
+  if(hour<5.5||hour>=20.0)return 0;
+  if(hour<7.0)return (hour-5.5)/1.5;
+  if(hour<17.5)return 1;
+  return Math.max(0,(20.0-hour)/2.5);
+}
+function twilightForHour(hour){
+  const sunrise=Math.max(0,1-Math.abs(hour-6.25)/1.4);
+  const sunset=Math.max(0,1-Math.abs(hour-18.5)/1.8);
+  return Math.max(sunrise,sunset);
+}
+const initialHour=localClockHour();
+const initialDaylight=daylightForHour(initialHour);
+const initialTwilight=twilightForHour(initialHour);
+
 const scene=new THREE.Scene();
-scene.background=new THREE.Color(0x02060b);
-scene.fog=new THREE.FogExp2(0x02060b,isMobileDevice?.018:.013);
+scene.background=new THREE.Color(0x050912);
+scene.fog=new THREE.FogExp2(0x050912,isMobileDevice?0.014:0.010);
 
 const camera=new THREE.PerspectiveCamera(isMobileDevice?52:46,1,.1,280);
 camera.position.set(30,22,38);
@@ -153,7 +172,7 @@ renderer.outputColorSpace=THREE.SRGBColorSpace;
 renderer.shadowMap.enabled=!isMobileDevice;
 renderer.shadowMap.type=THREE.PCFSoftShadowMap;
 renderer.toneMapping=THREE.ACESFilmicToneMapping;
-renderer.toneMappingExposure=1.08;
+renderer.toneMappingExposure=1.0+initialDaylight*.42+initialTwilight*.10;
 stage.appendChild(renderer.domElement);
 
 const labelRenderer=new CSS2DRenderer();
@@ -172,8 +191,27 @@ controls.maxPolarAngle=Math.PI*.49;
 controls.minPolarAngle=.12;
 controls.enablePan=!isMobileDevice;
 
-scene.add(new THREE.HemisphereLight(0x7bc6ff,0x06100d,1.8));
-const moon=new THREE.DirectionalLight(0xb9e7ff,2.2);moon.position.set(-18,26,18);moon.castShadow=!isMobileDevice;scene.add(moon);
+const hemisphere=new THREE.HemisphereLight(0xbfe8ff,0x27331f,1.6);
+scene.add(hemisphere);
+
+const sunLight=new THREE.DirectionalLight(0xfff2cf,0);
+sunLight.castShadow=!isMobileDevice;
+scene.add(sunLight);
+const sunVisual=new THREE.Mesh(
+  new THREE.SphereGeometry(2.0,isMobileDevice?12:20,isMobileDevice?8:14),
+  new THREE.MeshBasicMaterial({color:0xfff1a8,transparent:true,opacity:0})
+);
+scene.add(sunVisual);
+
+const moon=new THREE.DirectionalLight(0xb9d8ff,1.8);
+moon.castShadow=!isMobileDevice;
+scene.add(moon);
+const moonVisual=new THREE.Mesh(
+  new THREE.SphereGeometry(1.25,isMobileDevice?10:18,isMobileDevice?8:12),
+  new THREE.MeshBasicMaterial({color:0xdde8ff,transparent:true,opacity:0})
+);
+scene.add(moonVisual);
+
 const cityGlow=new THREE.PointLight(0x21a9ff,80,70,2);cityGlow.position.set(2,11,-8);scene.add(cityGlow);
 const warmGlow=new THREE.PointLight(0xffb257,45,48,2);warmGlow.position.set(10,7,8);scene.add(warmGlow);
 
@@ -182,17 +220,71 @@ const starCount=isMobileDevice?160:480;
 const starPositions=new Float32Array(starCount*3);
 for(let i=0;i<starCount;i++){starPositions[i*3]=(Math.random()-.5)*150;starPositions[i*3+1]=18+Math.random()*55;starPositions[i*3+2]=(Math.random()-.5)*120;}
 stars.setAttribute("position",new THREE.BufferAttribute(starPositions,3));
-scene.add(new THREE.Points(stars,new THREE.PointsMaterial({color:0x91cfff,size:.08,transparent:true,opacity:.7})));
+const starMaterial=new THREE.PointsMaterial({color:0x91cfff,size:.08,transparent:true,opacity:.7});
+scene.add(new THREE.Points(stars,starMaterial));
 
-const ground=new THREE.Mesh(new THREE.PlaneGeometry(92,66),mat(0x071117,.96,.03));
+function applyTimeOfDay(){
+  const hour=localClockHour();
+  const daylight=daylightForHour(hour);
+  const twilight=twilightForHour(hour);
+  const night=1-daylight;
+  const skyNight=new THREE.Color(0x050912);
+  const skyDay=new THREE.Color(0x74b9e8);
+  const skyTwilight=new THREE.Color(hour<12?0xe9a06f:0xf08b5b);
+  const sky=skyNight.clone().lerp(skyDay,daylight);
+  if(twilight>0.01)sky.lerp(skyTwilight,twilight*.42);
+  scene.background.copy(sky);
+
+  const fogNight=new THREE.Color(0x07111c);
+  const fogDay=new THREE.Color(0xa9d4e8);
+  const fogColor=fogNight.clone().lerp(fogDay,daylight*.88);
+  if(twilight>0.01)fogColor.lerp(new THREE.Color(0xd9aa8b),twilight*.22);
+  scene.fog.color.copy(fogColor);
+  scene.fog.density=(isMobileDevice?0.014:0.010)-(daylight*(isMobileDevice?0.007:0.005));
+
+  renderer.toneMappingExposure=1.02+daylight*.50+twilight*.10;
+  hemisphere.intensity=1.45+daylight*2.25;
+  hemisphere.color.set(daylight>0.2?0xd9f2ff:0x87a9d0);
+  hemisphere.groundColor.set(daylight>0.2?0x6d7055:0x101619);
+
+  const sunProgress=Math.min(1,Math.max(0,(hour-5.5)/14.5));
+  const sunAngle=Math.PI*sunProgress;
+  const sunX=-42+84*sunProgress;
+  const sunY=7+Math.sin(sunAngle)*39;
+  sunLight.position.set(sunX,sunY,22);
+  sunLight.intensity=daylight*(3.7+1.1*(1-twilight));
+  sunLight.color.set(twilight>0.18?0xffc27d:0xfff3d4);
+  sunVisual.position.set(sunX,sunY,-38);
+  sunVisual.material.color.set(twilight>0.18?0xffb45f:0xfff2a8);
+  sunVisual.material.opacity=Math.min(1,daylight*1.15);
+  sunVisual.visible=daylight>0.02;
+
+  const moonProgress=(sunProgress+.5)%1;
+  moon.position.set(36-72*moonProgress,18+Math.sin(Math.PI*moonProgress)*22,-18);
+  moon.intensity=night*(1.4+night*.9);
+  moonVisual.position.set(-28,31,-42);
+  moonVisual.material.opacity=Math.max(0,night*.9-twilight*.35);
+  moonVisual.visible=night>0.08;
+
+  starMaterial.opacity=Math.max(0.02,night*.78-twilight*.35);
+  cityGlow.intensity=25+night*75;
+  warmGlow.intensity=16+night*54+twilight*20;
+}
+applyTimeOfDay();
+setInterval(applyTimeOfDay,60000);
+
+const groundColor=new THREE.Color(0x071117).lerp(new THREE.Color(0x52656a),initialDaylight*.68).getHex();
+const ground=new THREE.Mesh(new THREE.PlaneGeometry(92,66),mat(groundColor,.96,.03));
 ground.rotation.x=-Math.PI/2;ground.position.y=-.035;ground.receiveShadow=true;scene.add(ground);
 
 function addPlane(x,z,w,d,color,y=.003){
   const mesh=new THREE.Mesh(new THREE.PlaneGeometry(w,d),mat(color,1,0));
   mesh.rotation.x=-Math.PI/2;mesh.position.set(x,y,z);mesh.receiveShadow=true;scene.add(mesh);return mesh;
 }
-function addRoad(x,z,w,d){return addPlane(x,z,w,d,0x091116,.012);}
-function addSidewalk(x,z,w,d){return addPlane(x,z,w,d,0x16242b,.02);}
+const roadColor=new THREE.Color(0x091116).lerp(new THREE.Color(0x455057),initialDaylight*.60).getHex();
+const sidewalkColor=new THREE.Color(0x16242b).lerp(new THREE.Color(0x9ba4a5),initialDaylight*.55).getHex();
+function addRoad(x,z,w,d){return addPlane(x,z,w,d,roadColor,.012);}
+function addSidewalk(x,z,w,d){return addPlane(x,z,w,d,sidewalkColor,.02);}
 addRoad(2.5,0,60,2.0);addRoad(2.5,9.5,60,1.45);addRoad(2.5,-9.5,60,1.45);
 addRoad(-12,0,1.6,32);addRoad(-3.5,0,1.35,32);addRoad(7,0,1.45,32);addRoad(17,0,1.45,32);
 addSidewalk(2.5,1.55,60,.7);addSidewalk(2.5,-1.55,60,.7);
