@@ -20,8 +20,9 @@ if not health.get("ok"):
     st.caption(str(health.get("message") or "Database readiness check failed."))
     st.stop()
 
-if st.button("Refresh Brain", type="primary"):
-    st.rerun()
+# Deliberately no timed page rerun: preserve scroll position and interaction state.
+# The neural canvas animates continuously in the browser while the evidence snapshot
+# remains stable for this page session. A normal browser reload fetches fresh evidence.
 
 snapshot = build_oracle_brain_snapshot(rows)
 summary = snapshot["summary"]
