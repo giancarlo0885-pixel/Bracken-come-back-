@@ -18,6 +18,24 @@ ALTER TABLE oracle_brain_sources
 CREATE INDEX IF NOT EXISTS idx_oracle_brain_sources_cluster
 ON oracle_brain_sources(cluster_key, observed_at DESC);
 
+CREATE TABLE IF NOT EXISTS oracle_brain_episode_exclusions (
+    trade_id TEXT PRIMARY KEY,
+    market TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    first_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    last_checked_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    retry_count INTEGER NOT NULL DEFAULT 1,
+    status TEXT NOT NULL DEFAULT 'excluded',
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    execution_impact TEXT NOT NULL DEFAULT 'NONE',
+    CHECK (retry_count >= 1),
+    CHECK (status IN ('excluded','resolved','retired')),
+    CHECK (execution_impact = 'NONE')
+);
+
+CREATE INDEX IF NOT EXISTS idx_oracle_brain_episode_exclusions_retry
+ON oracle_brain_episode_exclusions(market,status,last_checked_at);
+
 CREATE TABLE IF NOT EXISTS oracle_brain_source_clusters (
     cluster_key TEXT PRIMARY KEY,
     canonical_title TEXT NOT NULL,
