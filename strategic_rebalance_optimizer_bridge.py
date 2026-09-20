@@ -6,6 +6,7 @@ from typing import Any
 import global_adaptive_engine as adaptive
 import runtime_integrity_patch as patch
 from config import MIN_TRADE_NOTIONAL, MIN_TRADE_VALUE
+from paper_strategy_economics import fee_edge_allows_entry
 
 
 _TACTICAL_AUTHORIZATION_REASONS = {
@@ -229,6 +230,30 @@ def install_strategic_rebalance_optimizer_bridge(worker: Any) -> None:
                         score=round(adaptive._finite(item.get("soft_score") or item.get("opportunity_score")), 4),
                         confidence=round(adaptive._finite(item.get("confidence")), 4),
                     )
+                continue
+
+            # Keep optimizer telemetry aligned with the locked paper execution
+            # economics gate. Mature known-negative evidence must not be logged as
+            # APPROVED merely because the candidate has capital capacity.
+            economics_allowed, economics_reason, expected_edge, estimated_cost = fee_edge_allows_entry(item)
+            if not economics_allowed:
+                rejections.append({
+                    "symbol": symbol,
+                    "reason": "economics_blocked",
+                    "economics_reason": economics_reason,
+                    "expected_edge_pct": expected_edge,
+                    "estimated_round_trip_cost_pct": estimated_cost,
+                    "watch_only": True,
+                })
+                _log_optimizer_decision(
+                    worker,
+                    symbol,
+                    status="WATCH",
+                    reason="economics_blocked",
+                    economics_reason=economics_reason,
+                    expected_edge_pct=expected_edge if expected_edge is not None else "unknown",
+                    estimated_round_trip_cost_pct=round(estimated_cost, 6),
+                )
                 continue
 
             gate = _strategic_rebalance_gate(item)
