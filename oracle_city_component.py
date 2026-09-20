@@ -90,12 +90,12 @@ input[type=range]{width:100%;accent-color:#55d4ff}
     </div>
     <div class="toolbar">
       <button id="reset">CITY</button>
-      <button id="street">STREET</button>
+      <button id="street" aria-label="STREET VIEW">STREET</button>
       <button id="topview">TOP</button>
       <button id="workers" class="active">WORKERS</button>
       <button id="traffic" class="active">TRAFFIC</button>
       <button id="autorotate">CINEMA</button>
-      <button id="brain">BRAIN</button>
+      <button id="brain" aria-label="BRAIN MAP">BRAIN</button>
       <button id="replayToggle">REPLAY</button>
     </div>
   </div>
