@@ -190,6 +190,68 @@ def build_oracle_brain_snapshot(fetch_rows: FetchRows) -> dict[str, Any]:
         """,
     )
 
+    sources = _safe_rows(
+        fetch_rows,
+        """
+        SELECT source_key,source_type,provider,category,symbol,title,source_ref,
+               observed_at,source_quality,freshness_score,confidence,status,metadata
+        FROM oracle_brain_sources
+        ORDER BY confidence DESC,freshness_score DESC,observed_at DESC NULLS LAST
+        LIMIT 80
+        """,
+    )
+    episodes = _safe_rows(
+        fetch_rows,
+        """
+        SELECT episode_key,trade_id,market,symbol,strategy,regime,entry_time,exit_time,
+               net_pnl,fees,return_pct,mfe_pct,mae_pct,provenance_status,
+               source_quality,freshness_score,confidence,outcome_snapshot,tags
+        FROM oracle_brain_episodes
+        WHERE provenance_status='exact'
+        ORDER BY exit_time DESC NULLS LAST
+        LIMIT 120
+        """,
+    )
+    links = _safe_rows(
+        fetch_rows,
+        """
+        SELECT source_key,target_key,relation,weight,evidence_count,confidence,
+               last_observed_at,metadata
+        FROM oracle_brain_links
+        ORDER BY confidence DESC,evidence_count DESC,last_observed_at DESC
+        LIMIT 120
+        """,
+    )
+    contradictions = _safe_rows(
+        fetch_rows,
+        """
+        SELECT contradiction_key,subject_key,prior_polarity,current_polarity,reason,
+               severity,status,detected_at,metadata
+        FROM oracle_brain_contradictions
+        WHERE status='active'
+        ORDER BY detected_at DESC
+        LIMIT 40
+        """,
+    )
+    research_queue = _safe_rows(
+        fetch_rows,
+        """
+        SELECT topic_key,topic,market,strategy,regime,priority,reason,evidence,status,updated_at
+        FROM oracle_brain_research_queue
+        WHERE status IN ('queued','in_review')
+        ORDER BY priority DESC,updated_at DESC
+        LIMIT 40
+        """,
+    )
+    learning_state = _safe_rows(
+        fetch_rows,
+        """
+        SELECT pipeline_key,market,last_source_id,last_episode_exit_at,last_sync_at,last_result
+        FROM oracle_brain_learning_state
+        ORDER BY pipeline_key,market
+        """,
+    )
+
     experiments = [
         entry for entry in entries
         if entry.get("category") in {"experiment", "research", "promotion"}
@@ -232,6 +294,27 @@ def build_oracle_brain_snapshot(fetch_rows: FetchRows) -> dict[str, Any]:
                 "source": "paper_regime_trade_metrics",
             }
         )
+    if contradictions:
+        derived_lessons.append(
+            {
+                "level": "warning",
+                "title": "Knowledge contradiction requires forward evidence",
+                "body": (
+                    f"{len(contradictions)} active contradiction(s) are preserved instead of silently overwriting "
+                    "older evidence. Resolve them with new exact-provenance outcomes."
+                ),
+                "source": "oracle_brain_contradictions",
+            }
+        )
+
+    stale_sources = [
+        item for item in sources
+        if str(item.get("status") or "") == "stale" or _num(item.get("freshness_score"), 1.0) < 0.18
+    ]
+    high_confidence_links = [
+        item for item in links
+        if _num(item.get("confidence"), 0.0) >= 0.70 and int(_num(item.get("evidence_count"), 0.0)) >= 3
+    ]
 
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -242,6 +325,12 @@ def build_oracle_brain_snapshot(fetch_rows: FetchRows) -> dict[str, Any]:
         "experiments": experiments,
         "regime_economics": regimes,
         "workers": workers,
+        "sources": sources,
+        "episodes": episodes,
+        "concept_links": links,
+        "contradictions": contradictions,
+        "research_queue": research_queue,
+        "learning_state": learning_state,
         "derived_lessons": derived_lessons,
         "safety": runtime_safety_state(),
         "summary": {
@@ -250,6 +339,13 @@ def build_oracle_brain_snapshot(fetch_rows: FetchRows) -> dict[str, Any]:
             "mature_negative_regimes": len(negative_mature),
             "mature_positive_regimes": len(positive_mature),
             "workers_observed": len(workers),
+            "knowledge_sources": len(sources),
+            "stale_sources": len(stale_sources),
+            "exact_episodes": len(episodes),
+            "concept_links": len(links),
+            "high_confidence_links": len(high_confidence_links),
+            "active_contradictions": len(contradictions),
+            "research_topics": len(research_queue),
         },
     }
 
