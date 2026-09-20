@@ -98,6 +98,22 @@ l2.metric("Open contradictions", summary["active_contradictions"])
 l3.metric("High-confidence links", summary["high_confidence_links"])
 l4.metric("Stale sources", summary["stale_sources"])
 
+v1, v2, v3, v4 = st.columns(4)
+v1.metric("Resolved abstentions", summary["counterfactuals_resolved"])
+v2.metric("Avoided losses", summary["avoided_losses"])
+v3.metric("Missed winners", summary["missed_winners"])
+v4.metric("Active drift events", summary["active_drift_events"])
+
+h1, h2, h3, h4 = st.columns(4)
+h1.metric("Active Brain experiments", summary["active_brain_experiments"])
+h2.metric("Ready for review", summary["ready_brain_experiments"])
+h3.metric("Working-memory items", summary["working_memory_items"])
+h4.metric(
+    "Latest learner",
+    str(summary.get("latest_learning_run_status") or "unknown").upper(),
+    help=f"stage={summary.get('latest_learning_run_stage') or 'unknown'} · elapsed_ms={summary.get('latest_learning_run_ms')}",
+)
+
 if safety["safe_research_boundary"]:
     st.success(
         f"Research boundary intact: execution_mode={safety['execution_mode']}, "
@@ -130,6 +146,71 @@ st.caption(
     "purple nodes are durable lessons, and blue nodes are regime evidence. None has execution authority."
 )
 
+if snapshot["learning_runs"]:
+    latest_runs = snapshot["learning_runs"][:8]
+    with st.expander("Learner runtime health", expanded=False):
+        st.dataframe(
+            pd.DataFrame(
+                [
+                    {
+                        "Market": item["market"],
+                        "Status": item["status"],
+                        "Stage": item["stage"],
+                        "Elapsed ms": item["elapsed_ms"],
+                        "Started": item["started_at"],
+                        "Finished": item["finished_at"],
+                    }
+                    for item in latest_runs
+                ]
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+if snapshot["drift_events"]:
+    st.markdown("**Active regime drift**")
+    st.dataframe(
+        pd.DataFrame(
+            [
+                {
+                    "Market": item["market"],
+                    "Strategy": item["strategy"],
+                    "Regime": item["regime"],
+                    "Severity": item["severity"],
+                    "Baseline expectancy": item["baseline_expectancy"],
+                    "Recent expectancy": item["recent_expectancy"],
+                    "Z score": item["z_score"],
+                    "Sign flip": item["sign_flip"],
+                }
+                for item in snapshot["drift_events"]
+            ]
+        ),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+if snapshot["brain_experiments"]:
+    st.markdown("**Paper research experiments**")
+    st.dataframe(
+        pd.DataFrame(
+            [
+                {
+                    "Market": item["market"],
+                    "Strategy": item["strategy"],
+                    "Regime": item["regime"],
+                    "Trigger": item["trigger_type"],
+                    "Status": item["status"],
+                    "Progress": f"{item['observed_samples']}/{item['target_samples']}",
+                    "Priority": item["priority"],
+                    "Hypothesis": item["hypothesis"],
+                }
+                for item in snapshot["brain_experiments"]
+            ]
+        ),
+        use_container_width=True,
+        hide_index=True,
+    )
+
 if snapshot["research_queue"]:
     st.markdown("**Research queue**")
     st.dataframe(
@@ -156,6 +237,92 @@ if snapshot["contradictions"]:
             f"{item['subject_key']}: {item.get('prior_polarity') or 'unknown'} → "
             f"{item.get('current_polarity') or 'unknown'} — {item['reason']}"
         )
+
+with st.expander("Counterfactual abstention learning"):
+    if snapshot["counterfactuals"]:
+        st.dataframe(
+            pd.DataFrame(
+                [
+                    {
+                        "Market": item["market"],
+                        "Symbol": item["symbol"],
+                        "Strategy": item["strategy"],
+                        "Regime": item["regime"],
+                        "Horizon min": item["horizon_minutes"],
+                        "Decision": item["recommendation"],
+                        "Net return %": item["net_return_pct"],
+                        "Classification": item["classification"],
+                        "Observed": item["observed_at"],
+                    }
+                    for item in snapshot["counterfactuals"][:80]
+                ]
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
+    else:
+        st.info("Counterfactual learning will populate as watched/rejected candidates reach their forward horizons.")
+
+with st.expander("Source corroboration and provider reputation"):
+    if snapshot["source_clusters"]:
+        st.markdown("**Deduplicated event clusters**")
+        st.dataframe(
+            pd.DataFrame(
+                [
+                    {
+                        "Title": item["canonical_title"],
+                        "Symbol": item["symbol"],
+                        "Category": item["category"],
+                        "Sources": item["source_count"],
+                        "Providers": item["provider_count"],
+                        "Corroboration": item["corroboration_score"],
+                    }
+                    for item in snapshot["source_clusters"][:40]
+                ]
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
+    if snapshot["provider_reputation"]:
+        st.markdown("**Provider reputation**")
+        st.dataframe(
+            pd.DataFrame(
+                [
+                    {
+                        "Provider": item["provider"],
+                        "Base quality": item["base_quality"],
+                        "Events": item["total_events"],
+                        "Corroborated": item["corroborated_events"],
+                        "Reputation": item["reputation_score"],
+                    }
+                    for item in snapshot["provider_reputation"][:30]
+                ]
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+with st.expander("Active working memory"):
+    if snapshot["working_memory"]:
+        st.dataframe(
+            pd.DataFrame(
+                [
+                    {
+                        "Market": item["market"],
+                        "Kind": item["kind"],
+                        "Topic": item["topic"],
+                        "Importance": item["importance"],
+                        "Updated": item["updated_at"],
+                        "Expires": item["expires_at"],
+                    }
+                    for item in snapshot["working_memory"]
+                ]
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
+    else:
+        st.info("No short-lived working-memory items are active.")
 
 with st.expander("Recent acquired knowledge sources"):
     if snapshot["sources"]:
@@ -289,8 +456,10 @@ with st.expander("Brain safety boundary"):
         """
 - The dashboard performs SELECT-only evidence reads.
 - The learning worker runs asynchronously after scans and does not participate in order approval.
-- Durable sources, episodes, links, contradictions, and Brain ledger entries enforce execution impact NONE.
-- Exact trade provenance is required before an outcome becomes a durable episode.
+- Durable sources, episodes, links, contradictions, counterfactuals, drift records, experiments, and Brain ledger entries enforce execution impact NONE.
+- Exact trade provenance and a feature-schema fingerprint are required before executed outcomes enter durable similarity memory.
+- Rejected/watched candidates are evaluated only as counterfactual research; they are never replayed as orders.
+- Drift and uncertainty can create paper research experiments, but experiments cannot self-promote into trading authority.
 - Brain knowledge cannot arm live trading, submit orders, size positions, or bypass Council/risk/capacity gates.
 """
     )
