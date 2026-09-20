@@ -411,6 +411,10 @@ def _sync_trade_episodes(conn: Any, market: str, *, limit: int = _EPISODE_BATCH)
             skipped_provenance += 1
             continue
         latest_exit = max(latest_exit or episode["exit_time"], episode["exit_time"]) if episode["exit_time"] else latest_exit
+        existing_episode = conn.execute(
+            "SELECT 1 FROM oracle_brain_episodes WHERE episode_key=%s LIMIT 1",
+            (episode["episode_key"],),
+        ).fetchone()
         conn.execute(
             """
             INSERT INTO oracle_brain_episodes(
@@ -454,39 +458,40 @@ def _sync_trade_episodes(conn: Any, market: str, *, limit: int = _EPISODE_BATCH)
             ),
         )
         inserted += 1
-        context_key = f"cohort:{_slug(market)}:{_slug(episode['strategy'])}:{_slug(episode['regime'])}"
-        outcome = str(episode["outcome_snapshot"]["outcome"])
-        observed = episode["exit_time"] or now
-        _upsert_link(
-            conn,
-            source_key=f"strategy:{_slug(episode['strategy'])}",
-            target_key=f"regime:{_slug(episode['regime'])}",
-            relation="observed_in",
-            weight=0.0,
-            confidence=episode["confidence"],
-            observed_at=observed,
-            metadata={"market": market},
-        )
-        _upsert_link(
-            conn,
-            source_key=context_key,
-            target_key=f"outcome:{outcome}",
-            relation="produced",
-            weight=1.0 if outcome == "positive" else -1.0 if outcome == "negative" else 0.0,
-            confidence=episode["confidence"],
-            observed_at=observed,
-            metadata={"trade_id": episode["trade_id"]},
-        )
-        _upsert_link(
-            conn,
-            source_key=f"symbol:{_slug(episode['symbol'])}",
-            target_key=f"regime:{_slug(episode['regime'])}",
-            relation="experienced",
-            weight=0.0,
-            confidence=episode["confidence"],
-            observed_at=observed,
-            metadata={"strategy": episode["strategy"]},
-        )
+        if not existing_episode:
+            context_key = f"cohort:{_slug(market)}:{_slug(episode['strategy'])}:{_slug(episode['regime'])}"
+            outcome = str(episode["outcome_snapshot"]["outcome"])
+            observed = episode["exit_time"] or now
+            _upsert_link(
+                conn,
+                source_key=f"strategy:{_slug(episode['strategy'])}",
+                target_key=f"regime:{_slug(episode['regime'])}",
+                relation="observed_in",
+                weight=0.0,
+                confidence=episode["confidence"],
+                observed_at=observed,
+                metadata={"market": market},
+            )
+            _upsert_link(
+                conn,
+                source_key=context_key,
+                target_key=f"outcome:{outcome}",
+                relation="produced",
+                weight=1.0 if outcome == "positive" else -1.0 if outcome == "negative" else 0.0,
+                confidence=episode["confidence"],
+                observed_at=observed,
+                metadata={"trade_id": episode["trade_id"]},
+            )
+            _upsert_link(
+                conn,
+                source_key=f"symbol:{_slug(episode['symbol'])}",
+                target_key=f"regime:{_slug(episode['regime'])}",
+                relation="experienced",
+                weight=0.0,
+                confidence=episode["confidence"],
+                observed_at=observed,
+                metadata={"strategy": episode["strategy"]},
+            )
 
     conn.execute(
         """
@@ -635,6 +640,15 @@ def _sync_regime_lessons_and_queue(conn: Any, market: str) -> tuple[int, int]:
             after_id = _insert_regime_lesson(conn, market, strategy, regime, summary)
             if after_id is not None and (not before or int(before.get("id") or 0) != after_id):
                 lessons += 1
+            if not contradiction:
+                contradiction = conn.execute(
+                    """
+                    SELECT 1 FROM oracle_brain_contradictions
+                    WHERE subject_key=%s AND status='active'
+                    LIMIT 1
+                    """,
+                    (subject_key,),
+                ).fetchone()
 
         mature_mixed = summary["samples"] >= MIN_MATURE_SAMPLES and summary["polarity"] == "mixed"
         needs_more = summary["samples"] < MIN_MATURE_SAMPLES
