@@ -334,6 +334,22 @@ def record_generation_outcomes(limit: int = 250) -> int:
                 WHERE strategy='oracle_council_v3' AND regime=%s AND exit_time < %s
             """, (row.get("regime"), entry_time)).fetchone() or {}
             samples = int(prior.get("samples") or 0)
+            # Reconstruct the consecutive Council loss streak strictly as of the
+            # candidate entry. Rows closing at/after entry_time are excluded so
+            # AEVE cannot learn from the candidate outcome or any future trade.
+            prior_results = list(conn.execute("""
+                SELECT net_pnl
+                FROM paper_regime_trade_metrics
+                WHERE strategy='oracle_council_v3' AND exit_time < %s
+                ORDER BY exit_time DESC
+                LIMIT %s
+            """, (entry_time, max(1, int(cfg.max_loss_streak) + 1))).fetchall())
+            loss_streak = 0
+            for prior_result in prior_results:
+                if _f(prior_result.get("net_pnl")) < 0:
+                    loss_streak += 1
+                else:
+                    break
             gross_loss = _f(prior.get("gross_loss"))
             pf = (_f(prior.get("gross_win")) / gross_loss) if gross_loss > 0 else 0.0
             cost_pct = 0.0
@@ -356,7 +372,7 @@ def record_generation_outcomes(limit: int = 250) -> int:
                 mfe_pct=max(0.0, _f(prior.get("mfe"))),
                 mae_pct=min(0.0, _f(prior.get("mae"))),
                 round_trip_cost_pct=cost_pct,
-                loss_streak=0,
+                loss_streak=loss_streak,
                 price_above_recent_low_pct=(max(0.0, _f(rebound)) * 100.0) if entry_evidence_complete else 0.0,
                 rebound_from_low_pct=(max(0.0, _f(rebound)) * 100.0) if entry_evidence_complete else 0.0,
                 rsi=(_f(features.get("rsi_14"), 50.0) if features.get("rsi_14") is not None else None),
