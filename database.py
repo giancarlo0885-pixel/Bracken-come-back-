@@ -104,6 +104,13 @@ CANONICAL_PROTECTED_TABLES = {
     "model_registry",
     "model_registry_events",
     "paper_data_audit",
+    "oracle_brain_entries",
+    "oracle_brain_sources",
+    "oracle_brain_episodes",
+    "oracle_brain_links",
+    "oracle_brain_contradictions",
+    "oracle_brain_research_queue",
+    "oracle_brain_learning_state",
 }
 DATABASE_RETENTION_POLICIES = {
     "signals": {"keep_rows": 6000, "batch_size": DATABASE_RETENTION_BATCH_SIZE, "classification": "append-only analytical/ephemeral"},
@@ -155,6 +162,13 @@ DATABASE_TABLE_GROWTH_AUDIT = {
     "invalid_symbol_quarantine": {"class": "governance/provider safety records", "inserted_by": "provider symbol quarantine", "frequency": "provider-symbol failures", "retention": "preserve until retry policy/archive exists"},
     "global_model_governance": {"class": "governance/model records", "inserted_by": "champion/challenger governance", "frequency": "model lifecycle changes", "retention": "never auto-delete"},
     "global_decision_events": {"class": "append-only analytical/ephemeral records", "inserted_by": "global adaptive engine", "frequency": "worker decision funnel events", "retention": "keep newest 20000 rows"},
+    "oracle_brain_entries": {"class": "durable research knowledge", "inserted_by": "Oracle Brain learning/engineering workflows", "frequency": "meaningful evidence revisions only", "retention": "never auto-delete"},
+    "oracle_brain_sources": {"class": "durable research source memory", "inserted_by": "Oracle Brain source ingestion", "frequency": "new intelligence events", "retention": "preserve until archive strategy exists"},
+    "oracle_brain_episodes": {"class": "durable exact-provenance episodic memory", "inserted_by": "Oracle Brain outcome learner", "frequency": "one per exact-provenance closed paper trade", "retention": "never auto-delete"},
+    "oracle_brain_links": {"class": "durable research relationship memory", "inserted_by": "Oracle Brain relationship learner", "frequency": "distinct evidence relationships", "retention": "never auto-delete"},
+    "oracle_brain_contradictions": {"class": "research governance/audit records", "inserted_by": "Oracle Brain contradiction engine", "frequency": "evidence polarity changes", "retention": "never auto-delete"},
+    "oracle_brain_research_queue": {"class": "research governance records", "inserted_by": "Oracle Brain uncertainty engine", "frequency": "under-sampled/conflicting cohorts", "retention": "preserve until resolved/retired"},
+    "oracle_brain_learning_state": {"class": "research cursor/state records", "inserted_by": "Oracle Brain learner", "frequency": "periodic learning sync", "retention": "never auto-delete"},
 }
 
 
