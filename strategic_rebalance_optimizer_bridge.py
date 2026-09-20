@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import os
+import time
 from typing import Any
 
 import global_adaptive_engine as adaptive
 import runtime_integrity_patch as patch
 from config import MIN_TRADE_NOTIONAL, MIN_TRADE_VALUE
-from paper_strategy_economics import fee_edge_allows_entry
+from paper_strategy_economics import fee_edge_allows_entry, strategy_identity
 
 
 _TACTICAL_AUTHORIZATION_REASONS = {
@@ -16,6 +17,7 @@ _TACTICAL_AUTHORIZATION_REASONS = {
 _STRATEGIC_ENTRY_ACTIONS = {"HOLD", "BUY", "STRONG_BUY", "ACCUMULATE", "LONG"}
 _DEFAULT_MEANINGFUL_ENTRY_PCT = 0.005
 _DEFAULT_MAX_MEANINGFUL_ENTRY_PCT = 0.01
+_DEFAULT_TINY_GAP_COOLDOWN_SECONDS = 60.0
 
 
 def _env_float(name: str, default: float, *, low: float, high: float) -> float:
@@ -136,16 +138,79 @@ def _adaptive_meaningful_entry_floor(
     return round(min(ceiling, max(minimum_notional, floor)), 2)
 
 
+def _optimizer_state_key(status: str, reason: str, details: dict[str, Any]) -> tuple[Any, ...]:
+    proposed = adaptive._finite(details.get("proposed_amount"))
+    floor = adaptive._finite(details.get("meaningful_entry_floor"))
+    return (
+        status,
+        reason,
+        bool(proposed + 1e-9 >= floor) if floor > 0 else None,
+        details.get("economics_reason"),
+        details.get("capacity_reason"),
+        details.get("risk_reasons"),
+        details.get("state_token"),
+    )
+
+
 def _log_optimizer_decision(worker: Any, symbol: str, *, status: str, reason: str, **details: Any) -> None:
-    """Expose capital decisions without changing eligibility, sizing, or execution."""
+    """Log INFO on per-symbol state transitions and DEBUG for unchanged repeats."""
     rendered = " | ".join(f"{key}={value}" for key, value in details.items() if value is not None)
-    worker.log.info(
+    states = getattr(worker, "_crypto_optimizer_log_states", None)
+    if not isinstance(states, dict):
+        states = {}
+        worker._crypto_optimizer_log_states = states
+    key = _optimizer_state_key(status, reason, details)
+    changed = states.get(symbol) != key
+    states[symbol] = key
+    logger = worker.log.info if changed else getattr(worker.log, "debug", lambda *args, **kwargs: None)
+    logger(
         "CRYPTO_OPTIMIZER_DECISION | symbol=%s | status=%s | reason=%s%s",
         symbol or "missing",
         status,
         reason,
         f" | {rendered}" if rendered else "",
     )
+
+
+def _tiny_gap_cooldown_seconds() -> float:
+    return _env_float(
+        "CRYPTO_TINY_GAP_COOLDOWN_SECONDS",
+        _DEFAULT_TINY_GAP_COOLDOWN_SECONDS,
+        low=5.0,
+        high=900.0,
+    )
+
+
+def _tiny_gap_state(item: dict[str, Any], meaningful_entry_floor: float) -> tuple[Any, ...]:
+    return (
+        str(item.get("action") or item.get("tactical_action") or "").strip().upper(),
+        str(item.get("cohort") or item.get("strategy") or "").strip(),
+        str(item.get("regime") or "").strip(),
+        round(meaningful_entry_floor, 2),
+    )
+
+
+def _tiny_gap_on_cooldown(worker: Any, symbol: str, state: tuple[Any, ...], *, now: float) -> bool:
+    cooldowns = getattr(worker, "_crypto_optimizer_tiny_gap_cooldowns", None)
+    if not isinstance(cooldowns, dict):
+        cooldowns = {}
+        worker._crypto_optimizer_tiny_gap_cooldowns = cooldowns
+    existing = cooldowns.get(symbol) or {}
+    return existing.get("state") == state and now < adaptive._finite(existing.get("until"))
+
+
+def _set_tiny_gap_cooldown(worker: Any, symbol: str, state: tuple[Any, ...], *, now: float) -> None:
+    cooldowns = getattr(worker, "_crypto_optimizer_tiny_gap_cooldowns", None)
+    if not isinstance(cooldowns, dict):
+        cooldowns = {}
+        worker._crypto_optimizer_tiny_gap_cooldowns = cooldowns
+    cooldowns[symbol] = {"state": state, "until": now + _tiny_gap_cooldown_seconds()}
+
+
+def _clear_tiny_gap_cooldown(worker: Any, symbol: str) -> None:
+    cooldowns = getattr(worker, "_crypto_optimizer_tiny_gap_cooldowns", None)
+    if isinstance(cooldowns, dict):
+        cooldowns.pop(symbol, None)
 
 
 def install_strategic_rebalance_optimizer_bridge(worker: Any) -> None:
@@ -237,12 +302,18 @@ def install_strategic_rebalance_optimizer_bridge(worker: Any) -> None:
             # APPROVED merely because the candidate has capital capacity.
             economics_allowed, economics_reason, expected_edge, estimated_cost = fee_edge_allows_entry(item)
             if not economics_allowed:
+                economics_identity = {
+                    "cohort": str(item.get("cohort") or item.get("economic_cohort") or "").strip() or None,
+                    "strategy": strategy_identity(item),
+                    "regime": str(item.get("regime") or item.get("market_regime") or "").strip() or None,
+                }
                 rejections.append({
                     "symbol": symbol,
                     "reason": "economics_blocked",
                     "economics_reason": economics_reason,
                     "expected_edge_pct": expected_edge,
                     "estimated_round_trip_cost_pct": estimated_cost,
+                    "economics_identity": economics_identity,
                     "watch_only": True,
                 })
                 _log_optimizer_decision(
@@ -253,8 +324,59 @@ def install_strategic_rebalance_optimizer_bridge(worker: Any) -> None:
                     economics_reason=economics_reason,
                     expected_edge_pct=expected_edge if expected_edge is not None else "unknown",
                     estimated_round_trip_cost_pct=round(estimated_cost, 6),
+                    economics_identity=economics_identity,
                 )
                 continue
+
+            # A configured core gap is an allocation ceiling. If that ceiling is
+            # already below the unchanged meaningful-entry floor, no downstream
+            # risk/liquidity calculation can make it executable. Keep the symbol
+            # in WATCH and suppress repeat optimizer work briefly, per symbol.
+            meaningful_entry_floor = _adaptive_meaningful_entry_floor(
+                item,
+                equity=equity,
+                minimum_notional=minimum_notional,
+            )
+            strategic_target_gap = adaptive._finite(item.get("core_target_amount"))
+            if (
+                _explicit_strategic_rebalance(item)
+                and strategic_target_gap > 0
+                and strategic_target_gap + 1e-9 < meaningful_entry_floor
+            ):
+                now = time.monotonic()
+                tiny_state = _tiny_gap_state(item, meaningful_entry_floor)
+                cooldown_active = _tiny_gap_on_cooldown(worker, symbol, tiny_state, now=now)
+                if not cooldown_active:
+                    _set_tiny_gap_cooldown(worker, symbol, tiny_state, now=now)
+                rejections.append(
+                    {
+                        "symbol": symbol,
+                        "reason": "watch_momentum_candidate",
+                        "watch_only": True,
+                        "proposed_amount": round(strategic_target_gap, 8),
+                        "minimum_notional": round(minimum_notional, 8),
+                        "meaningful_entry_floor": meaningful_entry_floor,
+                        "entry_floor_mode": "adaptive_equity_spread_liquidity_confidence",
+                        "opportunity_score": round(adaptive._finite(item.get("soft_score") or item.get("opportunity_score")), 4),
+                        "authorization_basis": "explicit_core_rebalance_target_gap",
+                        "tiny_gap_cooldown": True,
+                        "cooldown_active": cooldown_active,
+                        "cooldown_scope": "symbol",
+                    }
+                )
+                _log_optimizer_decision(
+                    worker,
+                    symbol,
+                    status="WATCH",
+                    reason="below_meaningful_entry_floor",
+                    proposed_amount=round(strategic_target_gap, 2),
+                    meaningful_entry_floor=meaningful_entry_floor,
+                    entry_floor_mode="adaptive",
+                    cooldown="active" if cooldown_active else "started",
+                    state_token=tiny_state,
+                )
+                continue
+            _clear_tiny_gap_cooldown(worker, symbol)
 
             gate = _strategic_rebalance_gate(item)
             if not gate.get("allowed"):
@@ -292,7 +414,6 @@ def install_strategic_rebalance_optimizer_bridge(worker: Any) -> None:
             # An explicit configured-core target gap is an authorization ceiling,
             # not merely a reason to enter. Never let the generic optimizer buy
             # more than the remaining gap that produced the authorization.
-            strategic_target_gap = adaptive._finite(item.get("core_target_amount"))
             if _explicit_strategic_rebalance(item) and strategic_target_gap > 0:
                 candidate_amount = min(candidate_amount, strategic_target_gap)
 
@@ -335,12 +456,6 @@ def install_strategic_rebalance_optimizer_bridge(worker: Any) -> None:
                     candidate_amount=round(candidate_amount, 2),
                 )
                 continue
-
-            meaningful_entry_floor = _adaptive_meaningful_entry_floor(
-                item,
-                equity=equity,
-                minimum_notional=minimum_notional,
-            )
 
             # Do not turn weak/tiny sizing into a trade. Preserve it as a watch
             # candidate so momentum can continue to be observed until the same

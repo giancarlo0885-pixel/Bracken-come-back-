@@ -117,7 +117,22 @@ def _log_promotion_decision(worker: Any, signal: Any) -> None:
     reason = _promotion_rejection_reason(worker, signal)
     approved = intent == patch.CORE_REBALANCE_BUY_INTENT and approved_amount > 0 and bool(symbol) and allocation_symbol == symbol
 
-    worker.log.info(
+    target_amount = patch._numeric(patch._signal_value(signal, "core_target_amount", None), default=0.0)
+    meaningful_floor = _effective_meaningful_floor(worker, signal)
+    states = getattr(worker, "_core_rebalance_promotion_log_states", None)
+    if not isinstance(states, dict):
+        states = {}
+        worker._core_rebalance_promotion_log_states = states
+    fingerprint = (
+        approved,
+        intent,
+        reason,
+        bool(target_amount + 1e-9 >= meaningful_floor) if meaningful_floor > 0 else None,
+    )
+    changed = states.get(symbol) != fingerprint
+    states[symbol] = fingerprint
+    logger = worker.log.info if changed else getattr(worker.log, "debug", lambda *args, **kwargs: None)
+    logger(
         "CORE_REBALANCE_PROMOTION_DECISION | symbol=%s | approved=%s | intent=%s | approved_amount_raw=%s | "
         "approved_amount=%.2f | allocation_symbol=%s | target_amount=%.2f | meaningful_entry_floor=%.2f | "
         "entry_floor_mode=%s | optimizer_status=%s | optimizer_reason=%s | action=%s | reason=%s",
@@ -127,8 +142,8 @@ def _log_promotion_decision(worker: Any, signal: Any) -> None:
         raw_amount,
         approved_amount,
         allocation_symbol or "missing",
-        patch._numeric(patch._signal_value(signal, "core_target_amount", None), default=0.0),
-        _effective_meaningful_floor(worker, signal),
+        target_amount,
+        meaningful_floor,
         allocation.get("entry_floor_mode") or decision.get("entry_floor_mode") or "legacy_producer_floor",
         decision.get("status") or "missing",
         decision.get("reason") or "missing",
