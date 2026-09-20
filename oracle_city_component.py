@@ -683,7 +683,7 @@ function animate(){
   workerObjects.forEach(function(worker){
     const cycle=(Math.sin(elapsed*worker.userData.speed+worker.userData.phase)+1)/2;
     const state=String(worker.userData.data.state || "");
-    const restBias=(state==="RESTING" || state==="HOME")?.18:(state==="RECREATION"?.72:cycle);
+    const restBias=(state==="RESTING" || state==="HOME")?0.18:(state==="RECREATION"?0.72:cycle);
     worker.position.lerpVectors(worker.userData.home,worker.userData.work,restBias);
     worker.position.y=.02+Math.abs(Math.sin(elapsed*5+worker.userData.phase))*.035;
     const direction=worker.userData.work.clone().sub(worker.userData.home);
