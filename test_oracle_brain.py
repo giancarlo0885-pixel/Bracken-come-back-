@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import oracle_brain
 
 
@@ -98,3 +100,14 @@ def test_doctrine_contains_core_safety_invariants():
     assert "hybrid" in titles
     assert "promotion" in titles
     assert "live" in titles
+
+
+def test_brain_page_neural_field_is_evidence_driven_and_read_only():
+    source = Path("pages/3_Oracle_Brain.py").read_text(encoding="utf-8")
+    assert "ORACLE NEURAL FIELD" in source
+    assert 'snapshot["entries"]' in source
+    assert 'snapshot["regime_economics"]' in source
+    assert "execution authority: NONE" in source
+    assert "submit_order(" not in source
+    assert "ENABLE_BROKER_SUBMISSION=true" not in source
+    assert "LIVE_TRADING_ARMED=true" not in source
