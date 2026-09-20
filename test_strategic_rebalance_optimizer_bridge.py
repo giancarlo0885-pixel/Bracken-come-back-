@@ -247,3 +247,52 @@ def test_stock_optimizer_is_unchanged_delegate():
 
     assert plan == {"allocations": ["delegated"]}
     assert calls == ["stock"]
+
+
+def test_crypto_optimizer_does_not_approve_known_negative_economics(monkeypatch):
+    worker = _worker()
+    monkeypatch.setattr(adaptive, "hard_risk_gate", lambda item: {"allowed": True, "reasons": []})
+    monkeypatch.setattr(
+        bridge,
+        "fee_edge_allows_entry",
+        lambda item: (
+            False,
+            "edge_unavailable_known_negative_economics:samples=46:expectancy=-0.276231:pf=0.2818",
+            None,
+            0.6501,
+        ),
+    )
+    install_strategic_rebalance_optimizer_bridge(worker)
+
+    plan = worker.adaptive_portfolio_optimizer(
+        [_candidate(tactical_action="BUY")],
+        {"cash": 2000.0, "equity": 2000.0, "buying_power": 2000.0},
+        [],
+        engine="crypto",
+    )
+
+    assert plan["allocations"] == []
+    assert plan["rejections"][0]["reason"] == "economics_blocked"
+    assert plan["rejections"][0]["watch_only"] is True
+    assert plan["rejections"][0]["expected_edge_pct"] is None
+    assert plan["rejections"][0]["estimated_round_trip_cost_pct"] == 0.6501
+
+
+def test_crypto_optimizer_preserves_economics_exploration_when_allowed(monkeypatch):
+    worker = _worker()
+    monkeypatch.setattr(adaptive, "hard_risk_gate", lambda item: {"allowed": True, "reasons": []})
+    monkeypatch.setattr(
+        bridge,
+        "fee_edge_allows_entry",
+        lambda item: (True, "edge_unavailable_insufficient_evidence_exploration", None, 0.50),
+    )
+    install_strategic_rebalance_optimizer_bridge(worker)
+
+    plan = worker.adaptive_portfolio_optimizer(
+        [_candidate(tactical_action="BUY")],
+        {"cash": 2000.0, "equity": 2000.0, "buying_power": 2000.0},
+        [],
+        engine="crypto",
+    )
+
+    assert len(plan["allocations"]) == 1
