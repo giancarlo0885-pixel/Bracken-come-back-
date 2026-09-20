@@ -488,14 +488,6 @@ def _sync_curated_crypto_history(conn: Any) -> int:
 
 
 def _sync_trade_episodes(conn: Any, market: str, *, limit: int = _EPISODE_BATCH) -> tuple[int, int]:
-    state = conn.execute(
-        """
-        SELECT last_episode_exit_at FROM oracle_brain_learning_state
-        WHERE pipeline_key='episodes' AND market=%s
-        """,
-        (market,),
-    ).fetchone() or {}
-    last_exit = _dt(state.get("last_episode_exit_at"))
     rows = list(
         conn.execute(
             """
@@ -506,12 +498,18 @@ def _sync_trade_episodes(conn: Any, market: str, *, limit: int = _EPISODE_BATCH)
                    t.entry_quote_id,t.feature_snapshot,t.model,t.model_version
             FROM paper_regime_trade_metrics m
             LEFT JOIN trade_ledger t ON t.trade_id=m.trade_id
+            LEFT JOIN oracle_brain_episodes e ON e.trade_id=m.trade_id
+            LEFT JOIN oracle_brain_episode_exclusions x ON x.trade_id=m.trade_id
             WHERE m.market=%s AND m.exit_time IS NOT NULL
-              AND (%s::timestamptz IS NULL OR m.exit_time>%s::timestamptz)
-            ORDER BY m.exit_time ASC
+              AND e.trade_id IS NULL
+              AND (
+                    x.trade_id IS NULL
+                    OR (x.status='excluded' AND x.last_checked_at < NOW()-INTERVAL '24 hours')
+                  )
+            ORDER BY m.exit_time DESC
             LIMIT %s
             """,
-            (market, last_exit, last_exit, max(1, int(limit))),
+            (market, max(1, int(limit))),
         ).fetchall()
     )
     inserted = 0
@@ -525,11 +523,46 @@ def _sync_trade_episodes(conn: Any, market: str, *, limit: int = _EPISODE_BATCH)
         episode = episode_from_row(dict(row), now=now)
         if episode is None:
             skipped_provenance += 1
+            trade_id = str(row.get("trade_id") or "").strip()
+            if trade_id:
+                conn.execute(
+                    """
+                    INSERT INTO oracle_brain_episode_exclusions(
+                        trade_id,market,reason,first_seen_at,last_checked_at,retry_count,status,metadata,execution_impact
+                    )
+                    VALUES (%s,%s,'missing_exact_entry_provenance',NOW(),NOW(),1,'excluded',%s::jsonb,'NONE')
+                    ON CONFLICT (trade_id) DO UPDATE SET
+                        reason=EXCLUDED.reason,
+                        last_checked_at=NOW(),
+                        retry_count=oracle_brain_episode_exclusions.retry_count+1,
+                        status=CASE
+                            WHEN oracle_brain_episode_exclusions.status='retired' THEN 'retired'
+                            ELSE 'excluded'
+                        END,
+                        metadata=oracle_brain_episode_exclusions.metadata || EXCLUDED.metadata
+                    """,
+                    (
+                        trade_id,
+                        market,
+                        json.dumps({
+                            "entry_signal_id_present": bool(row.get("entry_signal_id")),
+                            "feature_snapshot_present": bool(_json_obj(row.get("feature_snapshot"))),
+                        }),
+                    ),
+                )
             continue
         existing_episode = conn.execute(
             "SELECT 1 FROM oracle_brain_episodes WHERE episode_key=%s LIMIT 1",
             (episode["episode_key"],),
         ).fetchone()
+        conn.execute(
+            """
+            UPDATE oracle_brain_episode_exclusions
+            SET status='resolved',last_checked_at=NOW()
+            WHERE trade_id=%s AND status='excluded'
+            """,
+            (episode["trade_id"],),
+        )
         conn.execute(
             """
             INSERT INTO oracle_brain_episodes(
