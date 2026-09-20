@@ -213,3 +213,26 @@ def test_generation_identity_rejects_config_from_another_generation():
         assert "generation identity mismatch" in str(exc)
     else:
         raise AssertionError("cross-generation configuration must fail closed")
+
+
+def test_aeve_loss_streak_is_preentry_and_not_hardcoded():
+    import inspect
+    import paper_aeve_generation_controller as controller
+    source = inspect.getsource(controller.record_generation_outcomes)
+    assert "loss_streak=0" not in source
+    assert "loss_streak=loss_streak" in source
+    assert "exit_time < %s" in source
+    assert "ORDER BY exit_time DESC" in source
+    assert "int(cfg.max_loss_streak) + 1" in source
+
+
+def test_aeve_loss_streak_query_excludes_candidate_and_future_outcomes():
+    import inspect
+    import paper_aeve_generation_controller as controller
+    source = inspect.getsource(controller.record_generation_outcomes)
+    query_start = source.index("SELECT net_pnl")
+    query_end = source.index("fetchall()", query_start)
+    streak_query = source[query_start:query_end]
+    assert "exit_time < %s" in streak_query
+    assert "exit_time <= %s" not in streak_query
+    assert "net_pnl<0" not in streak_query
