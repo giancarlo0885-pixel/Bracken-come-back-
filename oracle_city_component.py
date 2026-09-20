@@ -119,6 +119,8 @@ const app=document.getElementById("app");
 const stage=document.getElementById("stage");
 const status=document.getElementById("status");
 const inspector=document.getElementById("inspector");
+const hovercard=document.getElementById("hovercard");
+const replayPanel=document.getElementById("replayPanel");
 const isMobileDevice=window.matchMedia("(max-width:720px)").matches;
 const prefersReduced=window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 const DETAIL=isMobileDevice?0.48:1;
@@ -209,11 +211,7 @@ const vehicleObjects=[];
 const flowObjects=[];
 const portfolio_towers=DATA.portfolio_towers||[];
 
-function addLabel(group,title,metric,y){
-  if(isMobileDevice)return;
-  const div=document.createElement("div");div.className="label";div.innerHTML=esc(title)+"<small>"+esc(metric)+"</small>";
-  const label=new CSS2DObject(div);label.position.set(0,y,0);group.add(label);
-}
+function addLabel(group,title,metric,y){ return; }
 
 function box(parent,w,h,d,x,y,z,material){
   const m=new THREE.Mesh(new THREE.BoxGeometry(w,h,d),material);m.position.set(x,y,z);m.castShadow=!isMobileDevice;m.receiveShadow=true;parent.add(m);return m;
