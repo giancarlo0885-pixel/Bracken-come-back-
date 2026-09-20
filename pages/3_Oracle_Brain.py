@@ -96,56 +96,45 @@ if snapshot["derived_lessons"]:
 entries = snapshot["entries"]
 with st.expander("Knowledge memory"):
     if entries:
-    st.dataframe(
-        pd.DataFrame(
-            [
+        st.dataframe(
+            pd.DataFrame([
                 {
                     "Category": item["category"],
-                    "Key": item["brain_key"],
                     "Title": item["title"],
                     "Confidence": item["confidence"],
                     "Evidence": item["evidence_ref"],
-                    "Execution impact": item["execution_impact"],
-                    "Created": item["created_at"],
                 }
                 for item in entries
-            ]
-        ),
-        use_container_width=True,
-        hide_index=True,
-    )
+            ]),
+            use_container_width=True,
+            hide_index=True,
+        )
     else:
-        st.info("No active Oracle Brain entries are available yet.")
+        st.info("No active knowledge yet.")
 
 with st.expander("Detailed market evidence"):
     st.caption("Positive = promising. Negative = avoid/research. Insufficient = still learning.")
     regimes = snapshot["regime_economics"]
     if regimes:
-    st.dataframe(
-        pd.DataFrame(
-            [
+        st.dataframe(
+            pd.DataFrame([
                 {
                     "Strategy": item["strategy"],
                     "Regime": item["regime"],
                     "Samples": item["samples"],
-                    "Net P&L": item["net_pnl"],
-                    "Fees": item["fees"],
                     "Expectancy": item["expectancy"],
-                    "Avg MFE %": item["avg_mfe_pct"],
-                    "Avg MAE %": item["avg_mae_pct"],
                     "State": item["evidence_state"],
                 }
                 for item in regimes
-            ]
-        ),
-        use_container_width=True,
-        hide_index=True,
-    )
+            ]),
+            use_container_width=True,
+            hide_index=True,
+        )
     else:
-        st.info("No regime economics rows are available.")
+        st.info("No regime evidence yet.")
 
 with st.expander("System status"):
-    st.caption("Read-only worker context; this does not control trading.")
+    st.caption("Read-only status. This does not control trading.")
     if snapshot["workers"]:
         st.dataframe(pd.DataFrame(snapshot["workers"]), use_container_width=True, hide_index=True)
     else:
