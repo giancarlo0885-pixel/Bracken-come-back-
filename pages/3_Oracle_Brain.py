@@ -60,16 +60,13 @@ function color(v,a){{if(v.state==="negative")return "rgba(255,82,112,"+a+")";if(
 function frame(){{t+=.018;x.clearRect(0,0,W,H);x.save();x.translate(Math.sin(t*.2)*2,Math.cos(t*.17)*2);for(let i=0;i<nodes.length;i++){{let a=nodes[i],b=nodes[(i*7+5)%nodes.length],d=Math.hypot(a.x-b.x,a.y-b.y);if(d<Math.min(W,H)*.38){{x.strokeStyle=color(a.v,.08+.08*Math.sin(t+a.phase));x.lineWidth=.7;x.beginPath();x.moveTo(a.x,a.y);x.quadraticCurveTo(W*.5,H*.5,b.x,b.y);x.stroke();}}}}for(const n of nodes){{let pulse=1+.35*Math.sin(t*2.4+n.phase),r=2.4+5*(n.v.value||.2)*pulse;x.shadowBlur=16;x.shadowColor=color(n.v,.8);x.fillStyle=color(n.v,.9);x.beginPath();x.arc(n.x,n.y,r,0,Math.PI*2);x.fill();}}x.restore();requestAnimationFrame(frame);}}
 new ResizeObserver(resize).observe(c);resize();frame();
 </script></body></html>""", height=440, scrolling=False)
-st.caption(
-    "Persistent engineering/research memory + live evidence summary. "
-    "Read-only dashboard; execution authority: NONE."
-)
+st.caption("Living evidence map. Open details only when you want the numbers.")
 
 c1, c2, c3, c4 = st.columns(4)
-c1.metric("Active knowledge entries", summary["active_entries"])
-c2.metric("Tracked experiments", summary["experiments"])
-c3.metric("Mature negative regimes", summary["mature_negative_regimes"])
-c4.metric("Mature positive regimes", summary["mature_positive_regimes"])
+c1.metric("Knowledge", summary["active_entries"])
+c2.metric("Experiments", summary["experiments"])
+c3.metric("Avoid", summary["mature_negative_regimes"])
+c4.metric("Promising", summary["mature_positive_regimes"])
 
 if safety["safe_research_boundary"]:
     st.success(
@@ -84,10 +81,9 @@ else:
         f"live_armed={safety['live_trading_armed']}."
     )
 
-st.subheader("Permanent doctrine")
-for item in snapshot["doctrine"]:
-    with st.expander(item["title"]):
-        st.write(item["body"])
+with st.expander("How the Brain learns"):
+    for item in snapshot["doctrine"]:
+        st.markdown(f"**{item['title']}** — {item['body']}")
 
 if snapshot["derived_lessons"]:
     st.subheader("Evidence-derived lessons")
@@ -97,9 +93,9 @@ if snapshot["derived_lessons"]:
         else:
             st.info(f"**{lesson['title']}** — {lesson['body']}")
 
-st.subheader("Persistent knowledge ledger")
 entries = snapshot["entries"]
-if entries:
+with st.expander("Knowledge memory"):
+    if entries:
     st.dataframe(
         pd.DataFrame(
             [
@@ -118,12 +114,13 @@ if entries:
         use_container_width=True,
         hide_index=True,
     )
-else:
-    st.info("No active Oracle Brain entries are available yet.")
+    else:
+        st.info("No active Oracle Brain entries are available yet.")
 
-st.subheader("Regime economics evidence")
-regimes = snapshot["regime_economics"]
-if regimes:
+with st.expander("Detailed market evidence"):
+    st.caption("Positive = promising. Negative = avoid/research. Insufficient = still learning.")
+    regimes = snapshot["regime_economics"]
+    if regimes:
     st.dataframe(
         pd.DataFrame(
             [
@@ -144,14 +141,15 @@ if regimes:
         use_container_width=True,
         hide_index=True,
     )
-else:
-    st.info("No regime economics rows are available.")
+    else:
+        st.info("No regime economics rows are available.")
 
-st.subheader("Worker context")
-if snapshot["workers"]:
-    st.dataframe(pd.DataFrame(snapshot["workers"]), use_container_width=True, hide_index=True)
-else:
-    st.info("Worker heartbeat data is unavailable.")
+with st.expander("System status"):
+    st.caption("Read-only worker context; this does not control trading.")
+    if snapshot["workers"]:
+        st.dataframe(pd.DataFrame(snapshot["workers"]), use_container_width=True, hide_index=True)
+    else:
+        st.info("Worker heartbeat data is unavailable.")
 
 with st.expander("Brain safety boundary"):
     st.markdown(
