@@ -26,29 +26,29 @@ html,body{margin:0;height:100%;overflow:hidden;background:#02070c;color:#eef8ff;
 #app{position:relative;height:100%;min-height:720px;background:radial-gradient(circle at 50% 25%,#0b2635 0,#051019 42%,#02070c 78%);border:1px solid #17394d;border-radius:22px;overflow:hidden}
 #stage{position:absolute;inset:0}
 #labels{position:absolute;inset:0;pointer-events:none}
-.label{padding:5px 7px;border:1px solid rgba(91,176,214,.42);border-radius:8px;background:rgba(3,11,17,.82);backdrop-filter:blur(8px);font-size:11px;font-weight:850;color:#eef8ff;white-space:nowrap;box-shadow:0 7px 20px rgba(0,0,0,.25)}
-.label small{display:block;margin-top:1px;color:#87a9ba;font-size:9px;font-weight:700}
+.label{padding:5px 7px;border:1px solid rgba(91,176,214,.42);border-radius:8px;background:rgba(3,11,17,.82);backdrop-filter:blur(8px);font-size:14px;font-weight:800;color:#f5fbff;white-space:nowrap;box-shadow:0 7px 20px rgba(0,0,0,.25)}
+.label small{display:block;margin-top:1px;color:#b6cfdb;font-size:11px;font-weight:650}
 .topbar{position:absolute;z-index:5;left:14px;right:14px;top:14px;display:flex;gap:10px;align-items:flex-start;justify-content:space-between;pointer-events:none}
 .brand,.toolbar,.inspector,.replay{pointer-events:auto;border:1px solid rgba(74,143,176,.38);background:rgba(2,10,16,.82);backdrop-filter:blur(14px);box-shadow:0 15px 48px rgba(0,0,0,.28)}
-.brand{border-radius:15px;padding:11px 13px;max-width:380px}
-.brand b{font-size:13px;letter-spacing:.12em;text-transform:uppercase}
-.brand span{display:block;margin-top:3px;color:#8aa7b7;font-size:10px;line-height:1.35}
+.brand{border-radius:15px;padding:14px 16px;max-width:520px}
+.brand b{font-size:16px;letter-spacing:.12em;text-transform:uppercase}
+.brand span{display:block;margin-top:3px;color:#c0d3dd;font-size:12px;line-height:1.45}
 .toolbar{display:flex;gap:6px;border-radius:13px;padding:6px}
-button{appearance:none;border:1px solid #28516a;border-radius:9px;background:#071722;color:#e9f7ff;padding:7px 9px;font-size:10px;font-weight:850;cursor:pointer}
+button{appearance:none;border:1px solid #28516a;border-radius:9px;background:#071722;color:#e9f7ff;padding:9px 11px;font-size:12px;font-weight:800;cursor:pointer}
 button:hover{border-color:#5cbbe5;background:#0c2432}
 button.active{border-color:#4bf49b;color:#4bf49b}
 .inspector{position:absolute;z-index:5;left:14px;bottom:14px;width:min(360px,calc(100% - 28px));border-radius:16px;padding:13px}
-.inspector .eyebrow{font-size:9px;font-weight:950;letter-spacing:.1em;text-transform:uppercase;color:#66d1ff}
-.inspector h3{margin:4px 0 3px;font-size:17px}
-.inspector .metric{font-size:13px;font-weight:900;margin:3px 0 5px}
-.inspector p{margin:0;color:#9bb2c0;font-size:11px;line-height:1.45}
+.inspector .eyebrow{font-size:11px;font-weight:900;letter-spacing:.1em;text-transform:uppercase;color:#66d1ff}
+.inspector h3{margin:4px 0 3px;font-size:20px}
+.inspector .metric{font-size:15px;font-weight:850;margin:5px 0 7px}
+.inspector p{margin:0;color:#c3d4dc;font-size:13px;line-height:1.55}
 .replay{position:absolute;z-index:5;right:14px;bottom:14px;width:min(440px,calc(100% - 28px));border-radius:16px;padding:10px 12px}
 .replay-head{display:flex;gap:8px;align-items:center}
 .replay-title{min-width:0;flex:1}
-.replay-title b{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:11px}
-.replay-title span{display:block;color:#86a4b5;font-size:9px;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.replay-title b{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:13px}
+.replay-title span{display:block;color:#b4cad5;font-size:11px;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 input[type=range]{width:100%;accent-color:#55d4ff}
-.legend{position:absolute;z-index:5;right:14px;top:66px;border:1px solid rgba(74,143,176,.28);border-radius:12px;padding:8px 10px;background:rgba(2,10,16,.72);font-size:9px;color:#91aebe;pointer-events:none}
+.legend{position:absolute;z-index:5;right:14px;top:66px;border:1px solid rgba(74,143,176,.28);border-radius:12px;padding:8px 10px;background:rgba(2,10,16,.72);font-size:11px;color:#b9ced8;pointer-events:none}
 .legend div+div{margin-top:4px}.dot{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:6px}
 #fallback{position:absolute;z-index:2;inset:88px 18px 150px;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;align-content:start;pointer-events:none}
 .fallback-card{border:1px solid #17394d;border-radius:13px;padding:10px;background:rgba(5,18,27,.72)}
@@ -81,7 +81,7 @@ input[type=range]{width:100%;accent-color:#55d4ff}
   <div id="fallback"></div>
   <div id="status">Loading Oracle City WebGL...</div>
   <div class="topbar">
-    <div class="brand"><b>GARIBALDI MARKET ORACLE · CITY V3</b><span>Interactive read-only digital twin + decision provenance brain map. Drag to orbit · wheel to zoom · click any node.</span></div>
+    <div class="brand"><b>GARIBALDI MARKET ORACLE · CITY V3</b><span>System map: green = healthy, yellow = waiting, red = problem. Drag to move · wheel to zoom · click a building for details.</span></div>
     <div class="toolbar">
       <button id="reset">RESET VIEW</button>
       <button id="flows" class="active">FLOWS ON</button>
@@ -106,7 +106,7 @@ input[type=range]{width:100%;accent-color:#55d4ff}
   <div class="replay">
     <div class="replay-head">
       <button id="play">PLAY</button>
-      <div class="replay-title"><b id="replayTitle">Decision / execution replay</b><span id="replayDetail">Use the slider to replay persisted Oracle events.</span></div>
+      <div class="replay-title"><b id="replayTitle">Recent decision replay</b><span id="replayDetail">Move the slider to review Oracle decisions and paper-trade events.</span></div>
     </div>
     <input id="timeline" type="range" min="0" max="0" value="0" step="1">
   </div>
@@ -384,11 +384,11 @@ function setBrainMode(enabled){
     inspector.innerHTML="<div class='eyebrow'>ORACLE BRAIN MAP</div><h3>Decision provenance network</h3><div class='metric'>"+
       String((brainData.summary || {}).traced_decisions || 0)+" decisions · "+
       String((brainData.summary || {}).linked_outcomes || 0)+" linked outcomes</div><p>"+
-      "Blue nodes are persisted evidence, purple nodes are decisions, green/red nodes are downstream gates, and outcome nodes carry recorded execution state. This layer is SELECT-only."+
+      "Blue = evidence, purple = Oracle decision, green = passed safety gate, red = blocked, and outcome nodes = recorded paper-trade result. This view cannot place trades."+
       "</p>";
   }else{
     resetView();
-    inspector.innerHTML="<div class='eyebrow'>ORACLE CITY</div><h3>Interactive system map</h3><div class='metric'>Read-only observability</div><p>Select a district or switch to Brain Map to inspect persisted evidence, decision gates, execution links, and outcomes.</p>";
+    inspector.innerHTML="<div class='eyebrow'>ORACLE CITY</div><h3>Oracle system overview</h3><div class='metric'>Click a building to see what it is doing</div><p>City Map shows Oracle components. Brain Map shows evidence, decisions, safety checks, paper trades, and outcomes.</p>";
   }
   controls.update();
 }
