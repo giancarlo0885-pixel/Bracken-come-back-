@@ -39,12 +39,22 @@ if auto_refresh and st_autorefresh is not None:
 snapshot = build_oracle_city_snapshot(rows)
 summary = snapshot["summary"]
 
-st.title("Oracle City — Living Research Campus")
+st.title("Oracle City — Cinematic Metropolis")
 st.caption(
-    "A living, read-only visualization of Oracle research, Council decisions, risk controls, paper execution, learning, and worker activity. "
-    "Worker movement is illustrative; persisted Oracle state drives assignments. This page cannot place trades."
+    "Explore Oracle as a real 3D financial city: research campuses, exchanges, Council, risk, paper execution, homes, parks, workers, and market traffic. "
+    "The city is read-only; persisted Oracle state drives the information shown."
 )
 
+if snapshot["warnings"]:
+    st.warning("Partial Oracle City feeds: " + "; ".join(snapshot["warnings"]))
+
+components.html(
+    render_oracle_city_component(snapshot),
+    height=980,
+    scrolling=False,
+)
+
+st.subheader("City status")
 c1, c2, c3, c4, c5 = st.columns(5)
 c1.metric("Systems online", f"{summary['workers_online']}/{summary['workers_total']}")
 c2.metric("Open positions", summary["open_positions"])
@@ -74,15 +84,6 @@ if brain_gaps:
         f"{brain_gaps} recent closed trade(s) lack a canonical decision provenance link. "
         "Treat those rows as unsuitable for strategy-learning attribution until repaired."
     )
-
-if snapshot["warnings"]:
-    st.warning("Partial Oracle City feeds: " + "; ".join(snapshot["warnings"]))
-
-components.html(
-    render_oracle_city_component(snapshot),
-    height=900,
-    scrolling=False,
-)
 
 st.subheader("Current trade ideas")
 opportunities = snapshot["opportunities"]
