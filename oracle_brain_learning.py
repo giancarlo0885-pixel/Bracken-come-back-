@@ -519,11 +519,13 @@ def _sync_trade_episodes(conn: Any, market: str, *, limit: int = _EPISODE_BATCH)
     latest_exit: datetime | None = None
     now = datetime.now(timezone.utc)
     for row in rows:
+        row_exit = _dt(row.get("exit_time"))
+        if row_exit is not None:
+            latest_exit = max(latest_exit or row_exit, row_exit)
         episode = episode_from_row(dict(row), now=now)
         if episode is None:
             skipped_provenance += 1
             continue
-        latest_exit = max(latest_exit or episode["exit_time"], episode["exit_time"]) if episode["exit_time"] else latest_exit
         existing_episode = conn.execute(
             "SELECT 1 FROM oracle_brain_episodes WHERE episode_key=%s LIMIT 1",
             (episode["episode_key"],),
@@ -719,7 +721,13 @@ def _insert_regime_lesson(conn: Any, market: str, strategy: str, regime: str, su
                 prior_polarity,
                 polarity,
                 "Mature exact-provenance paper evidence changed polarity as new outcomes accumulated.",
-                json.dumps({"samples": summary["samples"], "expectancy": summary["expectancy"]}),
+                json.dumps({
+                    "samples": summary["samples"],
+                    "expectancy": summary["expectancy"],
+                    "market": market,
+                    "strategy": strategy,
+                    "regime": regime,
+                }),
             ),
         )
     return current_id
@@ -917,14 +925,14 @@ def sync_brain_learning(market: str, *, source_limit: int = _SOURCE_BATCH, episo
                 deadline_monotonic=deadline,
             )
             result = {
-            "status": "ok",
-            "market": normalized_market,
-            "sources_ingested": sources,
-            "curated_history_ingested": curated_history,
-            "episodes_processed": episodes,
-            "episodes_skipped_missing_exact_provenance": skipped,
-            "lessons_updated": lessons,
-            "research_topics_queued": queued,
+                "status": "ok",
+                "market": normalized_market,
+                "sources_ingested": sources,
+                "curated_history_ingested": curated_history,
+                "episodes_processed": episodes,
+                "episodes_skipped_missing_exact_provenance": skipped,
+                "lessons_updated": lessons,
+                "research_topics_queued": queued,
                 "source_freshness_refreshed": refreshed,
                 "v3": v3,
                 "execution_impact": "NONE",
