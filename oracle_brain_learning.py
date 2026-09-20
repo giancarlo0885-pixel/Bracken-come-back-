@@ -391,6 +391,10 @@ def _sync_curated_crypto_history(conn: Any) -> int:
     for event in EVENTS:
         observed = _dt(f"{event.event_date}T00:00:00+00:00")
         source_key = f"crypto_history:{event.event_id}"
+        existing_source = conn.execute(
+            "SELECT 1 FROM oracle_brain_sources WHERE source_key=%s LIMIT 1",
+            (source_key,),
+        ).fetchone()
         result = conn.execute(
             """
             INSERT INTO oracle_brain_sources(
@@ -430,29 +434,30 @@ def _sync_curated_crypto_history(conn: Any) -> int:
                 ),
             ),
         )
-        inserted += max(0, int(getattr(result, "rowcount", 1) or 0))
-        event_node = f"source:{source_key}"
-        _upsert_link(
-            conn,
-            source_key=event_node,
-            target_key=f"category:{_slug(event.category)}",
-            relation="classified_as",
-            weight=0.0,
-            confidence=0.94,
-            observed_at=observed,
-            metadata={"context_only": True},
-        )
-        for asset in event.assets:
+        if not existing_source:
+            inserted += max(0, int(getattr(result, "rowcount", 1) or 0))
+            event_node = f"source:{source_key}"
             _upsert_link(
                 conn,
                 source_key=event_node,
-                target_key=f"symbol:{_slug(asset)}",
-                relation="historical_context_for",
+                target_key=f"category:{_slug(event.category)}",
+                relation="classified_as",
                 weight=0.0,
                 confidence=0.94,
                 observed_at=observed,
                 metadata={"context_only": True},
             )
+            for asset in event.assets:
+                _upsert_link(
+                    conn,
+                    source_key=event_node,
+                    target_key=f"symbol:{_slug(asset)}",
+                    relation="historical_context_for",
+                    weight=0.0,
+                    confidence=0.94,
+                    observed_at=observed,
+                    metadata={"context_only": True},
+                )
     return inserted
 
 
