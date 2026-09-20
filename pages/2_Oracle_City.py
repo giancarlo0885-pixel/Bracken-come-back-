@@ -8,12 +8,6 @@ from database import database_ready, rows
 from oracle_city_component import render_oracle_city_component
 from oracle_city_model import build_oracle_city_snapshot
 
-try:
-    from streamlit_autorefresh import st_autorefresh
-except ImportError:
-    st_autorefresh = None
-
-
 st.set_page_config(
     page_title="Oracle City V3 - GARIBALDI MARKET ORACLE",
     page_icon="ORCL",
@@ -26,15 +20,9 @@ if not health.get("ok"):
     st.caption(str(health.get("message") or "Database readiness check failed."))
     st.stop()
 
-left, middle, spacer = st.columns([1, 1, 4])
-with left:
-    if st.button("Refresh now", type="primary", use_container_width=True):
-        st.rerun()
-with middle:
-    auto_refresh = st.toggle("Auto refresh", value=True)
-
-if auto_refresh and st_autorefresh is not None:
-    st_autorefresh(interval=15_000, key="oracle-city-v2-refresh")
+# Keep the city continuously animated without rerunning the Streamlit page.
+# This preserves camera, scroll, and inspection state. A normal browser reload
+# fetches a fresh persisted Oracle snapshot when the viewer wants new evidence.
 
 snapshot = build_oracle_city_snapshot(rows)
 summary = snapshot["summary"]
