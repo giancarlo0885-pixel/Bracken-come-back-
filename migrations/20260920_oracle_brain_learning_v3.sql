@@ -62,6 +62,8 @@ CREATE TABLE IF NOT EXISTS oracle_brain_counterfactuals (
     horizon_minutes INTEGER NOT NULL,
     market TEXT NOT NULL,
     symbol TEXT NOT NULL,
+    strategy TEXT,
+    regime TEXT,
     recommendation TEXT,
     approved BOOLEAN NOT NULL DEFAULT FALSE,
     reason TEXT,
