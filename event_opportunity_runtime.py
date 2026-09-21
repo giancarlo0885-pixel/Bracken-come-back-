@@ -11,6 +11,7 @@ verified by the normal market-data path.
 from typing import Any
 
 from event_opportunity_scanner import active_event_watchlist, event_context_for_symbol
+from market_intelligence_bridge import brain_context_for_signal
 
 
 _INSTALLED = False
@@ -72,17 +73,41 @@ def install_event_opportunity_runtime(market_worker_module: Any) -> None:
         if signal is None:
             return None
         try:
-            context = event_context_for_symbol(symbol)
+            event_context = event_context_for_symbol(symbol)
         except Exception:
-            context = {"score": 0.0, "events": [], "headlines": []}
-        score = float(context.get("score") or 0.0)
+            event_context = {"score": 0.0, "events": [], "headlines": []}
+        market = "crypto" if str(symbol or "").upper().endswith("-USD") else "cash"
+        sector = str(getattr(signal, "sector", "") or "")
+        try:
+            brain_context = brain_context_for_signal(symbol, market=market, sector=sector)
+        except Exception:
+            brain_context = {
+                "catalyst_score": 0.0,
+                "sources": [],
+                "headlines": [],
+                "citations": [],
+                "execution_impact": "NONE",
+            }
+        event_score = float(event_context.get("score") or 0.0)
+        brain_score = float(brain_context.get("catalyst_score") or 0.0)
+        score = max(event_score, brain_score)
         if score > 0:
             setattr(signal, "external_catalyst_score", score)
-            setattr(signal, "event_catalyst_score", score)
-            setattr(signal, "event_opportunities", list(context.get("events") or []))
-            setattr(signal, "event_headlines", list(context.get("headlines") or []))
+            setattr(signal, "event_catalyst_score", event_score)
+            setattr(signal, "brain_intelligence_score", brain_score)
+            setattr(signal, "event_opportunities", list(event_context.get("events") or []))
+            setattr(signal, "event_headlines", list(event_context.get("headlines") or []))
+            setattr(signal, "brain_intelligence_context", brain_context)
             reason = str(getattr(signal, "reason", "") or "").strip()
-            suffix = f"Event radar catalyst {score:.0f}/100 from independently discovered market news."
+            parts: list[str] = []
+            if event_score > 0:
+                parts.append(f"event radar {event_score:.0f}/100")
+            if brain_score > 0:
+                parts.append(f"attributed Brain context {brain_score:.0f}/100")
+            suffix = (
+                f"Bounded external catalyst context: {', '.join(parts)}; "
+                "price/volume confirmation and all Council/risk vetoes still apply."
+            )
             setattr(signal, "reason", f"{reason} {suffix}".strip())
         return signal
 
@@ -92,28 +117,47 @@ def install_event_opportunity_runtime(market_worker_module: Any) -> None:
         if not symbol:
             return result
         try:
-            context = event_context_for_symbol(symbol)
+            event_context = event_context_for_symbol(symbol)
         except Exception:
+            event_context = {"events": [], "headlines": []}
+        market = "crypto" if symbol.endswith("-USD") else "cash"
+        try:
+            brain_context = brain_context_for_signal(symbol, market=market)
+        except Exception:
+            brain_context = {"headlines": [], "citations": []}
+        event_headlines = list(event_context.get("headlines") or [])
+        brain_headlines = list(brain_context.get("headlines") or [])
+        events = list(event_context.get("events") or [])
+        if not event_headlines and not brain_headlines:
             return result
-        event_headlines = list(context.get("headlines") or [])
-        events = list(context.get("events") or [])
-        if not event_headlines:
-            return result
-        headlines = _merge_unique(list(getattr(result, "headlines", []) or []), event_headlines, limit=12)
+        added_headlines = _merge_unique(brain_headlines, event_headlines, limit=12)
+        headlines = _merge_unique(list(getattr(result, "headlines", []) or []), added_headlines, limit=12)
         citations = _merge_unique(
             list(getattr(result, "citations", []) or []),
-            [str(item.get("url") or "") for item in events if isinstance(item, dict) and item.get("url")],
+            [
+                *[str(item.get("url") or "") for item in events if isinstance(item, dict) and item.get("url")],
+                *[str(item) for item in brain_context.get("citations", []) if item],
+            ],
             limit=12,
         )
         source = str(getattr(result, "source", "") or "Unavailable")
         message = str(getattr(result, "message", "") or "").strip()
+        context_sources = []
+        if event_headlines:
+            context_sources.append("Event Radar")
+        if brain_headlines:
+            context_sources.append("Oracle Brain")
         result_type = type(result)
         try:
             return result_type(
                 sentiment=float(getattr(result, "sentiment", 0.0) or 0.0),
                 headlines=headlines,
-                source=f"{source} + Event Radar",
-                message=(message + f" Event radar added {len(event_headlines)} independently discovered catalyst headline(s).").strip(),
+                source=f"{source} + {' + '.join(context_sources)}",
+                message=(
+                    message
+                    + f" Research memory added {len(added_headlines)} attributed catalyst headline(s); "
+                    "execution authority remains NONE."
+                ).strip(),
                 citations=citations,
             )
         except Exception:

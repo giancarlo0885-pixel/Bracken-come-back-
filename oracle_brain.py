@@ -196,10 +196,21 @@ def build_oracle_brain_snapshot(fetch_rows: FetchRows) -> dict[str, Any]:
         SELECT source_key,source_type,provider,category,symbol,title,source_ref,
                observed_at,source_quality,freshness_score,confidence,status,metadata
         FROM oracle_brain_sources
-        ORDER BY confidence DESC,freshness_score DESC,observed_at DESC NULLS LAST
+        ORDER BY observed_at DESC NULLS LAST,confidence DESC,freshness_score DESC
         LIMIT 80
         """,
     )
+    for source in sources:
+        source["metadata"] = _json_obj(source.get("metadata"))
+        source["verification_status"] = str(
+            source["metadata"].get("verification_status") or "reported"
+        )
+        source["ranking_eligible"] = bool(source["metadata"].get("ranking_eligible", False))
+    source_count_rows = _safe_rows(
+        fetch_rows,
+        "SELECT COUNT(*)::int AS total FROM oracle_brain_sources",
+    )
+    source_total = int(_num(source_count_rows[0].get("total"), len(sources))) if source_count_rows else len(sources)
     episodes = _safe_rows(
         fetch_rows,
         """
@@ -394,7 +405,7 @@ def build_oracle_brain_snapshot(fetch_rows: FetchRows) -> dict[str, Any]:
             "mature_negative_regimes": len(negative_mature),
             "mature_positive_regimes": len(positive_mature),
             "workers_observed": len(workers),
-            "knowledge_sources": len(sources),
+            "knowledge_sources": source_total,
             "stale_sources": len(stale_sources),
             "exact_episodes": len(episodes),
             "concept_links": len(links),

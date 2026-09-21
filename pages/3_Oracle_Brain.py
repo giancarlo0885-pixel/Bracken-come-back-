@@ -170,6 +170,9 @@ with st.expander("Recent acquired knowledge sources"):
                         "Quality": item["source_quality"],
                         "Freshness": item["freshness_score"],
                         "Confidence": item["confidence"],
+                        "Verification": item.get("verification_status", "reported"),
+                        "Ranking eligible": item.get("ranking_eligible", False),
+                        "Source": item.get("source_ref"),
                         "Status": item["status"],
                     }
                     for item in snapshot["sources"]

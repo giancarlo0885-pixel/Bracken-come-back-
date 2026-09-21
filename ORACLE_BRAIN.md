@@ -38,6 +38,16 @@ Market/provider data
 
 Oracle City/Brain Map visualizes this flow. Oracle Brain preserves why the system is designed this way and what empirical evidence has been learned.
 
+## Automatic market-intelligence loop
+
+The stock intelligence collector and event-opportunity radar feed one canonical `intelligence_events` intake. The radar continuously rotates across company catalysts, macro policy, AI, space, quantum, crypto market structure, commodities, and supply disruptions. Each observation receives a stable event key so repeated polling updates the same record instead of flooding memory.
+
+The intake preserves provider, source URL, event time, first/last observation, verification status, confidence, freshness/expiry, affected symbols, sectors, asset classes, themes, catalysts, risks, transmission channels, and separate fact/inference fields. Source-free claims remain visible as unverified research but carry zero ranking influence.
+
+The Brain learning sync converts canonical events into `oracle_brain_sources` and concept links. Signal research can retrieve relevant, fresh sources by exact symbol, sector, or truly market-wide category. That context can raise the bounded external-catalyst score used by opportunity surveillance, but it cannot create BUY/SELL direction, approve an order, alter position size, bypass price/volume confirmation, bypass Council V3 or risk vetoes, enable broker submission, or arm live trading. Crypto and stock workers use the same read-only retrieval boundary.
+
+`ingest_market_brief()` in `market_intelligence_bridge.py` is the structured contract for an attributed external weekly brief. It deliberately requires per-development provenance and keeps verified facts distinct from inference. A transport that calls this contract must be authenticated and deployed separately; narrative text is never treated as ingested merely because it appeared in a chat.
+
 ## What belongs in Oracle Brain
 
 Store durable items such as architecture decisions, experiment hypotheses, known failure modes and fixes, provider/API limitations, strategy/regime lessons supported by canonical evidence, promotion or retirement decisions, and follow-up work future coding agents should understand.

@@ -80,11 +80,18 @@ def freshness_score(
 def source_quality(provider: Any, category: Any = "") -> float:
     name = str(provider or "").strip().lower()
     category_text = str(category or "").strip().lower()
-    if any(token in name for token in ("sec", "federal reserve", "fred", "bls", "bea", "treasury", ".gov", "official")):
+    if (
+        ".gov" in name
+        or any(token in name for token in ("federal reserve", "u.s. treasury", "official"))
+        or re.search(r"\b(?:sec|cftc|fred|bls|bea|nasa)\b", name)
+    ):
         return 0.97
     if any(token in name for token in ("nasdaq", "finnhub", "alpha vantage", "eodhd", "polygon", "iex", "quiver")):
         return 0.86
-    if any(token in name for token in ("reuters", "ap", "bloomberg", "financial times", "wall street journal")):
+    if (
+        any(token in name for token in ("reuters", "bloomberg", "financial times", "wall street journal"))
+        or re.search(r"\b(?:ap|associated press|ap news)\b", name)
+    ):
         return 0.84
     if any(token in name for token in ("newsapi", "google", "yahoo")):
         return 0.70
@@ -104,6 +111,108 @@ def source_half_life_days(category: Any) -> float:
     if any(token in text for token in ("macro", "economic", "policy")):
         return 21.0
     return 14.0
+
+
+_SOURCE_VERIFICATION_STATES = {"verified", "corroborated", "reported", "unverified", "inference"}
+
+
+def intelligence_source_from_row(
+    row: dict[str, Any],
+    *,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Translate one canonical intelligence event into durable Brain memory.
+
+    Facts and inference remain separate in metadata. Confidence is bounded by
+    source quality and freshness, while unverified/inference-only observations
+    are explicitly retained for research with no ranking eligibility.
+    """
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+
+    source_id = int(_num(row.get("id"), 0))
+    event_key = str(row.get("event_key") or f"legacy:{source_id}").strip()
+    provider = str(row.get("provider") or "unknown").strip()
+    category = str(row.get("category") or "uncategorized").strip()
+    symbol = str(row.get("symbol") or "").upper().strip() or None
+    details = _json_obj(row.get("details"))
+    intake_metadata = _json_obj(row.get("metadata"))
+    verification = str(
+        row.get("verification_status")
+        or intake_metadata.get("verification_status")
+        or details.get("verification_status")
+        or "reported"
+    ).strip().lower()
+    if verification not in _SOURCE_VERIFICATION_STATES:
+        verification = "unverified"
+
+    observed = _dt(row.get("event_time")) or _dt(row.get("created_at")) or current
+    quality = source_quality(provider, category)
+    if verification == "verified" and not str(row.get("source_url") or "").strip() and quality < 0.95:
+        verification = "unverified"
+    half_life = source_half_life_days(category)
+    fresh = freshness_score(observed, now=current, half_life_days=half_life)
+    intake_confidence = max(0.0, min(1.0, _num(row.get("confidence"), quality)))
+    confidence = min(0.98, min(intake_confidence, quality) * (0.72 + 0.28 * fresh))
+    if verification == "reported":
+        confidence = min(confidence, 0.75)
+    elif verification in {"unverified", "inference"}:
+        confidence = min(confidence, 0.35)
+
+    explicit_expiry = _dt(row.get("expires_at"))
+    stale_after = explicit_expiry or observed + timedelta(days=half_life * 2.0)
+    status = "stale" if stale_after <= current or fresh < 0.18 else "active"
+
+    fact = str(
+        details.get("fact")
+        or details.get("verified_fact")
+        or details.get("summary")
+        or ""
+    ).strip()
+    inference = str(details.get("inference") or "").strip()
+    body = fact or str(row.get("details") or "").strip() or None
+    affected_symbols = intake_metadata.get("affected_symbols") or details.get("affected_symbols") or []
+    if not isinstance(affected_symbols, list):
+        affected_symbols = [affected_symbols]
+    normalized_symbols = list(
+        dict.fromkeys(
+            value
+            for value in [symbol, *(str(item or "").upper().strip() for item in affected_symbols)]
+            if value
+        )
+    )
+    metadata = {
+        **details,
+        **intake_metadata,
+        "intelligence_event_id": source_id,
+        "event_key": event_key,
+        "verification_status": verification,
+        "intake_confidence": round(intake_confidence, 6),
+        "ingest_count": max(1, int(_num(row.get("ingest_count"), 1))),
+        "affected_symbols": normalized_symbols,
+        "fact": fact,
+        "inference": inference,
+        "ranking_eligible": verification in {"verified", "corroborated", "reported"},
+        "execution_impact": "NONE",
+    }
+    return {
+        "source_key": f"intel:{event_key}",
+        "provider": provider,
+        "category": category,
+        "symbol": symbol,
+        "title": str(row.get("title") or "Untitled intelligence").strip(),
+        "body": body,
+        "source_ref": str(row.get("source_url") or "").strip() or f"intelligence_events:{source_id}",
+        "observed_at": observed,
+        "source_quality": round(quality, 6),
+        "freshness_score": round(fresh, 6),
+        "confidence": round(max(0.0, confidence), 6),
+        "stale_after": stale_after,
+        "status": status,
+        "metadata": metadata,
+        "execution_impact": "NONE",
+    }
 
 
 def episode_from_row(row: dict[str, Any], *, now: datetime | None = None) -> dict[str, Any] | None:
@@ -261,49 +370,70 @@ def _upsert_link(
 
 def _sync_intelligence_sources(conn: Any, *, limit: int = _SOURCE_BATCH) -> int:
     state = conn.execute(
-        "SELECT last_source_id FROM oracle_brain_learning_state WHERE pipeline_key='intelligence' AND market='global'"
+        "SELECT last_source_id,last_sync_at FROM oracle_brain_learning_state WHERE pipeline_key='intelligence' AND market='global'"
     ).fetchone() or {}
     last_id = int(_num(state.get("last_source_id"), 0))
-    rows = list(
+    previous_sync = _dt(state.get("last_sync_at")) or datetime(1970, 1, 1, tzinfo=timezone.utc)
+    sync_started = datetime.now(timezone.utc)
+    batch_limit = max(1, int(limit))
+    new_rows = list(
         conn.execute(
             """
-            SELECT id,category,provider,symbol,title,details,event_time,created_at
+            SELECT id,event_key,category,provider,symbol,title,details,event_time,created_at,
+                   source_url,verification_status,confidence,expires_at,metadata,ingest_count,
+                   execution_impact
             FROM intelligence_events
             WHERE id > %s
             ORDER BY id ASC
             LIMIT %s
             """,
-            (last_id, max(1, int(limit))),
+            (last_id, batch_limit),
         ).fetchall()
     )
+    updated_rows = list(
+        conn.execute(
+            """
+            SELECT id,event_key,category,provider,symbol,title,details,event_time,created_at,
+                   source_url,verification_status,confidence,expires_at,metadata,ingest_count,
+                   execution_impact,updated_at
+            FROM intelligence_events
+            WHERE id <= %s
+              AND NULLIF(updated_at,'')::timestamptz > %s
+              AND NULLIF(updated_at,'')::timestamptz <= %s
+            ORDER BY NULLIF(updated_at,'')::timestamptz ASC,id ASC
+            LIMIT %s
+            """,
+            (last_id, previous_sync, sync_started, batch_limit),
+        ).fetchall()
+    )
+    rows = [*new_rows, *updated_rows]
     if not rows:
         conn.execute(
             """
             INSERT INTO oracle_brain_learning_state(pipeline_key,market,last_sync_at,last_result)
-            VALUES ('intelligence','global',NOW(),%s::jsonb)
+            VALUES ('intelligence','global',%s,%s::jsonb)
             ON CONFLICT (pipeline_key,market) DO UPDATE SET
                 last_sync_at=EXCLUDED.last_sync_at,last_result=EXCLUDED.last_result
             """,
-            (json.dumps({"inserted": 0}),),
+            (sync_started, json.dumps({"inserted": 0, "updated": 0})),
         )
         return 0
 
     inserted = 0
     max_id = last_id
-    now = datetime.now(timezone.utc)
     for row in rows:
         source_id = int(_num(row.get("id"), 0))
         max_id = max(max_id, source_id)
-        provider = str(row.get("provider") or "unknown")
-        category = str(row.get("category") or "uncategorized")
-        symbol = str(row.get("symbol") or "").upper().strip() or None
-        observed = _dt(row.get("event_time")) or _dt(row.get("created_at")) or now
-        quality = source_quality(provider, category)
-        half_life = source_half_life_days(category)
-        freshness = freshness_score(observed, now=now, half_life_days=half_life)
-        confidence = round(min(0.98, quality * (0.72 + 0.28 * freshness)), 6)
-        stale_after = observed + timedelta(days=half_life * 2.0)
-        source_key = f"intel:{source_id}"
+        source = intelligence_source_from_row(dict(row))
+        provider = source["provider"]
+        category = source["category"]
+        symbol = source["symbol"]
+        observed = source["observed_at"]
+        quality = source["source_quality"]
+        freshness = source["freshness_score"]
+        confidence = source["confidence"]
+        stale_after = source["stale_after"]
+        source_key = source["source_key"]
         result = conn.execute(
             """
             INSERT INTO oracle_brain_sources(
@@ -311,8 +441,15 @@ def _sync_intelligence_sources(conn: Any, *, limit: int = _SOURCE_BATCH) -> int:
                 observed_at,source_quality,freshness_score,confidence,stale_after,status,
                 metadata,execution_impact
             )
-            VALUES (%s,'intelligence_event',%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'active',%s::jsonb,'NONE')
+            VALUES (%s,'intelligence_event',%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,'NONE')
             ON CONFLICT (source_key) DO UPDATE SET
+                provider=EXCLUDED.provider,
+                category=EXCLUDED.category,
+                symbol=COALESCE(EXCLUDED.symbol,oracle_brain_sources.symbol),
+                title=EXCLUDED.title,
+                body=EXCLUDED.body,
+                source_ref=EXCLUDED.source_ref,
+                observed_at=EXCLUDED.observed_at,
                 source_quality=EXCLUDED.source_quality,
                 freshness_score=EXCLUDED.freshness_score,
                 confidence=EXCLUDED.confidence,
@@ -325,15 +462,16 @@ def _sync_intelligence_sources(conn: Any, *, limit: int = _SOURCE_BATCH) -> int:
                 provider,
                 category,
                 symbol,
-                str(row.get("title") or "Untitled intelligence"),
-                str(row.get("details") or "") or None,
-                f"intelligence_events:{source_id}",
+                source["title"],
+                source["body"],
+                source["source_ref"],
                 observed,
                 quality,
                 freshness,
                 confidence,
                 stale_after,
-                json.dumps({"intelligence_event_id": source_id}),
+                source["status"],
+                json.dumps(source["metadata"]),
             ),
         )
         inserted += max(0, int(getattr(result, "rowcount", 1) or 0))
@@ -349,11 +487,12 @@ def _sync_intelligence_sources(conn: Any, *, limit: int = _SOURCE_BATCH) -> int:
             observed_at=observed,
             metadata={"provider": provider},
         )
-        if symbol:
+        linked_symbols = list(source["metadata"].get("affected_symbols") or [])
+        for linked_symbol in linked_symbols:
             _upsert_link(
                 conn,
                 source_key=source_node,
-                target_key=f"symbol:{_slug(symbol)}",
+                target_key=f"symbol:{_slug(linked_symbol)}",
                 relation="about",
                 weight=0.0,
                 confidence=confidence,
@@ -370,15 +509,36 @@ def _sync_intelligence_sources(conn: Any, *, limit: int = _SOURCE_BATCH) -> int:
             observed_at=observed,
         )
 
+    update_backlog_possible = len(updated_rows) >= batch_limit
+    if update_backlog_possible:
+        processed_updates = [_dt(row.get("updated_at")) for row in updated_rows]
+        sync_watermark = max(
+            [previous_sync, *(value for value in processed_updates if value is not None)]
+        )
+    else:
+        sync_watermark = sync_started
     conn.execute(
         """
         INSERT INTO oracle_brain_learning_state(pipeline_key,market,last_source_id,last_sync_at,last_result)
-        VALUES ('intelligence','global',%s,NOW(),%s::jsonb)
+        VALUES ('intelligence','global',%s,%s,%s::jsonb)
         ON CONFLICT (pipeline_key,market) DO UPDATE SET
             last_source_id=GREATEST(COALESCE(oracle_brain_learning_state.last_source_id,0),EXCLUDED.last_source_id),
             last_sync_at=EXCLUDED.last_sync_at,last_result=EXCLUDED.last_result
         """,
-        (max_id, json.dumps({"inserted": inserted, "last_source_id": max_id})),
+        (
+            max_id,
+            sync_watermark,
+            json.dumps(
+                {
+                    "inserted": inserted,
+                    "upserted": inserted,
+                    "new": len(new_rows),
+                    "updated": len(updated_rows),
+                    "update_backlog_possible": update_backlog_possible,
+                    "last_source_id": max_id,
+                }
+            ),
+        ),
     )
     return inserted
 
@@ -789,7 +949,7 @@ def _refresh_source_freshness(conn: Any) -> int:
     rows = list(
         conn.execute(
             """
-            SELECT source_key,category,observed_at,status
+            SELECT source_key,category,observed_at,source_quality,confidence,stale_after,status,metadata
             FROM oracle_brain_sources
             WHERE source_type='intelligence_event'
               AND status IN ('active','stale')
@@ -803,16 +963,29 @@ def _refresh_source_freshness(conn: Any) -> int:
     for row in rows:
         half_life = source_half_life_days(row.get("category"))
         score = freshness_score(row.get("observed_at"), now=now, half_life_days=half_life)
-        status = "stale" if score < 0.18 else "active"
+        stale_after = _dt(row.get("stale_after"))
+        status = "stale" if score < 0.18 or (stale_after is not None and stale_after <= now) else "active"
+        metadata = _json_obj(row.get("metadata"))
+        verification = str(metadata.get("verification_status") or "reported").lower()
+        quality = max(0.0, min(1.0, _num(row.get("source_quality"), 0.0)))
+        intake_confidence = max(
+            0.0,
+            min(1.0, _num(metadata.get("intake_confidence"), row.get("confidence") or quality)),
+        )
+        confidence = min(0.98, min(intake_confidence, quality) * (0.72 + 0.28 * score))
+        if verification == "reported":
+            confidence = min(confidence, 0.75)
+        elif verification in {"unverified", "inference"}:
+            confidence = min(confidence, 0.35)
         conn.execute(
             """
             UPDATE oracle_brain_sources
             SET freshness_score=%s,
-                confidence=LEAST(0.98,source_quality*(0.72+0.28*%s)),
+                confidence=%s,
                 status=CASE WHEN status IN ('retired','superseded') THEN status ELSE %s END
             WHERE source_key=%s
             """,
-            (score, score, status, row["source_key"]),
+            (score, confidence, status, row["source_key"]),
         )
         changed += 1
     return changed
@@ -945,6 +1118,7 @@ __all__ = [
     "MIN_MATURE_SAMPLES",
     "episode_from_row",
     "freshness_score",
+    "intelligence_source_from_row",
     "research_priority",
     "regime_summary",
     "retrieve_brain_context",

@@ -49,7 +49,6 @@ from database import (
     is_transient_database_error,
     run_database_maintenance,
     save_forecast,
-    save_intelligence_event,
     save_json_signal,
     utc_now,
     wait_for_database_ready,
@@ -67,6 +66,7 @@ from global_adaptive_engine import (
 )
 from intelligence_hub import collect_all
 from market_data import get_history, get_many_snapshots
+from market_intelligence_bridge import ingest_monitor_record
 from news_intelligence import get_news_sentiment
 from opportunity_engine import rank_opportunities
 from oracle_bot import process_signals, risk_exits, snapshot, update_prices
@@ -1491,7 +1491,15 @@ def _collect_stock_intelligence() -> None:
             for record in result.records:
                 if stop_event.is_set():
                     break
-                save_intelligence_event(category, result.provider, record.get("title", category), record)
+                try:
+                    ingest_monitor_record(category, result.provider, record)
+                except Exception as exc:
+                    log.warning(
+                        "Intelligence record intake failed | category=%s | provider=%s | error=%s",
+                        category,
+                        result.provider,
+                        exc,
+                    )
     except Exception as exc:
         log.exception("Stock intelligence collection failed: %s", exc)
 

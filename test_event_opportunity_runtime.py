@@ -36,6 +36,7 @@ def test_runtime_adds_only_verified_event_watchlist(monkeypatch):
     monkeypatch.setattr(runtime, "_INSTALLED", False)
     monkeypatch.setattr(runtime, "active_event_watchlist", lambda: {"EXM": "Example Energy"})
     monkeypatch.setattr(runtime, "event_context_for_symbol", lambda symbol: {"score": 0.0, "events": [], "headlines": []})
+    monkeypatch.setattr(runtime, "brain_context_for_signal", lambda *args, **kwargs: {"catalyst_score": 0.0})
 
     runtime.install_event_opportunity_runtime(worker)
     result = worker.scan_market("cash")
@@ -57,6 +58,17 @@ def test_runtime_attaches_event_evidence_to_signal_and_news(monkeypatch):
             "events": [{"url": "https://event.test/exm", "title": "Example Energy wins major contract"}],
         },
     )
+    monkeypatch.setattr(
+        runtime,
+        "brain_context_for_signal",
+        lambda *args, **kwargs: {
+            "catalyst_score": 74.0,
+            "headlines": ["Verified Brain supply-chain context"],
+            "citations": ["https://brain.test/source"],
+            "sources": [{"source_key": "intel:1"}],
+            "execution_impact": "NONE",
+        },
+    )
 
     runtime.install_event_opportunity_runtime(worker)
     signal = worker.analyze_market("EXM", object(), 0.1)
@@ -64,7 +76,12 @@ def test_runtime_attaches_event_evidence_to_signal_and_news(monkeypatch):
 
     assert signal.external_catalyst_score == 88.0
     assert signal.event_catalyst_score == 88.0
-    assert "Event radar catalyst 88/100" in signal.reason
+    assert signal.brain_intelligence_score == 74.0
+    assert signal.brain_intelligence_context["execution_impact"] == "NONE"
+    assert "event radar 88/100" in signal.reason
+    assert "attributed Brain context 74/100" in signal.reason
+    assert "Council/risk vetoes still apply" in signal.reason
     assert news.headlines[0] == "Example Energy wins major contract"
     assert "https://event.test/exm" in news.citations
-    assert news.source.endswith("+ Event Radar")
+    assert "https://brain.test/source" in news.citations
+    assert news.source.endswith("+ Event Radar + Oracle Brain")

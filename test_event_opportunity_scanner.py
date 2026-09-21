@@ -61,6 +61,21 @@ def test_query_membership_alone_cannot_manufacture_hot_event():
     assert "query_only_cap" in factors
 
 
+def test_ai_space_quantum_macro_and_commodity_headlines_are_classified():
+    cases = [
+        ("Nvidia launches major AI chip platform - Reuters", "AI_TECHNOLOGY", "NVDA"),
+        ("Rocket Lab wins satellite launch contract - Reuters", "SPACE_TECHNOLOGY", "RKLB"),
+        ("IonQ demonstrates quantum error correction milestone - Reuters", "QUANTUM_TECHNOLOGY", "IONQ"),
+        ("Federal Reserve raises rates after inflation report - Reuters", "MACRO_POLICY", ""),
+        ("Brent crude oil supply disruption lifts market - Reuters", "COMMODITIES", ""),
+    ]
+    for title, expected_category, expected_symbol in cases:
+        event = scanner.classify_headline(title, query_category=expected_category)
+        assert event is not None
+        assert event.category == expected_category
+        assert event.primary_symbol == expected_symbol
+
+
 def test_event_catalyst_strengthens_radar_without_bypassing_confirmation():
     base = SimpleNamespace(
         momentum_5d=0.0,
