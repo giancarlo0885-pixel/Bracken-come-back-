@@ -1,6 +1,7 @@
 name: Python Tests
 
 on:
+  workflow_dispatch:
   pull_request:
   push:
     branches:
@@ -21,6 +22,8 @@ jobs:
       ENABLE_AUTOMATED_EXITS: "false"
       ENABLE_PORTFOLIO_ROTATION: "false"
       ENABLE_BROKER_SUBMISSION: "false"
+      EXECUTION_MODE: "paper"
+      LIVE_TRADING_ARMED: "false"
       DATABASE_URL: ""
     steps:
       - uses: actions/checkout@v5
@@ -58,6 +61,8 @@ jobs:
       ENABLE_AUTOMATED_EXITS: "false"
       ENABLE_PORTFOLIO_ROTATION: "false"
       ENABLE_BROKER_SUBMISSION: "false"
+      EXECUTION_MODE: "paper"
+      LIVE_TRADING_ARMED: "false"
       DATABASE_URL: "postgresql://oracle_test:oracle_test@localhost:5432/garibaldi_test"
     steps:
       - uses: actions/checkout@v5
