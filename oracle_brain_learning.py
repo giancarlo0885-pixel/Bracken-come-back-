@@ -219,6 +219,7 @@ def episode_from_row(row: dict[str, Any], *, now: datetime | None = None) -> dic
     trade_id = str(row.get("trade_id") or "").strip()
     signal_id = str(row.get("entry_signal_id") or "").strip()
     feature_snapshot = _json_obj(row.get("feature_snapshot"))
+    risk_snapshot = _json_obj(row.get("risk_snapshot"))
     if not trade_id or not signal_id or not feature_snapshot:
         return None
 
@@ -243,6 +244,15 @@ def episode_from_row(row: dict[str, Any], *, now: datetime | None = None) -> dic
     market = str(row.get("market") or "unknown")
     symbol = str(row.get("symbol") or "unknown").upper()
     outcome = "positive" if net_pnl > 0 else "negative" if net_pnl < 0 else "flat"
+    exit_reason = str(row.get("exit_reason") or row.get("order_id") or "").strip() or None
+    execution_costs = {
+        key: risk_snapshot.get(key)
+        for key in (
+            "spread_pct", "slippage_pct", "estimated_slippage_pct",
+            "market_impact_pct", "paper_market_impact_pct", "fee_pct", "paper_fee_pct",
+        )
+        if risk_snapshot.get(key) is not None
+    }
 
     return {
         "episode_key": f"trade:{trade_id}",
@@ -273,6 +283,8 @@ def episode_from_row(row: dict[str, Any], *, now: datetime | None = None) -> dic
             "holding_seconds": holding_seconds,
             "mfe_pct": None if row.get("mfe_pct") is None else _num(row.get("mfe_pct")),
             "mae_pct": None if row.get("mae_pct") is None else _num(row.get("mae_pct")),
+            "exit_reason": exit_reason,
+            "execution_costs": execution_costs,
             "entry_signal_id": signal_id,
             "entry_decision_id": row.get("entry_decision_id"),
             "entry_forecast_id": row.get("entry_forecast_id"),
@@ -287,6 +299,56 @@ def episode_from_row(row: dict[str, Any], *, now: datetime | None = None) -> dic
             f"outcome:{outcome}",
         ],
     }
+
+
+
+def similar_episode_evidence(
+    current_features: dict[str, Any],
+    episodes: Iterable[dict[str, Any]],
+    *,
+    strategy: str | None = None,
+    regime: str | None = None,
+    limit: int = 12,
+) -> list[dict[str, Any]]:
+    """Rank exact historical Brain episodes by entry-time feature similarity.
+
+    Research-only retrieval: it never creates a signal, changes size, or submits an order.
+    Missing/non-numeric features are ignored rather than imputed from future data.
+    """
+    numeric_current = {k: _num(v, float("nan")) for k, v in current_features.items()}
+    ranked: list[dict[str, Any]] = []
+    for raw in episodes:
+        row = dict(raw)
+        if str(row.get("provenance_status") or "exact").lower() != "exact":
+            continue
+        if strategy and str(row.get("strategy") or "") != strategy:
+            continue
+        if regime and str(row.get("regime") or "") != regime:
+            continue
+        historical = _json_obj(row.get("feature_snapshot"))
+        distances: list[float] = []
+        for key, current in numeric_current.items():
+            prior = _num(historical.get(key), float("nan"))
+            if math.isfinite(current) and math.isfinite(prior):
+                scale = max(abs(current), abs(prior), 1.0)
+                distances.append(((current - prior) / scale) ** 2)
+        if not distances:
+            continue
+        distance = math.sqrt(sum(distances) / len(distances))
+        similarity = max(0.0, min(1.0, 1.0 - distance))
+        ranked.append({
+            "episode_key": row.get("episode_key"),
+            "trade_id": row.get("trade_id"),
+            "strategy": row.get("strategy"),
+            "regime": row.get("regime"),
+            "net_pnl": _num(row.get("net_pnl")),
+            "return_pct": row.get("return_pct"),
+            "mfe_pct": row.get("mfe_pct"),
+            "mae_pct": row.get("mae_pct"),
+            "similarity": round(similarity, 6),
+        })
+    ranked.sort(key=lambda item: item["similarity"], reverse=True)
+    return ranked[:max(1, int(limit))]
 
 
 def regime_summary(rows: Iterable[dict[str, Any]]) -> dict[str, Any]:
@@ -645,7 +707,7 @@ def _sync_trade_episodes(conn: Any, market: str, *, limit: int = _EPISODE_BATCH)
                    m.entry_price,m.exit_price,m.net_pnl,m.fees,m.mfe_pct,m.mae_pct,
                    m.excursion_sample_count,
                    t.quantity,t.entry_signal_id,t.entry_decision_id,t.entry_forecast_id,
-                   t.entry_quote_id,t.feature_snapshot
+                   t.entry_quote_id,t.feature_snapshot,t.risk_snapshot,t.order_id AS exit_reason
             FROM paper_regime_trade_metrics m
             LEFT JOIN trade_ledger t ON t.trade_id=m.trade_id
             WHERE m.market=%s AND m.exit_time IS NOT NULL
