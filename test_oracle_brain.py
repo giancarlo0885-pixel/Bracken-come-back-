@@ -111,3 +111,46 @@ def test_brain_page_neural_field_is_evidence_driven_and_read_only():
     assert "submit_order(" not in source
     assert "ENABLE_BROKER_SUBMISSION=true" not in source
     assert "LIVE_TRADING_ARMED=true" not in source
+
+
+def test_brain_attributes_thesis_separately_from_realized_outcome(monkeypatch):
+    monkeypatch.setenv("EXECUTION_MODE", "paper")
+    monkeypatch.setenv("ENABLE_BROKER_SUBMISSION", "false")
+    monkeypatch.setenv("LIVE_TRADING_ARMED", "false")
+
+    def fetch(query: str, params=()):
+        if "FROM oracle_brain_episodes" in query:
+            return [{
+                "episode_key": "trade:42",
+                "trade_id": "42",
+                "market": "crypto",
+                "symbol": "BTC",
+                "strategy": "aeve",
+                "regime": "trend",
+                "entry_time": "2026-09-20T00:00:00+00:00",
+                "exit_time": "2026-09-20T01:00:00+00:00",
+                "net_pnl": 5.0,
+                "fees": 0.2,
+                "return_pct": 0.4,
+                "mfe_pct": 0.7,
+                "mae_pct": -0.2,
+                "provenance_status": "exact",
+                "source_quality": 1.0,
+                "freshness_score": 1.0,
+                "confidence": 0.9,
+                "feature_snapshot": {
+                    "expected_edge_pct": -0.10,
+                    "probability_of_profit": 55,
+                    "estimated_cost_pct": 0.08,
+                },
+                "outcome_snapshot": {"entry_signal_id": "sig-42"},
+                "tags": [],
+            }]
+        return []
+
+    snapshot = oracle_brain.build_oracle_brain_snapshot(fetch)
+    row = snapshot["outcome_attribution"][0]
+    assert row["probability_of_profit"] == 0.55
+    assert row["attribution_state"] == "positive_outcome_without_positive_thesis"
+    assert snapshot["attribution_counts"]["positive_outcome_without_positive_thesis"] == 1
+    assert snapshot["execution_authority"] == "NONE"
