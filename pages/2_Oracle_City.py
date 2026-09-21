@@ -31,10 +31,10 @@ with left:
     if st.button("Refresh now", type="primary", use_container_width=True):
         st.rerun()
 with middle:
-    auto_refresh = st.toggle("Auto refresh", value=False)
+    auto_refresh = st.toggle("Paper live", value=True)
 
 if auto_refresh and st_autorefresh is not None:
-    st_autorefresh(interval=15_000, key="oracle-city-v2-refresh")
+    st_autorefresh(interval=5_000, key="oracle-city-paper-live-refresh")
 
 snapshot = build_oracle_city_snapshot(rows)
 summary = snapshot["summary"]
