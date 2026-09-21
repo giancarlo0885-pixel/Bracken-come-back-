@@ -205,7 +205,7 @@ def build_oracle_brain_snapshot(fetch_rows: FetchRows) -> dict[str, Any]:
         """
         SELECT episode_key,trade_id,market,symbol,strategy,regime,entry_time,exit_time,
                net_pnl,fees,return_pct,mfe_pct,mae_pct,provenance_status,
-               source_quality,freshness_score,confidence,outcome_snapshot,tags
+               source_quality,freshness_score,confidence,feature_snapshot,outcome_snapshot,tags
         FROM oracle_brain_episodes
         WHERE provenance_status='exact'
         ORDER BY exit_time DESC NULLS LAST
@@ -307,6 +307,59 @@ def build_oracle_brain_snapshot(fetch_rows: FetchRows) -> dict[str, Any]:
             }
         )
 
+    # Read-only attribution diagnostics separate decision quality from realized luck.
+    # They never feed execution; they only compare exact entry-time thesis fields
+    # with later paper outcomes.
+    attribution: list[dict[str, Any]] = []
+    for item in episodes:
+        features = _json_obj(item.get("feature_snapshot"))
+        outcome = _json_obj(item.get("outcome_snapshot"))
+        expected_edge = next(
+            (_num(features[key]) for key in ("expected_edge_pct", "expected_value_pct", "edge_pct") if features.get(key) is not None),
+            None,
+        )
+        probability = next(
+            (_num(features[key]) for key in ("probability_of_profit", "probability", "win_probability") if features.get(key) is not None),
+            None,
+        )
+        if probability is not None and 1.0 < probability <= 100.0:
+            probability /= 100.0
+        estimated_cost = next(
+            (max(0.0, _num(features[key])) for key in ("estimated_cost_pct", "total_cost_pct", "cost_pct") if features.get(key) is not None),
+            None,
+        )
+        actual_return = None if item.get("return_pct") is None else _num(item.get("return_pct"))
+        thesis_positive = expected_edge is not None and expected_edge > 0
+        outcome_positive = actual_return is not None and actual_return > 0
+        if expected_edge is None or actual_return is None:
+            attribution_state = "insufficient"
+        elif thesis_positive and outcome_positive:
+            attribution_state = "thesis_confirmed"
+        elif thesis_positive and not outcome_positive:
+            attribution_state = "thesis_failed"
+        elif not thesis_positive and outcome_positive:
+            attribution_state = "positive_outcome_without_positive_thesis"
+        else:
+            attribution_state = "negative_thesis_confirmed"
+        attribution.append({
+            "episode_key": item.get("episode_key"),
+            "strategy": item.get("strategy"),
+            "regime": item.get("regime"),
+            "expected_edge_pct": expected_edge,
+            "probability_of_profit": probability,
+            "estimated_cost_pct": estimated_cost,
+            "actual_return_pct": actual_return,
+            "mfe_pct": item.get("mfe_pct"),
+            "mae_pct": item.get("mae_pct"),
+            "attribution_state": attribution_state,
+            "entry_signal_id": outcome.get("entry_signal_id"),
+        })
+
+    attribution_counts: dict[str, int] = {}
+    for item in attribution:
+        state = str(item["attribution_state"])
+        attribution_counts[state] = attribution_counts.get(state, 0) + 1
+
     stale_sources = [
         item for item in sources
         if str(item.get("status") or "") == "stale" or _num(item.get("freshness_score"), 1.0) < 0.18
@@ -332,6 +385,8 @@ def build_oracle_brain_snapshot(fetch_rows: FetchRows) -> dict[str, Any]:
         "research_queue": research_queue,
         "learning_state": learning_state,
         "derived_lessons": derived_lessons,
+        "outcome_attribution": attribution,
+        "attribution_counts": attribution_counts,
         "safety": runtime_safety_state(),
         "summary": {
             "active_entries": len(entries),
