@@ -16,6 +16,7 @@ from crypto_quote_readiness_sampler import install_v39_quote_verification_sample
 from crypto_v39_risk_bridge import install_crypto_v39_risk_bridge
 from crypto_v39_spread_bridge import install_crypto_v39_spread_bridge
 from current_model_readiness_fix import install_current_model_readiness_fix
+from event_opportunity_runtime import install_event_opportunity_runtime
 from live_broker_capital import install_live_broker_capital_sizing
 from live_v39_broker_bridge import install_live_v39_broker_capital_bridge
 from massive_crypto_websocket import install_massive_crypto_websocket
@@ -61,6 +62,7 @@ logger = logging.getLogger("crypto-worker")
 install_migration_runtime_safety()
 install_yahoo_runtime_reliability()
 install_runtime_integrity_patch(market_worker)
+install_event_opportunity_runtime(market_worker)
 install_paper_autonomous_learning()
 install_paper_crypto_learning_relaxation()
 install_core_rebalance_score_compat()

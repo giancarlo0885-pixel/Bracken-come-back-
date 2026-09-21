@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import random
@@ -117,7 +118,7 @@ DATABASE_RETENTION_POLICIES = {
     "forecasts": {"keep_rows": 3000, "batch_size": DATABASE_RETENTION_BATCH_SIZE, "classification": "append-only analytical/ephemeral"},
     "equity_snapshots": {"keep_rows": 15000, "batch_size": DATABASE_RETENTION_BATCH_SIZE, "classification": "append-only analytical/ephemeral"},
     "alerts": {"keep_rows": 3000, "batch_size": DATABASE_RETENTION_BATCH_SIZE, "classification": "append-only analytical/ephemeral"},
-    "intelligence_events": {"keep_rows": 5000, "batch_size": DATABASE_RETENTION_BATCH_SIZE, "classification": "append-only analytical/ephemeral"},
+    "intelligence_events": {"keep_rows": 5000, "batch_size": DATABASE_RETENTION_BATCH_SIZE, "classification": "canonical deduplicated research observations"},
     "opportunity_rankings": {"keep_rows": 12000, "batch_size": DATABASE_RETENTION_BATCH_SIZE, "classification": "append-only analytical/ephemeral"},
     "oracle_decision_audit": {"keep_rows": 12000, "batch_size": DATABASE_RETENTION_BATCH_SIZE, "classification": "append-only analytical/ephemeral"},
     "opportunity_radar_assessments": {"keep_rows": 12000, "batch_size": DATABASE_RETENTION_BATCH_SIZE, "classification": "append-only analytical/ephemeral"},
@@ -137,7 +138,7 @@ DATABASE_TABLE_GROWTH_AUDIT = {
     "forecasts": {"class": "append-only analytical/ephemeral records", "inserted_by": "market_worker save_forecast", "frequency": "scan candidates", "retention": "keep newest 3000 rows"},
     "equity_snapshots": {"class": "append-only analytical/ephemeral records", "inserted_by": "oracle_bot snapshot", "frequency": "worker pulse/scan", "retention": "keep newest 15000 rows"},
     "alerts": {"class": "append-only analytical/ephemeral records", "inserted_by": "database save_alert", "frequency": "notable system/market events", "retention": "keep newest 3000 rows"},
-    "intelligence_events": {"class": "append-only analytical/ephemeral records", "inserted_by": "market intelligence collection", "frequency": "stock intelligence refresh", "retention": "keep newest 5000 rows"},
+    "intelligence_events": {"class": "canonical deduplicated research observations", "inserted_by": "market intelligence bridge", "frequency": "continuous collection", "retention": "keep newest 5000 unique events"},
     "opportunity_rankings": {"class": "append-only analytical/ephemeral records", "inserted_by": "market_worker rank persistence", "frequency": "scan candidates", "retention": "keep newest 12000 rows"},
     "oracle_decision_audit": {"class": "append-only analytical/ephemeral records", "inserted_by": "market_worker decision persistence", "frequency": "ranked scan candidates", "retention": "keep newest 12000 rows"},
     "opportunity_radar_assessments": {"class": "append-only analytical/ephemeral records", "inserted_by": "market_worker radar persistence", "frequency": "ranked scan candidates", "retention": "keep newest 12000 rows"},
@@ -482,13 +483,28 @@ def initialize_database() -> None:
         """
         CREATE TABLE IF NOT EXISTS intelligence_events (
             id BIGSERIAL PRIMARY KEY,
+            event_key TEXT NOT NULL UNIQUE,
             category TEXT NOT NULL,
             provider TEXT NOT NULL,
             symbol TEXT,
             title TEXT NOT NULL,
             details TEXT,
             event_time TEXT,
-            created_at TEXT NOT NULL
+            source_url TEXT,
+            verification_status TEXT NOT NULL DEFAULT 'reported',
+            confidence DOUBLE PRECISION NOT NULL DEFAULT 0.5,
+            expires_at TEXT,
+            metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+            first_seen_at TEXT,
+            last_seen_at TEXT,
+            updated_at TEXT,
+            ingest_count INTEGER NOT NULL DEFAULT 1,
+            execution_impact TEXT NOT NULL DEFAULT 'NONE',
+            created_at TEXT NOT NULL,
+            CHECK (verification_status IN ('verified','corroborated','reported','unverified','inference')),
+            CHECK (confidence >= 0.0 AND confidence <= 1.0),
+            CHECK (ingest_count >= 1),
+            CHECK (execution_impact = 'NONE')
         )
         """,
         """
@@ -1542,6 +1558,22 @@ def add_alert(
 # INTELLIGENCE EVENTS
 # =========================================================
 
+def _intelligence_event_key(
+    *,
+    category: str,
+    provider: str,
+    title: str,
+    symbol: str | None,
+    event_time: str | None,
+    source_url: str | None,
+) -> str:
+    normalized = "|".join(
+        " ".join(str(value or "").strip().lower().split())
+        for value in (provider, category, symbol, title, event_time, source_url)
+    )
+    return "intel:" + hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:40]
+
+
 def save_intelligence_event(
     category: str,
     provider: str,
@@ -1549,32 +1581,110 @@ def save_intelligence_event(
     details: Any,
     symbol: str | None = None,
     event_time: str | None = None,
-) -> None:
+    *,
+    event_key: str | None = None,
+    source_url: str | None = None,
+    verification_status: str = "reported",
+    confidence: float = 0.5,
+    expires_at: str | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Persist one canonical research event and collapse repeat observations.
+
+    A stable ``event_key`` prevents periodic collectors from flooding the Brain
+    with the same fact. Duplicate observations update provenance telemetry but
+    do not create another learning event.
+    """
+    clean_category = " ".join(str(category or "uncategorized").split())[:120]
+    clean_provider = " ".join(str(provider or "unknown").split())[:160]
+    clean_title = " ".join(str(title or "Untitled intelligence").split())[:500]
+    clean_symbol = str(symbol or "").upper().strip()[:32] or None
+    clean_url = str(source_url or "").strip()[:2000] or None
+    clean_status = str(verification_status or "reported").strip().lower()
+    if clean_status not in {"verified", "corroborated", "reported", "unverified", "inference"}:
+        clean_status = "unverified"
+    try:
+        clean_confidence = max(0.0, min(1.0, float(confidence)))
+    except (TypeError, ValueError):
+        clean_confidence = 0.0
+    clean_key = str(event_key or "").strip()[:240] or _intelligence_event_key(
+        category=clean_category,
+        provider=clean_provider,
+        title=clean_title,
+        symbol=clean_symbol,
+        event_time=event_time,
+        source_url=clean_url,
+    )
+    now = utc_now()
+    detail_payload = details if isinstance(details, (dict, list)) else {"summary": str(details or "")}
+    metadata_payload = dict(metadata or {})
+    metadata_payload.update(
+        {
+            "event_key": clean_key,
+            "verification_status": clean_status,
+            "execution_impact": "NONE",
+        }
+    )
     with connect() as conn:
-        with conn.cursor() as cursor:
-            cursor.execute(
-                """
-                INSERT INTO intelligence_events (
-                    category,
-                    provider,
-                    symbol,
-                    title,
-                    details,
-                    event_time,
-                    created_at
-                )
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
-                """,
-                (
-                    category,
-                    provider,
-                    symbol,
-                    title,
-                    json.dumps(details, default=str),
-                    event_time,
-                    utc_now(),
-                ),
+        row = conn.execute(
+            """
+            INSERT INTO intelligence_events (
+                event_key,category,provider,symbol,title,details,event_time,source_url,
+                verification_status,confidence,expires_at,metadata,first_seen_at,
+                last_seen_at,updated_at,ingest_count,execution_impact,created_at
             )
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s,%s,1,'NONE',%s)
+            ON CONFLICT (event_key) DO UPDATE SET
+                category=EXCLUDED.category,
+                provider=EXCLUDED.provider,
+                symbol=COALESCE(EXCLUDED.symbol,intelligence_events.symbol),
+                title=EXCLUDED.title,
+                details=EXCLUDED.details,
+                event_time=COALESCE(EXCLUDED.event_time,intelligence_events.event_time),
+                source_url=COALESCE(EXCLUDED.source_url,intelligence_events.source_url),
+                verification_status=CASE
+                    WHEN 'verified' IN (intelligence_events.verification_status,EXCLUDED.verification_status) THEN 'verified'
+                    WHEN 'corroborated' IN (intelligence_events.verification_status,EXCLUDED.verification_status) THEN 'corroborated'
+                    WHEN 'reported' IN (intelligence_events.verification_status,EXCLUDED.verification_status) THEN 'reported'
+                    WHEN 'unverified' IN (intelligence_events.verification_status,EXCLUDED.verification_status) THEN 'unverified'
+                    ELSE EXCLUDED.verification_status END,
+                confidence=GREATEST(intelligence_events.confidence,EXCLUDED.confidence),
+                expires_at=COALESCE(EXCLUDED.expires_at,intelligence_events.expires_at),
+                metadata=(intelligence_events.metadata || EXCLUDED.metadata) || jsonb_build_object(
+                    'verification_status',CASE
+                        WHEN 'verified' IN (intelligence_events.verification_status,EXCLUDED.verification_status) THEN 'verified'
+                        WHEN 'corroborated' IN (intelligence_events.verification_status,EXCLUDED.verification_status) THEN 'corroborated'
+                        WHEN 'reported' IN (intelligence_events.verification_status,EXCLUDED.verification_status) THEN 'reported'
+                        WHEN 'unverified' IN (intelligence_events.verification_status,EXCLUDED.verification_status) THEN 'unverified'
+                        ELSE EXCLUDED.verification_status END,
+                    'execution_impact','NONE'
+                ),
+                last_seen_at=EXCLUDED.last_seen_at,
+                updated_at=EXCLUDED.updated_at,
+                ingest_count=intelligence_events.ingest_count + 1,
+                execution_impact='NONE'
+            RETURNING id,event_key,ingest_count,verification_status,confidence,execution_impact
+            """,
+            (
+                clean_key,
+                clean_category,
+                clean_provider,
+                clean_symbol,
+                clean_title,
+                json.dumps(detail_payload, default=str),
+                event_time,
+                clean_url,
+                clean_status,
+                clean_confidence,
+                expires_at,
+                json.dumps(metadata_payload, default=str),
+                now,
+                now,
+                now,
+                now,
+            ),
+        ).fetchone()
+    return dict(row or {"event_key": clean_key, "execution_impact": "NONE"})
 
 
 # =========================================================

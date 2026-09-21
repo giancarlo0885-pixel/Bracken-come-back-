@@ -25,6 +25,7 @@ import xml.etree.ElementTree as ET
 import requests
 
 from database import connect, utc_now
+from market_intelligence_bridge import ingest_monitor_record
 
 log = logging.getLogger("event-opportunity-scanner")
 
@@ -46,6 +47,11 @@ _QUERY_GROUPS: tuple[tuple[str, str], ...] = (
     ("CAPITAL_RAISE", '"capital raise" OR "secondary offering" OR "rights issue" OR "bond sale" OR financing shares when:2d'),
     ("SUPPLY_DISRUPTION", 'shutdown OR outage OR strike OR "export ban" OR disruption OR shortage commodities market when:2d'),
     ("CRYPTO_MARKET_STRUCTURE", 'crypto ETF approval OR token listing OR exchange listing OR stablecoin law OR crypto regulation when:2d'),
+    ("MACRO_POLICY", '"Federal Reserve" OR inflation OR CPI OR PPI OR payrolls OR "Treasury yields" OR recession when:2d'),
+    ("AI_TECHNOLOGY", '"artificial intelligence" OR "AI chip" OR GPU OR "data center" OR "foundation model" market when:2d'),
+    ("SPACE_TECHNOLOGY", '"space launch" OR rocket OR satellite OR lunar OR NASA OR SpaceX contract when:7d'),
+    ("QUANTUM_TECHNOLOGY", '"quantum computing" OR qubit OR "quantum error correction" OR "quantum network" when:7d'),
+    ("COMMODITIES", 'oil OR copper OR gold OR uranium OR "natural gas" supply disruption market when:2d'),
 )
 
 # These patterns intentionally match normal headline grammar, not only exact
@@ -93,12 +99,50 @@ _CATEGORY_PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("CAPITAL_RAISE", (r"capital raise", r"secondary offering", r"rights issue", r"bond sale", r"private placement", r"follow-on offering")),
     ("SUPPLY_DISRUPTION", (r"\bshutdown\b", r"\boutage\b", r"\bstrike\b", r"export ban", r"supply disruption", r"production halt", r"pipeline disruption")),
     ("CRYPTO_MARKET_STRUCTURE", (r"crypto etf", r"spot (?:bitcoin|ether|ethereum) etf", r"token listing", r"exchange listing", r"stablecoin law", r"crypto regulation")),
+    (
+        "MACRO_POLICY",
+        (
+            r"federal reserve", r"central bank", r"interest rate (?:cut|hike|increase|decision)",
+            r"(?:raises?|cuts?) (?:interest )?rates?", r"\binflation\b", r"consumer price index",
+            r"producer price index", r"\bcpi\b", r"\bppi\b", r"nonfarm payroll",
+            r"jobs report", r"treasury yields?", r"\brecession\b",
+        ),
+    ),
+    (
+        "AI_TECHNOLOGY",
+        (
+            r"artificial intelligence", r"\bai (?:chip|model|infrastructure|software|agent)s?\b",
+            r"\bgpu\b", r"foundation model", r"data cent(?:er|re)", r"machine learning platform",
+        ),
+    ),
+    (
+        "SPACE_TECHNOLOGY",
+        (
+            r"space launch", r"rocket launch", r"orbital (?:launch|flight|test)",
+            r"satellite (?:launch|contract|constellation)", r"lunar (?:mission|lander|contract)",
+            r"\bnasa\b", r"\bspacex\b",
+        ),
+    ),
+    (
+        "QUANTUM_TECHNOLOGY",
+        (r"quantum computing", r"quantum computer", r"quantum error correction", r"quantum network", r"logical qubit", r"\bqubits?\b"),
+    ),
+    (
+        "COMMODITIES",
+        (
+            r"\bbrent\b", r"\bwti\b", r"crude oil", r"copper (?:price|mine|supply)",
+            r"gold (?:price|record|rally)", r"uranium (?:price|mine|supply)",
+            r"natural gas (?:price|supply|export)", r"commodity (?:prices|supply|shortage)",
+        ),
+    ),
 )
 
 _MARKET_TERMS = (
     "shares", "stock", "equity", "investor", "market", "exchange", "ipo", "listing",
     "revenue", "profit", "guidance", "contract", "approval", "refinery", "oil", "gas",
     "crypto", "bitcoin", "ethereum", "etf", "bond", "acquisition", "merger", "capital",
+    "inflation", "federal reserve", "rates", "treasury", "ai", "chip", "gpu", "data center",
+    "space", "rocket", "satellite", "quantum", "qubit", "copper", "gold", "uranium",
 )
 _HIGH_AUTHORITY_SOURCES = (
     "reuters", "bloomberg", "financial times", "wall street journal", "wsj", "associated press",
@@ -108,12 +152,34 @@ _RUMOR_TERMS = ("rumor", "rumour", "unconfirmed", "sources say", "reportedly con
 _DEFINITIVE_TERMS = (
     "approved", "signed", "completed", "awarded", "wins", "won", "opens", "open on",
     "set to", "will launch", "will list", "files for", "priced at", "raises guidance",
+    "launches", "demonstrates", "achieves", "raises rates", "cuts rates",
 )
 _SCALE_TERMS = ("largest", "biggest", "record", "major", "billion", "bn", "mega", "landmark")
 
 _EXPLICIT_TICKER_PATTERNS = (
     re.compile(r"\b(?:NASDAQ|NYSE|AMEX|NYSEARCA)\s*[:\-]\s*([A-Z][A-Z0-9.\-]{0,9})\b"),
     re.compile(r"\$([A-Z]{1,6})\b"),
+)
+
+_ENTITY_SYMBOL_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"\bnvidia\b", re.IGNORECASE), "NVDA"),
+    (re.compile(r"\badvanced micro devices\b|\bamd\b", re.IGNORECASE), "AMD"),
+    (re.compile(r"\bmicrosoft\b", re.IGNORECASE), "MSFT"),
+    (re.compile(r"\balphabet\b|\bgoogle\b", re.IGNORECASE), "GOOGL"),
+    (re.compile(r"\bamazon\b", re.IGNORECASE), "AMZN"),
+    (re.compile(r"\bintel\b", re.IGNORECASE), "INTC"),
+    (re.compile(r"\brocket lab\b", re.IGNORECASE), "RKLB"),
+    (re.compile(r"\bintuitive machines\b", re.IGNORECASE), "LUNR"),
+    (re.compile(r"\bast spacemobile\b", re.IGNORECASE), "ASTS"),
+    (re.compile(r"\bredwire\b", re.IGNORECASE), "RDW"),
+    (re.compile(r"\bboeing\b", re.IGNORECASE), "BA"),
+    (re.compile(r"\blockheed martin\b", re.IGNORECASE), "LMT"),
+    (re.compile(r"\bnorthrop grumman\b", re.IGNORECASE), "NOC"),
+    (re.compile(r"\bionq\b", re.IGNORECASE), "IONQ"),
+    (re.compile(r"\bd-wave\b|\bd wave\b", re.IGNORECASE), "QBTS"),
+    (re.compile(r"\brigetti\b", re.IGNORECASE), "RGTI"),
+    (re.compile(r"\bquantum computing inc\b", re.IGNORECASE), "QUBT"),
+    (re.compile(r"\bibm\b", re.IGNORECASE), "IBM"),
 )
 
 
@@ -221,7 +287,25 @@ def _source_quality(source: str) -> float:
 
 def _category_for_title(title: str, fallback: str = "EVENT") -> tuple[str, list[str]]:
     lowered = str(title or "").lower()
+    # Preserve the thematic identity of AI/space/quantum/crypto/commodity news
+    # when a headline also contains a generic catalyst word such as "contract"
+    # or "disruption". The generic event still contributes scoring factors.
+    thematic_priority = {
+        "AI_TECHNOLOGY",
+        "SPACE_TECHNOLOGY",
+        "QUANTUM_TECHNOLOGY",
+        "CRYPTO_MARKET_STRUCTURE",
+        "COMMODITIES",
+    }
     for category, patterns in _CATEGORY_PATTERNS:
+        if category not in thematic_priority:
+            continue
+        matched = [pattern for pattern in patterns if re.search(pattern, lowered, flags=re.IGNORECASE)]
+        if matched:
+            return category, matched
+    for category, patterns in _CATEGORY_PATTERNS:
+        if category in thematic_priority:
+            continue
         matched = [pattern for pattern in patterns if re.search(pattern, lowered, flags=re.IGNORECASE)]
         if matched:
             return category, matched
@@ -235,7 +319,10 @@ def _extract_symbols(title: str) -> list[str]:
             symbol = str(match or "").upper().strip(".- ")
             if symbol and symbol not in symbols:
                 symbols.append(symbol)
-    return symbols[:4]
+    for pattern, symbol in _ENTITY_SYMBOL_PATTERNS:
+        if pattern.search(str(title or "")) and symbol not in symbols:
+            symbols.append(symbol)
+    return symbols[:8]
 
 
 def _extract_entity(title: str) -> str:
@@ -274,6 +361,11 @@ def score_event(
         "CRYPTO_MARKET_STRUCTURE": 45.0,
         "CAPITAL_RAISE": 39.0,
         "EARNINGS_GUIDANCE": 36.0,
+        "MACRO_POLICY": 43.0,
+        "AI_TECHNOLOGY": 38.0,
+        "SPACE_TECHNOLOGY": 39.0,
+        "QUANTUM_TECHNOLOGY": 39.0,
+        "COMMODITIES": 42.0,
     }
     score = base_by_category.get(category, 20.0 if matched_patterns else 0.0)
     factors: list[str] = [f"category:{category}"] if score else []
@@ -434,6 +526,62 @@ def _persist_event(event: EventOpportunity) -> None:
                 json.dumps(payload),
             ),
         )
+
+    # Feed the same attributed observation into the canonical Brain intake.
+    # This closes the former split where event radar could influence a scan but
+    # its evidence never became durable Oracle Brain memory.
+    context_by_category = {
+        "macro_policy": {
+            "asset_classes": ["stocks", "crypto", "bonds", "commodities"],
+            "themes": ["macro"],
+        },
+        "ai_technology": {
+            "asset_classes": ["stocks"],
+            "affected_sectors": ["technology", "semiconductors"],
+            "themes": ["ai"],
+        },
+        "space_technology": {
+            "asset_classes": ["stocks"],
+            "affected_sectors": ["industrials", "aerospace", "defense"],
+            "themes": ["space"],
+        },
+        "quantum_technology": {
+            "asset_classes": ["stocks"],
+            "affected_sectors": ["technology"],
+            "themes": ["quantum"],
+        },
+        "commodities": {
+            "asset_classes": ["stocks", "commodities"],
+            "affected_sectors": ["energy", "materials"],
+            "themes": ["commodities"],
+        },
+        "crypto_market_structure": {
+            "asset_classes": ["crypto", "stocks"],
+            "affected_sectors": ["financials"],
+            "themes": ["crypto"],
+        },
+    }
+    try:
+        ingest_monitor_record(
+            event.category,
+            event.source or "Google News RSS",
+            {
+                **payload,
+                **context_by_category.get(event.category.lower(), {}),
+                "event_key": f"event-radar:{event.event_id}",
+                "symbol": event.primary_symbol or None,
+                "affected_symbols": event.symbol_candidates,
+                "source_url": event.url,
+                "verification_status": "reported",
+                "confidence": event.source_quality,
+                "impact_score": event.score,
+                "execution_impact": "NONE",
+            },
+        )
+    except Exception as exc:
+        # Candidate discovery remains available if the durable Brain sink has a
+        # transient failure; the next radar observation will retry the upsert.
+        log.warning("Brain intelligence intake failed for event %s: %s", event.event_id, exc)
 
 
 def _status() -> dict[str, Any]:

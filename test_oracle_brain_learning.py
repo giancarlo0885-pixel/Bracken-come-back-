@@ -22,6 +22,58 @@ def test_source_quality_distinguishes_primary_and_social_sources():
     assert learning.source_quality("NewsAPI") > learning.source_quality("Reddit social")
 
 
+def test_intelligence_source_preserves_provenance_and_verification_boundaries():
+    source = learning.intelligence_source_from_row(
+        {
+            "id": 42,
+            "event_key": "event-radar:abc",
+            "category": "AI_TECHNOLOGY",
+            "provider": "Reuters",
+            "symbol": "NVDA",
+            "title": "Nvidia capacity agreement",
+            "details": {
+                "fact": "A capacity agreement was announced.",
+                "inference": "Supply may tighten.",
+                "affected_symbols": ["NVDA", "AMD"],
+                "impact_score": 82,
+            },
+            "event_time": "2026-09-21T12:00:00+00:00",
+            "created_at": "2026-09-21T12:01:00+00:00",
+            "source_url": "https://reuters.test/report",
+            "verification_status": "reported",
+            "confidence": 0.84,
+            "metadata": {"themes": ["ai"]},
+            "ingest_count": 3,
+        },
+        now=datetime(2026, 9, 21, 13, 0, tzinfo=timezone.utc),
+    )
+
+    assert source["source_key"] == "intel:event-radar:abc"
+    assert source["source_ref"] == "https://reuters.test/report"
+    assert source["body"] == "A capacity agreement was announced."
+    assert source["metadata"]["fact"] == "A capacity agreement was announced."
+    assert source["metadata"]["inference"] == "Supply may tighten."
+    assert source["metadata"]["affected_symbols"] == ["NVDA", "AMD"]
+    assert source["metadata"]["verification_status"] == "reported"
+    assert source["confidence"] <= 0.75
+    assert source["execution_impact"] == "NONE"
+
+    unverified = learning.intelligence_source_from_row(
+        {
+            "id": 43,
+            "category": "QUANTUM_TECHNOLOGY",
+            "provider": "Unknown blog",
+            "title": "Unsupported claim",
+            "verification_status": "verified",
+            "confidence": 1.0,
+            "created_at": "2026-09-21T12:00:00+00:00",
+        },
+        now=datetime(2026, 9, 21, 13, 0, tzinfo=timezone.utc),
+    )
+    assert unverified["metadata"]["verification_status"] == "unverified"
+    assert unverified["confidence"] <= 0.35
+
+
 def test_episode_requires_exact_entry_provenance():
     base = {
         "trade_id": "T1",
