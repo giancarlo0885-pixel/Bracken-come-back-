@@ -86,7 +86,9 @@ def test_episode_requires_exact_entry_provenance():
         "entry_price": 100.0,
         "quantity": 2.0,
         "net_pnl": 10.0,
+        "gross_pnl": 11.0,
         "fees": 1.0,
+        "exit_price": 106.0,
         "mfe_pct": 8.0,
         "mae_pct": -3.0,
         "excursion_sample_count": 12,
@@ -109,6 +111,14 @@ def test_episode_requires_exact_entry_provenance():
     assert episode["return_pct"] == 5.0
     assert episode["outcome_snapshot"]["outcome"] == "positive"
     assert episode["outcome_snapshot"]["entry_signal_id"] == "S1"
+    assert episode["outcome_snapshot"]["gross_pnl"] == 11.0
+    assert episode["outcome_snapshot"]["net_pnl"] == 10.0
+    assert episode["outcome_snapshot"]["fees"] == 1.0
+    assert episode["outcome_snapshot"]["entry_price"] == 100.0
+    assert episode["outcome_snapshot"]["exit_price"] == 106.0
+    assert episode["outcome_snapshot"]["holding_seconds"] == 7200.0
+    assert episode["outcome_snapshot"]["mfe_pct"] == 8.0
+    assert episode["outcome_snapshot"]["mae_pct"] == -3.0
 
 
 def test_regime_summary_requires_mature_sample_depth():

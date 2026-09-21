@@ -227,7 +227,15 @@ def episode_from_row(row: dict[str, Any], *, now: datetime | None = None) -> dic
     basis = entry_price * quantity if entry_price > 0 and quantity > 0 else 0.0
     net_pnl = _num(row.get("net_pnl"))
     return_pct = (net_pnl / basis) * 100.0 if basis > 0 else None
+    entry_time = _dt(row.get("entry_time"))
     exit_time = _dt(row.get("exit_time"))
+    exit_price = _num(row.get("exit_price"))
+    gross_pnl = _num(row.get("gross_pnl"), net_pnl + max(0.0, _num(row.get("fees"))))
+    holding_seconds = (
+        max(0.0, (exit_time - entry_time).total_seconds())
+        if entry_time is not None and exit_time is not None
+        else None
+    )
     fresh = freshness_score(exit_time, now=now, half_life_days=45.0)
     confidence = min(0.99, 0.82 + fresh * 0.17)
     strategy = str(row.get("strategy") or "unknown")
@@ -243,7 +251,7 @@ def episode_from_row(row: dict[str, Any], *, now: datetime | None = None) -> dic
         "symbol": symbol,
         "strategy": strategy,
         "regime": regime,
-        "entry_time": _dt(row.get("entry_time")),
+        "entry_time": entry_time,
         "exit_time": exit_time,
         "net_pnl": net_pnl,
         "fees": max(0.0, _num(row.get("fees"))),
@@ -257,6 +265,14 @@ def episode_from_row(row: dict[str, Any], *, now: datetime | None = None) -> dic
         "feature_snapshot": feature_snapshot,
         "outcome_snapshot": {
             "outcome": outcome,
+            "gross_pnl": gross_pnl,
+            "net_pnl": net_pnl,
+            "fees": max(0.0, _num(row.get("fees"))),
+            "entry_price": entry_price,
+            "exit_price": exit_price if exit_price > 0 else None,
+            "holding_seconds": holding_seconds,
+            "mfe_pct": None if row.get("mfe_pct") is None else _num(row.get("mfe_pct")),
+            "mae_pct": None if row.get("mae_pct") is None else _num(row.get("mae_pct")),
             "entry_signal_id": signal_id,
             "entry_decision_id": row.get("entry_decision_id"),
             "entry_forecast_id": row.get("entry_forecast_id"),
