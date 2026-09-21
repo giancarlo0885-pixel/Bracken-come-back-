@@ -129,7 +129,10 @@ const aeveData=DATA.aeve||{};
 document.getElementById("cityMood").textContent="CITY MOOD: "+String(DATA.city_mood||"UNKNOWN");
 document.getElementById("aeveProgress").textContent="AEVE: "+(aeveData.accepted==null?"UNAVAILABLE":String(aeveData.accepted))+" / "+String(aeveData.target||1000);
 const safety=DATA.safety||{};
-document.getElementById("paperState").textContent=(String(safety.execution_mode||DATA.execution_mode||"paper").toUpperCase())+" · LIVE "+(safety.live_trading_armed?"ARMED":"DISARMED");
+const executionMode=String(safety.execution_mode||DATA.execution_mode||"paper").toUpperCase();
+document.getElementById("paperState").textContent=executionMode==="PAPER"
+  ? "PAPER ACTIVE · REAL MONEY "+(safety.live_trading_armed?"ARMED":"DISARMED")
+  : executionMode+" · LIVE "+(safety.live_trading_armed?"ARMED":"DISARMED");
 
 function esc(value){
   return String(value==null?"":value).replace(/[&<>"']/g,ch=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[ch]));
@@ -575,6 +578,49 @@ function brainColor(node){if(node.state==="offline")return 0xff6767;if(node.stat
 
 let brainMode=false,workersVisible=true,trafficVisible=true;
 function showCityObjects(on){cityObjects.forEach(o=>{if(o!==brainGroup&&!o.isLight)o.visible=on;});workerObjects.forEach(o=>o.visible=on&&workersVisible);vehicleObjects.forEach(o=>o.visible=on&&trafficVisible);}
+
+const CITY_VIEW_STORAGE_KEY="oracle-city-view-v1";
+function saveCityViewState(){
+  try{
+    localStorage.setItem(CITY_VIEW_STORAGE_KEY,JSON.stringify({
+      camera:camera.position.toArray(),
+      target:controls.target.toArray(),
+      autoRotate:!!controls.autoRotate,
+      workersVisible,
+      trafficVisible,
+      brainMode
+    }));
+  }catch(e){}
+}
+function restoreCityViewState(){
+  try{
+    const raw=localStorage.getItem(CITY_VIEW_STORAGE_KEY);
+    if(!raw)return false;
+    const saved=JSON.parse(raw);
+    if(!Array.isArray(saved.camera)||saved.camera.length!==3||!Array.isArray(saved.target)||saved.target.length!==3)return false;
+    camera.position.fromArray(saved.camera);
+    controls.target.fromArray(saved.target);
+    controls.autoRotate=!!saved.autoRotate;
+    workersVisible=saved.workersVisible!==false;
+    trafficVisible=saved.trafficVisible!==false;
+    brainMode=!!saved.brainMode;
+    showCityObjects(!brainMode);
+    brainGroup.visible=brainMode;
+    const brainButton=document.getElementById("brain");
+    brainButton.classList.toggle("active",brainMode);
+    brainButton.textContent=brainMode?"CITY":"BRAIN";
+    const workersButton=document.getElementById("workers");
+    workersButton.textContent=workersVisible?"WORKERS":"WORKERS OFF";
+    workersButton.classList.toggle("active",workersVisible);
+    const trafficButton=document.getElementById("traffic");
+    trafficButton.textContent=trafficVisible?"TRAFFIC":"TRAFFIC OFF";
+    trafficButton.classList.toggle("active",trafficVisible);
+    const cinemaButton=document.getElementById("autorotate");
+    cinemaButton.classList.toggle("active",controls.autoRotate);
+    controls.update();
+    return true;
+  }catch(e){return false;}
+}
 function setBrainMode(on){
   brainMode=on;showCityObjects(!on);brainGroup.visible=on;
   const b=document.getElementById("brain");b.classList.toggle("active",on);b.textContent=on?"CITY":"BRAIN";
@@ -681,7 +727,7 @@ function animate(){
   vehicleObjects.forEach((v,i)=>{if(v.userData.path==="east"){v.position.x=-31+((elapsed*v.userData.speed*45+v.userData.offset)%62);v.rotation.y=Math.PI/2;}else{v.position.x=31-((elapsed*v.userData.speed*45+v.userData.offset)%62);v.rotation.y=-Math.PI/2;}});
   renderer.render(scene,camera);labelRenderer.render(scene,camera);
 }
-status.style.display="none";resetView();animate();
+status.style.display="none";if(!restoreCityViewState())resetView();setInterval(saveCityViewState,1000);animate();
 </script>
 </body>
 </html>"""
