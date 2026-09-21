@@ -223,7 +223,7 @@ def test_oracle_city_component_contains_interactive_webgl_controls():
     assert "function applyTimeOfDay()" in rendered
     assert "sunVisual" in rendered
     assert "moonVisual" in rendered
-    assert "setInterval(applyTimeOfDay,60000)" in rendered
+    assert "setInterval(applyTimeOfDay,60000)" in rendered\n    assert "PAPER ACTIVE · REAL MONEY" in rendered\n    assert "CITY_VIEW_STORAGE_KEY" in rendered\n    assert "restoreCityViewState" in rendered\n    assert "setInterval(saveCityViewState,1000)" in rendered
     assert "STREET VIEW" in rendered
     assert "CINEMATIC" in rendered
     assert 'id="hovercard"' in rendered
@@ -309,7 +309,7 @@ def test_oracle_city_page_leads_with_cinematic_city():
     assert city < status
     assert "Cinematic Metropolis" in source
     assert "height=980" in source
-    assert 'auto_refresh = st.toggle("Auto refresh", value=False)' in source
+    assert 'auto_refresh = st.toggle("Paper live", value=True)' in source\n    assert 'st_autorefresh(interval=5_000, key="oracle-city-paper-live-refresh")' in source
 
 
 def test_oracle_city_defaults_to_city_first_uncluttered_view():
