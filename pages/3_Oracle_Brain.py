@@ -128,6 +128,57 @@ if lifecycle:
     q3.metric("Exact entry provenance", int(life.get("exact_entry_provenance") or 0))
     st.caption("Signals and approvals are not counted as completed trades. Closed lifecycle evidence is the source of truth.")
 
+# Unified research cockpit: evidence throughput, knowledge use, source health and control comparison.
+try:
+    cockpit = rows("""
+        WITH active AS (
+          SELECT generation,config_hash,started_at FROM paper_aeve_generations
+          WHERE status='ACTIVE' ORDER BY generation DESC LIMIT 1
+        )
+        SELECT
+          a.generation,a.config_hash,a.started_at,
+          COUNT(o.id) FILTER (WHERE o.would_trade AND o.provenance_version>=2)::int AS aeve_trades,
+          COUNT(o.id) FILTER (WHERE o.would_trade AND o.provenance_version>=2
+              AND o.feature_snapshot IS NOT NULL)::int AS knowledge_snapshots,
+          COUNT(o.id) FILTER (WHERE o.would_trade AND o.provenance_version>=2
+              AND o.entry_signal_id IS NOT NULL)::int AS exact_signals
+        FROM active a LEFT JOIN paper_aeve_generation_outcomes o
+          ON o.generation=a.generation AND o.config_hash=a.config_hash
+        GROUP BY a.generation,a.config_hash,a.started_at
+    """)
+except Exception:
+    cockpit=[]
+if cockpit:
+    cp=cockpit[0]
+    st.subheader("Oracle Research Cockpit")
+    completed=int(cp.get("aeve_trades") or 0)
+    elapsed=max(0.001,(datetime.now(timezone.utc)-cp["started_at"]).total_seconds()/3600.0) if cp.get("started_at") else 0.0
+    tph=completed/elapsed if elapsed else 0.0
+    c1,c2,c3,c4=st.columns(4)
+    c1.metric("Verified AEVE", f"{completed:,} / 1,000")
+    c2.metric("Learning velocity", f"{tph:.2f}/hr")
+    c3.metric("Knowledge snapshots", int(cp.get("knowledge_snapshots") or 0))
+    c4.metric("Exact signal provenance", int(cp.get("exact_signals") or 0))
+    st.caption("Knowledge stored is separated from knowledge captured at decision time. Throughput never relaxes acceptance gates.")
+
+try:
+    source_health=rows("""
+        SELECT provider,
+               COUNT(*)::int AS observations,
+               COUNT(*) FILTER (WHERE status='active')::int AS active,
+               COUNT(*) FILTER (WHERE status='stale')::int AS stale,
+               AVG(freshness_score) AS freshness,
+               AVG(confidence) AS confidence
+        FROM oracle_brain_sources
+        GROUP BY provider ORDER BY observations DESC LIMIT 12
+    """)
+except Exception:
+    source_health=[]
+if source_health:
+    st.subheader("Intelligence Data Lineage & Health")
+    st.dataframe(source_health, use_container_width=True, hide_index=True)
+    st.caption("Provider → freshness → confidence is visible. Stale evidence remains research evidence and is not silently treated as current.")
+
 summary = snapshot["summary"]
 growth = snapshot["growth"]
 safety = snapshot["safety"]
