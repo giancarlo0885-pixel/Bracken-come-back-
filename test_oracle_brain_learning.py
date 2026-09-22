@@ -223,6 +223,7 @@ def test_learning_schema_and_runtime_are_research_only():
     assert "execution_impact=NONE" in worker
     assert "existing_episode" in source
     assert "if not existing_episode" in source
+    assert "new_exact_episodes" in source
     assert "_sync_curated_crypto_history" in source
     for table in (
         "oracle_brain_entries",
