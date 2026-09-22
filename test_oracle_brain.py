@@ -154,3 +154,12 @@ def test_brain_attributes_thesis_separately_from_realized_outcome(monkeypatch):
     assert row["attribution_state"] == "positive_outcome_without_positive_thesis"
     assert snapshot["attribution_counts"]["positive_outcome_without_positive_thesis"] == 1
     assert snapshot["execution_authority"] == "NONE"
+
+
+def test_brain_page_uses_supported_streamlit_width_and_bounded_nodes():
+    source = Path("pages/3_Oracle_Brain.py").read_text(encoding="utf-8")
+    assert "components.html" not in source
+    assert "use_container_width=True" not in source
+    assert 'width="stretch"' in source
+    assert "Math.max(14,Math.min(W-14,n.x))" in source
+    assert "Math.max(14,Math.min(H-14,n.y))" in source
