@@ -30,3 +30,35 @@ def test_optimizer_decision_is_authoritative_meaningful_entry_floor():
         "entry_floor_mode": "adaptive_equity_spread_liquidity_confidence",
     })
     assert runtime._effective_meaningful_floor(worker, signal) == 2.00
+
+def test_rejected_candidate_without_optimizer_floor_is_not_labeled_legacy():
+    signal = Signal(
+        symbol="AVAX-USD",
+        core_meaningful_entry_floor=None,
+        v39_optimizer_allocation={},
+    )
+    worker = SimpleNamespace(
+        _core_rebalance_optimizer_decisions={
+            "AVAX-USD": {"status": "REJECTED", "reason": "economics_blocked"}
+        }
+    )
+    assert runtime._effective_meaningful_floor(worker, signal) == 0.0
+    assert runtime._effective_entry_floor_mode(worker, signal) == "not_applicable"
+
+
+def test_optimizer_entry_floor_mode_remains_authoritative():
+    signal = Signal(
+        symbol="LINK-USD",
+        core_meaningful_entry_floor=None,
+        v39_optimizer_allocation={},
+    )
+    worker = SimpleNamespace(
+        _core_rebalance_optimizer_decisions={
+            "LINK-USD": {
+                "meaningful_entry_floor": 2.00,
+                "entry_floor_mode": "adaptive_equity_spread_liquidity_confidence",
+            }
+        }
+    )
+    assert runtime._effective_entry_floor_mode(worker, signal) == "adaptive_equity_spread_liquidity_confidence"
+
