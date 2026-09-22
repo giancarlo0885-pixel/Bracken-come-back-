@@ -117,6 +117,7 @@ CANONICAL_PROTECTED_TABLES = {
     "oracle_calibration_buckets",
     "oracle_validation_weaknesses",
     "oracle_paper_promotion_evidence",
+    "oracle_decision_replays",
 }
 DATABASE_RETENTION_POLICIES = {
     "signals": {"keep_rows": 6000, "batch_size": DATABASE_RETENTION_BATCH_SIZE, "classification": "append-only analytical/ephemeral"},
@@ -180,6 +181,7 @@ DATABASE_TABLE_GROWTH_AUDIT = {
     "oracle_calibration_buckets": {"class": "research validation rollups", "inserted_by": "Oracle validation layer", "frequency": "learning sync", "retention": "never auto-delete"},
     "oracle_validation_weaknesses": {"class": "research weakness evidence", "inserted_by": "Oracle validation layer", "frequency": "learning sync", "retention": "never auto-delete"},
     "oracle_paper_promotion_evidence": {"class": "research promotion evidence", "inserted_by": "Oracle validation layer", "frequency": "learning sync", "retention": "never auto-delete"},
+    "oracle_decision_replays": {"class": "advanced research evidence", "inserted_by": "Oracle advanced learning", "frequency": "learning sync", "retention": "never auto-delete"},
 }
 
 
