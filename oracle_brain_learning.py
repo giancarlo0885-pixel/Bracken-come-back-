@@ -1040,7 +1040,17 @@ def sync_brain_learning(market: str, *, source_limit: int = _SOURCE_BATCH, episo
     with connect() as conn:
         from oracle_observation_bus import sync_observations
 
-        observation_sync = sync_observations(conn)
+        try:
+            observation_sync = sync_observations(conn)
+        except Exception as exc:
+            # Observation telemetry must never block the established Brain learner.
+            observation_sync = {
+                "status": "degraded",
+                "inserted": 0,
+                "by_source": {},
+                "error": str(exc)[:240],
+                "execution_impact": "NONE",
+            }
         sources = _sync_intelligence_sources(conn, limit=source_limit) if normalized_market == "cash" else 0
         curated_history = _sync_curated_crypto_history(conn) if normalized_market == "crypto" else 0
         episodes, skipped, new_episodes = _sync_trade_episodes(conn, normalized_market, limit=episode_limit)
@@ -1049,6 +1059,7 @@ def sync_brain_learning(market: str, *, source_limit: int = _SOURCE_BATCH, episo
         result = {
             "status": "ok",
             "market": normalized_market,
+            "observation_sync_status": observation_sync["status"],
             "observations_ingested": observation_sync["inserted"],
             "observation_sources": observation_sync["by_source"],
             "sources_ingested": sources,
