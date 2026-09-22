@@ -119,7 +119,7 @@ if validation_summary:
     if promotion_rows:
         with st.expander("Paper-influence promotion evidence"):
             st.dataframe(pd.DataFrame(promotion_rows),width="stretch",hide_index=True)
-            st.caption("Eligibility is intentionally held false until forward drawdown validation is implemented; this table cannot promote or execute anything.")
+            st.caption("Eligibility requires exact sample depth, positive expectancy, profit factor, calibration, and ordered drawdown evidence. This table is research-only and cannot promote or execute anything.")
 
 summary = snapshot["summary"]
 growth = snapshot["growth"]
