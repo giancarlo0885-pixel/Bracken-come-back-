@@ -513,9 +513,9 @@ def install_strategic_rebalance_optimizer_bridge(worker: Any) -> None:
             _log_optimizer_decision(
                 worker,
                 symbol,
-                status="APPROVED",
-                reason="capital_allocated",
-                amount=round(executable_amount, 2),
+                status="CANDIDATE_ALLOCATED",
+                reason="candidate_capital_reserved_for_downstream_validation",
+                candidate_amount=round(executable_amount, 2),
                 cash_before=round(cash, 2),
                 reserve=round(reserve, 2),
                 meaningful_entry_floor=meaningful_entry_floor,

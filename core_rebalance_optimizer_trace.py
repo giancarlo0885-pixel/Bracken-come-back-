@@ -25,7 +25,7 @@ def _trace_state_changed(worker: Any, decisions: dict[str, dict[str, Any]]) -> b
             decision.get("status"),
             decision.get("reason"),
             bool(proposed + 1e-9 >= floor) if floor > 0 else None,
-            decision.get("approved_amount"),
+            decision.get("candidate_amount"),
         )
         if states.get(symbol) != fingerprint:
             changed = True
@@ -106,9 +106,9 @@ def _optimizer_decision_index(
         if not symbol:
             continue
         decisions[symbol] = {
-            "status": "APPROVED",
-            "reason": "capital_allocated",
-            "approved_amount": allocation.get("amount"),
+            "status": "CANDIDATE_ALLOCATED",
+            "reason": "candidate_capital_reserved_for_downstream_validation",
+            "candidate_amount": allocation.get("amount"),
             "meaningful_entry_floor": allocation.get("meaningful_entry_floor")
             or plan.get("meaningful_entry_floor"),
             "entry_floor_mode": allocation.get("entry_floor_mode")

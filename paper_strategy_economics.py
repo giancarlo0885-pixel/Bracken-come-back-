@@ -378,6 +378,8 @@ def expected_edge_pct(signal: Any) -> float | None:
 
     for name in (
         "net_expected_value_pct",
+        "expected_edge_pct",
+        "calibrated_expected_edge_pct",
         "expected_return_pct",
         "forecast_return_pct",
         "possible_move_pct",

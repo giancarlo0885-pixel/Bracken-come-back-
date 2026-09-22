@@ -234,9 +234,9 @@ def test_core_rebalance_trace_changes_only_when_symbol_state_changes():
     }
     executable = {
         "BNB-USD": {
-            "status": "APPROVED",
-            "reason": "capital_allocated",
-            "approved_amount": 25.0,
+            "status": "CANDIDATE_ALLOCATED",
+            "reason": "candidate_capital_reserved_for_downstream_validation",
+            "candidate_amount": 25.0,
             "meaningful_entry_floor": 10.0,
         }
     }
@@ -385,3 +385,21 @@ def test_crypto_optimizer_preserves_economics_exploration_when_allowed(monkeypat
     )
 
     assert len(plan["allocations"]) == 1
+
+
+def test_trace_allocation_is_candidate_not_execution_approval():
+    from core_rebalance_optimizer_trace import _optimizer_decision_index
+    decisions = _optimizer_decision_index(
+        [{"symbol": "BTC-USD", "action": "BUY"}],
+        {"allocations": [{"symbol": "BTC-USD", "amount": 25.0}], "rejections": []},
+    )
+    assert decisions["BTC-USD"]["status"] == "CANDIDATE_ALLOCATED"
+    assert decisions["BTC-USD"]["reason"] == "candidate_capital_reserved_for_downstream_validation"
+    assert decisions["BTC-USD"]["candidate_amount"] == 25.0
+    assert "approved_amount" not in decisions["BTC-USD"]
+
+
+def test_expected_edge_consumes_explicit_calibrated_provenance():
+    from paper_strategy_economics import expected_edge_pct
+    assert expected_edge_pct({"calibrated_expected_edge_pct": 0.42}) == 0.42
+    assert expected_edge_pct({"expected_edge_pct": -0.31}) == -0.31
