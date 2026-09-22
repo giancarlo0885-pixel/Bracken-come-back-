@@ -454,14 +454,18 @@ def crypto_page_sections(
                 "Strategy": row.get("strategy") or "",
                 "Bucket": row.get("bucket") or "",
                 "Entry": money_text(row.get("entry_price")),
-                # trade_ledger is realized/closed-trade evidence. Never render a\n                # missing exit as $0.00 or substitute an unrelated current mark.\n                "Exit": money_text(row.get("exit_price")) if _finite(row.get("exit_price")) > 0 else "MISSING EXIT PRICE",\n                "Quantity": format_quantity(row.get("quantity")),
+                # trade_ledger is realized/closed-trade evidence. Never render a
+                # missing exit as $0.00 or substitute an unrelated current mark.
+                "Exit": money_text(row.get("exit_price")) if _finite(row.get("exit_price")) > 0 else "MISSING EXIT PRICE",
+                "Quantity": format_quantity(row.get("quantity")),
                 "Gross P/L": signed_money_text(row.get("gross_pnl")),
                 "Fees": money_text(row.get("fees")),
                 "Net P/L": signed_money_text(row.get("net_pnl")),
                 "Return %": f"{_finite(row.get('return_pct')):+.1f}%",
                 "Tier": row.get("tier") or "",
                 "Held For": row.get("held_for") or "",
-                "Status": (row.get("status") or "CLOSED") if _finite(row.get("exit_price")) > 0 else "DATA INCOMPLETE",\n            }
+                "Status": (row.get("status") or "CLOSED") if _finite(row.get("exit_price")) > 0 else "DATA INCOMPLETE",
+            }
         )
     rotations = [candidate for candidate in (crypto_rotation_candidate(item, positions) for item in candidates) if candidate]
     return {
