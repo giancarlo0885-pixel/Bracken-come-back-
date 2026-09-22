@@ -2,14 +2,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from config import MIN_TRADE_VALUE
 from crypto_opportunity_engine import crypto_core_rebalance_plan
 import runtime_integrity_patch as patch
 
 
 _STRATEGIC_ENTRY_ACTIONS = {"HOLD", "BUY", "STRONG_BUY", "ACCUMULATE", "LONG"}
-_MEANINGFUL_ENTRY_PCT = 0.01
-
 
 def _row_symbol(row: dict[str, Any]) -> str:
     return str(row.get("Asset") or row.get("symbol") or "").upper().strip()
@@ -175,8 +172,6 @@ def install_strategic_core_rebalance_producer(worker: Any) -> None:
                 portfolio = {}
                 plan_rows = []
 
-            equity = max(0.0, patch._numeric((portfolio or {}).get("equity"), default=0.0))
-            producer_floor = max(max(0.0, patch._numeric(MIN_TRADE_VALUE, default=0.0)), equity * _MEANINGFUL_ENTRY_PCT)
             plan_by_symbol = {_row_symbol(row): row for row in plan_rows if _row_symbol(row) and patch._numeric(row.get("Amount")) > 0}
             for signal in signals:
                 symbol = str(patch._signal_value(signal, "symbol", "") or "").upper().strip()
@@ -198,14 +193,15 @@ def install_strategic_core_rebalance_producer(worker: Any) -> None:
                 patch._set_signal_value(signal, "core_target_weight", row.get("Target Weight"))
                 patch._set_signal_value(signal, "core_current_value", patch._numeric(row.get("Current Core Value")))
                 patch._set_signal_value(signal, "core_plan_reason", row.get("Reason"))
-                patch._set_signal_value(signal, "core_meaningful_entry_floor", producer_floor)
+                # The optimizer is the single authority for the adaptive meaningful-entry floor.
+                # Do not persist a producer-side legacy floor before the optimizer evaluates this candidate.
+                patch._set_signal_value(signal, "core_meaningful_entry_floor", None)
                 worker.log.info(
-                    "CORE_REBALANCE_STRATEGIC_CANDIDATE | symbol=%s | target_amount=%.2f | target_weight=%s | current_core_value=%.2f | producer_review_floor=%.2f | action=%s",
+                    "CORE_REBALANCE_STRATEGIC_CANDIDATE | symbol=%s | target_amount=%.2f | target_weight=%s | current_core_value=%.2f | meaningful_entry_floor=pending_optimizer | action=%s",
                     symbol,
                     patch._numeric(row.get("Amount")),
                     row.get("Target Weight"),
                     patch._numeric(row.get("Current Core Value")),
-                    producer_floor,
                     action,
                 )
 
