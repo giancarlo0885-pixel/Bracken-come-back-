@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import pandas as pd
 import streamlit as st
-import streamlit.components.v1 as components
 
 from database import database_ready, rows
 from oracle_brain import build_oracle_brain_snapshot
@@ -60,7 +59,7 @@ neural_payload = {
 }
 import json
 _payload = json.dumps(neural_payload).replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
-components.html(f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1">
+st.html(f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
 html,body{{margin:0;background:#05080e;color:#eaf6ff;font-family:system-ui;overflow:hidden}}
 #brain{{width:100%;height:430px;display:block;background:radial-gradient(circle at 50% 48%,#11243b 0,#07101d 42%,#03060b 78%);border:1px solid #263d58;border-radius:22px}}
@@ -78,9 +77,9 @@ function make(){{nodes=[];const src=[
 ...D.episodes.map(v=>({{...v,kind:"episode",value:v.confidence||.5,state:(v.pnl||0)>0?"positive":((v.pnl||0)<0?"negative":"mixed"),label:v.symbol+" · "+v.strategy}}))
 ];const count=Math.max(18,src.length);for(let i=0;i<count;i++){{const a=(i/count)*Math.PI*2*3.7,r=(.08+.38*Math.sqrt((i+1)/count))*Math.min(W,H),v=src[i%Math.max(1,src.length)]||{{kind:"idle",value:.2,label:"awaiting evidence"}};nodes.push({{x:W*.5+Math.cos(a)*r*.72,y:H*.52+Math.sin(a)*r*.46,v,phase:i*.71}});}}}}
 function color(v,a){{if(v.state==="negative")return "rgba(255,82,112,"+a+")";if(v.state==="positive")return "rgba(75,245,164,"+a+")";if(v.kind==="knowledge")return "rgba(177,102,255,"+a+")";if(v.kind==="source")return "rgba(255,194,94,"+a+")";if(v.kind==="episode")return "rgba(95,234,205,"+a+")";return "rgba(80,199,255,"+a+")";}}
-function frame(){{t+=.018;x.clearRect(0,0,W,H);x.save();x.translate(Math.sin(t*.2)*2,Math.cos(t*.17)*2);for(let i=0;i<nodes.length;i++){{let a=nodes[i],b=nodes[(i*7+5)%nodes.length],d=Math.hypot(a.x-b.x,a.y-b.y);if(d<Math.min(W,H)*.38){{x.strokeStyle=color(a.v,.08+.08*Math.sin(t+a.phase));x.lineWidth=.7;x.beginPath();x.moveTo(a.x,a.y);x.quadraticCurveTo(W*.5,H*.5,b.x,b.y);x.stroke();}}}}for(const n of nodes){{let pulse=1+.35*Math.sin(t*2.4+n.phase),r=2.4+5*(n.v.value||.2)*pulse;x.shadowBlur=16;x.shadowColor=color(n.v,.8);x.fillStyle=color(n.v,.9);x.beginPath();x.arc(n.x,n.y,r,0,Math.PI*2);x.fill();}}x.restore();requestAnimationFrame(frame);}}
+function frame(){{t+=.018;x.clearRect(0,0,W,H);for(const n of nodes){{n.x=Math.max(14,Math.min(W-14,n.x));n.y=Math.max(14,Math.min(H-14,n.y));}}x.save();x.translate(Math.sin(t*.2)*2,Math.cos(t*.17)*2);for(let i=0;i<nodes.length;i++){{let a=nodes[i],b=nodes[(i*7+5)%nodes.length],d=Math.hypot(a.x-b.x,a.y-b.y);if(d<Math.min(W,H)*.38){{x.strokeStyle=color(a.v,.08+.08*Math.sin(t+a.phase));x.lineWidth=.7;x.beginPath();x.moveTo(a.x,a.y);x.quadraticCurveTo(W*.5,H*.5,b.x,b.y);x.stroke();}}}}for(const n of nodes){{let pulse=1+.35*Math.sin(t*2.4+n.phase),r=2.4+5*(n.v.value||.2)*pulse;x.shadowBlur=16;x.shadowColor=color(n.v,.8);x.fillStyle=color(n.v,.9);x.beginPath();x.arc(n.x,n.y,r,0,Math.PI*2);x.fill();}}x.restore();requestAnimationFrame(frame);}}
 new ResizeObserver(resize).observe(c);resize();frame();
-</script></body></html>""", height=440, scrolling=False)
+</script></body></html>""")
 st.caption(
     "Persistent engineering/research memory + live evidence summary. "
     "Read-only dashboard; execution authority: NONE."
@@ -145,7 +144,7 @@ if snapshot["research_queue"]:
                 for item in snapshot["research_queue"]
             ]
         ),
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
     )
 
@@ -178,7 +177,7 @@ with st.expander("Recent acquired knowledge sources"):
                     for item in snapshot["sources"]
                 ]
             ),
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
         )
     else:
@@ -203,7 +202,7 @@ with st.expander("Recent exact-provenance episodes"):
                     for item in snapshot["episodes"]
                 ]
             ),
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
         )
     else:
@@ -225,7 +224,7 @@ with st.expander("Strongest concept relationships"):
                     for item in snapshot["concept_links"][:50]
                 ]
             ),
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
         )
     else:
@@ -249,7 +248,7 @@ if entries:
                 for item in entries
             ]
         ),
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
     )
 else:
@@ -275,7 +274,7 @@ if regimes:
                 for item in regimes
             ]
         ),
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
     )
 else:
@@ -283,7 +282,7 @@ else:
 
 st.subheader("Worker context")
 if snapshot["workers"]:
-    st.dataframe(pd.DataFrame(snapshot["workers"]), use_container_width=True, hide_index=True)
+    st.dataframe(pd.DataFrame(snapshot["workers"]), width="stretch", hide_index=True)
 else:
     st.info("Worker heartbeat data is unavailable.")
 
