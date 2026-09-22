@@ -103,14 +103,16 @@ def test_doctrine_contains_core_safety_invariants():
 
 
 def test_brain_page_neural_field_is_evidence_driven_and_read_only():
-    source = Path("pages/3_Oracle_Brain.py").read_text(encoding="utf-8")
-    assert "ORACLE NEURAL FIELD" in source
-    assert 'snapshot["entries"]' in source
-    assert 'snapshot["regime_economics"]' in source
-    assert "execution authority: NONE" in source
-    assert "submit_order(" not in source
-    assert "ENABLE_BROKER_SUBMISSION=true" not in source
-    assert "LIVE_TRADING_ARMED=true" not in source
+    page = Path("pages/3_Oracle_Brain.py").read_text(encoding="utf-8")
+    component = Path("oracle_brain_component.py").read_text(encoding="utf-8")
+    assert "render_oracle_brain_component" in page
+    assert 'snapshot["learning_activity"]' in page
+    assert "Oracle Brain · evidence monitor" in component
+    assert "retained evidence units" in component
+    assert "execution authority: NONE" in page
+    assert "submit_order(" not in page + component
+    assert "ENABLE_BROKER_SUBMISSION=true" not in page + component
+    assert "LIVE_TRADING_ARMED=true" not in page + component
 
 
 def test_brain_attributes_thesis_separately_from_realized_outcome(monkeypatch):
@@ -157,12 +159,14 @@ def test_brain_attributes_thesis_separately_from_realized_outcome(monkeypatch):
 
 
 def test_brain_page_uses_supported_streamlit_width_and_bounded_nodes():
-    source = Path("pages/3_Oracle_Brain.py").read_text(encoding="utf-8")
-    assert "components.html" not in source
-    assert "use_container_width=True" not in source
-    assert 'width="stretch"' in source
-    assert "Math.max(14,Math.min(W-14,n.x))" in source
-    assert "Math.max(14,Math.min(H-14,n.y))" in source
+    page = Path("pages/3_Oracle_Brain.py").read_text(encoding="utf-8")
+    component = Path("oracle_brain_component.py").read_text(encoding="utf-8")
+    assert "components.html" not in page
+    assert "use_container_width=True" not in page
+    assert 'width="stretch"' in page
+    assert "brainMask" in component
+    assert "pointFor" in component
+    assert "raw.slice(0,210)" in component
 
 
 def test_brain_retention_health_is_read_only(monkeypatch):
@@ -221,8 +225,69 @@ def test_brain_growth_is_derived_from_persisted_evidence(monkeypatch):
     assert growth["execution_authority"] == "NONE"
 
 
-def test_brain_visual_density_tracks_evidence():
-    source = Path("pages/3_Oracle_Brain.py").read_text(encoding="utf-8")
-    assert "evidenceCount" in source
-    assert "Math.min(120,evidenceCount)" in source
-    assert "Brain growth:" in source
+def test_brain_visual_density_tracks_evidence_without_fake_neurons():
+    component = Path("oracle_brain_component.py").read_text(encoding="utf-8")
+    page = Path("pages/3_Oracle_Brain.py").read_text(encoding="utf-8")
+    assert "brainPath" in component
+    assert "brainMask" in component
+    assert "D.entries||[]" in component
+    assert "D.sources||[]" in component
+    assert "D.episodes||[]" in component
+    assert "D.regimes||[]" in component
+    assert "Math.max(18" not in component
+    assert "awaiting evidence" not in component
+    assert "Brain growth:" in page
+
+
+def test_brain_learning_activity_reports_new_and_revised_evidence(monkeypatch):
+    monkeypatch.setenv("EXECUTION_MODE", "paper")
+    monkeypatch.setenv("ENABLE_BROKER_SUBMISSION", "false")
+    monkeypatch.setenv("LIVE_TRADING_ARMED", "false")
+
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc).isoformat()
+
+    def fetch(query: str, params=()):
+        if "FROM oracle_brain_learning_state" in query:
+            return [
+                {
+                    "pipeline_key": "intelligence",
+                    "market": "global",
+                    "last_sync_at": now,
+                    "last_result": {"new": 3, "updated": 2},
+                },
+                {
+                    "pipeline_key": "episodes",
+                    "market": "crypto",
+                    "last_sync_at": now,
+                    "last_result": {"new_exact_episodes": 1, "skipped_missing_exact_provenance": 4},
+                },
+                {
+                    "pipeline_key": "brain_v2",
+                    "market": "crypto",
+                    "last_sync_at": now,
+                    "last_result": {"lessons_updated": 1},
+                },
+            ]
+        return []
+
+    activity = oracle_brain.build_oracle_brain_snapshot(fetch)["learning_activity"]
+    assert activity["status"] == "LEARNING"
+    assert activity["new_sources"] == 3
+    assert activity["revised_sources"] == 2
+    assert activity["new_exact_episodes"] == 1
+    assert activity["lessons_updated"] == 1
+    assert activity["learned_this_cycle"] == 7
+    assert activity["skipped_missing_exact_provenance"] == 4
+    assert activity["execution_authority"] == "NONE"
+
+
+def test_brain_component_has_anatomical_hemispheres_and_truthful_states():
+    source = Path("oracle_brain_component.py").read_text(encoding="utf-8")
+    assert 'brainPath("left")' not in source  # loop supplies left/right dynamically
+    assert 'for(const side of ["left","right"])' in source
+    assert "central" not in source.lower() or "ctx.bezierCurveTo" in source
+    assert "SYNCED — NO NEW EVIDENCE" in source
+    assert "STALE" in source
+    assert 'String(A.status||"")==="LEARNING"' in source
+    assert "No completed Brain learning sync is recorded yet." in source

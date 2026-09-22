@@ -637,7 +637,7 @@ def _sync_curated_crypto_history(conn: Any) -> int:
     return inserted
 
 
-def _sync_trade_episodes(conn: Any, market: str, *, limit: int = _EPISODE_BATCH) -> tuple[int, int]:
+def _sync_trade_episodes(conn: Any, market: str, *, limit: int = _EPISODE_BATCH) -> tuple[int, int, int]:
     rows = list(
         conn.execute(
             """
@@ -656,6 +656,7 @@ def _sync_trade_episodes(conn: Any, market: str, *, limit: int = _EPISODE_BATCH)
         ).fetchall()
     )
     inserted = 0
+    new_episodes = 0
     skipped_provenance = 0
     latest_exit: datetime | None = None
     now = datetime.now(timezone.utc)
@@ -713,6 +714,7 @@ def _sync_trade_episodes(conn: Any, market: str, *, limit: int = _EPISODE_BATCH)
         )
         inserted += 1
         if not existing_episode:
+            new_episodes += 1
             context_key = f"cohort:{_slug(market)}:{_slug(episode['strategy'])}:{_slug(episode['regime'])}"
             outcome = str(episode["outcome_snapshot"]["outcome"])
             observed = episode["exit_time"] or now
@@ -758,10 +760,14 @@ def _sync_trade_episodes(conn: Any, market: str, *, limit: int = _EPISODE_BATCH)
         (
             market,
             latest_exit,
-            json.dumps({"episodes_seen": inserted, "skipped_missing_exact_provenance": skipped_provenance}),
+            json.dumps({
+                "episodes_seen": inserted,
+                "new_exact_episodes": new_episodes,
+                "skipped_missing_exact_provenance": skipped_provenance,
+            }),
         ),
     )
-    return inserted, skipped_provenance
+    return inserted, skipped_provenance, new_episodes
 
 
 def _insert_regime_lesson(conn: Any, market: str, strategy: str, regime: str, summary: dict[str, Any]) -> int | None:
@@ -1034,7 +1040,7 @@ def sync_brain_learning(market: str, *, source_limit: int = _SOURCE_BATCH, episo
     with connect() as conn:
         sources = _sync_intelligence_sources(conn, limit=source_limit) if normalized_market == "cash" else 0
         curated_history = _sync_curated_crypto_history(conn) if normalized_market == "crypto" else 0
-        episodes, skipped = _sync_trade_episodes(conn, normalized_market, limit=episode_limit)
+        episodes, skipped, new_episodes = _sync_trade_episodes(conn, normalized_market, limit=episode_limit)
         lessons, queued = _sync_regime_lessons_and_queue(conn, normalized_market)
         refreshed = _refresh_source_freshness(conn) if normalized_market == "cash" else 0
         result = {
@@ -1043,6 +1049,7 @@ def sync_brain_learning(market: str, *, source_limit: int = _SOURCE_BATCH, episo
             "sources_ingested": sources,
             "curated_history_ingested": curated_history,
             "episodes_processed": episodes,
+            "new_exact_episodes": new_episodes,
             "episodes_skipped_missing_exact_provenance": skipped,
             "lessons_updated": lessons,
             "research_topics_queued": queued,

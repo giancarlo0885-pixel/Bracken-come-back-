@@ -631,12 +631,39 @@ function curveFor(source,target){
 
 const cityObjects=scene.children.slice();
 const brainGroup=new THREE.Group();brainGroup.visible=false;scene.add(brainGroup);
-const brainData=DATA.decision_graph||{nodes:[],edges:[],summary:{}},brainObjects=new Map(),brainEdges=[];
+const brainData=DATA.decision_graph||{nodes:[],edges:[],summary:{}},brainObjects=new Map(),brainEdges=[],brainShells=[];
 function brainColor(node){if(node.state==="offline")return 0xff6767;if(node.state==="waiting")return 0xffd166;return ({feature:0x59cfff,decision:0xa86dff,gate:0x4df49b,outcome:0x55b8ff,memory:0xf0a6ff,source:0xffc66d,lesson:0x9b7cff,world:0x62e8d5})[node.kind]||0x9ccfe6;}
-(brainData.nodes||[]).forEach(function(node){
+function addBrainShell(side){
+  const shell=new THREE.Mesh(
+    new THREE.SphereGeometry(1,isMobileDevice?18:30,isMobileDevice?12:20),
+    new THREE.MeshBasicMaterial({color:0x69d7ff,wireframe:true,transparent:true,opacity:.075,depthWrite:false})
+  );
+  shell.position.set(side*2.25,2.9,0);shell.scale.set(4.25,2.85,3.55);
+  shell.userData={baseScale:shell.scale.clone(),phase:side<0?0:1.7};
+  brainGroup.add(shell);brainShells.push(shell);
+}
+addBrainShell(-1);addBrainShell(1);
+const cerebellum=new THREE.Mesh(
+  new THREE.SphereGeometry(1,isMobileDevice?14:22,isMobileDevice?10:16),
+  new THREE.MeshBasicMaterial({color:0xa86dff,wireframe:true,transparent:true,opacity:.055,depthWrite:false})
+);
+cerebellum.position.set(0,.65,1.05);cerebellum.scale.set(2.7,1.1,1.7);brainGroup.add(cerebellum);brainShells.push(cerebellum);
+const brainStem=new THREE.Mesh(new THREE.CylinderGeometry(.32,.48,2.0,14),new THREE.MeshBasicMaterial({color:0x69d7ff,transparent:true,opacity:.09,wireframe:true}));
+brainStem.position.set(0,-.35,.5);brainGroup.add(brainStem);
+function brainFieldPoint(index,total){
+  const side=index%2===0?-1:1,local=Math.floor(index/2),count=Math.max(1,Math.ceil(total/2));
+  const golden=2.399963229728653;
+  const q=(local+.65)/count,radial=Math.sqrt(Math.min(.96,q)),angle=local*golden;
+  const x=side*(.65+3.35*radial*Math.abs(Math.cos(angle)));
+  const z=3.05*radial*Math.sin(angle);
+  const dome=Math.sqrt(Math.max(0,1-Math.min(.98,radial*radial)));
+  const y=1.45+3.65*dome+.38*Math.sin(angle*.73);
+  return new THREE.Vector3(x,y,z);
+}
+(brainData.nodes||[]).forEach(function(node,index){
   const radius=Math.max(.11,Number(node.size||.28)),color=brainColor(node);
   const mesh=new THREE.Mesh(new THREE.IcosahedronGeometry(radius,1),mat(color,.25,.32,color,node.kind==="decision"?.75:.42));
-  mesh.position.set(Number(node.x||0),Number(node.y||0),Number(node.z||0));mesh.userData={type:"brain",data:node,phase:Math.random()*6.28};
+  mesh.position.copy(brainFieldPoint(index,(brainData.nodes||[]).length));mesh.userData={type:"brain",data:node,phase:(index*.73)%6.28};
   brainGroup.add(mesh);brainObjects.set(node.id,mesh);interactables.push(mesh);
   if(node.label&&!isMobileDevice)addLabel(mesh,node.title,node.metric,radius*2.3);
 });
@@ -698,7 +725,7 @@ function setBrainMode(on){
   const b=document.getElementById("brain");b.classList.toggle("active",on);b.textContent=on?"CITY":"BRAIN";
   inspector.classList.remove("open");
   hovercard.classList.remove("show");
-  if(on){camera.position.set(14,10,19);controls.target.set(0,2,0);}
+  if(on){camera.position.set(0,6.8,19.5);controls.target.set(0,2.7,0);}
   else resetView();
   controls.update();
 }
@@ -789,6 +816,7 @@ function animate(){
   flowObjects.forEach(item=>{const phase=(elapsed*.12+item.particle.userData.phase)%1;item.particle.position.copy(item.curve.getPointAt(phase));});
   brainEdges.forEach(item=>{const phase=(elapsed*.18+item.particle.userData.phase)%1;item.particle.position.copy(item.curve.getPointAt(phase));});
   brainObjects.forEach(o=>{if(brainMode){const p=1+Math.sin(elapsed*2.4+o.userData.phase)*.055;o.scale.setScalar(p);o.rotation.y+=.004;}});
+  brainShells.forEach(shell=>{if(brainMode&&shell.userData.baseScale){const p=1+Math.sin(elapsed*.9+shell.userData.phase)*.012;shell.scale.copy(shell.userData.baseScale).multiplyScalar(p);}});
   workerObjects.forEach(w=>{
     const state=String(w.userData.data.state||""),cycle=(Math.sin(elapsed*w.userData.speed+w.userData.phase)+1)/2;
     const t=(state==="RESTING"||state==="HOME")?0.16:(state==="RECREATION"?0.72:cycle);
