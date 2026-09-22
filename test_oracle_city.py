@@ -450,16 +450,17 @@ def test_oracle_city_brain_visual_growth_uses_persisted_counts():
         now=datetime(2026, 9, 19, 0, 0, tzinfo=timezone.utc),
     )
     growth = snapshot["brain_growth"]
-    assert growth == {
-        "knowledge_units": 100,
-        "durable_lessons": 10,
-        "observations": 20,
-        "exact_outcomes": 30,
-        "relationships": 40,
-        "active_contradictions": 2,
-        "last_learning_sync": "2026-09-18T23:59:00+00:00",
-        "execution_authority": "NONE",
-    }
+    assert growth["knowledge_units"] == 100
+    assert growth["durable_lessons"] == 10
+    assert growth["observations"] == 20
+    assert growth["exact_outcomes"] == 30
+    assert growth["relationships"] == 40
+    assert growth["active_contradictions"] == 2
+    assert growth["last_learning_sync"] == "2026-09-18T23:59:30+00:00"
+    assert growth["learning_status"] == "LEARNING"
+    assert growth["learned_this_cycle"] == 5
+    assert growth["sync_age_seconds"] == 30.0
+    assert growth["execution_authority"] == "NONE"
     memory_nodes = [
         item for item in snapshot["decision_graph"]["nodes"]
         if str(item.get("id", "")).startswith("brain-memory:")
