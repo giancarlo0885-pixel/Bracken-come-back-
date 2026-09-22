@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import requests
@@ -15,6 +15,26 @@ log = logging.getLogger("economic-calendar")
 
 EODHD_BASE_URL = "https://eodhd.com/api"
 FINNHUB_BASE_URL = "https://finnhub.io/api/v1"
+
+
+def _record_provider_health(provider: str, status: str, message: str) -> None:
+    """Persist calendar-provider health without affecting execution."""
+    try:
+        from database import connect, utc_now
+
+        with connect() as conn:
+            conn.execute(
+                """INSERT INTO provider_health(provider,configured,status,message,checked_at)
+                   VALUES (%s,TRUE,%s,%s,%s)
+                   ON CONFLICT(provider) DO UPDATE SET
+                       configured=EXCLUDED.configured,
+                       status=EXCLUDED.status,
+                       message=EXCLUDED.message,
+                       checked_at=EXCLUDED.checked_at""",
+                (provider, status, str(message)[:260], utc_now()),
+            )
+    except Exception as exc:
+        log.debug("Could not persist economic-calendar provider health: %s", exc)
 
 
 @dataclass
@@ -33,12 +53,14 @@ def _get_key(*names: str) -> str:
 
     try:
         settings = get_api_settings()
+        values = settings if isinstance(settings, dict) else getattr(settings, "values", {})
+        if callable(values):
+            values = {}
+        if not isinstance(values, dict):
+            values = {}
 
         for name in names:
-            value = str(
-                settings.values.get(name, "")
-            ).strip()
-
+            value = str(values.get(name, "") or "").strip()
             if value:
                 return value
     except Exception as exc:
@@ -51,7 +73,7 @@ def _get_key(*names: str) -> str:
 
 
 def _date_range() -> tuple[str, str]:
-    today = date.today()
+    today = datetime.now(timezone.utc).date()
     end_date = today + timedelta(days=7)
 
     return (
@@ -103,6 +125,7 @@ def _fetch_eodhd(
             "fmt": "json",
             "from": from_date,
             "to": to_date,
+            "limit": 1000,
         },
         timeout=20,
     )
@@ -143,6 +166,14 @@ def _fetch_eodhd(
         )
 
     if isinstance(payload, dict):
+        provider_error = payload.get("error") or payload.get("message")
+        if provider_error and not any(key in payload for key in ("events", "data", "economicEvents")):
+            return ProviderResult(
+                available=False,
+                provider="EODHD",
+                records=[],
+                message=f"EODHD returned an API error: {str(provider_error)[:180]}",
+            )
         events = (
             payload.get("events")
             or payload.get("data")
@@ -210,11 +241,9 @@ def _fetch_finnhub(
         params={
             "from": from_date,
             "to": to_date,
+            "token": api_key,
         },
-        headers={
-            "X-Finnhub-Token": api_key,
-            "Accept": "application/json",
-        },
+        headers={"Accept": "application/json"},
         timeout=20,
     )
 
@@ -251,6 +280,15 @@ def _fetch_finnhub(
                 f"Finnhub request failed with HTTP "
                 f"{response.status_code}."
             ),
+        )
+
+    provider_error = payload.get("error") if isinstance(payload, dict) else None
+    if provider_error:
+        return ProviderResult(
+            available=False,
+            provider="Finnhub",
+            records=[],
+            message=f"Finnhub returned an API error: {str(provider_error)[:180]}",
         )
 
     events = payload.get(
@@ -306,9 +344,16 @@ def fetch() -> ProviderResult:
             )
 
             log.info(
-                "Economic calendar provider=%s records=%d",
+                "Economic calendar provider=%s records=%d available=%s message=%s",
                 result.provider,
                 len(result.records),
+                result.available,
+                result.message,
+            )
+            _record_provider_health(
+                "EODHD_ECONOMIC_CALENDAR",
+                "healthy" if result.records else ("error" if not result.available else "degraded"),
+                result.message,
             )
 
             if result.records:
@@ -340,9 +385,16 @@ def fetch() -> ProviderResult:
             )
 
             log.info(
-                "Economic calendar provider=%s records=%d",
+                "Economic calendar provider=%s records=%d available=%s message=%s",
                 result.provider,
                 len(result.records),
+                result.available,
+                result.message,
+            )
+            _record_provider_health(
+                "FINNHUB_ECONOMIC_CALENDAR",
+                "healthy" if result.records else ("error" if not result.available else "degraded"),
+                result.message,
             )
 
             if result.records:
@@ -358,6 +410,16 @@ def fetch() -> ProviderResult:
             )
 
     if eodhd_result:
+        if eodhd_result.available and not eodhd_result.records:
+            return ProviderResult(
+                available=True,
+                provider="EODHD + Finnhub",
+                records=[],
+                message=(
+                    "Configured calendar providers returned no events for the next seven days. "
+                    "Treat this as degraded/unverified-empty coverage, not proof that no events exist."
+                ),
+            )
         return eodhd_result
 
     return ProviderResult(
