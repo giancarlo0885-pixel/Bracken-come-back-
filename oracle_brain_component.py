@@ -1,12 +1,27 @@
 from __future__ import annotations
 
 import json
+from datetime import date, datetime
+from decimal import Decimal
 from typing import Any
+
+
+def _json_default(value: Any) -> Any:
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if isinstance(value, Decimal):
+        return float(value)
+    raise TypeError(f"Object of type {value.__class__.__name__} is not JSON serializable")
 
 
 def _safe_json(value: Any) -> str:
     return (
-        json.dumps(value, ensure_ascii=True, separators=(",", ":"))
+        json.dumps(
+            value,
+            ensure_ascii=True,
+            separators=(",", ":"),
+            default=_json_default,
+        )
         .replace("<", "\\u003c")
         .replace(">", "\\u003e")
         .replace("&", "\\u0026")
