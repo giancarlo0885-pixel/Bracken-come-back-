@@ -83,6 +83,11 @@ def test_news_pipeline_falls_back_when_google_grounding_fails(monkeypatch):
     monkeypatch.setattr(ni, "_get_gemini_key", lambda: "gemini-key")
     monkeypatch.setattr(ni, "_gemini_budget_allows_request", lambda: True)
     monkeypatch.setattr(ni, "_fetch_gemini_grounded", lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("grounding unavailable")))
+    monkeypatch.setattr(
+        ni,
+        "_fetch_google_news",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("rss unavailable")),
+    )
     monkeypatch.setattr(ni, "_get_newsapi_key", lambda: "news-key")
     monkeypatch.setattr(ni, "_budget_allows_request", lambda: True)
     expected = ni.NewsResult(0.25, ["Fallback headline"], "NewsAPI", citations=["https://example.com/news"])
