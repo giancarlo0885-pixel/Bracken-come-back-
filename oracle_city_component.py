@@ -86,6 +86,8 @@ input[type=range]{width:100%;accent-color:#55d4ff}
         <span class="chip" id="cityMood">CITY: --</span>
         <span class="chip" id="aeveProgress">AEVE: -- / 1000</span>
         <span class="chip" id="paperState">PAPER</span>
+        <span class="chip" id="brainState">BRAIN: --</span>
+        <span class="chip" id="worldState">WORLD: --</span>
       </div>
     </div>
     <div class="toolbar">
@@ -131,8 +133,12 @@ document.getElementById("aeveProgress").textContent="AEVE: "+(aeveData.accepted=
 const safety=DATA.safety||{};
 const executionMode=String(safety.execution_mode||DATA.execution_mode||"paper").toUpperCase();
 document.getElementById("paperState").textContent=executionMode==="PAPER"
-  ? "PAPER ACTIVE · REAL MONEY "+(safety.live_trading_armed?"ARMED":"DISARMED")
+  ? "PAPER ONLY · LIVE "+(safety.live_trading_armed?"ARMED":"DISARMED")
   : executionMode+" · LIVE "+(safety.live_trading_armed?"ARMED":"DISARMED");
+const brainGrowth=DATA.brain_growth||{};
+const worldState=DATA.world_state||{};
+document.getElementById("brainState").textContent="BRAIN: "+String(brainGrowth.knowledge_units||0)+" UNITS";
+document.getElementById("worldState").textContent="WORLD: "+String(worldState.current_events||0)+" EVENTS";
 
 function esc(value){
   return String(value==null?"":value).replace(/[&<>"']/g,ch=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[ch]));
@@ -440,6 +446,66 @@ function createLab(node,aeve=false){
   windowGrid(g,1.65,3.1,2.5,aeve?0xcaa7ff:0x83ebff,7,4);return g;
 }
 
+
+function createEnergy(node){
+  const g=new THREE.Group(),state=stateColor(node.state);
+  box(g,4.8,.12,3.6,0,.06,0,mat(0x20231c,.9,.06));
+  for(const x of [-1.35,0,1.35]){
+    const tank=cyl(g,.55,.55,1.05,x,.58,.62,mat(0x38454a,.45,.55,state,.04),18);
+    const cap=new THREE.Mesh(new THREE.SphereGeometry(.55,18,10,0,Math.PI*2,0,Math.PI/2),mat(0x445258,.38,.62));cap.position.set(x,1.08,.62);g.add(cap);
+  }
+  const stack=cyl(g,.16,.25,3.4,-1.55,1.75,-.9,mat(0x31383b,.5,.48),12);
+  const flame=new THREE.PointLight(0xff9d42,node.state==="online"?8:2,5,2);flame.position.set(-1.55,3.55,-.9);g.add(flame);
+  box(g,1.65,1.45,1.45,.65,.75,-.75,mat(0x25353a,.42,.48,state,.08));windowGrid(g,1.65,1.45,1.45,0xffca74,3,4);
+  return g;
+}
+function createLogistics(node){
+  const g=new THREE.Group(),state=stateColor(node.state);
+  box(g,5.2,.10,3.9,0,.05,0,mat(0x17303d,.9,.05));
+  for(let i=0;i<5;i++){
+    box(g,.72,.42,1.15,-1.55+(i%3)*.82,.24,-.75+Math.floor(i/3)*.78,mat(i%2?0x235675:0x6c4932,.55,.28,state,.03));
+  }
+  for(const x of [-1.8,1.55]){
+    cyl(g,.055,.07,2.5,x,1.25,.75,mat(0x5f6f75,.45,.55),8);
+    box(g,1.35,.08,.08,x+.58,2.28,.75,mat(0x718189,.35,.62));
+    cyl(g,.025,.025,1.45,x+1.12,1.55,.75,mat(0x718189,.35,.62),6);
+  }
+  const ship=box(g,2.5,.28,.62,.35,.22,1.35,mat(0x263c4d,.35,.58,state,.08));
+  box(g,.75,.32,.46,.75,.50,1.35,mat(0xd8e2e8,.62,.18));
+  return g;
+}
+function createMacro(node){
+  const g=new THREE.Group(),state=stateColor(node.state);
+  box(g,4.2,.24,3.5,0,.12,0,mat(0x252b35,.82,.12));
+  box(g,3.2,2.8,2.55,0,1.55,0,mat(0x233447,.42,.42,state,.07));
+  for(let i=-2;i<=2;i++)cyl(g,.09,.11,2.15,i*.58,1.25,1.36,mat(0xd8d2bd,.62,.08),10);
+  box(g,3.55,.22,2.9,0,3.02,0,mat(0x566170,.35,.55,state,.06));
+  antenna(g,3.12,state);windowGrid(g,3.2,2.8,2.55,0xbad8ff,4,5);return g;
+}
+function createConsumer(node){
+  const g=new THREE.Group(),state=stateColor(node.state);
+  box(g,4.7,.10,3.6,0,.05,0,mat(0x293027,.92,.04));
+  const shops=[[-1.35,1.35,0x5d4435],[0,1.75,0x3b5260],[1.35,1.15,0x51543a]];
+  shops.forEach((item,i)=>{const x=item[0],h=item[1];box(g,1.15,h,1.75,x,h/2,0,mat(item[2],.62,.18,state,.04));windowGrid(g,1.15,h,1.75,0xffd99b,3,3);});
+  for(let i=-2;i<=2;i++)cyl(g,.035,.05,.55,i*.78,.28,1.28,mat(0x60706a,.55,.18),7);
+  return g;
+}
+function createBrainResearch(node){
+  const g=createLab(node,false),state=stateColor(node.state);
+  const orb=new THREE.Mesh(new THREE.IcosahedronGeometry(.62,2),new THREE.MeshStandardMaterial({color:0x8a7dff,emissive:0x8a7dff,emissiveIntensity:node.state==="online"?.85:.25,metalness:.25,roughness:.3}));
+  orb.position.set(0,3.65,0);g.add(orb);
+  const ring=new THREE.Mesh(new THREE.TorusGeometry(.88,.035,8,36),new THREE.MeshBasicMaterial({color:state,transparent:true,opacity:.8}));ring.position.set(0,3.65,0);ring.rotation.x=Math.PI/2;g.add(ring);
+  return g;
+}
+function createTechnology(node){
+  const g=new THREE.Group(),state=stateColor(node.state);
+  box(g,4.4,.12,3.5,0,.06,0,mat(0x171c29,.92,.06));
+  box(g,1.7,3.6,2.45,-.95,1.86,0,mat(0x222343,.28,.66,0x8a7dff,.15));
+  box(g,1.7,2.7,2.45,.95,1.41,0,mat(0x16364a,.3,.62,0x59cfff,.12));
+  windowGrid(g,1.7,3.6,2.45,0xb6a9ff,7,4);windowGrid(g,1.7,2.7,2.45,0x83ebff,6,4);
+  const bridge=box(g,.85,.32,1.0,0,1.65,0,mat(0x394657,.3,.7,state,.12));return g;
+}
+
 function buildDistrict(node){
   let g;
   switch(node.id){
@@ -455,6 +521,12 @@ function buildDistrict(node){
     case "wellness":g=createWellness(node);break;
     case "patterns":g=createLab(node,false);break;
     case "aeve":g=createLab(node,true);break;
+    case "brain":g=createBrainResearch(node);break;
+    case "macro":g=createMacro(node);break;
+    case "energy":g=createEnergy(node);break;
+    case "logistics":g=createLogistics(node);break;
+    case "consumer":g=createConsumer(node);break;
+    case "technology":g=createTechnology(node);break;
     case "academy":g=createStandardTower(node,{height:4.3,w:3.4,d:2.7,color:0x20324a,window:0x89c9ff});break;
     case "intel":g=createStandardTower(node,{height:6.8,w:2.6,d:2.6,color:0x143246,window:0x76dcff,setback:true});break;
     case "execution":g=createStandardTower(node,{height:6.8,w:2.9,d:2.7,color:0x11334a,window:0x65ddff,setback:true});break;
@@ -560,7 +632,7 @@ function curveFor(source,target){
 const cityObjects=scene.children.slice();
 const brainGroup=new THREE.Group();brainGroup.visible=false;scene.add(brainGroup);
 const brainData=DATA.decision_graph||{nodes:[],edges:[],summary:{}},brainObjects=new Map(),brainEdges=[];
-function brainColor(node){if(node.state==="offline")return 0xff6767;if(node.state==="waiting")return 0xffd166;return ({feature:0x59cfff,decision:0xa86dff,gate:0x4df49b,outcome:0x55b8ff})[node.kind]||0x9ccfe6;}
+function brainColor(node){if(node.state==="offline")return 0xff6767;if(node.state==="waiting")return 0xffd166;return ({feature:0x59cfff,decision:0xa86dff,gate:0x4df49b,outcome:0x55b8ff,memory:0xf0a6ff,source:0xffc66d,lesson:0x9b7cff,world:0x62e8d5})[node.kind]||0x9ccfe6;}
 (brainData.nodes||[]).forEach(function(node){
   const radius=Math.max(.11,Number(node.size||.28)),color=brainColor(node);
   const mesh=new THREE.Mesh(new THREE.IcosahedronGeometry(radius,1),mat(color,.25,.32,color,node.kind==="decision"?.75:.42));
