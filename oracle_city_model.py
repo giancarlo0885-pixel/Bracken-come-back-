@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 from datetime import datetime, timezone
 from typing import Any, Callable
 
@@ -443,6 +444,12 @@ _WORLD_DOMAIN_TERMS = {
 }
 
 
+def _matches_world_term(text: str, term: str) -> bool:
+    if len(term) <= 3 and term.isalnum():
+        return re.search(rf"\b{re.escape(term)}\b", text) is not None
+    return term in text
+
+
 def _event_text(item: dict[str, Any]) -> str:
     details = item.get("details")
     if isinstance(details, dict):
@@ -472,7 +479,7 @@ def _world_event_view(item: dict[str, Any], now: datetime) -> dict[str, Any]:
     text = _event_text(item)
     domains = [
         domain for domain, terms in _WORLD_DOMAIN_TERMS.items()
-        if any(term in text for term in terms)
+        if any(_matches_world_term(text, term) for term in terms)
     ]
     if not domains:
         domains = ["general"]
@@ -488,13 +495,13 @@ def _world_event_view(item: dict[str, Any], now: datetime) -> dict[str, Any]:
         confidence /= 100.0
     confidence = max(0.0, min(1.0, confidence))
 
-    severity = (
-        _number(details.get("impact_score"))
-        or _number(metadata.get("impact_score"))
-        or _number(details.get("severity"))
-        or _number(metadata.get("severity"))
-        or 25.0
+    severity_candidates = (
+        _number(details.get("impact_score")),
+        _number(metadata.get("impact_score")),
+        _number(details.get("severity")),
+        _number(metadata.get("severity")),
     )
+    severity = next((value for value in severity_candidates if value is not None), 25.0)
     if severity <= 1:
         severity *= 100.0
     severity = max(0.0, min(100.0, severity))
@@ -510,7 +517,7 @@ def _world_event_view(item: dict[str, Any], now: datetime) -> dict[str, Any]:
 
     observed = _parse_time(item.get("event_time") or item.get("created_at"))
     age_hours = None if observed is None else max(0.0, (now - observed).total_seconds() / 3600.0)
-    fresh = age_hours is None or age_hours <= 72.0
+    fresh = age_hours is not None and age_hours <= 72.0
     verification = str(item.get("verification_status") or metadata.get("verification_status") or "reported").strip().lower()
     summary = ""
     if isinstance(item.get("details"), dict):
