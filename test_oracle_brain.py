@@ -161,13 +161,13 @@ def test_brain_attributes_thesis_separately_from_realized_outcome(monkeypatch):
     assert snapshot["execution_authority"] == "NONE"
 
 
-def test_brain_page_runs_javascript_component_and_bounds_nodes():
+def test_brain_page_runs_javascript_iframe_and_bounds_nodes():
     page = Path("pages/3_Oracle_Brain.py").read_text(encoding="utf-8")
     component = Path("oracle_brain_component.py").read_text(encoding="utf-8")
-    assert "import streamlit.components.v1 as components" in page
-    assert "components.html(" in page
+    assert "st.iframe(" in page
     assert "height=610" in page
-    assert "scrolling=False" in page
+    assert "components.html(" not in page
+    assert "import streamlit.components.v1 as components" not in page
     assert "st.html(render_oracle_brain_component(snapshot))" not in page
     assert "brainMask" in component
     assert "pointFor" in component
