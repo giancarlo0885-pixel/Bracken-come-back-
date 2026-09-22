@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 
 import oracle_brain
+from oracle_brain_component import render_oracle_brain_component
 
 
 def _fetch(query: str, params=()):
@@ -291,3 +294,34 @@ def test_brain_component_has_anatomical_hemispheres_and_truthful_states():
     assert "STALE" in source
     assert 'String(A.status||"")==="LEARNING"' in source
     assert "No completed Brain learning sync is recorded yet." in source
+
+
+def test_oracle_brain_component_serializes_database_datetime_values():
+    rendered = render_oracle_brain_component({
+        "generated_at": datetime(2026, 9, 22, 4, 30, tzinfo=timezone.utc),
+        "growth": {
+            "knowledge_units": 12,
+            "relationships": 3,
+            "exact_outcomes": 4,
+            "last_learning_sync": datetime(2026, 9, 22, 4, 29, tzinfo=timezone.utc),
+        },
+        "learning_activity": {
+            "status": "LEARNING",
+            "last_sync_at": datetime(2026, 9, 22, 4, 29, tzinfo=timezone.utc),
+            "learned_this_cycle": 2,
+        },
+        "entries": [{
+            "brain_key": "lesson:test",
+            "category": "test",
+            "title": "Datetime regression",
+            "confidence": Decimal("0.75"),
+        }],
+        "sources": [],
+        "episodes": [],
+        "regime_economics": [],
+        "concept_links": [],
+    })
+    assert "2026-09-22T04:30:00+00:00" in rendered
+    assert "2026-09-22T04:29:00+00:00" in rendered
+    assert '"confidence":0.75' in rendered
+    assert "datetime is not JSON serializable" not in rendered
