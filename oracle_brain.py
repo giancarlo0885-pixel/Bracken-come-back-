@@ -291,6 +291,23 @@ def build_oracle_brain_snapshot(fetch_rows: FetchRows) -> dict[str, Any]:
         "execution_authority": "NONE",
     }
 
+    growth = {
+        "knowledge_units": (
+            retention_spans["entries"]["count"]
+            + retention_spans["sources"]["count"]
+            + retention_spans["episodes"]["count"]
+            + len(links)
+        ),
+        "durable_lessons": retention_spans["entries"]["count"],
+        "observations": retention_spans["sources"]["count"],
+        "exact_outcomes": retention_spans["episodes"]["count"],
+        "relationships": len(links),
+        "oldest_observation": retention_spans["sources"]["oldest"],
+        "newest_observation": retention_spans["sources"]["newest"],
+        "last_learning_sync": retention_health["last_sync_at"],
+        "execution_authority": "NONE",
+    }
+
     experiments = [
         entry for entry in entries
         if entry.get("category") in {"experiment", "research", "promotion"}
@@ -424,6 +441,7 @@ def build_oracle_brain_snapshot(fetch_rows: FetchRows) -> dict[str, Any]:
         "research_queue": research_queue,
         "learning_state": learning_state,
         "retention_health": retention_health,
+        "growth": growth,
         "derived_lessons": derived_lessons,
         "outcome_attribution": attribution,
         "attribution_counts": attribution_counts,
