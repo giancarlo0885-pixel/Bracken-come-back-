@@ -128,6 +128,49 @@ if lifecycle:
     q3.metric("Exact entry provenance", int(life.get("exact_entry_provenance") or 0))
     st.caption("Signals and approvals are not counted as completed trades. Closed lifecycle evidence is the source of truth.")
 
+# Research-only learning/validation scorecard.
+try:
+    validation_summary = rows("""
+        SELECT
+          (SELECT COUNT(*)::int FROM oracle_counterfactual_outcomes) AS counterfactuals,
+          (SELECT COUNT(*)::int FROM oracle_counterfactual_outcomes WHERE outcome_class='avoided_loss') AS avoided_losses,
+          (SELECT COUNT(*)::int FROM oracle_counterfactual_outcomes WHERE outcome_class='missed_winner') AS missed_winners,
+          (SELECT COUNT(*)::int FROM oracle_validation_weaknesses WHERE state='negative') AS negative_cohorts,
+          (SELECT SUM(samples)::int FROM oracle_calibration_buckets) AS calibrated_samples,
+          (SELECT SUM(samples*calibration_error)/NULLIF(SUM(samples),0) FROM oracle_calibration_buckets) AS calibration_error
+    """)
+    validation_rows = rows("""
+        SELECT market,strategy,regime,samples,expectancy,profit_factor,avg_mfe_pct,avg_mae_pct,state
+        FROM oracle_validation_weaknesses
+        ORDER BY CASE WHEN state='negative' THEN 0 ELSE 1 END,samples DESC
+        LIMIT 30
+    """)
+    promotion_rows = rows("""
+        SELECT market,samples,expectancy,profit_factor,calibration_error,max_drawdown,eligible,reasons,evaluated_at
+        FROM oracle_paper_promotion_evidence ORDER BY market
+    """)
+except Exception:
+    validation_summary, validation_rows, promotion_rows = [], [], []
+
+if validation_summary:
+    v = validation_summary[0]
+    st.subheader("Learning validation")
+    v1,v2,v3,v4,v5 = st.columns(5)
+    v1.metric("Counterfactuals", int(v.get("counterfactuals") or 0))
+    v2.metric("Avoided losses", int(v.get("avoided_losses") or 0))
+    v3.metric("Missed winners", int(v.get("missed_winners") or 0))
+    v4.metric("Negative cohorts", int(v.get("negative_cohorts") or 0))
+    err = v.get("calibration_error")
+    v5.metric("Calibration error", "n/a" if err is None else f"{float(err):.3f}")
+    st.caption("Research telemetry only. Rejected decisions are followed forward; calibration compares entry-time probability with exact outcomes. Execution authority: NONE.")
+    if validation_rows:
+        with st.expander("Strategy / regime validation"):
+            st.dataframe(pd.DataFrame(validation_rows),width="stretch",hide_index=True)
+    if promotion_rows:
+        with st.expander("Paper-influence promotion evidence"):
+            st.dataframe(pd.DataFrame(promotion_rows),width="stretch",hide_index=True)
+            st.caption("Eligibility requires exact sample depth, positive expectancy, profit factor, calibration, and ordered drawdown evidence. This table is research-only and cannot promote or execute anything.")
+
 summary = snapshot["summary"]
 growth = snapshot["growth"]
 safety = snapshot["safety"]
