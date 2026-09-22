@@ -263,6 +263,34 @@ def build_oracle_brain_snapshot(fetch_rows: FetchRows) -> dict[str, Any]:
         """,
     )
 
+    retention_spans = {}
+    for table, timestamp_column, key, predicate in (
+        ("oracle_brain_entries", "created_at", "entries", ""),
+        ("oracle_brain_sources", "observed_at", "sources", ""),
+        ("oracle_brain_episodes", "exit_time", "episodes", " WHERE provenance_status='exact'"),
+    ):
+        stats = _safe_rows(
+            fetch_rows,
+            f"SELECT COUNT(*)::int AS total, MIN({timestamp_column}) AS oldest, MAX({timestamp_column}) AS newest FROM {table}{predicate}",
+        )
+        row = stats[0] if stats else {}
+        retention_spans[key] = {
+            "count": int(_num(row.get("total"), 0.0)),
+            "oldest": row.get("oldest"),
+            "newest": row.get("newest"),
+        }
+    sync_times = [row.get("last_sync_at") for row in learning_state if row.get("last_sync_at") is not None]
+    retention_health = {
+        "persistent_store": "PostgreSQL",
+        "entries": retention_spans["entries"],
+        "sources": retention_spans["sources"],
+        "episodes": retention_spans["episodes"],
+        "learning_pipelines": len(learning_state),
+        "last_sync_at": max(sync_times) if sync_times else None,
+        "read_only": True,
+        "execution_authority": "NONE",
+    }
+
     experiments = [
         entry for entry in entries
         if entry.get("category") in {"experiment", "research", "promotion"}
@@ -395,6 +423,7 @@ def build_oracle_brain_snapshot(fetch_rows: FetchRows) -> dict[str, Any]:
         "contradictions": contradictions,
         "research_queue": research_queue,
         "learning_state": learning_state,
+        "retention_health": retention_health,
         "derived_lessons": derived_lessons,
         "outcome_attribution": attribution,
         "attribution_counts": attribution_counts,
