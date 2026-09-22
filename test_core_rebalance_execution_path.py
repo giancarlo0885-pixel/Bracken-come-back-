@@ -309,7 +309,8 @@ def test_core_rebalance_path_does_not_bypass_quote_gate(monkeypatch):
 def test_v39_opportunity_preserves_signed_forecast_as_explicit_edge(monkeypatch):
     import market_worker
 
-    signal = _signal("BTC-USD", price=100.0)
+    signal = _signal("BTC-USD")
+    signal.price = 100.0
     signal.expected_move_pct = -1.25
     prices = {
         "BTC-USD": {
