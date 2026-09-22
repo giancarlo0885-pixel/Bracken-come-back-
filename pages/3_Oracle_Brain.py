@@ -5,6 +5,7 @@ import streamlit as st
 
 from database import database_ready, rows
 from oracle_brain import build_oracle_brain_snapshot
+from oracle_brain_component import render_oracle_brain_component
 
 
 st.set_page_config(
@@ -28,63 +29,37 @@ growth = snapshot["growth"]
 safety = snapshot["safety"]
 
 st.title("Oracle Brain")
-st.caption(f"Brain growth: {growth['knowledge_units']:,} retained evidence units · {growth['relationships']:,} learned relationships · last sync {growth['last_learning_sync'] or 'not recorded'}")
-
-# Evidence-driven neural field: visualizes what Oracle has actually learned.
-# It is deliberately read-only and has no execution authority.
-neural_payload = {
-    "entries": [
-        {"category": item["category"], "title": item["title"], "confidence": item["confidence"]}
-        for item in snapshot["entries"][:24]
-    ],
-    "regimes": [
-        {"strategy": item["strategy"], "regime": item["regime"], "samples": item["samples"],
-         "expectancy": item["expectancy"], "state": item["evidence_state"]}
-        for item in snapshot["regime_economics"][:30]
-    ],
-    "sources": [
-        {"title": item["title"], "provider": item.get("provider"), "category": item.get("category"),
-         "confidence": item.get("confidence"), "freshness": item.get("freshness_score"),
-         "symbol": item.get("symbol")}
-        for item in snapshot["sources"][:24]
-    ],
-    "episodes": [
-        {"symbol": item["symbol"], "strategy": item["strategy"], "regime": item["regime"],
-         "pnl": item["net_pnl"], "confidence": item["confidence"]}
-        for item in snapshot["episodes"][:24]
-    ],
-    "links": [
-        {"source": item["source_key"], "target": item["target_key"], "relation": item["relation"],
-         "confidence": item["confidence"], "evidence_count": item["evidence_count"]}
-        for item in snapshot["concept_links"][:40]
-    ],
-}
-import json
-_payload = json.dumps(neural_payload).replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
-st.html(f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1">
-<style>
-html,body{{margin:0;background:#05080e;color:#eaf6ff;font-family:system-ui;overflow:hidden}}
-#brain{{width:100%;height:430px;display:block;background:radial-gradient(circle at 50% 48%,#11243b 0,#07101d 42%,#03060b 78%);border:1px solid #263d58;border-radius:22px}}
-.hud{{position:absolute;left:18px;top:16px;padding:9px 11px;border:1px solid #294865;border-radius:12px;background:#07101dcc;backdrop-filter:blur(8px);font-size:11px}}
-.hud b{{display:block;letter-spacing:.12em;color:#78d9ff}} .hud span{{color:#93a9bb}}
-@media(max-width:720px){{#brain{{height:390px}}.hud{{left:10px;top:10px;font-size:10px}}}}
-</style></head><body><canvas id="brain"></canvas><div class="hud"><b>ORACLE NEURAL FIELD</b><span id="state">Evidence pulses are learned observations — visualization only</span></div>
-<script id="data" type="application/json">{_payload}</script><script>
-const D=JSON.parse(document.getElementById("data").textContent),c=document.getElementById("brain"),x=c.getContext("2d");let W,H,t=0,nodes=[];
-function resize(){{const r=c.getBoundingClientRect();c.width=Math.max(1,r.width*devicePixelRatio);c.height=Math.max(1,r.height*devicePixelRatio);W=r.width;H=r.height;x.setTransform(devicePixelRatio,0,0,devicePixelRatio,0,0);make();}}
-function make(){{nodes=[];const src=[
-...D.entries.map(v=>({{...v,kind:"knowledge",value:v.confidence||.5,label:v.title}})),
-...D.regimes.map(v=>({{...v,kind:"regime",value:Math.min(1,(v.samples||0)/200),label:v.strategy+" · "+v.regime}})),
-...D.sources.map(v=>({{...v,kind:"source",value:(v.confidence||.3)*(v.freshness||.5),label:v.title}})),
-...D.episodes.map(v=>({{...v,kind:"episode",value:v.confidence||.5,state:(v.pnl||0)>0?"positive":((v.pnl||0)<0?"negative":"mixed"),label:v.symbol+" · "+v.strategy}}))
-];const evidenceCount=D.entries.length+D.regimes.length+D.sources.length+D.episodes.length;const count=Math.max(18,Math.min(120,evidenceCount));for(let i=0;i<count;i++){{const a=(i/count)*Math.PI*2*3.7,r=(.08+.38*Math.sqrt((i+1)/count))*Math.min(W,H),v=src[i%Math.max(1,src.length)]||{{kind:"idle",value:.2,label:"awaiting evidence"}};nodes.push({{x:W*.5+Math.cos(a)*r*.72,y:H*.52+Math.sin(a)*r*.46,v,phase:i*.71}});}}}}
-function color(v,a){{if(v.state==="negative")return "rgba(255,82,112,"+a+")";if(v.state==="positive")return "rgba(75,245,164,"+a+")";if(v.kind==="knowledge")return "rgba(177,102,255,"+a+")";if(v.kind==="source")return "rgba(255,194,94,"+a+")";if(v.kind==="episode")return "rgba(95,234,205,"+a+")";return "rgba(80,199,255,"+a+")";}}
-function frame(){{t+=.018;x.clearRect(0,0,W,H);for(const n of nodes){{n.x=Math.max(14,Math.min(W-14,n.x));n.y=Math.max(14,Math.min(H-14,n.y));}}x.save();x.translate(Math.sin(t*.2)*2,Math.cos(t*.17)*2);for(let i=0;i<nodes.length;i++){{let a=nodes[i],b=nodes[(i*7+5)%nodes.length],d=Math.hypot(a.x-b.x,a.y-b.y);if(d<Math.min(W,H)*.38){{x.strokeStyle=color(a.v,.08+.08*Math.sin(t+a.phase));x.lineWidth=.7;x.beginPath();x.moveTo(a.x,a.y);x.quadraticCurveTo(W*.5,H*.5,b.x,b.y);x.stroke();}}}}for(const n of nodes){{let pulse=1+.35*Math.sin(t*2.4+n.phase),r=2.4+5*(n.v.value||.2)*pulse;x.shadowBlur=16;x.shadowColor=color(n.v,.8);x.fillStyle=color(n.v,.9);x.beginPath();x.arc(n.x,n.y,r,0,Math.PI*2);x.fill();}}x.restore();requestAnimationFrame(frame);}}
-new ResizeObserver(resize).observe(c);resize();frame();
-</script></body></html>""")
+activity = snapshot["learning_activity"]
 st.caption(
-    "Persistent engineering/research memory + live evidence summary. "
-    "Read-only dashboard; execution authority: NONE."
+    f"Brain growth: {growth['knowledge_units']:,} retained evidence units · "
+    f"{growth['relationships']:,} learned relationships · "
+    f"learning state {activity['status']} · last sync {activity['last_sync_at'] or 'not recorded'}"
+)
+
+a1, a2, a3, a4, a5 = st.columns(5)
+a1.metric("Brain state", activity["status"])
+a2.metric("New sources", activity["new_sources"])
+a3.metric("Revised sources", activity["revised_sources"])
+a4.metric("New exact outcomes", activity["new_exact_episodes"])
+a5.metric("Lessons updated", activity["lessons_updated"])
+
+if activity["status"] == "LEARNING":
+    st.success(
+        f"Oracle Brain learned from {activity['learned_this_cycle']} new or revised evidence item(s) "
+        "in its latest completed learning cycle."
+    )
+elif activity["status"] == "SYNCED — NO NEW EVIDENCE":
+    st.info("Oracle Brain completed its latest sync successfully, but no new/revised evidence was available to learn.")
+elif activity["status"] == "STALE":
+    st.warning("Oracle Brain learning sync is stale. The visualization will stay dim until a fresh learning cycle completes.")
+else:
+    st.warning("Oracle Brain has not recorded a completed learning sync yet.")
+
+# Evidence-driven anatomical neural field. It visualizes persisted learning state only.
+st.html(render_oracle_brain_component(snapshot))
+st.caption(
+    "The brain shape is a visualization of persisted research memory. "
+    "Learning status comes from completed Oracle Brain sync records; execution authority: NONE."
 )
 
 retention = snapshot["retention_health"]
