@@ -124,8 +124,29 @@ def _fake_rows(sql, params=()):
             "exact_outcomes": 30,
             "relationships": 40,
             "active_contradictions": 2,
-            "last_learning_sync": "2026-09-18T23:59:00+00:00",
+            "last_learning_sync": "2026-09-18T23:59:30+00:00",
         }]
+    if "FROM oracle_brain_learning_state" in sql:
+        return [
+            {
+                "pipeline_key": "intelligence",
+                "market": "global",
+                "last_sync_at": "2026-09-18T23:59:30+00:00",
+                "last_result": {"new": 2, "updated": 1},
+            },
+            {
+                "pipeline_key": "episodes",
+                "market": "crypto",
+                "last_sync_at": "2026-09-18T23:59:20+00:00",
+                "last_result": {"new_exact_episodes": 1},
+            },
+            {
+                "pipeline_key": "brain_v2",
+                "market": "crypto",
+                "last_sync_at": "2026-09-18T23:59:10+00:00",
+                "last_result": {"lessons_updated": 1},
+            },
+        ]
     if "paper_aeve_generations" in sql:
         return [
             {
@@ -234,6 +255,12 @@ def test_oracle_city_snapshot_builds_workers_exposure_agents_and_replay():
     assert snapshot["world_state"]["domains"]["logistics"]["events"] == 1
     assert snapshot["world_state"]["execution_impact"] == "NONE"
     assert snapshot["brain_growth"]["knowledge_units"] == 100
+    assert snapshot["brain_growth"]["learning_status"] == "LEARNING"
+    assert snapshot["brain_growth"]["learned_this_cycle"] == 5
+    assert snapshot["brain_growth"]["new_sources"] == 2
+    assert snapshot["brain_growth"]["revised_sources"] == 1
+    assert snapshot["brain_growth"]["new_exact_episodes"] == 1
+    assert snapshot["brain_growth"]["lessons_updated"] == 1
     assert snapshot["brain_growth"]["execution_authority"] == "NONE"
     assert any(item["destination"] == "energy" for item in snapshot["resident_agents"])
     assert any(item["destination"] == "brain" for item in snapshot["resident_agents"])
@@ -275,6 +302,9 @@ def test_oracle_city_component_contains_interactive_webgl_controls():
     assert "PAPER ONLY · LIVE " in rendered
     assert 'id="brainState"' in rendered
     assert 'id="worldState"' in rendered
+    assert 'BRAIN: LEARNING +' in rendered
+    assert 'brainLearningStatus==="LEARNING"' in rendered
+    assert 'brainLearningStatus==="STALE"' in rendered
     assert "createEnergy" in rendered
     assert "createLogistics" in rendered
     assert "createMacro" in rendered
@@ -420,19 +450,50 @@ def test_oracle_city_brain_visual_growth_uses_persisted_counts():
         now=datetime(2026, 9, 19, 0, 0, tzinfo=timezone.utc),
     )
     growth = snapshot["brain_growth"]
-    assert growth == {
-        "knowledge_units": 100,
-        "durable_lessons": 10,
-        "observations": 20,
-        "exact_outcomes": 30,
-        "relationships": 40,
-        "active_contradictions": 2,
-        "last_learning_sync": "2026-09-18T23:59:00+00:00",
-        "execution_authority": "NONE",
-    }
+    assert growth["knowledge_units"] == 100
+    assert growth["durable_lessons"] == 10
+    assert growth["observations"] == 20
+    assert growth["exact_outcomes"] == 30
+    assert growth["relationships"] == 40
+    assert growth["active_contradictions"] == 2
+    assert growth["last_learning_sync"] == "2026-09-18T23:59:30+00:00"
+    assert growth["learning_status"] == "LEARNING"
+    assert growth["learned_this_cycle"] == 5
+    assert growth["sync_age_seconds"] == 30.0
+    assert growth["execution_authority"] == "NONE"
     memory_nodes = [
         item for item in snapshot["decision_graph"]["nodes"]
         if str(item.get("id", "")).startswith("brain-memory:")
     ]
     assert len(memory_nodes) == 5
     assert any(item["metric"] == "100 evidence units" for item in memory_nodes)
+
+
+def test_oracle_city_brain_monitor_distinguishes_synced_without_new_evidence():
+    def rows_no_delta(sql, params=()):
+        if "SELECT COUNT(*)::int FROM oracle_brain_entries" in sql:
+            return [{
+                "durable_lessons": 1,
+                "observations": 2,
+                "exact_outcomes": 3,
+                "relationships": 4,
+                "active_contradictions": 0,
+                "last_learning_sync": "2026-09-18T23:59:30+00:00",
+            }]
+        if "FROM oracle_brain_learning_state" in sql:
+            return [{
+                "pipeline_key": "brain_v2",
+                "market": "cash",
+                "last_sync_at": "2026-09-18T23:59:30+00:00",
+                "last_result": {"lessons_updated": 0},
+            }]
+        return []
+
+    snapshot = build_oracle_city_snapshot(
+        rows_no_delta,
+        now=datetime(2026, 9, 19, 0, 0, tzinfo=timezone.utc),
+    )
+    assert snapshot["brain_growth"]["learning_status"] == "SYNCED — NO NEW EVIDENCE"
+    assert snapshot["brain_growth"]["learned_this_cycle"] == 0
+    rendered = render_oracle_city_component(snapshot)
+    assert 'BRAIN: SYNCED' in rendered

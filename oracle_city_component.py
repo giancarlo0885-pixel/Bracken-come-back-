@@ -137,7 +137,19 @@ document.getElementById("paperState").textContent=executionMode==="PAPER"
   : executionMode+" · LIVE "+(safety.live_trading_armed?"ARMED":"DISARMED");
 const brainGrowth=DATA.brain_growth||{};
 const worldState=DATA.world_state||{};
-document.getElementById("brainState").textContent="BRAIN: "+String(brainGrowth.knowledge_units||0)+" UNITS";
+const brainLearningStatus=String(brainGrowth.learning_status||"NOT SYNCED");
+const brainCycleDelta=Number(brainGrowth.learned_this_cycle||0);
+const brainChip=document.getElementById("brainState");
+brainChip.textContent=brainLearningStatus==="LEARNING"
+  ? "BRAIN: LEARNING +"+String(brainCycleDelta)
+  : brainLearningStatus.startsWith("SYNCED")
+  ? "BRAIN: SYNCED"
+  : "BRAIN: "+brainLearningStatus;
+brainChip.title=String(brainGrowth.knowledge_units||0)+" retained evidence units · "+
+  String(brainGrowth.relationships||0)+" relationships · last sync "+
+  String(brainGrowth.last_learning_sync||"not recorded");
+brainChip.style.borderColor=brainLearningStatus==="LEARNING"?"#4bf49b":brainLearningStatus==="STALE"?"#ff6767":"#28516a";
+brainChip.style.color=brainLearningStatus==="LEARNING"?"#4bf49b":brainLearningStatus==="STALE"?"#ff8d9d":"#dff5ff";
 document.getElementById("worldState").textContent="WORLD: "+String(worldState.current_events||0)+" EVENTS";
 
 function esc(value){
@@ -815,8 +827,8 @@ function animate(){
   requestAnimationFrame(animate);elapsed+=prefersReduced?.004:.012;controls.update();
   flowObjects.forEach(item=>{const phase=(elapsed*.12+item.particle.userData.phase)%1;item.particle.position.copy(item.curve.getPointAt(phase));});
   brainEdges.forEach(item=>{const phase=(elapsed*.18+item.particle.userData.phase)%1;item.particle.position.copy(item.curve.getPointAt(phase));});
-  brainObjects.forEach(o=>{if(brainMode){const p=1+Math.sin(elapsed*2.4+o.userData.phase)*.055;o.scale.setScalar(p);o.rotation.y+=.004;}});
-  brainShells.forEach(shell=>{if(brainMode&&shell.userData.baseScale){const p=1+Math.sin(elapsed*.9+shell.userData.phase)*.012;shell.scale.copy(shell.userData.baseScale).multiplyScalar(p);}});
+  brainObjects.forEach(o=>{if(brainMode){const amp=brainLearningStatus==="LEARNING"?.11:.035;const p=1+Math.sin(elapsed*2.4+o.userData.phase)*amp;o.scale.setScalar(p);o.rotation.y+=brainLearningStatus==="LEARNING"?.007:.003;}});
+  brainShells.forEach(shell=>{if(brainMode&&shell.userData.baseScale){const amp=brainLearningStatus==="LEARNING"?.020:.006;const p=1+Math.sin(elapsed*.9+shell.userData.phase)*amp;shell.scale.copy(shell.userData.baseScale).multiplyScalar(p);}});
   workerObjects.forEach(w=>{
     const state=String(w.userData.data.state||""),cycle=(Math.sin(elapsed*w.userData.speed+w.userData.phase)+1)/2;
     const t=(state==="RESTING"||state==="HOME")?0.16:(state==="RECREATION"?0.72:cycle);

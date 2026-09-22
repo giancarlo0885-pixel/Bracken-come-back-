@@ -593,6 +593,8 @@ def _build_world_state(events: list[dict[str, Any]], now: datetime) -> dict[str,
 def _brain_growth_snapshot(
     fetch_rows: FetchRows,
     warnings: list[str],
+    *,
+    now: datetime,
 ) -> dict[str, Any]:
     rows_ = _safe_select(
         fetch_rows,
@@ -612,6 +614,56 @@ def _brain_growth_snapshot(
     observations = int(row.get("observations") or 0)
     outcomes = int(row.get("exact_outcomes") or 0)
     relationships = int(row.get("relationships") or 0)
+
+    learning_rows = _safe_select(
+        fetch_rows,
+        """SELECT pipeline_key,market,last_sync_at,last_result
+           FROM oracle_brain_learning_state
+           ORDER BY pipeline_key,market""",
+        (),
+        warnings,
+        "Brain learning status unavailable",
+    )
+    parsed_rows: list[tuple[dict[str, Any], datetime]] = []
+    for item in learning_rows:
+        parsed = _parse_time(item.get("last_sync_at"))
+        if parsed is not None:
+            parsed_rows.append((item, parsed))
+    latest_sync = max((parsed for _, parsed in parsed_rows), default=None)
+    recent_rows = (
+        [
+            item for item, parsed in parsed_rows
+            if latest_sync is not None
+            and (latest_sync - parsed).total_seconds() <= 15 * 60
+        ]
+        if latest_sync is not None
+        else []
+    )
+    new_sources = revised_sources = new_exact_episodes = lessons_updated = 0
+    for item in recent_rows:
+        result = _payload(item.get("last_result"))
+        pipeline = str(item.get("pipeline_key") or "")
+        if pipeline == "intelligence":
+            new_sources += int(_number(result.get("new")) or 0)
+            revised_sources += int(_number(result.get("updated")) or 0)
+        elif pipeline == "episodes":
+            new_exact_episodes += int(_number(result.get("new_exact_episodes")) or 0)
+        elif pipeline == "brain_v2":
+            lessons_updated += int(_number(result.get("lessons_updated")) or 0)
+    learned_this_cycle = new_sources + revised_sources + new_exact_episodes + lessons_updated
+    sync_age_seconds = (
+        None if latest_sync is None
+        else max(0.0, (now - latest_sync).total_seconds())
+    )
+    if latest_sync is None:
+        learning_status = "NOT SYNCED"
+    elif sync_age_seconds is not None and sync_age_seconds > 45 * 60:
+        learning_status = "STALE"
+    elif learned_this_cycle > 0:
+        learning_status = "LEARNING"
+    else:
+        learning_status = "SYNCED — NO NEW EVIDENCE"
+
     return {
         "knowledge_units": durable + observations + outcomes + relationships,
         "durable_lessons": durable,
@@ -619,7 +671,18 @@ def _brain_growth_snapshot(
         "exact_outcomes": outcomes,
         "relationships": relationships,
         "active_contradictions": int(row.get("active_contradictions") or 0),
-        "last_learning_sync": str(row.get("last_learning_sync") or "") or None,
+        "last_learning_sync": (
+            latest_sync.isoformat()
+            if latest_sync is not None
+            else str(row.get("last_learning_sync") or "") or None
+        ),
+        "learning_status": learning_status,
+        "learned_this_cycle": learned_this_cycle,
+        "new_sources": new_sources,
+        "revised_sources": revised_sources,
+        "new_exact_episodes": new_exact_episodes,
+        "lessons_updated": lessons_updated,
+        "sync_age_seconds": None if sync_age_seconds is None else round(sync_age_seconds, 1),
         "execution_authority": "NONE",
     }
 
@@ -854,7 +917,7 @@ def build_oracle_city_snapshot(
     crypto = worker_by_market["crypto"]
     exposure = sum(item["value"] for item in position_views)
     world_state = _build_world_state(events, now)
-    brain_growth = _brain_growth_snapshot(fetch_rows, warnings)
+    brain_growth = _brain_growth_snapshot(fetch_rows, warnings, now=now)
     world_domains = world_state["domains"]
 
     def _world_metric(domain: str) -> str:
@@ -874,8 +937,16 @@ def build_oracle_city_snapshot(
               "Provenance-aware news, macro, policy and external context already ingested by Oracle.",
               -6, -5, height=5.1),
         _node("brain", "Oracle Brain Research Center", "online" if brain_growth["knowledge_units"] else "waiting",
-              f"{brain_growth['knowledge_units']:,} evidence units",
-              f"Persisted learning: {brain_growth['observations']} observations, {brain_growth['exact_outcomes']} exact outcomes, {brain_growth['relationships']} relationships. Research-only.",
+              (
+                  f"{brain_growth['learning_status']} · +{brain_growth['learned_this_cycle']}"
+                  if brain_growth["learning_status"] == "LEARNING"
+                  else brain_growth["learning_status"]
+              ),
+              (
+                  f"{brain_growth['knowledge_units']:,} retained evidence units · "
+                  f"{brain_growth['observations']} observations · {brain_growth['exact_outcomes']} exact outcomes · "
+                  f"{brain_growth['relationships']} relationships. Research-only."
+              ),
               -17, 7, height=5.4),
         _node("macro", "Macro & Rates District", world_domains["macro"]["state"],
               _world_metric("macro"), _world_detail("macro", "Rates, inflation, employment and monetary-policy context."), -15, -14, height=5.0),
@@ -1162,7 +1233,15 @@ def build_oracle_city_snapshot(
         {"id": "resident-logistics", "title": "Port Dispatcher", "state": "ANALYZING" if world_domains["logistics"]["events"] else "MONITORING", "home": "residential", "destination": "logistics", "detail": "Observes freight, ports, shipping and supply-chain conditions."},
         {"id": "resident-consumer", "title": "Consumer Economy Analyst", "state": "ANALYZING" if world_domains["consumer"]["events"] else "MONITORING", "home": "residential", "destination": "consumer", "detail": "Observes housing, retail, household and spending conditions."},
         {"id": "resident-technology", "title": "Technology Engineer", "state": "ANALYZING" if world_domains["technology"]["events"] else "RESEARCHING", "home": "residential", "destination": "technology", "detail": "Studies AI, semiconductor, quantum and industrial-technology events."},
-        {"id": "resident-brain", "title": "Brain Researcher", "state": "LEARNING" if brain_growth["knowledge_units"] else "RESEARCHING", "home": "residential", "destination": "brain", "detail": "Visualizes durable Oracle Brain learning. It has no execution authority."},
+        {"id": "resident-brain", "title": "Brain Researcher", "state": (
+            "LEARNING" if brain_growth["learning_status"] == "LEARNING"
+            else "MONITORING" if brain_growth["learning_status"].startswith("SYNCED")
+            else "RESEARCHING"
+        ), "home": "residential", "destination": "brain", "detail": (
+            f"Brain state {brain_growth['learning_status']} · "
+            f"{brain_growth['learned_this_cycle']} new/revised evidence item(s) in the latest cycle. "
+            "It has no execution authority."
+        )},
         {"id": "resident-pattern", "title": "Pattern Researcher", "state": "ANALYZING" if opportunities else "RESEARCHING", "home": "residential", "destination": "patterns", "detail": "Studies setups, regimes, and entry evidence."},
         {"id": "resident-council", "title": "Council Analyst", "state": "COUNCIL_REVIEW" if opportunities else "IDLE", "home": "residential", "destination": "council", "detail": "Observes Council decisions without execution authority."},
         {"id": "resident-risk", "title": "Risk Guardian", "state": "RISK_REVIEW" if block_count else "MONITORING", "home": "residential", "destination": "risk", "detail": "Tracks safety gates, blocks, and capacity constraints."},
