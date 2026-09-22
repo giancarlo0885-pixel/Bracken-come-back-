@@ -18,6 +18,7 @@ WEAKNESS_MIN_SAMPLES = 30
 PROMOTION_MIN_SAMPLES = 200
 PROMOTION_MIN_PROFIT_FACTOR = 1.05
 PROMOTION_MAX_CALIBRATION_ERROR = 0.15
+PROMOTION_MAX_DRAWDOWN_PCT = 20.0
 
 
 def _f(v: Any, default: float = 0.0) -> float:
@@ -221,14 +222,27 @@ def evaluate_promotion_evidence(conn: Any, market: str) -> dict[str, Any]:
         (market,CALIBRATION_MIN_SAMPLES),
     ).fetchone() or {}
     calibration_error = _f(cal.get("error"), 1.0)
+    pnl_rows = list(conn.execute(
+        """SELECT net_pnl FROM oracle_brain_episodes
+           WHERE provenance_status='exact' AND market=%s
+           ORDER BY exit_time ASC,episode_key ASC""",
+        (market,),
+    ).fetchall())
+    equity = peak = 0.0
+    max_drawdown = 0.0
+    for item in pnl_rows:
+        equity += _f(item.get("net_pnl"))
+        peak = max(peak, equity)
+        max_drawdown = max(max_drawdown, peak - equity)
+    gross_profit = max(_f(stats.get("gross_win")), 0.0)
+    max_drawdown_pct = (max_drawdown / gross_profit * 100.0) if gross_profit > 0 else (100.0 if max_drawdown > 0 else 0.0)
     reasons = []
     if samples < PROMOTION_MIN_SAMPLES: reasons.append("insufficient_exact_samples")
     if _f(stats.get("expectancy")) <= 0: reasons.append("nonpositive_expectancy")
     if pf < PROMOTION_MIN_PROFIT_FACTOR: reasons.append("profit_factor_below_floor")
     if calibration_error > PROMOTION_MAX_CALIBRATION_ERROR: reasons.append("calibration_error_above_ceiling")
-    # Drawdown is deliberately not inferred from unordered aggregates.
-    reasons.append("forward_drawdown_validation_required")
-    eligible = False
+    if max_drawdown_pct > PROMOTION_MAX_DRAWDOWN_PCT: reasons.append("drawdown_above_ceiling")
+    eligible = not reasons
     result = {
         "candidate_key": f"brain_paper_influence:{market}",
         "market": market,
@@ -236,7 +250,7 @@ def evaluate_promotion_evidence(conn: Any, market: str) -> dict[str, Any]:
         "expectancy": _f(stats.get("expectancy")),
         "profit_factor": pf,
         "calibration_error": calibration_error,
-        "max_drawdown": None,
+        "max_drawdown": max_drawdown_pct,
         "eligible": eligible,
         "reasons": reasons,
         "execution_impact": "NONE",
@@ -249,9 +263,9 @@ def evaluate_promotion_evidence(conn: Any, market: str) -> dict[str, Any]:
            ON CONFLICT(candidate_key) DO UPDATE SET
                samples=EXCLUDED.samples,expectancy=EXCLUDED.expectancy,
                profit_factor=EXCLUDED.profit_factor,calibration_error=EXCLUDED.calibration_error,
-               max_drawdown=EXCLUDED.max_drawdown,eligible=FALSE,reasons=EXCLUDED.reasons,
+               max_drawdown=EXCLUDED.max_drawdown,eligible=EXCLUDED.eligible,reasons=EXCLUDED.reasons,
                evaluated_at=NOW()""",
-        (result["candidate_key"],market,samples,result["expectancy"],pf,calibration_error,None,False,json.dumps(reasons)),
+        (result["candidate_key"],market,samples,result["expectancy"],pf,calibration_error,max_drawdown_pct,eligible,json.dumps(reasons)),
     )
     return result
 
