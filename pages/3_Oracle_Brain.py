@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 
 from database import database_ready, rows
 from oracle_brain import build_oracle_brain_snapshot
@@ -55,8 +56,12 @@ elif activity["status"] == "STALE":
 else:
     st.warning("Oracle Brain has not recorded a completed learning sync yet.")
 
-# Evidence-driven anatomical neural field. It visualizes persisted learning state only.
-st.html(render_oracle_brain_component(snapshot))
+# Evidence-driven anatomical neural field. JavaScript must execute, so render in a Streamlit component iframe.
+components.html(
+    render_oracle_brain_component(snapshot),
+    height=610,
+    scrolling=False,
+)
 st.caption(
     "The brain shape is a visualization of persisted research memory. "
     "Learning status comes from completed Oracle Brain sync records; execution authority: NONE."
