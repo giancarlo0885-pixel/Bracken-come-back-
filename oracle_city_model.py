@@ -765,7 +765,7 @@ def build_oracle_city_snapshot(
         warnings, "portfolio summary unavailable",
     )
     positions = _safe_select(
-        fetch_rows, "SELECT * FROM positions ORDER BY market,symbol", (),
+        fetch_rows, "SELECT * FROM positions WHERE COALESCE(quantity,0) <> 0 ORDER BY market,symbol", (),
         warnings, "positions unavailable",
     )
     opportunities = _safe_select(
@@ -777,7 +777,9 @@ def build_oracle_city_snapshot(
         (), warnings, "opportunity rankings unavailable",
     )
     trades = _safe_select(
-        fetch_rows, "SELECT * FROM trades ORDER BY id DESC LIMIT 80", (),
+        fetch_rows, """SELECT * FROM trades
+           WHERE UPPER(COALESCE(side, '')) IN ('BUY','SELL')
+           ORDER BY id DESC LIMIT 80""", (),
         warnings, "trade history unavailable",
     )
     decisions = _safe_select(
@@ -970,7 +972,7 @@ def build_oracle_city_snapshot(
               "Risk, sizing and eligibility gates remain authoritative.",
               4, 0, height=5.0),
         _node("execution", "Execution Center", "online" if trades else "waiting",
-              f"{len(trades)} recent records", "Persisted paper execution history.",
+              f"{len(trades)} paper fill records", "Persisted canonical BUY/SELL paper execution history.",
               8, 0, height=5.4),
         _node("portfolio", "Portfolio Vault", "online" if portfolios else "waiting",
               f"{len(position_views)} open positions",
@@ -1214,16 +1216,26 @@ def build_oracle_city_snapshot(
 
     active_work = len(opportunity_views) + len(trades)
     block_count = int(decision_graph.get("summary", {}).get("downstream_blocks") or 0)
+    closed_result_records = sum(
+        1 for item in trades
+        if str(item.get("side") or "").upper() == "SELL"
+        and item.get("realized_pnl") is not None
+    )
     if warnings:
         city_mood = "DEGRADED"
+        city_mood_reason = f"{len(warnings)} City data feed warning(s)"
     elif block_count >= 3:
         city_mood = "DEFENSIVE"
+        city_mood_reason = f"{block_count} downstream safety/capacity blocks"
     elif aeve_summary["available"] and (aeve_accepted or 0) < 1000:
         city_mood = "RESEARCHING"
+        city_mood_reason = f"AEVE generation evidence {aeve_accepted or 0}/1000"
     elif active_work > 0:
         city_mood = "PRODUCTIVE"
+        city_mood_reason = "paper fills and/or ranked opportunities are present"
     else:
         city_mood = "CAUTIOUS"
+        city_mood_reason = "no current paper fills or ranked opportunities"
 
     resident_agents = [
         {"id": "resident-data", "title": "Data Scout", "state": "MONITORING" if not warnings else "MAINTENANCE", "home": "residential", "destination": "data", "detail": "Checks persisted market and provider state."},
@@ -1271,6 +1283,7 @@ def build_oracle_city_snapshot(
         "warnings": warnings,
         "safety": safety,
         "city_mood": city_mood,
+        "city_mood_reason": city_mood_reason,
         "aeve": aeve_summary,
         "world_state": world_state,
         "brain_growth": brain_growth,
@@ -1282,6 +1295,10 @@ def build_oracle_city_snapshot(
             "workers_total": len(worker_views),
             "open_positions": len(position_views),
             "recent_trades": len(trades),
+            "paper_fill_records": len(trades),
+            "closed_result_records": closed_result_records,
+            "downstream_blocks": block_count,
+            "city_mood_reason": city_mood_reason,
             "ranked_opportunities": len(opportunity_views),
             "known_exposure": round(exposure, 2),
             "world_events": int(world_state["current_events"]),

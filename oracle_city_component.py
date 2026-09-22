@@ -25,7 +25,7 @@ def render_oracle_city_component(snapshot: dict[str, Any]) -> str:
 html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#02050a;color:#eef8ff;font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
 #app{position:relative;width:100%;height:100%;min-height:780px;overflow:hidden;border:1px solid #17394d;border-radius:22px;background:#02050a;box-shadow:inset 0 0 80px rgba(8,57,87,.2)}
 #stage{position:absolute;inset:0}
-#status{position:absolute;z-index:20;left:50%;top:50%;transform:translate(-50%,-50%);padding:10px 13px;border-radius:10px;background:rgba(2,8,12,.9);border:1px solid #28516a;color:#b8d5e4;font-size:11px}
+#status{position:absolute;z-index:20;left:50%;top:50%;transform:translate(-50%,-50%);padding:10px 13px;border-radius:10px;background:rgba(2,8,12,.9);border:1px solid #28516a;color:#b8d5e4;font-size:11px}\n#fallbackCity{display:none;position:absolute;inset:0;z-index:3;overflow:hidden;background:linear-gradient(#183a5a 0%,#e59a65 48%,#07111b 49%,#02060b 100%)}\n#fallbackCity.show{display:block}\n#fallbackCity .skyline{position:absolute;left:3%;right:3%;bottom:8%;height:58%;display:flex;align-items:flex-end;justify-content:space-around;gap:1.2%}\n#fallbackCity .tower{flex:1;max-width:8%;min-width:18px;border:1px solid #35bff2;background:linear-gradient(90deg,#071521,#173d58,#071521);box-shadow:0 0 24px rgba(41,183,255,.3);position:relative}\n#fallbackCity .tower:after{content:"";position:absolute;inset:8% 18%;background:repeating-linear-gradient(0deg,#ffd66b 0 2px,transparent 2px 9px);opacity:.75}\n#fallbackCity .fallbackTitle{position:absolute;left:50%;top:46%;transform:translate(-50%,-50%);z-index:4;text-align:center;text-shadow:0 2px 14px #000}\n#fallbackCity .fallbackTitle b{font-size:clamp(22px,5vw,54px);letter-spacing:.08em}\n#fallbackCity .fallbackTitle span{display:block;margin-top:8px;font-size:12px;color:#d7edff}
 .hud{position:absolute;z-index:10;pointer-events:none}
 .topbar{left:14px;right:14px;top:14px;display:flex;gap:10px;align-items:flex-start;justify-content:space-between}
 .brand,.toolbar,.inspector,.replay{pointer-events:auto;border:1px solid rgba(81,159,197,.38);background:linear-gradient(180deg,rgba(3,12,19,.9),rgba(2,8,13,.82));backdrop-filter:blur(16px);box-shadow:0 18px 58px rgba(0,0,0,.35)}
@@ -76,7 +76,7 @@ input[type=range]{width:100%;accent-color:#55d4ff}
 </head>
 <body>
 <div id="app">
-  <div id="stage"></div>
+  <div id="stage"></div>\n  <div id="fallbackCity" aria-live="polite"><div class="skyline"></div><div class="fallbackTitle"><b>ORACLE CITY</b><span>Live data shell · 3D renderer unavailable</span></div></div>
   <div id="status">Building cinematic Oracle City…</div>
   <div id="hovercard"></div>
   <div class="hud topbar">
@@ -116,7 +116,7 @@ import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { CSS2DRenderer, CSS2DObject } from "three/addons/renderers/CSS2DRenderer.js";
 
-const DATA=JSON.parse(document.getElementById("oracle-data").textContent);
+window.__oracleCityBooted=true;\nconst DATA=JSON.parse(document.getElementById("oracle-data").textContent);
 const app=document.getElementById("app");
 const stage=document.getElementById("stage");
 const status=document.getElementById("status");

@@ -54,7 +54,7 @@ c1, c2, c3, c4, c5 = st.columns(5)
 c1.metric("Systems online", f"{summary['workers_online']}/{summary['workers_total']}")
 c2.metric("Open positions", summary["open_positions"])
 c3.metric("Trade ideas", summary["ranked_opportunities"])
-c4.metric("Recent trades", summary["recent_trades"])
+c4.metric("Paper fill records", summary.get("paper_fill_records", summary["recent_trades"]))
 c5.metric("Money in positions", "$" + f"{summary['known_exposure']:,.2f}")
 
 aeve = snapshot.get("aeve", {})
@@ -62,6 +62,7 @@ safety = snapshot.get("safety", {})
 aeve_progress = "Unavailable / 1000" if aeve.get("accepted") is None else f"{aeve['accepted']} / {aeve.get('target', 1000)}"
 m1, m2, m3, m4, m5 = st.columns(5)
 m1.metric("City mood", snapshot.get("city_mood") or "UNKNOWN")
+st.caption("City mood reason: " + str(snapshot.get("city_mood_reason") or "not available"))
 m2.metric("AEVE progress", aeve_progress)
 m3.metric("Execution mode", str(safety.get("execution_mode") or snapshot.get("execution_mode") or "unknown").upper())
 m4.metric("Broker submission", "ENABLED" if safety.get("broker_submission_enabled") else "DISABLED")
@@ -70,10 +71,10 @@ m5.metric("Live trading", "ARMED" if safety.get("live_trading_armed") else "DISA
 brain_summary = snapshot.get("decision_graph", {}).get("summary", {})
 b1, b2, b3, b4 = st.columns(4)
 b1.metric("Decisions tracked", int(brain_summary.get("traced_decisions") or 0))
-b2.metric("Trades with results", int(brain_summary.get("linked_outcomes") or 0))
+b2.metric("Result-linked provenance", int(brain_summary.get("linked_outcomes") or 0))
 b3.metric("Safety blocks", int(brain_summary.get("downstream_blocks") or 0))
 brain_gaps = int(brain_summary.get("recent_closed_provenance_gaps") or 0)
-b4.metric("Trades missing history link", brain_gaps)
+b4.metric("Closed trades missing provenance", brain_gaps)
 if brain_gaps:
     st.error(
         f"{brain_gaps} recent closed trade(s) lack a canonical decision provenance link. "
@@ -83,6 +84,12 @@ if brain_gaps:
 
 world_state = snapshot.get("world_state", {})
 brain_growth = snapshot.get("brain_growth", {})
+x1, x2, x3 = st.columns(3)
+x1.metric("Canonical open positions", summary["open_positions"])
+x2.metric("Closed fills with realized P&L", int(summary.get("closed_result_records") or 0))
+x3.metric("Downstream blocks", int(summary.get("downstream_blocks") or 0))
+st.caption("Paper fill records are canonical BUY/SELL rows from the trades table. Result-linked provenance is a separate attribution metric and is not an execution count.")
+
 st.subheader("World state & Brain learning")
 w1, w2, w3, w4, w5 = st.columns(5)
 w1.metric("Current world events", int(world_state.get("current_events") or 0))
