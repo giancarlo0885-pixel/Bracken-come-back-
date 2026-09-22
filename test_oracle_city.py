@@ -84,11 +84,48 @@ def _fake_rows(sql, params=()):
     if "intelligence_events" in sql:
         return [
             {
+                "id": 1,
+                "category": "MACRO",
+                "provider": "Federal Reserve",
                 "title": "Macro pulse",
-                "details": "Rates stable",
+                "details": {"fact": "Rates stable", "impact_score": 70},
+                "verification_status": "verified",
+                "confidence": 0.95,
+                "event_time": "2026-09-18T23:56:00+00:00",
                 "created_at": "2026-09-18T23:56:00+00:00",
-            }
+            },
+            {
+                "id": 2,
+                "category": "ENERGY",
+                "provider": "EIA",
+                "title": "Crude oil inventory update",
+                "details": {"fact": "Oil inventories changed", "impact_score": 65},
+                "verification_status": "verified",
+                "confidence": 0.92,
+                "event_time": "2026-09-18T23:55:00+00:00",
+                "created_at": "2026-09-18T23:55:00+00:00",
+            },
+            {
+                "id": 3,
+                "category": "SHIPPING",
+                "provider": "Port data",
+                "title": "Freight and port throughput update",
+                "details": {"fact": "Shipping conditions observed", "impact_score": 45},
+                "verification_status": "reported",
+                "confidence": 0.70,
+                "event_time": "2026-09-18T23:54:00+00:00",
+                "created_at": "2026-09-18T23:54:00+00:00",
+            },
         ]
+    if "SELECT COUNT(*)::int FROM oracle_brain_entries" in sql:
+        return [{
+            "durable_lessons": 10,
+            "observations": 20,
+            "exact_outcomes": 30,
+            "relationships": 40,
+            "active_contradictions": 2,
+            "last_learning_sync": "2026-09-18T23:59:00+00:00",
+        }]
     if "paper_aeve_generations" in sql:
         return [
             {
@@ -190,6 +227,17 @@ def test_oracle_city_snapshot_builds_workers_exposure_agents_and_replay():
     assert {item["state"] for item in snapshot["resident_agents"]} >= {"MONITORING", "LEARNING", "TRAINING"}
     node_ids = {item["id"] for item in snapshot["nodes"]}
     assert {"academy", "aeve", "arena", "residential", "wellness", "community", "recreation"} <= node_ids
+    assert {"brain", "macro", "energy", "logistics", "consumer", "technology"} <= node_ids
+    assert snapshot["world_state"]["current_events"] == 3
+    assert snapshot["world_state"]["domains"]["macro"]["events"] == 1
+    assert snapshot["world_state"]["domains"]["energy"]["events"] == 1
+    assert snapshot["world_state"]["domains"]["logistics"]["events"] == 1
+    assert snapshot["world_state"]["execution_impact"] == "NONE"
+    assert snapshot["brain_growth"]["knowledge_units"] == 100
+    assert snapshot["brain_growth"]["execution_authority"] == "NONE"
+    assert any(item["destination"] == "energy" for item in snapshot["resident_agents"])
+    assert any(item["destination"] == "brain" for item in snapshot["resident_agents"])
+    assert any(item["id"] == "brain-memory:core" for item in snapshot["decision_graph"]["nodes"])
     arena = {(item["strategy"], item["regime"]): item for item in snapshot["strategy_arena"]}
     assert arena[("oracle_council_v3", "trend_up")]["evidence_state"] == "PROMISING — PAPER ONLY"
     assert arena[("oracle_council_v3", "trend_up")]["control"] is True
@@ -224,7 +272,15 @@ def test_oracle_city_component_contains_interactive_webgl_controls():
     assert "sunVisual" in rendered
     assert "moonVisual" in rendered
     assert "setInterval(applyTimeOfDay,60000)" in rendered
-    assert "PAPER ACTIVE · REAL MONEY" in rendered
+    assert "PAPER ONLY · LIVE " in rendered
+    assert 'id="brainState"' in rendered
+    assert 'id="worldState"' in rendered
+    assert "createEnergy" in rendered
+    assert "createLogistics" in rendered
+    assert "createMacro" in rendered
+    assert "createConsumer" in rendered
+    assert "createBrainResearch" in rendered
+    assert "createTechnology" in rendered
     assert "CITY_VIEW_STORAGE_KEY" in rendered
     assert "restoreCityViewState" in rendered
     assert "setInterval(saveCityViewState,1000)" in rendered
@@ -313,8 +369,8 @@ def test_oracle_city_page_leads_with_cinematic_city():
     assert city < status
     assert "Cinematic Metropolis" in source
     assert "height=980" in source
-    assert 'auto_refresh = st.toggle("Paper live", value=True)' in source
-    assert 'st_autorefresh(interval=5_000, key="oracle-city-paper-live-refresh")' in source
+    assert 'auto_refresh = st.toggle("Sync data every 60s", value=False)' in source
+    assert 'st_autorefresh(interval=60_000, key="oracle-city-world-sync")' in source
 
 
 def test_oracle_city_defaults_to_city_first_uncluttered_view():
@@ -341,3 +397,42 @@ def test_oracle_city_day_night_cycle_uses_viewer_local_clock():
     assert "renderer.toneMappingExposure=1.02+daylight*.50+twilight*.10" in rendered
     assert "sunLight.intensity=daylight" in rendered
     assert "starMaterial.opacity" in rendered
+
+
+def test_oracle_city_world_state_preserves_provenance_and_does_not_execute():
+    snapshot = build_oracle_city_snapshot(
+        _fake_rows,
+        now=datetime(2026, 9, 19, 0, 0, tzinfo=timezone.utc),
+    )
+    events = snapshot["world_state"]["top_events"]
+    assert events
+    assert all(item["execution_impact"] == "NONE" for item in events)
+    assert any(item["provider"] == "EIA" and "energy" in item["domains"] for item in events)
+    assert any(item["provider"] == "Federal Reserve" and "macro" in item["domains"] for item in events)
+    source = Path("oracle_city_model.py").read_text(encoding="utf-8")
+    assert "submit_order(" not in source
+    assert "process_signals(" not in source
+
+
+def test_oracle_city_brain_visual_growth_uses_persisted_counts():
+    snapshot = build_oracle_city_snapshot(
+        _fake_rows,
+        now=datetime(2026, 9, 19, 0, 0, tzinfo=timezone.utc),
+    )
+    growth = snapshot["brain_growth"]
+    assert growth == {
+        "knowledge_units": 100,
+        "durable_lessons": 10,
+        "observations": 20,
+        "exact_outcomes": 30,
+        "relationships": 40,
+        "active_contradictions": 2,
+        "last_learning_sync": "2026-09-18T23:59:00+00:00",
+        "execution_authority": "NONE",
+    }
+    memory_nodes = [
+        item for item in snapshot["decision_graph"]["nodes"]
+        if str(item.get("id", "")).startswith("brain-memory:")
+    ]
+    assert len(memory_nodes) == 5
+    assert any(item["metric"] == "100 evidence units" for item in memory_nodes)
