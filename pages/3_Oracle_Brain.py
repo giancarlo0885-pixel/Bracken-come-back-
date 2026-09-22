@@ -24,6 +24,60 @@ if st.button("Refresh Brain", type="primary"):
     st.rerun()
 
 snapshot = build_oracle_brain_snapshot(rows)
+
+# Authoritative AEVE research-generation progress. Count only generation-isolated
+# outcomes produced by the AEVE evaluator; Council approvals/signals are not trades.
+try:
+    aeve_rows = rows("""
+        SELECT g.generation,g.started_at,g.config_hash,g.status,
+               COUNT(o.id)::int AS observed_outcomes,
+               COUNT(o.id) FILTER (WHERE o.would_trade)::int AS accepted_trades,
+               COUNT(o.id) FILTER (
+                   WHERE o.would_trade AND o.provenance_version >= 2
+                     AND o.config_hash = g.config_hash
+               )::int AS verified_trades,
+               COUNT(o.id) FILTER (
+                   WHERE o.would_trade AND o.net_pnl > 0
+                     AND o.provenance_version >= 2 AND o.config_hash = g.config_hash
+               )::int AS winners,
+               COUNT(o.id) FILTER (
+                   WHERE o.would_trade AND o.net_pnl <= 0
+                     AND o.provenance_version >= 2 AND o.config_hash = g.config_hash
+               )::int AS non_winners,
+               COALESCE(SUM(o.net_pnl) FILTER (
+                   WHERE o.would_trade AND o.provenance_version >= 2
+                     AND o.config_hash = g.config_hash
+               ),0)::double precision AS net_pnl
+        FROM paper_aeve_generations g
+        LEFT JOIN paper_aeve_generation_outcomes o
+          ON o.generation=g.generation AND o.config_hash=g.config_hash
+        WHERE g.status='ACTIVE'
+        GROUP BY g.generation,g.started_at,g.config_hash,g.status
+        ORDER BY g.generation DESC LIMIT 1
+    """)
+except Exception:
+    aeve_rows = []
+
+if aeve_rows:
+    aeve = aeve_rows[0]
+    completed = int(aeve.get("verified_trades") or 0)
+    target = 1000
+    st.subheader("AEVE Generation Progress")
+    p1, p2, p3, p4 = st.columns(4)
+    p1.metric("Generation", int(aeve.get("generation") or 1))
+    p2.metric("Verified trades", f"{completed:,} / {target:,}")
+    p3.metric("Remaining", f"{max(0, target-completed):,}")
+    p4.metric("Net post-cost P&L", f"${float(aeve.get('net_pnl') or 0.0):,.2f}")
+    st.progress(min(1.0, completed / target))
+    st.caption(
+        f"Accepted AEVE outcomes only · provenance v2+ · active config hash matched · "
+        f"winners {int(aeve.get('winners') or 0):,} · "
+        f"non-winners {int(aeve.get('non_winners') or 0):,}. "
+        "Council approvals, scans, quote handoffs, and rejected shadow candidates do not increment this counter."
+    )
+else:
+    st.warning("AEVE generation progress is unavailable; no active generation-isolated outcome row was returned.")
+
 summary = snapshot["summary"]
 growth = snapshot["growth"]
 safety = snapshot["safety"]
