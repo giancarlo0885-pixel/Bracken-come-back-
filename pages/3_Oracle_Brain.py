@@ -24,9 +24,11 @@ if st.button("Refresh Brain", type="primary"):
 
 snapshot = build_oracle_brain_snapshot(rows)
 summary = snapshot["summary"]
+growth = snapshot["growth"]
 safety = snapshot["safety"]
 
 st.title("Oracle Brain")
+st.caption(f"Brain growth: {growth['knowledge_units']:,} retained evidence units · {growth['relationships']:,} learned relationships · last sync {growth['last_learning_sync'] or 'not recorded'}")
 
 # Evidence-driven neural field: visualizes what Oracle has actually learned.
 # It is deliberately read-only and has no execution authority.
@@ -75,7 +77,7 @@ function make(){{nodes=[];const src=[
 ...D.regimes.map(v=>({{...v,kind:"regime",value:Math.min(1,(v.samples||0)/200),label:v.strategy+" · "+v.regime}})),
 ...D.sources.map(v=>({{...v,kind:"source",value:(v.confidence||.3)*(v.freshness||.5),label:v.title}})),
 ...D.episodes.map(v=>({{...v,kind:"episode",value:v.confidence||.5,state:(v.pnl||0)>0?"positive":((v.pnl||0)<0?"negative":"mixed"),label:v.symbol+" · "+v.strategy}}))
-];const count=Math.max(18,src.length);for(let i=0;i<count;i++){{const a=(i/count)*Math.PI*2*3.7,r=(.08+.38*Math.sqrt((i+1)/count))*Math.min(W,H),v=src[i%Math.max(1,src.length)]||{{kind:"idle",value:.2,label:"awaiting evidence"}};nodes.push({{x:W*.5+Math.cos(a)*r*.72,y:H*.52+Math.sin(a)*r*.46,v,phase:i*.71}});}}}}
+];const evidenceCount=D.entries.length+D.regimes.length+D.sources.length+D.episodes.length;const count=Math.max(18,Math.min(120,evidenceCount));for(let i=0;i<count;i++){{const a=(i/count)*Math.PI*2*3.7,r=(.08+.38*Math.sqrt((i+1)/count))*Math.min(W,H),v=src[i%Math.max(1,src.length)]||{{kind:"idle",value:.2,label:"awaiting evidence"}};nodes.push({{x:W*.5+Math.cos(a)*r*.72,y:H*.52+Math.sin(a)*r*.46,v,phase:i*.71}});}}}}
 function color(v,a){{if(v.state==="negative")return "rgba(255,82,112,"+a+")";if(v.state==="positive")return "rgba(75,245,164,"+a+")";if(v.kind==="knowledge")return "rgba(177,102,255,"+a+")";if(v.kind==="source")return "rgba(255,194,94,"+a+")";if(v.kind==="episode")return "rgba(95,234,205,"+a+")";return "rgba(80,199,255,"+a+")";}}
 function frame(){{t+=.018;x.clearRect(0,0,W,H);for(const n of nodes){{n.x=Math.max(14,Math.min(W-14,n.x));n.y=Math.max(14,Math.min(H-14,n.y));}}x.save();x.translate(Math.sin(t*.2)*2,Math.cos(t*.17)*2);for(let i=0;i<nodes.length;i++){{let a=nodes[i],b=nodes[(i*7+5)%nodes.length],d=Math.hypot(a.x-b.x,a.y-b.y);if(d<Math.min(W,H)*.38){{x.strokeStyle=color(a.v,.08+.08*Math.sin(t+a.phase));x.lineWidth=.7;x.beginPath();x.moveTo(a.x,a.y);x.quadraticCurveTo(W*.5,H*.5,b.x,b.y);x.stroke();}}}}for(const n of nodes){{let pulse=1+.35*Math.sin(t*2.4+n.phase),r=2.4+5*(n.v.value||.2)*pulse;x.shadowBlur=16;x.shadowColor=color(n.v,.8);x.fillStyle=color(n.v,.9);x.beginPath();x.arc(n.x,n.y,r,0,Math.PI*2);x.fill();}}x.restore();requestAnimationFrame(frame);}}
 new ResizeObserver(resize).observe(c);resize();frame();
