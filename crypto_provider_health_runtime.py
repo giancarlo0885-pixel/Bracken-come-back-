@@ -8,12 +8,12 @@ from typing import Any, Iterable
 _WINDOW = 200
 
 
-def _health_score(events: deque[tuple[float, int, int]]) -> float:
-    requested = sum(item[1] for item in events)
-    resolved = sum(item[2] for item in events)
+def _ratio_score(events: deque[tuple[float, int, int, int, int]], requested_index: int, good_index: int) -> float:
+    requested = sum(item[requested_index] for item in events)
+    good = sum(item[good_index] for item in events)
     if requested <= 0:
         return 100.0
-    return round(max(0.0, min(100.0, resolved / requested * 100.0)), 2)
+    return round(max(0.0, min(100.0, good / requested * 100.0)), 2)
 
 
 def _quality_quarantined_symbols(provider: Any) -> set[str]:
@@ -40,7 +40,7 @@ def install_crypto_provider_health_runtime(worker: Any) -> bool:
         return False
 
     original_snapshots = provider.snapshots
-    events: deque[tuple[float, int, int]] = deque(maxlen=_WINDOW)
+    events: deque[tuple[float, int, int, int, int]] = deque(maxlen=_WINDOW)
 
     def observed_snapshots(symbols: Iterable[str]):
         requested = list(
@@ -71,14 +71,26 @@ def install_crypto_provider_health_runtime(worker: Any) -> bool:
             if symbol in supported and symbol not in quality_quarantined
         ]
         resolved = sum(1 for symbol in health_eligible if symbol in result)
-        events.append((time.monotonic(), len(health_eligible), resolved))
+        quality_eligible = [symbol for symbol in requested if symbol in supported]
+        quality_good = [symbol for symbol in quality_eligible if symbol not in quality_quarantined]
+        events.append((
+            time.monotonic(),
+            len(health_eligible),
+            resolved,
+            len(quality_eligible),
+            len(quality_good),
+        ))
 
-        score = _health_score(events)
+        availability_score = _ratio_score(events, 1, 2)
+        data_quality_score = _ratio_score(events, 3, 4)
+        score = min(availability_score, data_quality_score)
         unresolved = [symbol for symbol in health_eligible if symbol not in result]
         quarantined_requested = [symbol for symbol in requested if symbol in quality_quarantined]
         worker._crypto_provider_health = {
             "primary_provider": "Robinhood Crypto",
             "quote_health_score": score,
+            "availability_score": availability_score,
+            "data_quality_score": data_quality_score,
             "window_calls": len(events),
             "requested": sum(item[1] for item in events),
             "resolved": sum(item[2] for item in events),
@@ -91,9 +103,11 @@ def install_crypto_provider_health_runtime(worker: Any) -> bool:
 
         if unresolved or coverage_gaps or quarantined_requested or len(events) in {1, 10, 25, 50, 100, 200}:
             worker.log.info(
-                "CRYPTO_PROVIDER_HEALTH | provider=Robinhood Crypto | score=%.2f | eligible_requested=%d | "
-                "resolved=%d | unresolved=%s | coverage_gaps=%s | quality_quarantined=%s | window_calls=%d",
+                "CRYPTO_PROVIDER_HEALTH | provider=Robinhood Crypto | score=%.2f | availability=%.2f | quality=%.2f | "
+                "eligible_requested=%d | resolved=%d | unresolved=%s | coverage_gaps=%s | quality_quarantined=%s | window_calls=%d",
                 score,
+                availability_score,
+                data_quality_score,
                 len(health_eligible),
                 resolved,
                 ",".join(unresolved[:8]) or "none",
@@ -107,6 +121,6 @@ def install_crypto_provider_health_runtime(worker: Any) -> bool:
     worker._crypto_provider_health_runtime_installed = True
     worker.log.info(
         "CRYPTO_PROVIDER_HEALTH | installed=ON | primary=Robinhood Crypto | coverage_gap_penalty=OFF | "
-        "quality_quarantine_separate=ON | final_post_retry_observation=ON | execution_behavior=UNCHANGED"
+        "quality_penalty=ON | final_post_retry_observation=ON | execution_behavior=UNCHANGED"
     )
     return True

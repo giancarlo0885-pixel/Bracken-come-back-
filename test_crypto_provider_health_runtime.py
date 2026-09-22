@@ -47,7 +47,9 @@ def test_provider_health_reports_quarantine_created_during_snapshot_call():
     assert health["last_quality_quarantined"] == ["BTC-USD"]
     assert health["last_requested"] == 1
     assert health["last_resolved"] == 1
-    assert health["quote_health_score"] == 100.0
+    assert health["availability_score"] == 100.0
+    assert health["data_quality_score"] == 50.0
+    assert health["quote_health_score"] == 50.0
     assert any("quality_quarantined=BTC-USD" in message for message in worker.log.messages)
 
 

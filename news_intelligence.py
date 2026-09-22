@@ -357,6 +357,34 @@ def get_news_sentiment(query: str, *, priority: bool = True) -> NewsResult:
             )
             return result
         except Exception as exc:
+            reason = str(exc)
+            google_rss = None
+            try:
+                google_rss = _fetch_google_news(clean)
+            except Exception as rss_exc:
+                log.info("Google News RSS fallback unavailable for %s (%s)", clean, rss_exc)
+
+            if google_rss and google_rss.headlines and google_rss.citations:
+                _record_gemini_health(
+                    "degraded",
+                    f"Gemini grounding unavailable ({reason[:160]}); Google News RSS fallback is active.",
+                )
+                set_value(
+                    key,
+                    google_rss,
+                    NEWS_CACHE_TTL_SECONDS if google_rss.headlines else NEWS_NEGATIVE_CACHE_TTL_SECONDS,
+                )
+                log.info(
+                    "News ready | provider=Google RSS after grounding fallback | query=%s | headlines=%d",
+                    clean,
+                    len(google_rss.headlines),
+                )
+                return google_rss
+
+            _record_gemini_health(
+                "degraded",
+                f"Gemini grounding returned no attributable sources and Google RSS fallback failed ({reason[:160]}).",
+            )
             log.info("Google grounded intelligence unavailable for %s; using provider fallback (%s)", clean, exc)
 
     api_key = _get_newsapi_key()

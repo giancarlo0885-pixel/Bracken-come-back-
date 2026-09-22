@@ -83,6 +83,11 @@ def test_news_pipeline_falls_back_when_google_grounding_fails(monkeypatch):
     monkeypatch.setattr(ni, "_get_gemini_key", lambda: "gemini-key")
     monkeypatch.setattr(ni, "_gemini_budget_allows_request", lambda: True)
     monkeypatch.setattr(ni, "_fetch_gemini_grounded", lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("grounding unavailable")))
+    monkeypatch.setattr(
+        ni,
+        "_fetch_google_news",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("rss unavailable")),
+    )
     monkeypatch.setattr(ni, "_get_newsapi_key", lambda: "news-key")
     monkeypatch.setattr(ni, "_budget_allows_request", lambda: True)
     expected = ni.NewsResult(0.25, ["Fallback headline"], "NewsAPI", citations=["https://example.com/news"])
@@ -117,3 +122,40 @@ def test_gemini_budget_enforces_minimum_spacing(monkeypatch):
     assert ni._gemini_budget_allows_request() is False
     monkeypatch.setattr(ni.time, "time", lambda: 2_121.0)
     assert ni._gemini_budget_allows_request() is True
+
+
+
+def test_grounding_failure_uses_google_rss_and_marks_health_degraded(monkeypatch):
+    monkeypatch.setattr(ni, "GOOGLE_GROUNDED_INTELLIGENCE_ENABLED", True)
+    monkeypatch.setattr(ni, "cache_get", lambda _key: None)
+    monkeypatch.setattr(ni, "set_value", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(ni, "_get_gemini_key", lambda: "gemini-key")
+    monkeypatch.setattr(ni, "_gemini_budget_allows_request", lambda: True)
+    monkeypatch.setattr(
+        ni,
+        "_fetch_gemini_grounded",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("Google Search grounding returned no attributable web sources")
+        ),
+    )
+    fallback = ni.NewsResult(
+        0.0,
+        ["Google RSS fallback headline"],
+        "Google News RSS",
+        citations=["https://example.com/google-rss"],
+    )
+    monkeypatch.setattr(ni, "_fetch_google_news", lambda *_args, **_kwargs: fallback)
+    health = []
+    monkeypatch.setattr(ni, "_record_gemini_health", lambda status, message: health.append((status, message)))
+    monkeypatch.setattr(
+        ni,
+        "_fetch_newsapi",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("NewsAPI should not run")),
+    )
+
+    result = ni.get_news_sentiment("Example Corp EXM")
+
+    assert result is fallback
+    assert health
+    assert health[-1][0] == "degraded"
+    assert "RSS fallback is active" in health[-1][1]
