@@ -78,6 +78,56 @@ if aeve_rows:
 else:
     st.warning("AEVE generation progress is unavailable; no active generation-isolated outcome row was returned.")
 
+# Research diagnostics: expose the economics behind the counter, not merely volume.
+try:
+    aeve_diag = rows("""
+        SELECT COUNT(*) FILTER (WHERE would_trade)::int AS trades,
+               AVG(net_pnl) FILTER (WHERE would_trade) AS expectancy,
+               CASE WHEN ABS(SUM(CASE WHEN would_trade AND net_pnl<0 THEN net_pnl ELSE 0 END)) > 0
+                    THEN SUM(CASE WHEN would_trade AND net_pnl>0 THEN net_pnl ELSE 0 END)
+                         / ABS(SUM(CASE WHEN would_trade AND net_pnl<0 THEN net_pnl ELSE 0 END))
+                    ELSE NULL END AS profit_factor,
+               AVG(mfe_pct) FILTER (WHERE would_trade AND excursion_sample_count>0) AS avg_mfe_pct,
+               AVG(mae_pct) FILTER (WHERE would_trade AND excursion_sample_count>0) AS avg_mae_pct,
+               AVG(cost_pct) FILTER (WHERE would_trade) AS avg_cost_pct
+        FROM paper_aeve_generation_outcomes o
+        JOIN paper_aeve_generations g
+          ON g.generation=o.generation AND g.config_hash=o.config_hash
+        WHERE g.status='ACTIVE' AND o.provenance_version>=2
+    """)
+except Exception:
+    aeve_diag = []
+if aeve_diag:
+    d = aeve_diag[0]
+    st.caption(
+        "Generation economics · "
+        f"expectancy {float(d.get('expectancy') or 0):.6f} · "
+        f"PF {float(d.get('profit_factor') or 0):.3f} · "
+        f"avg MFE {float(d.get('avg_mfe_pct') or 0):.3f}% · "
+        f"avg MAE {float(d.get('avg_mae_pct') or 0):.3f}% · "
+        f"avg measured cost {float(d.get('avg_cost_pct') or 0):.4f}%"
+    )
+
+# Lifecycle reconciliation makes the difference between a decision and a completed trade explicit.
+try:
+    lifecycle = rows("""
+        SELECT COUNT(*)::int AS closed_trades,
+               COUNT(*) FILTER (WHERE entry_time IS NOT NULL AND exit_time IS NOT NULL)::int AS complete_lifecycle,
+               COUNT(*) FILTER (WHERE entry_signal_id IS NOT NULL AND feature_snapshot IS NOT NULL)::int AS exact_entry_provenance
+        FROM paper_regime_trade_metrics
+        WHERE strategy='oracle_council_v3'
+    """)
+except Exception:
+    lifecycle = []
+if lifecycle:
+    life = lifecycle[0]
+    st.subheader("Paper Trade Lifecycle")
+    q1, q2, q3 = st.columns(3)
+    q1.metric("Closed Council trades", int(life.get("closed_trades") or 0))
+    q2.metric("Complete entry → exit", int(life.get("complete_lifecycle") or 0))
+    q3.metric("Exact entry provenance", int(life.get("exact_entry_provenance") or 0))
+    st.caption("Signals and approvals are not counted as completed trades. Closed lifecycle evidence is the source of truth.")
+
 summary = snapshot["summary"]
 growth = snapshot["growth"]
 safety = snapshot["safety"]

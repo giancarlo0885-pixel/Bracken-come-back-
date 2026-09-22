@@ -404,6 +404,43 @@ def record_generation_outcomes(limit: int = 250) -> int:
     return created
 
 
+def generation_research_report(conn: Any, generation: int, config_hash: str) -> dict[str, Any]:
+    """Freeze auditable post-cost evidence for a completed AEVE research generation."""
+    row = conn.execute("""
+        SELECT COUNT(*) FILTER (WHERE would_trade)::int AS accepted_trades,
+               AVG(net_pnl) FILTER (WHERE would_trade) AS expectancy,
+               SUM(net_pnl) FILTER (WHERE would_trade) AS net_pnl,
+               SUM(CASE WHEN would_trade AND net_pnl>0 THEN net_pnl ELSE 0 END) AS gross_win,
+               ABS(SUM(CASE WHEN would_trade AND net_pnl<0 THEN net_pnl ELSE 0 END)) AS gross_loss,
+               AVG(mfe_pct) FILTER (WHERE would_trade AND excursion_sample_count>0) AS avg_mfe_pct,
+               AVG(mae_pct) FILTER (WHERE would_trade AND excursion_sample_count>0) AS avg_mae_pct,
+               AVG(cost_pct) FILTER (WHERE would_trade) AS avg_cost_pct,
+               COUNT(*) FILTER (WHERE NOT would_trade)::int AS rejected_candidates,
+               COUNT(*) FILTER (WHERE NOT would_trade AND net_pnl<0)::int AS avoided_losses,
+               COUNT(*) FILTER (WHERE NOT would_trade AND net_pnl>0)::int AS missed_winners
+        FROM paper_aeve_generation_outcomes
+        WHERE generation=%s AND config_hash=%s AND provenance_version=%s
+    """, (generation, config_hash, PROVENANCE_VERSION)).fetchone() or {}
+    gross_loss = _f(row.get("gross_loss"))
+    gross_win = _f(row.get("gross_win"))
+    return {
+        "generation": generation,
+        "config_hash": config_hash,
+        "provenance_version": PROVENANCE_VERSION,
+        "accepted_trades": int(row.get("accepted_trades") or 0),
+        "expectancy": _f(row.get("expectancy")),
+        "net_pnl": _f(row.get("net_pnl")),
+        "profit_factor": (gross_win / gross_loss) if gross_loss > 0 else None,
+        "avg_mfe_pct": _f(row.get("avg_mfe_pct")),
+        "avg_mae_pct": _f(row.get("avg_mae_pct")),
+        "avg_cost_pct": _f(row.get("avg_cost_pct")),
+        "rejected_candidates": int(row.get("rejected_candidates") or 0),
+        "avoided_losses": int(row.get("avoided_losses") or 0),
+        "missed_winners": int(row.get("missed_winners") or 0),
+        "execution_impact": "NONE",
+    }
+
+
 def maybe_advance_generation() -> bool:
     """Advance after exactly one new 1,000-trade forward window; paper telemetry only."""
     if not active():
