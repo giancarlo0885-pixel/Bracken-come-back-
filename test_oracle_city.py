@@ -498,3 +498,17 @@ def test_oracle_city_brain_monitor_distinguishes_synced_without_new_evidence():
     rendered = render_oracle_city_component(snapshot)
     assert 'BRAIN: SYNCED' in rendered
 \n\ndef test_city_has_renderer_failure_fallback():\n    from oracle_city_component import render_oracle_city_component\n    html = render_oracle_city_component({})\n    assert "fallbackCity" in html\n    assert "__oracleCityBooted" in html\n    assert "3D renderer unavailable" in html\n
+
+def test_city_execution_metrics_are_not_confused_with_provenance():
+    snapshot = build_oracle_city_snapshot(
+        _fake_rows,
+        now=datetime(2026, 9, 19, 0, 0, tzinfo=timezone.utc),
+    )
+    assert snapshot["summary"]["paper_fill_records"] == 1
+    assert snapshot["summary"]["open_positions"] == 2
+    assert snapshot["summary"]["closed_result_records"] == 0
+    assert "city_mood_reason" in snapshot
+    page = Path("pages/2_Oracle_City.py").read_text(encoding="utf-8")
+    assert 'Paper fill records' in page
+    assert 'Result-linked provenance' in page
+    assert 'Trades with results' not in page
