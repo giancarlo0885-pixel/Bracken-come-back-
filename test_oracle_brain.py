@@ -161,12 +161,14 @@ def test_brain_attributes_thesis_separately_from_realized_outcome(monkeypatch):
     assert snapshot["execution_authority"] == "NONE"
 
 
-def test_brain_page_uses_supported_streamlit_width_and_bounded_nodes():
+def test_brain_page_runs_javascript_component_and_bounds_nodes():
     page = Path("pages/3_Oracle_Brain.py").read_text(encoding="utf-8")
     component = Path("oracle_brain_component.py").read_text(encoding="utf-8")
-    assert "components.html" not in page
-    assert "use_container_width=True" not in page
-    assert 'width="stretch"' in page
+    assert "import streamlit.components.v1 as components" in page
+    assert "components.html(" in page
+    assert "height=610" in page
+    assert "scrolling=False" in page
+    assert "st.html(render_oracle_brain_component(snapshot))" not in page
     assert "brainMask" in component
     assert "pointFor" in component
     assert "raw.slice(0,210)" in component
@@ -325,3 +327,11 @@ def test_oracle_brain_component_serializes_database_datetime_values():
     assert "2026-09-22T04:29:00+00:00" in rendered
     assert '"confidence":0.75' in rendered
     assert "datetime is not JSON serializable" not in rendered
+
+
+def test_brain_visual_payload_executes_client_side_metrics():
+    component = Path("oracle_brain_component.py").read_text(encoding="utf-8")
+    assert 'document.getElementById("knowledgeUnits").textContent=Number(G.knowledge_units||0).toLocaleString();' in component
+    assert 'document.getElementById("newCycle").textContent=Number(A.learned_this_cycle||0).toLocaleString();' in component
+    assert "requestAnimationFrame(draw)" in component
+    assert "buildNodes();" in component
