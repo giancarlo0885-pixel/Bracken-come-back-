@@ -163,3 +163,33 @@ def test_brain_page_uses_supported_streamlit_width_and_bounded_nodes():
     assert 'width="stretch"' in source
     assert "Math.max(14,Math.min(W-14,n.x))" in source
     assert "Math.max(14,Math.min(H-14,n.y))" in source
+
+
+def test_brain_retention_health_is_read_only(monkeypatch):
+    monkeypatch.setenv("EXECUTION_MODE", "paper")
+    monkeypatch.setenv("ENABLE_BROKER_SUBMISSION", "false")
+    monkeypatch.setenv("LIVE_TRADING_ARMED", "false")
+
+    def fetch(query: str, params=()):
+        if "COUNT(*)::int AS total, MIN(created_at)" in query:
+            return [{"total": 10, "oldest": "2026-09-01", "newest": "2026-09-21"}]
+        if "COUNT(*)::int AS total, MIN(observed_at)" in query:
+            return [{"total": 20, "oldest": "2026-09-02", "newest": "2026-09-21"}]
+        if "COUNT(*)::int AS total, MIN(exit_time)" in query:
+            return [{"total": 30, "oldest": "2026-09-03", "newest": "2026-09-21"}]
+        if "FROM oracle_brain_learning_state" in query:
+            return [{"pipeline_key": "paper", "market": "crypto", "last_source_id": 20,
+                     "last_episode_exit_at": "2026-09-21", "last_sync_at": "2026-09-21",
+                     "last_result": {}}]
+        return []
+
+    snapshot = oracle_brain.build_oracle_brain_snapshot(fetch)
+    health = snapshot["retention_health"]
+    assert health["persistent_store"] == "PostgreSQL"
+    assert health["entries"]["count"] == 10
+    assert health["sources"]["count"] == 20
+    assert health["episodes"]["count"] == 30
+    assert health["learning_pipelines"] == 1
+    assert health["read_only"] is True
+    assert health["execution_authority"] == "NONE"
+    assert snapshot["safety"]["safe_research_boundary"] is True
