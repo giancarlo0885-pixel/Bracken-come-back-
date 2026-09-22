@@ -85,6 +85,20 @@ st.caption(
     "Read-only dashboard; execution authority: NONE."
 )
 
+retention = snapshot["retention_health"]
+st.subheader("Brain retention health")
+rh1, rh2, rh3, rh4 = st.columns(4)
+rh1.metric("Persistent entries", retention["entries"]["count"])
+rh2.metric("Retained sources", retention["sources"]["count"])
+rh3.metric("Exact episodes retained", retention["episodes"]["count"])
+rh4.metric("Learning pipelines", retention["learning_pipelines"])
+st.caption(
+    f"Store: {retention['persistent_store']} · Last learning sync: "
+    f"{retention['last_sync_at'] or 'not recorded'} · "
+    f"Oldest retained knowledge: {retention['entries']['oldest'] or 'not recorded'} · "
+    "Read-only; execution authority: NONE."
+)
+
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("Active knowledge entries", summary["active_entries"])
 c2.metric("Exact trade episodes", summary["exact_episodes"])
