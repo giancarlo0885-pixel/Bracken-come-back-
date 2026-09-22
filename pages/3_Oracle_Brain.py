@@ -179,6 +179,45 @@ if source_health:
     st.dataframe(source_health, use_container_width=True, hide_index=True)
     st.caption("Provider → freshness → confidence is visible. Stale evidence remains research evidence and is not silently treated as current.")
 
+# Learning + validation cockpit (research-only).
+try:
+    lv = rows("""SELECT
+      (SELECT COUNT(*)::int FROM oracle_counterfactual_outcomes) counterfactuals,
+      (SELECT COUNT(*)::int FROM oracle_counterfactual_outcomes WHERE outcome_class='avoided_loss') avoided_losses,
+      (SELECT COUNT(*)::int FROM oracle_counterfactual_outcomes WHERE outcome_class='missed_winner') missed_winners,
+      (SELECT COUNT(*)::int FROM oracle_decision_replays) decision_replays,
+      (SELECT COUNT(*)::int FROM oracle_setup_validation) setup_cohorts,
+      (SELECT COUNT(*)::int FROM oracle_challenger_validation WHERE state='shadow') shadow_challengers,
+      (SELECT COUNT(*)::int FROM oracle_validation_weaknesses WHERE state='negative') negative_cohorts,
+      (SELECT SUM(samples*calibration_error)/NULLIF(SUM(samples),0) FROM oracle_calibration_buckets) calibration_error
+    """)
+    failure_rows=rows("""SELECT failure_class,COUNT(*)::int samples FROM oracle_failure_taxonomy GROUP BY failure_class ORDER BY samples DESC""")
+    challenger_rows=rows("""SELECT candidate_key,market,samples,expectancy,profit_factor,max_drawdown,state,updated_at FROM oracle_challenger_validation ORDER BY state DESC,samples DESC LIMIT 30""")
+    setup_rows=rows("""SELECT market,strategy,regime,samples,wins,losses,expectancy,profit_factor,avg_mfe_pct,avg_mae_pct FROM oracle_setup_validation ORDER BY samples DESC LIMIT 30""")
+except Exception:
+    lv,failure_rows,challenger_rows,setup_rows=[],[],[],[]
+
+if lv:
+    v=lv[0]
+    st.subheader("Learning & validation")
+    c1,c2,c3,c4=st.columns(4)
+    c1.metric("Decision replays",int(v.get("decision_replays") or 0))
+    c2.metric("Avoided losses",int(v.get("avoided_losses") or 0))
+    c3.metric("Missed winners",int(v.get("missed_winners") or 0))
+    c4.metric("Shadow challengers",int(v.get("shadow_challengers") or 0))
+    c5,c6,c7,c8=st.columns(4)
+    c5.metric("Counterfactuals",int(v.get("counterfactuals") or 0))
+    c6.metric("Setup cohorts",int(v.get("setup_cohorts") or 0))
+    c7.metric("Negative cohorts",int(v.get("negative_cohorts") or 0))
+    err=v.get("calibration_error"); c8.metric("Calibration error","n/a" if err is None else f"{float(err):.3f}")
+    st.caption("Research-only evidence: replay → attribution → calibration → counterfactuals → walk-forward challenger validation. Execution authority: NONE.")
+    with st.expander("Setup-specific learning"):
+        st.dataframe(pd.DataFrame(setup_rows),width="stretch",hide_index=True)
+    with st.expander("Failure taxonomy"):
+        st.dataframe(pd.DataFrame(failure_rows),width="stretch",hide_index=True)
+    with st.expander("Walk-forward challengers"):
+        st.dataframe(pd.DataFrame(challenger_rows),width="stretch",hide_index=True)
+
 summary = snapshot["summary"]
 growth = snapshot["growth"]
 safety = snapshot["safety"]

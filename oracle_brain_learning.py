@@ -1056,6 +1056,16 @@ def sync_brain_learning(market: str, *, source_limit: int = _SOURCE_BATCH, episo
         episodes, skipped, new_episodes = _sync_trade_episodes(conn, normalized_market, limit=episode_limit)
         lessons, queued = _sync_regime_lessons_and_queue(conn, normalized_market)
         refreshed = _refresh_source_freshness(conn) if normalized_market == "cash" else 0
+        try:
+            from oracle_learning_validation import sync_learning_validation
+            validation = sync_learning_validation(conn, normalized_market)
+        except Exception as exc:
+            validation = {"status": "degraded", "error": str(exc)[:240], "execution_impact": "NONE"}
+        try:
+            from oracle_advanced_learning import sync_advanced_learning
+            advanced_learning = sync_advanced_learning(conn, normalized_market)
+        except Exception as exc:
+            advanced_learning = {"status": "degraded", "error": str(exc)[:240], "execution_impact": "NONE"}
         result = {
             "status": "ok",
             "market": normalized_market,
@@ -1070,6 +1080,8 @@ def sync_brain_learning(market: str, *, source_limit: int = _SOURCE_BATCH, episo
             "lessons_updated": lessons,
             "research_topics_queued": queued,
             "source_freshness_refreshed": refreshed,
+            "validation": validation,
+            "advanced_learning": advanced_learning,
             "execution_impact": "NONE",
         }
         conn.execute(

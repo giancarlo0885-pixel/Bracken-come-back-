@@ -113,6 +113,11 @@ CANONICAL_PROTECTED_TABLES = {
     "oracle_brain_research_queue",
     "oracle_brain_learning_state",
     "oracle_brain_observations",
+    "oracle_counterfactual_outcomes",
+    "oracle_calibration_buckets",
+    "oracle_validation_weaknesses",
+    "oracle_paper_promotion_evidence",
+    "oracle_decision_replays",
 }
 DATABASE_RETENTION_POLICIES = {
     "signals": {"keep_rows": 6000, "batch_size": DATABASE_RETENTION_BATCH_SIZE, "classification": "append-only analytical/ephemeral"},
@@ -172,6 +177,11 @@ DATABASE_TABLE_GROWTH_AUDIT = {
     "oracle_brain_research_queue": {"class": "research governance records", "inserted_by": "Oracle Brain uncertainty engine", "frequency": "under-sampled/conflicting cohorts", "retention": "preserve until resolved/retired"},
     "oracle_brain_learning_state": {"class": "research cursor/state records", "inserted_by": "Oracle Brain learner", "frequency": "periodic learning sync", "retention": "never auto-delete"},
     "oracle_brain_observations": {"class": "canonical append-only research observations", "inserted_by": "Oracle observation bus", "frequency": "normalized persisted Oracle evidence", "retention": "never auto-delete"},
+    "oracle_counterfactual_outcomes": {"class": "research validation evidence", "inserted_by": "Oracle validation layer", "frequency": "mature rejected decisions", "retention": "never auto-delete"},
+    "oracle_calibration_buckets": {"class": "research validation rollups", "inserted_by": "Oracle validation layer", "frequency": "learning sync", "retention": "never auto-delete"},
+    "oracle_validation_weaknesses": {"class": "research weakness evidence", "inserted_by": "Oracle validation layer", "frequency": "learning sync", "retention": "never auto-delete"},
+    "oracle_paper_promotion_evidence": {"class": "research promotion evidence", "inserted_by": "Oracle validation layer", "frequency": "learning sync", "retention": "never auto-delete"},
+    "oracle_decision_replays": {"class": "advanced research evidence", "inserted_by": "Oracle advanced learning", "frequency": "learning sync", "retention": "never auto-delete"},
 }
 
 
