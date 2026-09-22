@@ -234,9 +234,9 @@ def test_core_rebalance_trace_changes_only_when_symbol_state_changes():
     }
     executable = {
         "BNB-USD": {
-            "status": "APPROVED",
-            "reason": "capital_allocated",
-            "approved_amount": 25.0,
+            "status": "CANDIDATE_ALLOCATED",
+            "reason": "candidate_capital_reserved_for_downstream_validation",
+            "candidate_amount": 25.0,
             "meaningful_entry_floor": 10.0,
         }
     }
