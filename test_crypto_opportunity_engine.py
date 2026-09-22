@@ -196,3 +196,26 @@ def test_paper_accounting_rejects_malformed_capacity():
 
     assert sized["allowed"] is False
     assert "capacity" in sized["reason"]
+
+
+def test_crypto_profit_table_never_renders_missing_exit_as_zero():
+    page = crypto.crypto_page_sections(
+        [], [],
+        [{"symbol": "DOGE-USD", "market": "crypto", "strategy": "fast", "bucket": "Core", "entry_price": 0.10, "exit_price": None, "current_price": None, "quantity": 220.0, "gross_pnl": None, "fees": 0, "net_pnl": None, "return_pct": None, "status": "CLOSED"}],
+        {"equity": 2_000, "cash": 2_000},
+    )
+    row = page["profit_sources"][0]
+    assert row["Exit"] == "MISSING EXIT PRICE"
+    assert row["Status"] == "DATA INCOMPLETE"
+    assert "$0.00" not in row["Exit"]
+
+
+def test_crypto_profit_table_uses_realized_exit_not_current_mark():
+    page = crypto.crypto_page_sections(
+        [], [],
+        [{"symbol": "LINK-USD", "market": "crypto", "strategy": "fast", "bucket": "Core", "entry_price": 13.05, "exit_price": 12.99, "current_price": 99.0, "quantity": 1, "gross_pnl": -0.06, "fees": 0.01, "net_pnl": -0.07, "return_pct": -0.46, "status": "CLOSED"}],
+        {"equity": 2_000, "cash": 2_000},
+    )
+    row = page["profit_sources"][0]
+    assert row["Exit"] == "$12.99"
+    assert row["Status"] == "CLOSED"
