@@ -138,10 +138,8 @@ try:
         SELECT
           a.generation,a.config_hash,a.started_at,
           COUNT(o.id) FILTER (WHERE o.would_trade AND o.provenance_version>=2)::int AS aeve_trades,
-          COUNT(o.id) FILTER (WHERE o.would_trade AND o.provenance_version>=2
-              AND o.feature_snapshot IS NOT NULL)::int AS knowledge_snapshots,
-          COUNT(o.id) FILTER (WHERE o.would_trade AND o.provenance_version>=2
-              AND o.entry_signal_id IS NOT NULL)::int AS exact_signals
+          COUNT(o.id) FILTER (WHERE o.would_trade AND o.provenance_version>=2)::int AS provenance_v2,
+          COUNT(o.id) FILTER (WHERE o.would_trade AND o.provenance_version<2)::int AS legacy_provenance
         FROM active a LEFT JOIN paper_aeve_generation_outcomes o
           ON o.generation=a.generation AND o.config_hash=a.config_hash
         GROUP BY a.generation,a.config_hash,a.started_at
@@ -157,9 +155,9 @@ if cockpit:
     c1,c2,c3,c4=st.columns(4)
     c1.metric("Verified AEVE", f"{completed:,} / 1,000")
     c2.metric("Learning velocity", f"{tph:.2f}/hr")
-    c3.metric("Knowledge snapshots", int(cp.get("knowledge_snapshots") or 0))
-    c4.metric("Exact signal provenance", int(cp.get("exact_signals") or 0))
-    st.caption("Knowledge stored is separated from knowledge captured at decision time. Throughput never relaxes acceptance gates.")
+    c3.metric("Provenance v2", int(cp.get("provenance_v2") or 0))
+    c4.metric("Legacy provenance", int(cp.get("legacy_provenance") or 0))
+    st.caption("The authoritative generation table stores immutable config/provenance identity. Entry-time knowledge snapshots remain in canonical Council lifecycle evidence; they are not duplicated into AEVE outcomes.")
 
 try:
     source_health=rows("""
