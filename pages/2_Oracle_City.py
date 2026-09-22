@@ -31,10 +31,10 @@ with left:
     if st.button("Refresh now", type="primary", use_container_width=True):
         st.rerun()
 with middle:
-    auto_refresh = st.toggle("Paper live", value=True)
+    auto_refresh = st.toggle("Sync data every 60s", value=False)
 
 if auto_refresh and st_autorefresh is not None:
-    st_autorefresh(interval=5_000, key="oracle-city-paper-live-refresh")
+    st_autorefresh(interval=60_000, key="oracle-city-world-sync")
 
 snapshot = build_oracle_city_snapshot(rows)
 summary = snapshot["summary"]
@@ -79,6 +79,49 @@ if brain_gaps:
         f"{brain_gaps} recent closed trade(s) lack a canonical decision provenance link. "
         "Treat those rows as unsuitable for strategy-learning attribution until repaired."
     )
+
+
+world_state = snapshot.get("world_state", {})
+brain_growth = snapshot.get("brain_growth", {})
+st.subheader("World state & Brain learning")
+w1, w2, w3, w4, w5 = st.columns(5)
+w1.metric("Current world events", int(world_state.get("current_events") or 0))
+w2.metric("Verified/corroborated", int(world_state.get("verified_events") or 0))
+w3.metric("Brain evidence units", int(brain_growth.get("knowledge_units") or 0))
+w4.metric("Learned relationships", int(brain_growth.get("relationships") or 0))
+w5.metric("Exact outcomes", int(brain_growth.get("exact_outcomes") or 0))
+
+domains = world_state.get("domains", {})
+domain_rows = []
+for key in ("macro", "energy", "logistics", "crypto", "finance", "consumer", "technology"):
+    item = domains.get(key, {})
+    domain_rows.append({
+        "District": key.replace("_", " ").title(),
+        "Current events": int(item.get("events") or 0),
+        "Verified": int(item.get("verified") or 0),
+        "Avg confidence": round(float(item.get("confidence") or 0.0), 2),
+    })
+st.dataframe(pd.DataFrame(domain_rows), use_container_width=True, hide_index=True)
+
+top_events = world_state.get("top_events", [])
+if top_events:
+    st.dataframe(
+        pd.DataFrame([
+            {
+                "Observed": item.get("observed_at"),
+                "Event": item.get("title"),
+                "World area": ", ".join(item.get("domains") or []),
+                "Source": item.get("provider"),
+                "Verification": item.get("verification"),
+                "Confidence": item.get("confidence"),
+            }
+            for item in top_events[:10]
+        ]),
+        use_container_width=True,
+        hide_index=True,
+    )
+else:
+    st.info("No current provenance-aware world events are available in Oracle's intelligence memory.")
 
 st.subheader("Current trade ideas")
 opportunities = snapshot["opportunities"]
@@ -136,6 +179,8 @@ with st.expander("Oracle City V3 architecture and safety boundary"):
   moving visualization workers, strategy evidence cohorts, capital-weighted position towers, and animated data-flow paths.
 - Worker assignments are derived from persisted Oracle state. Their walking, resting, and recreation movement is illustrative only.
 - Strategy Arena and AEVE Research Center expose read-only evidence; they cannot promote a strategy or change execution behavior.
+- Current world districts are derived from Oracle's existing provenance-aware intelligence memory; the City does not create or invent news.
+- Brain-growth metrics are derived from persisted Oracle Brain sources, exact outcomes, durable lessons, and learned relationships.
 - Historical replay uses persisted Oracle decisions, intelligence events, and paper trades
   to illuminate the path that evidence took through the system.
 - **Brain Map** traces persisted entry-time features into immutable decision IDs, downstream
