@@ -68,6 +68,22 @@ def _num(value: Any, default: float = 0.0) -> float:
     return parsed if math.isfinite(parsed) else default
 
 
+def _parse_timestamp(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
 def _json_obj(value: Any) -> dict[str, Any]:
     if isinstance(value, dict):
         return dict(value)
@@ -263,6 +279,65 @@ def build_oracle_brain_snapshot(fetch_rows: FetchRows) -> dict[str, Any]:
         """,
     )
 
+    now = datetime.now(timezone.utc)
+    sync_rows: list[tuple[dict[str, Any], datetime]] = []
+    for item in learning_state:
+        parsed = _parse_timestamp(item.get("last_sync_at"))
+        if parsed is not None:
+            sync_rows.append((item, parsed))
+
+    latest_sync = max((parsed for _, parsed in sync_rows), default=None)
+    recent_rows: list[dict[str, Any]] = []
+    if latest_sync is not None:
+        recent_rows = [
+            item
+            for item, parsed in sync_rows
+            if (latest_sync - parsed).total_seconds() <= 15 * 60
+        ]
+
+    new_sources = 0
+    revised_sources = 0
+    new_exact_episodes = 0
+    lessons_updated = 0
+    skipped_provenance = 0
+    for item in recent_rows:
+        result = _json_obj(item.get("last_result"))
+        pipeline = str(item.get("pipeline_key") or "")
+        if pipeline == "intelligence":
+            new_sources += int(_num(result.get("new"), 0.0))
+            revised_sources += int(_num(result.get("updated"), 0.0))
+        elif pipeline == "episodes":
+            new_exact_episodes += int(_num(result.get("new_exact_episodes"), 0.0))
+            skipped_provenance += int(_num(result.get("skipped_missing_exact_provenance"), 0.0))
+        elif pipeline == "brain_v2":
+            lessons_updated += int(_num(result.get("lessons_updated"), 0.0))
+
+    sync_age_seconds = None if latest_sync is None else max(0.0, (now - latest_sync).total_seconds())
+    learned_this_cycle = new_sources + revised_sources + new_exact_episodes + lessons_updated
+    if latest_sync is None:
+        learning_status = "NOT SYNCED"
+    elif sync_age_seconds is not None and sync_age_seconds > 45 * 60:
+        learning_status = "STALE"
+    elif learned_this_cycle > 0:
+        learning_status = "LEARNING"
+    else:
+        learning_status = "SYNCED — NO NEW EVIDENCE"
+
+    learning_activity = {
+        "status": learning_status,
+        "last_sync_at": latest_sync.isoformat() if latest_sync else None,
+        "sync_age_seconds": None if sync_age_seconds is None else round(sync_age_seconds, 1),
+        "pipelines_total": len(learning_state),
+        "pipelines_recent": len(recent_rows),
+        "new_sources": new_sources,
+        "revised_sources": revised_sources,
+        "new_exact_episodes": new_exact_episodes,
+        "lessons_updated": lessons_updated,
+        "skipped_missing_exact_provenance": skipped_provenance,
+        "learned_this_cycle": learned_this_cycle,
+        "execution_authority": "NONE",
+    }
+
     retention_spans = {}
     for table, timestamp_column, key, predicate in (
         ("oracle_brain_entries", "created_at", "entries", ""),
@@ -440,6 +515,7 @@ def build_oracle_brain_snapshot(fetch_rows: FetchRows) -> dict[str, Any]:
         "contradictions": contradictions,
         "research_queue": research_queue,
         "learning_state": learning_state,
+        "learning_activity": learning_activity,
         "retention_health": retention_health,
         "growth": growth,
         "derived_lessons": derived_lessons,
