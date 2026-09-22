@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from oracle_research_cockpit import integrity_flags, learning_velocity, challenger_verdict
 
 
@@ -34,3 +36,9 @@ def test_cockpit_query_keeps_generation_config_and_provenance_isolation():
     cockpit = src.split("# Unified research cockpit:", 1)[1].split("summary = snapshot", 1)[0]
     assert "feature_snapshot IS NOT NULL" not in cockpit
     assert "entry_signal_id IS NOT NULL" not in cockpit
+
+
+def test_brain_page_imports_datetime_for_learning_velocity():
+    src = Path("pages/3_Oracle_Brain.py").read_text()
+    assert "from datetime import datetime, timezone" in src
+    assert "datetime.now(timezone.utc)" in src
