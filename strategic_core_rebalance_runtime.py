@@ -56,6 +56,13 @@ def _effective_meaningful_floor(worker: Any, signal: Any) -> float:
     return 0.0
 
 
+def _effective_entry_floor_mode(worker: Any, signal: Any) -> str:
+    allocation = patch._signal_value(signal, "v39_optimizer_allocation", {}) or {}
+    decision = _optimizer_decision(worker, signal)
+    mode = allocation.get("entry_floor_mode") or decision.get("entry_floor_mode")
+    return str(mode or "not_applicable")
+
+
 def _promotion_rejection_reason(worker: Any, signal: Any | None = None) -> str:
     """Explain promotion state; accept legacy signal-only callers for diagnostics/tests."""
     if signal is None:
@@ -141,7 +148,7 @@ def _log_promotion_decision(worker: Any, signal: Any) -> None:
         allocation_symbol or "missing",
         target_amount,
         meaningful_floor,
-        allocation.get("entry_floor_mode") or decision.get("entry_floor_mode") or "legacy_producer_floor",
+        _effective_entry_floor_mode(worker, signal),
         decision.get("status") or "missing",
         decision.get("reason") or "missing",
         patch._signal_value(signal, "action", ""),
