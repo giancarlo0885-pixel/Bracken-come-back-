@@ -619,6 +619,37 @@ def _v39_position_rows(market: str) -> tuple[dict[str, Any], list[dict[str, Any]
     return enriched, positions
 
 
+def _v39_persisted_forecast_edge(market: str, symbol: str, forecast_id: Any, signal_id: Any) -> tuple[float | None, str | None]:
+    """Resolve exact persisted forecast edge without latest-row fallback or lookahead."""
+    if not forecast_id or not signal_id:
+        return None, None
+    try:
+        with connect() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """SELECT expected_move_pct, created_at, signal_created_at
+                       FROM forecasts
+                       WHERE market=%s AND symbol=%s AND forecast_id=%s AND signal_id::TEXT=%s
+                       ORDER BY id ASC LIMIT 1""",
+                    (market, symbol, str(forecast_id), str(signal_id)),
+                )
+                row = cursor.fetchone()
+        if not row:
+            return None, None
+        value = row.get("expected_move_pct")
+        if value is None:
+            return None, None
+        edge = float(value)
+        if not math.isfinite(edge):
+            return None, None
+        # Persistence identity is exact on market/symbol/forecast_id/signal_id;
+        # no symbol-latest or future-row fallback is permitted.
+        return edge, "persisted_forecast_expected_move_pct"
+    except Exception as exc:
+        log.debug("V39 persisted forecast edge unavailable | market=%s | symbol=%s | forecast_id=%s | error=%s", market, symbol, forecast_id, exc)
+        return None, None
+
+
 def _v39_signal_opportunity(market: str, signal: Any, prices: dict[str, Any], ranked_by_symbol: dict[str, dict[str, Any]], scan_type: str) -> dict[str, Any]:
     symbol = str(getattr(signal, "symbol", "") or "").upper()
     quote = dict(prices.get(symbol) or {})
@@ -632,9 +663,16 @@ def _v39_signal_opportunity(market: str, signal: Any, prices: dict[str, Any], ra
     if expected_move in (None, ""):
         expected_move = getattr(signal, "expected_move_pct", None)
     # Preserve the signed directional forecast as explicit edge provenance for
-    # downstream paper economics. Do not derive edge from confidence, score,
-    # historical profitability, or absolute movement.
+    # downstream paper economics. If the in-memory signal omitted it, resolve
+    # only the exact persisted forecast identity; never use a latest-row fallback.
     expected_edge = expected_move
+    edge_provenance = "forecast_expected_move_pct" if expected_edge not in (None, "") else None
+    signal_id = getattr(signal, "signal_id", None)
+    forecast_id = getattr(signal, "forecast_id", None)
+    if expected_edge in (None, ""):
+        expected_edge, edge_provenance = _v39_persisted_forecast_edge(market, symbol, forecast_id, signal_id)
+        if expected_edge is not None:
+            expected_move = expected_edge
     price = _finite_positive(quote.get("price")) or _finite_positive(getattr(signal, "price", None))
     liquidity = _finite_positive(quote.get("avg_dollar_volume")) or _finite_positive(ranked.get("liquidity")) or 0.0
     stages = ["surveillance", "deep_research" if scan_type == "deep" else "active_hot"]
@@ -669,8 +707,6 @@ def _v39_signal_opportunity(market: str, signal: Any, prices: dict[str, Any], ra
         risk_known = risk_score is not None and math.isfinite(float(risk_score))
     except (TypeError, ValueError):
         risk_known = False
-    signal_id = getattr(signal, "signal_id", None)
-    forecast_id = getattr(signal, "forecast_id", None)
     qualified = bool(
         action in {"BUY", "STRONG_BUY", "ACCUMULATE", "LONG"}
         and quote.get("quote_verified") is True
@@ -719,7 +755,7 @@ def _v39_signal_opportunity(market: str, signal: Any, prices: dict[str, Any], ra
         "opportunity_score": ranked.get("opportunity_score") or signal_score,
         "expected_move_pct": expected_move,
         "expected_edge_pct": expected_edge,
-        "edge_provenance": "forecast_expected_move_pct" if expected_edge not in (None, "") else None,
+        "edge_provenance": edge_provenance,
         "confidence": getattr(signal, "confidence", 0.0),
         "data_quality_score": quote.get("data_quality_score") or ranked.get("data_quality_score") or 0.0,
         "risk_score": risk_score,

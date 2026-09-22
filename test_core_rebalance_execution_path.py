@@ -331,3 +331,33 @@ def test_v39_opportunity_preserves_signed_forecast_as_explicit_edge(monkeypatch)
     assert opportunity["expected_move_pct"] == -1.25
     assert opportunity["expected_edge_pct"] == -1.25
     assert opportunity["edge_provenance"] == "forecast_expected_move_pct"
+
+
+def test_v39_opportunity_uses_exact_persisted_forecast_edge_when_signal_omits_it(monkeypatch):
+    import market_worker
+
+    signal = _signal("BTC-USD")
+    signal.price = 100.0
+    signal.expected_move_pct = None
+    monkeypatch.setattr(
+        market_worker,
+        "_v39_persisted_forecast_edge",
+        lambda market, symbol, forecast_id, signal_id: (-0.75, "persisted_forecast_expected_move_pct"),
+    )
+    monkeypatch.setattr(market_worker, "_execution_quote_eligible", lambda quote: True)
+    prices = {"BTC-USD": {"price": 100.0, "requested_symbol": "BTC-USD", "provider_symbol": "BTC-USD",
+              "quote_verified": True, "tradeable": True, "avg_dollar_volume": 1_000_000.0, "spread_pct": 0.01}}
+    ranked = {"BTC-USD": {"risk_score": 50.0}}
+
+    opportunity = market_worker._v39_signal_opportunity("crypto", signal, prices, ranked, "deep")
+
+    assert opportunity["expected_move_pct"] == -0.75
+    assert opportunity["expected_edge_pct"] == -0.75
+    assert opportunity["edge_provenance"] == "persisted_forecast_expected_move_pct"
+
+
+def test_persisted_forecast_edge_requires_exact_identity(monkeypatch):
+    import market_worker
+
+    assert market_worker._v39_persisted_forecast_edge("crypto", "BTC-USD", None, "1") == (None, None)
+    assert market_worker._v39_persisted_forecast_edge("crypto", "BTC-USD", "fc-1", None) == (None, None)
