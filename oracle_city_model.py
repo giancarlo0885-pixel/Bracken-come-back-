@@ -431,6 +431,253 @@ def _build_decision_graph(
     }
 
 
+
+_WORLD_DOMAIN_TERMS = {
+    "macro": ("macro", "monetary", "inflation", "employment", "jobs", "fed", "fomc", "treasury", "rates", "yield", "policy", "gdp"),
+    "energy": ("energy", "oil", "crude", "petroleum", "gas", "refinery", "opec", "electricity", "power", "diesel", "gasoline"),
+    "logistics": ("shipping", "freight", "port", "logistics", "supply chain", "container", "maritime", "trucking", "rail", "warehouse"),
+    "crypto": ("crypto", "bitcoin", "btc", "ethereum", "eth", "stablecoin", "blockchain", "defi", "exchange", "digital asset"),
+    "finance": ("stock", "equity", "earnings", "filing", "bank", "credit", "bond", "market", "merger", "acquisition"),
+    "consumer": ("consumer", "retail", "housing", "mortgage", "spending", "wage", "household", "confidence"),
+    "technology": ("ai", "artificial intelligence", "semiconductor", "chip", "quantum", "technology", "software", "data center"),
+}
+
+
+def _event_text(item: dict[str, Any]) -> str:
+    details = item.get("details")
+    if isinstance(details, dict):
+        detail_text = " ".join(
+            str(details.get(key) or "")
+            for key in ("fact", "verified_fact", "summary", "inference", "event_type")
+        )
+    else:
+        detail_text = str(details or "")
+    metadata = _payload(item.get("metadata"))
+    meta_text = " ".join(
+        str(metadata.get(key) or "")
+        for key in ("themes", "event_type", "category", "fact", "inference")
+    )
+    return " ".join(
+        [
+            str(item.get("category") or ""),
+            str(item.get("title") or ""),
+            detail_text,
+            meta_text,
+            str(item.get("symbol") or ""),
+        ]
+    ).lower()
+
+
+def _world_event_view(item: dict[str, Any], now: datetime) -> dict[str, Any]:
+    text = _event_text(item)
+    domains = [
+        domain for domain, terms in _WORLD_DOMAIN_TERMS.items()
+        if any(term in text for term in terms)
+    ]
+    if not domains:
+        domains = ["general"]
+
+    metadata = _payload(item.get("metadata"))
+    details = item.get("details") if isinstance(item.get("details"), dict) else {}
+    confidence = _number(item.get("confidence"))
+    if confidence is None:
+        confidence = _number(metadata.get("confidence"))
+    if confidence is None:
+        confidence = 0.5
+    if confidence > 1:
+        confidence /= 100.0
+    confidence = max(0.0, min(1.0, confidence))
+
+    severity = (
+        _number(details.get("impact_score"))
+        or _number(metadata.get("impact_score"))
+        or _number(details.get("severity"))
+        or _number(metadata.get("severity"))
+        or 25.0
+    )
+    if severity <= 1:
+        severity *= 100.0
+    severity = max(0.0, min(100.0, severity))
+
+    raw_direction = str(
+        details.get("direction")
+        or metadata.get("direction")
+        or details.get("impact_direction")
+        or metadata.get("impact_direction")
+        or "uncertain"
+    ).strip().lower()
+    direction = raw_direction if raw_direction in {"positive", "negative", "mixed", "uncertain"} else "uncertain"
+
+    observed = _parse_time(item.get("event_time") or item.get("created_at"))
+    age_hours = None if observed is None else max(0.0, (now - observed).total_seconds() / 3600.0)
+    fresh = age_hours is None or age_hours <= 72.0
+    verification = str(item.get("verification_status") or metadata.get("verification_status") or "reported").strip().lower()
+    summary = ""
+    if isinstance(item.get("details"), dict):
+        summary = str(
+            details.get("fact")
+            or details.get("verified_fact")
+            or details.get("summary")
+            or details.get("inference")
+            or ""
+        )
+    else:
+        summary = str(item.get("details") or item.get("summary") or "")
+
+    return {
+        "id": item.get("id"),
+        "title": str(item.get("title") or item.get("event_type") or item.get("category") or "Intelligence"),
+        "category": str(item.get("category") or "uncategorized"),
+        "domains": domains,
+        "provider": str(item.get("provider") or "unknown"),
+        "verification": verification,
+        "confidence": round(confidence, 4),
+        "severity": round(severity, 1),
+        "direction": direction,
+        "observed_at": str(item.get("event_time") or item.get("created_at") or ""),
+        "age_hours": None if age_hours is None else round(age_hours, 2),
+        "fresh": fresh,
+        "summary": summary[:260],
+        "source_url": str(item.get("source_url") or ""),
+        "execution_impact": "NONE",
+    }
+
+
+def _build_world_state(events: list[dict[str, Any]], now: datetime) -> dict[str, Any]:
+    views = [_world_event_view(item, now) for item in events]
+    current = [item for item in views if item["fresh"]]
+    domain_state: dict[str, dict[str, Any]] = {}
+    for domain in _WORLD_DOMAIN_TERMS:
+        matched = [item for item in current if domain in item["domains"]]
+        verified = sum(1 for item in matched if item["verification"] in {"verified", "corroborated"})
+        confidence = (
+            sum(float(item["confidence"]) for item in matched) / len(matched)
+            if matched else 0.0
+        )
+        top = sorted(
+            matched,
+            key=lambda item: (float(item["severity"]), float(item["confidence"])),
+            reverse=True,
+        )[:3]
+        domain_state[domain] = {
+            "events": len(matched),
+            "verified": verified,
+            "confidence": round(confidence, 4),
+            "state": "online" if matched else "waiting",
+            "top_titles": [item["title"] for item in top],
+        }
+    top_events = sorted(
+        current,
+        key=lambda item: (float(item["severity"]), float(item["confidence"])),
+        reverse=True,
+    )[:12]
+    return {
+        "current_events": len(current),
+        "verified_events": sum(
+            1 for item in current
+            if item["verification"] in {"verified", "corroborated"}
+        ),
+        "domains": domain_state,
+        "top_events": top_events,
+        "execution_impact": "NONE",
+    }
+
+
+def _brain_growth_snapshot(
+    fetch_rows: FetchRows,
+    warnings: list[str],
+) -> dict[str, Any]:
+    rows_ = _safe_select(
+        fetch_rows,
+        """SELECT
+               (SELECT COUNT(*)::int FROM oracle_brain_entries) AS durable_lessons,
+               (SELECT COUNT(*)::int FROM oracle_brain_sources WHERE status <> 'retired') AS observations,
+               (SELECT COUNT(*)::int FROM oracle_brain_episodes WHERE provenance_status='exact') AS exact_outcomes,
+               (SELECT COUNT(*)::int FROM oracle_brain_links) AS relationships,
+               (SELECT COUNT(*)::int FROM oracle_brain_contradictions WHERE status='active') AS active_contradictions,
+               (SELECT MAX(last_sync_at) FROM oracle_brain_learning_state) AS last_learning_sync""",
+        (),
+        warnings,
+        "Brain growth unavailable",
+    )
+    row = rows_[0] if rows_ else {}
+    durable = int(row.get("durable_lessons") or 0)
+    observations = int(row.get("observations") or 0)
+    outcomes = int(row.get("exact_outcomes") or 0)
+    relationships = int(row.get("relationships") or 0)
+    return {
+        "knowledge_units": durable + observations + outcomes + relationships,
+        "durable_lessons": durable,
+        "observations": observations,
+        "exact_outcomes": outcomes,
+        "relationships": relationships,
+        "active_contradictions": int(row.get("active_contradictions") or 0),
+        "last_learning_sync": str(row.get("last_learning_sync") or "") or None,
+        "execution_authority": "NONE",
+    }
+
+
+def _augment_brain_graph(
+    graph: dict[str, Any],
+    growth: dict[str, Any],
+    world_state: dict[str, Any],
+) -> None:
+    nodes = graph.setdefault("nodes", [])
+    edges = graph.setdefault("edges", [])
+    center_id = "brain-memory:core"
+    knowledge_units = int(growth.get("knowledge_units") or 0)
+    center_size = min(1.15, 0.34 + math.log1p(max(0, knowledge_units)) * 0.07)
+    nodes.append(_brain_node(
+        center_id,
+        "Durable Oracle Memory",
+        "memory",
+        "online" if knowledge_units else "waiting",
+        f"{knowledge_units:,} evidence units",
+        "Persisted research memory only. It has no execution authority.",
+        0.0, 7.2, 0.0, size=center_size, label=True,
+    ))
+
+    aggregates = [
+        ("sources", "Knowledge Sources", int(growth.get("observations") or 0), -4.2, 5.0, -2.8),
+        ("episodes", "Exact Outcomes", int(growth.get("exact_outcomes") or 0), 4.2, 5.0, -2.8),
+        ("lessons", "Durable Lessons", int(growth.get("durable_lessons") or 0), -4.2, 5.0, 2.8),
+        ("links", "Learned Relationships", int(growth.get("relationships") or 0), 4.2, 5.0, 2.8),
+    ]
+    for key, title, count, x, y, z in aggregates:
+        node_id = f"brain-memory:{key}"
+        size = min(0.82, 0.22 + math.log1p(max(0, count)) * 0.055)
+        nodes.append(_brain_node(
+            node_id,
+            title,
+            "lesson" if key in {"lessons", "links"} else "source",
+            "online" if count else "waiting",
+            f"{count:,}",
+            "Count is derived from persisted Oracle Brain evidence.",
+            x, y, z, size=size, label=True,
+        ))
+        edges.append({"source": node_id, "target": center_id, "kind": "memory", "weight": 1.0})
+
+    for index, domain in enumerate(("macro", "energy", "logistics", "crypto", "finance", "consumer", "technology")):
+        data = world_state.get("domains", {}).get(domain, {})
+        count = int(data.get("events") or 0)
+        if count <= 0:
+            continue
+        angle = (index / 7.0) * math.tau
+        node_id = f"world:{domain}"
+        nodes.append(_brain_node(
+            node_id,
+            f"{domain.title()} Context",
+            "world",
+            "online",
+            f"{count} current event{'s' if count != 1 else ''}",
+            "Current provenance-aware world context observed by Oracle.",
+            math.cos(angle) * 7.2, 3.5, math.sin(angle) * 7.2,
+            size=min(0.7, 0.28 + count * 0.035),
+            label=False,
+        ))
+        edges.append({"source": node_id, "target": center_id, "kind": "context", "weight": 0.8})
+
+
 def build_oracle_city_snapshot(
     fetch_rows: FetchRows = rows,
     *,
@@ -599,13 +846,40 @@ def build_oracle_city_snapshot(
     stock = worker_by_market["cash"]
     crypto = worker_by_market["crypto"]
     exposure = sum(item["value"] for item in position_views)
+    world_state = _build_world_state(events, now)
+    brain_growth = _brain_growth_snapshot(fetch_rows, warnings)
+    world_domains = world_state["domains"]
+
+    def _world_metric(domain: str) -> str:
+        data = world_domains.get(domain, {})
+        return f"{int(data.get('events') or 0)} current · {int(data.get('verified') or 0)} verified"
+
+    def _world_detail(domain: str, fallback: str) -> str:
+        titles = list(world_domains.get(domain, {}).get("top_titles") or [])
+        return (titles[0] + ". " + fallback) if titles else fallback
 
     nodes = [
         _node("data", "Data Center", "online" if not warnings else "waiting",
               "PostgreSQL linked" if not warnings else f"{len(warnings)} partial feeds",
               "Canonical read-only state source for Oracle City.", -10, 0, height=4.2),
         _node("intel", "Intelligence Tower", "online" if events else "waiting",
-              f"{len(events)} events", "Macro, news, policy and external context.", -6, -5, height=5.1),
+              f"{world_state['current_events']} current events",
+              "Provenance-aware news, macro, policy and external context already ingested by Oracle.",
+              -6, -5, height=5.1),
+        _node("brain", "Oracle Brain Research Center", "online" if brain_growth["knowledge_units"] else "waiting",
+              f"{brain_growth['knowledge_units']:,} evidence units",
+              f"Persisted learning: {brain_growth['observations']} observations, {brain_growth['exact_outcomes']} exact outcomes, {brain_growth['relationships']} relationships. Research-only.",
+              -17, 7, height=5.4),
+        _node("macro", "Macro & Rates District", world_domains["macro"]["state"],
+              _world_metric("macro"), _world_detail("macro", "Rates, inflation, employment and monetary-policy context."), -15, -14, height=5.0),
+        _node("energy", "Energy & Resources District", world_domains["energy"]["state"],
+              _world_metric("energy"), _world_detail("energy", "Oil, gas, power and resource conditions."), -7, -15, height=4.5),
+        _node("logistics", "Port & Logistics District", world_domains["logistics"]["state"],
+              _world_metric("logistics"), _world_detail("logistics", "Shipping, freight, ports and supply-chain conditions."), 1, -15, height=4.1),
+        _node("consumer", "Consumer Economy District", world_domains["consumer"]["state"],
+              _world_metric("consumer"), _world_detail("consumer", "Households, retail, housing and spending conditions."), 9, -15, height=3.8),
+        _node("technology", "Technology & Industry District", world_domains["technology"]["state"],
+              _world_metric("technology"), _world_detail("technology", "AI, semiconductors, quantum and industrial technology context."), 17, -14, height=4.8),
         _node("patterns", "Pattern Lab", "online" if opportunities else "waiting",
               f"{len({item['strategy'] for item in opportunity_views})} setups",
               "Strategy, regime and pattern evidence.", -2, -5, height=4.7),
@@ -662,6 +936,20 @@ def build_oracle_city_snapshot(
         for source, target, label in [
             ("data", "intel", "context"),
             ("data", "patterns", "market state"),
+            ("intel", "macro", "world events"),
+            ("intel", "energy", "world events"),
+            ("intel", "logistics", "world events"),
+            ("intel", "consumer", "world events"),
+            ("intel", "technology", "world events"),
+            ("intel", "brain", "observations"),
+            ("macro", "brain", "macro context"),
+            ("energy", "brain", "resource context"),
+            ("logistics", "brain", "supply context"),
+            ("consumer", "brain", "economic-life context"),
+            ("technology", "brain", "technology context"),
+            ("brain", "patterns", "historical research context"),
+            ("energy", "logistics", "resource dependency"),
+            ("logistics", "consumer", "supply flow"),
             ("intel", "council", "intelligence"),
             ("patterns", "council", "pattern evidence"),
             ("stock", "council", "stock signals"),
@@ -731,16 +1019,15 @@ def build_oracle_city_snapshot(
             "path": ["council", "risk", "execution", "portfolio"],
         })
 
-    for item in events[:20]:
-        title = str(
-            item.get("title") or item.get("event_type") or item.get("category") or "Intelligence"
-        )
+    for item in world_state["top_events"][:20]:
+        primary_domain = next((domain for domain in item["domains"] if domain != "general"), None)
+        path = ["data", "intel"] + ([primary_domain] if primary_domain else []) + ["brain"]
         replay.append({
             "kind": "intel",
-            "time": str(item.get("event_time") or item.get("created_at") or ""),
-            "title": title,
-            "detail": str(item.get("details") or item.get("summary") or "")[:260],
-            "path": ["data", "intel", "council"],
+            "time": item["observed_at"],
+            "title": item["title"],
+            "detail": (item["summary"] or f"{item['category']} · {item['provider']}")[:260],
+            "path": path,
         })
 
     replay.sort(
@@ -754,6 +1041,7 @@ def build_oracle_city_snapshot(
         canonical_trade_ledger,
         trades,
     )
+    _augment_brain_graph(decision_graph, brain_growth, world_state)
 
     def _env_true(name: str) -> bool:
         return str(os.getenv(name, "false") or "false").strip().lower() in {"1", "true", "yes", "on"}
@@ -861,7 +1149,13 @@ def build_oracle_city_snapshot(
 
     resident_agents = [
         {"id": "resident-data", "title": "Data Scout", "state": "MONITORING" if not warnings else "MAINTENANCE", "home": "residential", "destination": "data", "detail": "Checks persisted market and provider state."},
-        {"id": "resident-intel", "title": "Macro Analyst", "state": "ANALYZING" if events else "RESEARCHING", "home": "residential", "destination": "intel", "detail": "Studies macro, news, and external context."},
+        {"id": "resident-intel", "title": "News & Intelligence Analyst", "state": "ANALYZING" if events else "RESEARCHING", "home": "residential", "destination": "intel", "detail": "Studies provenance-aware news and external context."},
+        {"id": "resident-macro", "title": "Macro Economist", "state": "ANALYZING" if world_domains["macro"]["events"] else "MONITORING", "home": "residential", "destination": "macro", "detail": "Observes rates, inflation, employment and policy context."},
+        {"id": "resident-energy", "title": "Energy Operator", "state": "ANALYZING" if world_domains["energy"]["events"] else "MONITORING", "home": "residential", "destination": "energy", "detail": "Observes oil, gas, power and resource conditions."},
+        {"id": "resident-logistics", "title": "Port Dispatcher", "state": "ANALYZING" if world_domains["logistics"]["events"] else "MONITORING", "home": "residential", "destination": "logistics", "detail": "Observes freight, ports, shipping and supply-chain conditions."},
+        {"id": "resident-consumer", "title": "Consumer Economy Analyst", "state": "ANALYZING" if world_domains["consumer"]["events"] else "MONITORING", "home": "residential", "destination": "consumer", "detail": "Observes housing, retail, household and spending conditions."},
+        {"id": "resident-technology", "title": "Technology Engineer", "state": "ANALYZING" if world_domains["technology"]["events"] else "RESEARCHING", "home": "residential", "destination": "technology", "detail": "Studies AI, semiconductor, quantum and industrial-technology events."},
+        {"id": "resident-brain", "title": "Brain Researcher", "state": "LEARNING" if brain_growth["knowledge_units"] else "RESEARCHING", "home": "residential", "destination": "brain", "detail": "Visualizes durable Oracle Brain learning. It has no execution authority."},
         {"id": "resident-pattern", "title": "Pattern Researcher", "state": "ANALYZING" if opportunities else "RESEARCHING", "home": "residential", "destination": "patterns", "detail": "Studies setups, regimes, and entry evidence."},
         {"id": "resident-council", "title": "Council Analyst", "state": "COUNCIL_REVIEW" if opportunities else "IDLE", "home": "residential", "destination": "council", "detail": "Observes Council decisions without execution authority."},
         {"id": "resident-risk", "title": "Risk Guardian", "state": "RISK_REVIEW" if block_count else "MONITORING", "home": "residential", "destination": "risk", "detail": "Tracks safety gates, blocks, and capacity constraints."},
@@ -892,6 +1186,8 @@ def build_oracle_city_snapshot(
         "safety": safety,
         "city_mood": city_mood,
         "aeve": aeve_summary,
+        "world_state": world_state,
+        "brain_growth": brain_growth,
         "strategy_arena": strategy_arena,
         "resident_agents": resident_agents,
         "rewards": rewards,
@@ -902,6 +1198,8 @@ def build_oracle_city_snapshot(
             "recent_trades": len(trades),
             "ranked_opportunities": len(opportunity_views),
             "known_exposure": round(exposure, 2),
+            "world_events": int(world_state["current_events"]),
+            "brain_knowledge_units": int(brain_growth["knowledge_units"]),
         },
         "nodes": nodes,
         "flows": flows,
