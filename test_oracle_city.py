@@ -497,3 +497,4 @@ def test_oracle_city_brain_monitor_distinguishes_synced_without_new_evidence():
     assert snapshot["brain_growth"]["learned_this_cycle"] == 0
     rendered = render_oracle_city_component(snapshot)
     assert 'BRAIN: SYNCED' in rendered
+\n\ndef test_city_has_renderer_failure_fallback():\n    from oracle_city_component import render_oracle_city_component\n    html = render_oracle_city_component({})\n    assert "fallbackCity" in html\n    assert "__oracleCityBooted" in html\n    assert "3D renderer unavailable" in html\n
