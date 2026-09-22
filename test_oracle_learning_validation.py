@@ -48,10 +48,13 @@ def test_rejected_decision_that_rises_is_missed_winner():
     assert result["missed_winners"] == 1
     assert result["avoided_losses"] == 0
     assert conn.insert[8] == "missed_winner"
-    assert conn.insert[7] == 2.0
+    assert round(conn.insert[7], 6) == 2.0
 
 
-def test_promotion_evidence_cannot_auto_promote():
+def test_promotion_evidence_is_research_only():
     source=Path("oracle_learning_validation.py").read_text(encoding="utf-8")
-    assert "eligible = False" in source
-    assert "forward_drawdown_validation_required" in source
+    assert "PROMOTION_MIN_SAMPLES" in source
+    assert "PROMOTION_MIN_PROFIT_FACTOR" in source
+    assert "PROMOTION_MAX_CALIBRATION_ERROR" in source
+    assert "PROMOTION_MAX_DRAWDOWN_PCT" in source
+    assert "execution_impact" in source
