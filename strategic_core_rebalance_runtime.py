@@ -141,7 +141,7 @@ def _log_promotion_decision(worker: Any, signal: Any) -> None:
         allocation_symbol or "missing",
         target_amount,
         meaningful_floor,
-        allocation.get("entry_floor_mode") or decision.get("entry_floor_mode") or "legacy_producer_floor",
+        allocation.get("entry_floor_mode") or decision.get("entry_floor_mode") or "not_applicable",
         decision.get("status") or "missing",
         decision.get("reason") or "missing",
         patch._signal_value(signal, "action", ""),
