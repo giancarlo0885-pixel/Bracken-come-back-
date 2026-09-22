@@ -193,3 +193,36 @@ def test_brain_retention_health_is_read_only(monkeypatch):
     assert health["read_only"] is True
     assert health["execution_authority"] == "NONE"
     assert snapshot["safety"]["safe_research_boundary"] is True
+
+
+def test_brain_growth_is_derived_from_persisted_evidence(monkeypatch):
+    monkeypatch.setenv("EXECUTION_MODE", "paper")
+    monkeypatch.setenv("ENABLE_BROKER_SUBMISSION", "false")
+    monkeypatch.setenv("LIVE_TRADING_ARMED", "false")
+
+    def fetch(query: str, params=()):
+        if "COUNT(*)::int AS total, MIN(created_at)" in query:
+            return [{"total": 10, "oldest": "2026-09-01", "newest": "2026-09-21"}]
+        if "COUNT(*)::int AS total, MIN(observed_at)" in query:
+            return [{"total": 20, "oldest": "2026-09-02", "newest": "2026-09-21"}]
+        if "COUNT(*)::int AS total, MIN(exit_time)" in query:
+            return [{"total": 30, "oldest": "2026-09-03", "newest": "2026-09-21"}]
+        if "FROM oracle_brain_links" in query:
+            return [{"source_key":"a","target_key":"b","relation":"supports","weight":1.0,
+                     "evidence_count":3,"confidence":0.8,"last_observed_at":"2026-09-21","metadata":{}}]
+        return []
+
+    growth = oracle_brain.build_oracle_brain_snapshot(fetch)["growth"]
+    assert growth["knowledge_units"] == 61
+    assert growth["durable_lessons"] == 10
+    assert growth["observations"] == 20
+    assert growth["exact_outcomes"] == 30
+    assert growth["relationships"] == 1
+    assert growth["execution_authority"] == "NONE"
+
+
+def test_brain_visual_density_tracks_evidence():
+    source = Path("pages/3_Oracle_Brain.py").read_text(encoding="utf-8")
+    assert "evidenceCount" in source
+    assert "Math.min(120,evidenceCount)" in source
+    assert "Brain growth:" in source
