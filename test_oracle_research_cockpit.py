@@ -26,4 +26,4 @@ def test_cockpit_query_keeps_generation_config_and_provenance_isolation():
     assert "o.generation=a.generation AND o.config_hash=a.config_hash" in src
     assert "o.provenance_version>=2" in src
     assert "Intelligence Data Lineage & Health" in src
-    assert "Knowledge snapshots" in src
+    assert "Provenance v2" in src\n    assert "feature_snapshot IS NOT NULL" not in src\n    assert "entry_signal_id IS NOT NULL" not in src
