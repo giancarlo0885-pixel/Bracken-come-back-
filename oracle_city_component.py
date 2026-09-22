@@ -135,7 +135,7 @@ const hovercard=document.getElementById("hovercard");
 const replayPanel=document.getElementById("replayPanel");
 const isMobileDevice=window.matchMedia("(max-width:720px)").matches;
 const prefersReduced=window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-const DETAIL=isMobileDevice?0.48:1;
+const DETAIL=isMobileDevice?0.78:1.15;
 const colors={online:0x4df49b,waiting:0xffd166,offline:0xff6767};
 const aeveData=DATA.aeve||{};
 document.getElementById("cityMood").textContent="CITY MOOD: "+String(DATA.city_mood||"UNKNOWN");
@@ -197,8 +197,8 @@ scene.fog=new THREE.FogExp2(0x050912,isMobileDevice?0.014:0.010);
 const camera=new THREE.PerspectiveCamera(isMobileDevice?52:46,1,.1,280);
 camera.position.set(30,22,38);
 
-const renderer=new THREE.WebGLRenderer({antialias:!isMobileDevice,powerPreference:"high-performance"});
-const renderScale=isMobileDevice?Math.min(window.devicePixelRatio||1,1.35):Math.min(window.devicePixelRatio||1,2.5);
+const renderer=new THREE.WebGLRenderer({antialias:true,powerPreference:"high-performance",alpha:false});
+const renderScale=isMobileDevice?Math.min(window.devicePixelRatio||1,1.75):Math.min(window.devicePixelRatio||1,2.5);
 renderer.setPixelRatio(renderScale);
 renderer.outputColorSpace=THREE.SRGBColorSpace;
 renderer.shadowMap.enabled=!isMobileDevice;
@@ -261,14 +261,14 @@ function applyTimeOfDay(){
   const twilight=twilightForHour(hour);
   const night=1-daylight;
   const skyNight=new THREE.Color(0x050912);
-  const skyDay=new THREE.Color(0x74b9e8);
+  const skyDay=new THREE.Color(0x5f9fc9);
   const skyTwilight=new THREE.Color(hour<12?0xe9a06f:0xf08b5b);
   const sky=skyNight.clone().lerp(skyDay,daylight);
   if(twilight>0.01)sky.lerp(skyTwilight,twilight*.42);
   scene.background.copy(sky);
 
   const fogNight=new THREE.Color(0x07111c);
-  const fogDay=new THREE.Color(0xa9d4e8);
+  const fogDay=new THREE.Color(0x7da9b7);
   const fogColor=fogNight.clone().lerp(fogDay,daylight*.88);
   if(twilight>0.01)fogColor.lerp(new THREE.Color(0xd9aa8b),twilight*.22);
   scene.fog.color.copy(fogColor);
@@ -327,6 +327,15 @@ const laneMat=new THREE.MeshBasicMaterial({color:0xc5a95c,transparent:true,opaci
 for(let x=-27;x<32;x+=3.2){
   const dash=new THREE.Mesh(new THREE.PlaneGeometry(1.45,.055),laneMat);dash.rotation.x=-Math.PI/2;dash.position.set(x,.025,0);scene.add(dash);
 }
+// cinematic boulevard lighting
+const curbGlowMat=new THREE.MeshBasicMaterial({color:0x55d8ff,transparent:true,opacity:.24});
+[-1.02,1.02].forEach(z=>{const strip=new THREE.Mesh(new THREE.PlaneGeometry(60,.025),curbGlowMat);strip.rotation.x=-Math.PI/2;strip.position.set(2.5,.031,z);scene.add(strip);});
+for(let x=-25;x<=29;x+=6){
+  cyl(scene,.035,.045,1.55,x,.775,2.05,mat(0x142832,.3,.75),8);
+  const lamp=new THREE.PointLight(0x9ee8ff,isMobileDevice?.75:1.6,5,2);lamp.position.set(x,1.62,2.05);scene.add(lamp);
+  cyl(scene,.035,.045,1.55,x,.775,-2.05,mat(0x142832,.3,.75),8);
+  const lamp2=new THREE.PointLight(0xffc878,isMobileDevice?.65:1.35,5,2);lamp2.position.set(x,1.62,-2.05);scene.add(lamp2);
+}
 
 const nodeObjects=new Map();
 const interactables=[];
@@ -372,17 +381,30 @@ function antenna(parent,y,color){
   const b=new THREE.Mesh(new THREE.SphereGeometry(.09,10,10),new THREE.MeshBasicMaterial({color}));b.position.set(0,y+1.75,0);parent.add(b);return b;
 }
 
+function addArchitecturalDetail(parent,w,h,d,accent){
+  const dark=mat(0x07141d,.28,.82,accent,.08);
+  box(parent,w*1.16,.22,d*1.16,0,.11,0,dark);
+  box(parent,w*.86,.16,d*.86,0,h+.15,0,dark);
+  const finMat=new THREE.MeshStandardMaterial({color:0x163949,emissive:accent,emissiveIntensity:.42,metalness:.72,roughness:.24});
+  const fy=h*.50;
+  [[-.49,-.49],[.49,-.49],[-.49,.49],[.49,.49]].forEach(([sx,sz])=>box(parent,.055,h*.86,.055,sx*w,fy,sz*d,finMat));
+  box(parent,w*.38,.28,d*.38,0,h+.31,0,mat(0x091820,.3,.78));
+  const beacon=new THREE.PointLight(accent,isMobileDevice?1.4:3.0,4.5,2);
+  beacon.position.set(0,h+.62,0);parent.add(beacon);
+}
+
 function createStandardTower(node,opts={}){
   const g=new THREE.Group(),state=stateColor(node.state),h=Number(opts.height||node.height||5),w=Number(opts.w||2.5),d=Number(opts.d||2.5);
-  const facade=mat(opts.color||0x102a38,.32,.68,state,.12);
+  const facade=mat(opts.color||0x0b2230,.24,.82,state,.16);
   box(g,w,h,d,0,h/2,0,facade);
   if(opts.setback){
     box(g,w*.72,h*.32,d*.72,0,h+h*.16,0,mat(opts.color2||0x0c2431,.28,.75,state,.16));
     roofGlow(g,w*.76,d*.76,h+h*.32+.06,state);
     antenna(g,h+h*.32,state);
   }else{roofGlow(g,w*1.03,d*1.03,h+.06,state);antenna(g,h,state);}
-  windowGrid(g,w,h,d,opts.window||0x6dd9ff,opts.rows||10,opts.cols||6);
+  windowGrid(g,w,h,d,opts.window||0x82e8ff,opts.rows||14,opts.cols||8);
   neonSign(g,state,Math.min(h-.45,h*.72),Math.min(2.0,w*.78));
+  addArchitecturalDetail(g,w,h,d,state);
   return g;
 }
 function createCouncil(node){
