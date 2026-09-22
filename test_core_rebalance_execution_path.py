@@ -304,3 +304,30 @@ def test_core_rebalance_path_does_not_bypass_quote_gate(monkeypatch):
     finally:
         market_worker._v39_signal_opportunity = original_opportunity
         market_worker._v39_prioritize_signals = original_prioritize
+
+
+def test_v39_opportunity_preserves_signed_forecast_as_explicit_edge(monkeypatch):
+    import market_worker
+
+    signal = _signal("BTC-USD")
+    signal.price = 100.0
+    signal.expected_move_pct = -1.25
+    prices = {
+        "BTC-USD": {
+            "price": 100.0,
+            "requested_symbol": "BTC-USD",
+            "provider_symbol": "BTC-USD",
+            "quote_verified": True,
+            "tradeable": True,
+            "avg_dollar_volume": 1_000_000.0,
+            "spread_pct": 0.01,
+        }
+    }
+    ranked = {"BTC-USD": {"risk_score": 50.0}}
+    monkeypatch.setattr(market_worker, "_execution_quote_eligible", lambda quote: True)
+
+    opportunity = market_worker._v39_signal_opportunity("crypto", signal, prices, ranked, "deep")
+
+    assert opportunity["expected_move_pct"] == -1.25
+    assert opportunity["expected_edge_pct"] == -1.25
+    assert opportunity["edge_provenance"] == "forecast_expected_move_pct"

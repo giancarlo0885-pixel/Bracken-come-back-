@@ -631,6 +631,10 @@ def _v39_signal_opportunity(market: str, signal: Any, prices: dict[str, Any], ra
     )
     if expected_move in (None, ""):
         expected_move = getattr(signal, "expected_move_pct", None)
+    # Preserve the signed directional forecast as explicit edge provenance for
+    # downstream paper economics. Do not derive edge from confidence, score,
+    # historical profitability, or absolute movement.
+    expected_edge = expected_move
     price = _finite_positive(quote.get("price")) or _finite_positive(getattr(signal, "price", None))
     liquidity = _finite_positive(quote.get("avg_dollar_volume")) or _finite_positive(ranked.get("liquidity")) or 0.0
     stages = ["surveillance", "deep_research" if scan_type == "deep" else "active_hot"]
@@ -714,6 +718,8 @@ def _v39_signal_opportunity(market: str, signal: Any, prices: dict[str, Any], ra
         "reward_risk_ratio": ranked.get("reward_risk_ratio") or getattr(signal, "reward_risk_ratio", None),
         "opportunity_score": ranked.get("opportunity_score") or signal_score,
         "expected_move_pct": expected_move,
+        "expected_edge_pct": expected_edge,
+        "edge_provenance": "forecast_expected_move_pct" if expected_edge not in (None, "") else None,
         "confidence": getattr(signal, "confidence", 0.0),
         "data_quality_score": quote.get("data_quality_score") or ranked.get("data_quality_score") or 0.0,
         "risk_score": risk_score,
