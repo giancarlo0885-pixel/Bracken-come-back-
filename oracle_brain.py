@@ -343,6 +343,7 @@ def build_oracle_brain_snapshot(fetch_rows: FetchRows) -> dict[str, Any]:
         ("oracle_brain_entries", "created_at", "entries", ""),
         ("oracle_brain_sources", "observed_at", "sources", ""),
         ("oracle_brain_episodes", "exit_time", "episodes", " WHERE provenance_status='exact'"),
+        ("oracle_brain_observations", "event_time", "observations", ""),
     ):
         stats = _safe_rows(
             fetch_rows,
@@ -360,25 +361,31 @@ def build_oracle_brain_snapshot(fetch_rows: FetchRows) -> dict[str, Any]:
         "entries": retention_spans["entries"],
         "sources": retention_spans["sources"],
         "episodes": retention_spans["episodes"],
+        "observations": retention_spans["observations"],
         "learning_pipelines": len(learning_state),
         "last_sync_at": max(sync_times) if sync_times else None,
         "read_only": True,
         "execution_authority": "NONE",
     }
 
+    link_stats = _safe_rows(fetch_rows, "SELECT COUNT(*)::int AS total FROM oracle_brain_links")
+    relationship_count = int(_num((link_stats[0] if link_stats else {}).get("total"), len(links)))
+
     growth = {
         "knowledge_units": (
             retention_spans["entries"]["count"]
             + retention_spans["sources"]["count"]
             + retention_spans["episodes"]["count"]
-            + len(links)
+            + retention_spans["observations"]["count"]
+            + relationship_count
         ),
         "durable_lessons": retention_spans["entries"]["count"],
-        "observations": retention_spans["sources"]["count"],
+        "observations": retention_spans["observations"]["count"],
+        "intelligence_sources": retention_spans["sources"]["count"],
         "exact_outcomes": retention_spans["episodes"]["count"],
-        "relationships": len(links),
-        "oldest_observation": retention_spans["sources"]["oldest"],
-        "newest_observation": retention_spans["sources"]["newest"],
+        "relationships": relationship_count,
+        "oldest_observation": retention_spans["observations"]["oldest"],
+        "newest_observation": retention_spans["observations"]["newest"],
         "last_learning_sync": retention_health["last_sync_at"],
         "execution_authority": "NONE",
     }

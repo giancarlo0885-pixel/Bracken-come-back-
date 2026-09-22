@@ -112,6 +112,7 @@ CANONICAL_PROTECTED_TABLES = {
     "oracle_brain_contradictions",
     "oracle_brain_research_queue",
     "oracle_brain_learning_state",
+    "oracle_brain_observations",
 }
 DATABASE_RETENTION_POLICIES = {
     "signals": {"keep_rows": 6000, "batch_size": DATABASE_RETENTION_BATCH_SIZE, "classification": "append-only analytical/ephemeral"},
@@ -170,6 +171,7 @@ DATABASE_TABLE_GROWTH_AUDIT = {
     "oracle_brain_contradictions": {"class": "research governance/audit records", "inserted_by": "Oracle Brain contradiction engine", "frequency": "evidence polarity changes", "retention": "never auto-delete"},
     "oracle_brain_research_queue": {"class": "research governance records", "inserted_by": "Oracle Brain uncertainty engine", "frequency": "under-sampled/conflicting cohorts", "retention": "preserve until resolved/retired"},
     "oracle_brain_learning_state": {"class": "research cursor/state records", "inserted_by": "Oracle Brain learner", "frequency": "periodic learning sync", "retention": "never auto-delete"},
+    "oracle_brain_observations": {"class": "canonical append-only research observations", "inserted_by": "Oracle observation bus", "frequency": "normalized persisted Oracle evidence", "retention": "never auto-delete"},
 }
 
 

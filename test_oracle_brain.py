@@ -216,15 +216,20 @@ def test_brain_growth_is_derived_from_persisted_evidence(monkeypatch):
             return [{"total": 20, "oldest": "2026-09-02", "newest": "2026-09-21"}]
         if "COUNT(*)::int AS total, MIN(exit_time)" in query:
             return [{"total": 30, "oldest": "2026-09-03", "newest": "2026-09-21"}]
+        if "COUNT(*)::int AS total, MIN(event_time)" in query:
+            return [{"total": 40, "oldest": "2026-09-04", "newest": "2026-09-22"}]
+        if "SELECT COUNT(*)::int AS total FROM oracle_brain_links" in query:
+            return [{"total": 1}]
         if "FROM oracle_brain_links" in query:
             return [{"source_key":"a","target_key":"b","relation":"supports","weight":1.0,
                      "evidence_count":3,"confidence":0.8,"last_observed_at":"2026-09-21","metadata":{}}]
         return []
 
     growth = oracle_brain.build_oracle_brain_snapshot(fetch)["growth"]
-    assert growth["knowledge_units"] == 61
+    assert growth["knowledge_units"] == 101
     assert growth["durable_lessons"] == 10
-    assert growth["observations"] == 20
+    assert growth["observations"] == 40
+    assert growth["intelligence_sources"] == 20
     assert growth["exact_outcomes"] == 30
     assert growth["relationships"] == 1
     assert growth["execution_authority"] == "NONE"
