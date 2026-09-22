@@ -193,7 +193,10 @@ def install_strategic_core_rebalance_producer(worker: Any) -> None:
                 patch._set_signal_value(signal, "core_target_weight", row.get("Target Weight"))
                 patch._set_signal_value(signal, "core_current_value", patch._numeric(row.get("Current Core Value")))
                 patch._set_signal_value(signal, "core_plan_reason", row.get("Reason"))
-                # The optimizer is the single authority for the adaptive meaningful-entry floor.\n                # Do not persist a producer-side legacy floor before the optimizer evaluates this candidate.\n                patch._set_signal_value(signal, "core_meaningful_entry_floor", None)\n                worker.log.info(
+                # The optimizer is the single authority for the adaptive meaningful-entry floor.
+                # Do not persist a producer-side legacy floor before the optimizer evaluates this candidate.
+                patch._set_signal_value(signal, "core_meaningful_entry_floor", None)
+                worker.log.info(
                     "CORE_REBALANCE_STRATEGIC_CANDIDATE | symbol=%s | target_amount=%.2f | target_weight=%s | current_core_value=%.2f | meaningful_entry_floor=pending_optimizer | action=%s",
                     symbol,
                     patch._numeric(row.get("Amount")),
