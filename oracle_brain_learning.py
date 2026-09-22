@@ -1061,6 +1061,11 @@ def sync_brain_learning(market: str, *, source_limit: int = _SOURCE_BATCH, episo
             validation = sync_learning_validation(conn, normalized_market)
         except Exception as exc:
             validation = {"status": "degraded", "error": str(exc)[:240], "execution_impact": "NONE"}
+        try:
+            from oracle_advanced_learning import sync_advanced_learning
+            advanced_learning = sync_advanced_learning(conn, normalized_market)
+        except Exception as exc:
+            advanced_learning = {"status": "degraded", "error": str(exc)[:240], "execution_impact": "NONE"}
         result = {
             "status": "ok",
             "market": normalized_market,
@@ -1076,6 +1081,7 @@ def sync_brain_learning(market: str, *, source_limit: int = _SOURCE_BATCH, episo
             "research_topics_queued": queued,
             "source_freshness_refreshed": refreshed,
             "validation": validation,
+            "advanced_learning": advanced_learning,
             "execution_impact": "NONE",
         }
         conn.execute(
