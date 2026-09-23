@@ -200,8 +200,8 @@ def test_postgres_bootstrap_advisory_lock_runs_migrations_once():
 
 
 def test_decision_funnel_retention_is_bounded_for_storage_safety():
-    assert database.DATABASE_RETENTION_POLICIES["global_decision_events"]["keep_rows"] == 5000
-    assert "5000" in database.DATABASE_TABLE_GROWTH_AUDIT["global_decision_events"]["retention"]
+    assert database.DATABASE_RETENTION_POLICIES["global_decision_events"]["keep_rows"] == 1000
+    assert "1000" in database.DATABASE_TABLE_GROWTH_AUDIT["global_decision_events"]["retention"]
 
 
 class _RetentionProbeResult:
@@ -232,3 +232,10 @@ def test_retention_hysteresis_triggers_after_bounded_overshoot():
     due = database._retention_cleanup_due(conn, "signals", keep_rows=5000, batch_size=500)
     assert due is True
     assert conn.params == (6000,)
+
+
+def test_high_churn_tables_get_aggressive_autovacuum_settings():
+    source = open("database.py", encoding="utf-8").read()
+    assert "global_decision_events SET (autovacuum_vacuum_scale_factor = 0.005" in source
+    assert "signals SET (autovacuum_vacuum_scale_factor = 0.01" in source
+    assert "VACUUM FULL" not in source
