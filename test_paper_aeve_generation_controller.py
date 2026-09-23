@@ -131,7 +131,7 @@ def test_generation_window_counts_all_valid_outcomes_and_tracks_acceptance_separ
     assert "WHERE generation=%s" in source
     assert "config_hash=%s" in source
     assert "provenance_version=%s" in source
-    assert PROVENANCE_VERSION == 2
+    assert PROVENANCE_VERSION == 3
 
 
 def test_completed_window_with_insufficient_acceptance_advances_identity_without_tuning():
@@ -178,7 +178,7 @@ def _score_with_persisted_row(row):
         mae_pct=-0.10,
         round_trip_cost_pct=0.05,
         loss_streak=0,
-        price_above_recent_low_pct=0.10,
+        dip_depth_pct=0.10,
         rebound_from_low_pct=1.0,
         rsi=43.5,
         trend_confirmed=True,
@@ -258,3 +258,75 @@ def test_aeve_loss_streak_query_excludes_candidate_and_future_outcomes():
     assert "exit_time < %s" in streak_query
     assert "exit_time <= %s" not in streak_query
     assert "net_pnl<0" not in streak_query
+
+
+def test_evaluator_passes_independent_entry_inputs_and_persists_version(monkeypatch, caplog):
+    from contextlib import nullcontext
+    import logging
+    import pytest
+    import database
+    import paper_aeve_generation_controller as controller
+    import paper_aeve_v1_formula as formula
+
+    cfg = AEVEGenerationConfig()
+    identity = generation_config_hash(cfg)
+    features = {'edge_pct': 0.24, 'dip_depth_pct': 0.0025, 'rebound_pct': 0.0005}
+    captured, inserted = [], []
+    real_score = formula.score_entry
+
+    class Result:
+        def __init__(self, rows):
+            self.rows = rows
+        def fetchall(self):
+            return self.rows
+        def fetchone(self):
+            return self.rows[0] if self.rows else None
+
+    class Conn:
+        def execute(self, sql, params=None):
+            if 'JOIN trade_ledger' in sql:
+                return Result([dict(trade_id='entry-1', regime='range', entry_time='2026-09-23',
+                    exit_time='2026-09-24', net_pnl=1, quantity=1, entry_price=100, fees=0.15,
+                    feature_snapshot=dict(features), aeve_generation=cfg.generation,
+                    aeve_config_json=cfg.__dict__, aeve_config_hash=identity)])
+            if 'COUNT(*) AS samples' in sql:
+                return Result([dict(samples=80, expectancy=0.1, gross_win=2, gross_loss=1,
+                                    mfe=1.1, mae=-0.3)])
+            if 'SELECT net_pnl' in sql:
+                return Result([])
+            if 'INSERT INTO paper_aeve_generation_outcomes' in sql:
+                inserted.append(params)
+                return Result([])
+            raise AssertionError(sql)
+
+    def capture(**kwargs):
+        decision = real_score(**kwargs)
+        captured.append((kwargs, decision))
+        return decision
+
+    monkeypatch.setattr(controller, 'active', lambda: True)
+    monkeypatch.setattr(controller, '_load_active', lambda conn: (cfg, {'config_hash': identity}))
+    monkeypatch.setattr(database, 'connect', lambda: nullcontext(Conn()))
+    monkeypatch.setattr(formula, 'score_entry', capture)
+    caplog.set_level(logging.INFO, logger=controller.log.name)
+    assert controller.record_generation_outcomes() == 1
+    features['dip_depth_pct'] = 0.0125
+    assert controller.record_generation_outcomes() == 1
+    features['rebound_pct'] = 0.002
+    assert controller.record_generation_outcomes() == 1
+    first, dip_changed, rebound_changed = captured
+    assert first[0]['dip_depth_pct'] == pytest.approx(0.25)
+    assert first[0]['rebound_from_low_pct'] == pytest.approx(0.05)
+    assert dip_changed[0]['dip_depth_pct'] == pytest.approx(1.25)
+    assert dip_changed[1].dip_quality != first[1].dip_quality
+    assert dip_changed[1].rebound_quality == first[1].rebound_quality
+    assert rebound_changed[0]['rebound_from_low_pct'] == pytest.approx(0.20)
+    assert rebound_changed[1].dip_quality == dip_changed[1].dip_quality
+    assert rebound_changed[1].rebound_quality != dip_changed[1].rebound_quality
+    assert all(row[-1] == 3 for row in inserted)
+    assert all(item[0]['config'] == cfg.__dict__ for item in captured)
+    assert 'input_schema=dip_depth_rebound_v1' in caplog.text
+    assert 'dip_depth_pct=1.25 | rebound_from_low_pct=0.2' in caplog.text
+    features.pop('dip_depth_pct')
+    assert controller.record_generation_outcomes() == 1
+    assert inserted[-1][8] is False

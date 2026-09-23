@@ -5,7 +5,7 @@ def candidate(**overrides):
     base = dict(
         expected_net_edge_pct=0.24, mfe_pct=1.1, mae_pct=-0.30,
         round_trip_cost_pct=0.15, loss_streak=0,
-        price_above_recent_low_pct=0.35, rebound_from_low_pct=0.45,
+        dip_depth_pct=0.35, rebound_from_low_pct=0.45,
         rsi=44, trend_confirmed=True, regime_expectancy_positive=True,
         profit_factor=1.35, min_samples=80,
     )
@@ -64,3 +64,17 @@ def test_take_profit_requires_net_gain_and_pullback():
                               mfe_since_entry_pct=1.0, pullback_from_peak_pct=0.35) is True
     assert should_take_profit(unrealized_return_pct=0.20, round_trip_cost_pct=0.15,
                               mfe_since_entry_pct=0.25, pullback_from_peak_pct=0.20) is False
+
+
+def test_dip_depth_changes_only_dip_component():
+    shallow = score_entry(**candidate(dip_depth_pct=0.25, rebound_from_low_pct=0.10))
+    deeper = score_entry(**candidate(dip_depth_pct=1.25, rebound_from_low_pct=0.10))
+    assert shallow.dip_quality > deeper.dip_quality
+    assert shallow.rebound_quality == deeper.rebound_quality
+
+
+def test_rebound_changes_only_rebound_component():
+    weak = score_entry(**candidate(dip_depth_pct=0.25, rebound_from_low_pct=0.05))
+    strong = score_entry(**candidate(dip_depth_pct=0.25, rebound_from_low_pct=0.20))
+    assert weak.rebound_quality < strong.rebound_quality
+    assert weak.dip_quality == strong.dip_quality

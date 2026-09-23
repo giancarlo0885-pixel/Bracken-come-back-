@@ -57,7 +57,7 @@ class AEVEEntry:
 
 def score_entry(
     *, expected_net_edge_pct: float, mfe_pct: float, mae_pct: float,
-    round_trip_cost_pct: float, loss_streak: int, price_above_recent_low_pct: float,
+    round_trip_cost_pct: float, loss_streak: int, dip_depth_pct: float,
     rebound_from_low_pct: float, rsi: float | None, trend_confirmed: bool,
     regime_expectancy_positive: bool, profit_factor: float, min_samples: int,
     config: AEVEScoringConfig | Mapping[str, Any] | None = None,
@@ -68,13 +68,15 @@ def score_entry(
     mfe = max(0.0, _f(mfe_pct))
     mae = abs(min(0.0, _f(mae_pct)))
     cost = max(0.0, _f(round_trip_cost_pct))
-    above_low = max(0.0, _f(price_above_recent_low_pct))
+    dip_depth = max(0.0, _f(dip_depth_pct))
     rebound = max(0.0, _f(rebound_from_low_pct))
     pf = max(0.0, _f(profit_factor))
     samples = max(0, int(min_samples))
     streak = max(0, int(loss_streak))
 
-    dip_quality = _clip(1.0 - above_low / 2.0, 0.0, 1.0)
+    # Dip depth is high-to-low drawdown in percentage points. Preserve the
+    # existing shallow-dip preference and scale; recovery is scored separately.
+    dip_quality = _clip(1.0 - dip_depth / 2.0, 0.0, 1.0)
     rebound_quality = _clip(rebound / max(cost * 2.0, 0.20), 0.0, 1.0)
     excursion_quality = _clip((mfe - mae) / max(mfe + mae, 0.10), -1.0, 1.0)
     cost_coverage = _clip((mfe - cfg.min_mfe_cost_multiple * cost) / max(mfe, 0.10), -1.0, 1.0)

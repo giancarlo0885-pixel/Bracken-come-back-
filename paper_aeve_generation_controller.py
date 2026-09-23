@@ -20,7 +20,7 @@ log = logging.getLogger("paper-aeve-generation-controller")
 _THREAD: threading.Thread | None = None
 _STOP = threading.Event()
 BATCH_SIZE = 1000
-PROVENANCE_VERSION = 2
+PROVENANCE_VERSION = 3
 _REQUIRED_RESEARCH_RELATIONS = ("paper_aeve_generation_outcomes",)
 
 
@@ -285,7 +285,7 @@ def record_generation_outcomes(limit: int = 250) -> int:
         if not active_generation_row:
             return 0
         log.info(
-            "AEVE EVALUATOR HANDSHAKE | generation=%s | config_hash=%s | provenance_version=%s | config=%s | mode=shadow | execution_impact=NONE | broker_submission=NONE | live_trading=DISARMED",
+            "AEVE EVALUATOR HANDSHAKE | generation=%s | config_hash=%s | provenance_version=%s | input_schema=dip_depth_rebound_v1 | config=%s | mode=shadow | execution_impact=NONE | broker_submission=NONE | live_trading=DISARMED",
             active_cfg.generation,
             active_generation_row.get("config_hash"),
             PROVENANCE_VERSION,
@@ -362,6 +362,8 @@ def record_generation_outcomes(limit: int = 250) -> int:
                 if key in features and features.get(key) is not None:
                     edge = _f(features.get(key))
                     break
+            # Entry snapshots store fractional returns; scoring uses percentage points.
+            # High-to-low dip depth and low-to-entry recovery are distinct measurements.
             dip_depth = features.get("dip_depth_pct")
             rebound = features.get("rebound_pct")
             # Fail closed when immutable entry-time AEVE evidence is absent. Never
@@ -373,7 +375,7 @@ def record_generation_outcomes(limit: int = 250) -> int:
                 mae_pct=min(0.0, _f(prior.get("mae"))),
                 round_trip_cost_pct=cost_pct,
                 loss_streak=loss_streak,
-                price_above_recent_low_pct=(max(0.0, _f(rebound)) * 100.0) if entry_evidence_complete else 0.0,
+                dip_depth_pct=(max(0.0, _f(dip_depth)) * 100.0) if entry_evidence_complete else 0.0,
                 rebound_from_low_pct=(max(0.0, _f(rebound)) * 100.0) if entry_evidence_complete else 0.0,
                 rsi=(_f(features.get("rsi_14"), 50.0) if features.get("rsi_14") is not None else None),
                 trend_confirmed=False,
@@ -396,9 +398,12 @@ def record_generation_outcomes(limit: int = 250) -> int:
                 json.dumps(config_snapshot),config_hash,PROVENANCE_VERSION,
             ))
             log.info(
-                "AEVE SHADOW RESULT | trade_id=%s | generation=%s | config_hash=%s | provenance_version=%s | would_trade=%s | score=%.6f | mode=shadow | execution_impact=NONE | broker_submission=NONE | live_trading=DISARMED",
+                "AEVE SHADOW RESULT | trade_id=%s | generation=%s | config_hash=%s | provenance_version=%s | would_trade=%s | score=%.6f | input_schema=dip_depth_rebound_v1 | dip_depth_pct=%s | rebound_from_low_pct=%s | entry_evidence_complete=%s | mode=shadow | execution_impact=NONE | broker_submission=NONE | live_trading=DISARMED",
                 row.get("trade_id"), cfg.generation, config_hash, PROVENANCE_VERSION,
                 bool(decision.would_trade if entry_evidence_complete else False), decision.score,
+                max(0.0, _f(dip_depth)) * 100.0 if entry_evidence_complete else None,
+                max(0.0, _f(rebound)) * 100.0 if entry_evidence_complete else None,
+                entry_evidence_complete,
             )
             created += 1
     return created
