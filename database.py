@@ -1080,8 +1080,6 @@ def initialize_database() -> None:
         "ALTER TABLE forecasts SET (autovacuum_vacuum_scale_factor = 0.01, autovacuum_vacuum_threshold = 50, autovacuum_analyze_scale_factor = 0.02, autovacuum_analyze_threshold = 50)",
         "ALTER TABLE equity_snapshots SET (autovacuum_vacuum_scale_factor = 0.01, autovacuum_vacuum_threshold = 50, autovacuum_analyze_scale_factor = 0.02, autovacuum_analyze_threshold = 50)",
         "ALTER TABLE opportunity_rankings SET (autovacuum_vacuum_scale_factor = 0.01, autovacuum_vacuum_threshold = 50, autovacuum_analyze_scale_factor = 0.02, autovacuum_analyze_threshold = 50)",
-        "ALTER TABLE oracle_decision_audit SET (autovacuum_vacuum_scale_factor = 0.01, autovacuum_vacuum_threshold = 50, autovacuum_analyze_scale_factor = 0.02, autovacuum_analyze_threshold = 50)",
-        "ALTER TABLE opportunity_radar_assessments SET (autovacuum_vacuum_scale_factor = 0.01, autovacuum_vacuum_threshold = 50, autovacuum_analyze_scale_factor = 0.02, autovacuum_analyze_threshold = 50)",
         "ALTER TABLE global_decision_events SET (autovacuum_vacuum_scale_factor = 0.005, autovacuum_vacuum_threshold = 25, autovacuum_analyze_scale_factor = 0.01, autovacuum_analyze_threshold = 25)",
         "CREATE INDEX IF NOT EXISTS idx_trade_audits_status ON trade_audits (status, created_at DESC)",
         "CREATE INDEX IF NOT EXISTS idx_position_audits_status ON position_audits (status, created_at DESC)",
