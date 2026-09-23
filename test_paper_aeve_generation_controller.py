@@ -119,15 +119,37 @@ def test_aeve_outcome_producer_consumes_frozen_generation_config():
     assert "post-entry excursion" in source
 
 
-def test_generation_batch_counts_only_accepted_aeve_outcomes():
+def test_generation_window_counts_all_valid_outcomes_and_tracks_acceptance_separately():
     import inspect
     import paper_aeve_generation_controller as controller
     source = inspect.getsource(controller.maybe_advance_generation)
-    assert "would_trade=TRUE" in source
+    assert "COUNT(*) AS window_samples" in source
+    assert "COUNT(*) FILTER (WHERE would_trade) AS samples" in source
+    assert "AND would_trade=TRUE" not in source
+    assert "if window_samples < BATCH_SIZE" in source
+    assert "accepted_samples=%s" in source
     assert "WHERE generation=%s" in source
     assert "config_hash=%s" in source
     assert "provenance_version=%s" in source
     assert PROVENANCE_VERSION == 2
+
+
+def test_completed_window_with_insufficient_acceptance_advances_identity_without_tuning():
+    import inspect
+    import paper_aeve_generation_controller as controller
+    source = inspect.getsource(controller.maybe_advance_generation)
+    assert "if nxt.generation == cfg.generation" in source
+    assert "replace(cfg, generation=cfg.generation + 1)" in source
+    assert "insufficient_samples_hold_formula" not in source  # diagnosis is derived, not hard-coded
+    assert "diagnosis = f\"{diagnosis}_hold_formula\"" in source
+
+
+def test_generation_report_exposes_window_and_accepted_sample_depth():
+    import inspect
+    import paper_aeve_generation_controller as controller
+    source = inspect.getsource(controller.generation_research_report)
+    assert "COUNT(*)::int AS window_trades" in source
+    assert "COUNT(*) FILTER (WHERE would_trade)::int AS accepted_trades" in source
 
 
 def test_legacy_outcomes_are_not_retroactively_certified_for_advancement():
