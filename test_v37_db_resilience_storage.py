@@ -197,3 +197,8 @@ def test_postgres_bootstrap_advisory_lock_runs_migrations_once():
     called = []
     database.bootstrap_database_with_lock(lambda: called.append("migrate"))
     assert called == ["migrate"]
+
+
+def test_decision_funnel_retention_is_bounded_for_storage_safety():
+    assert database.DATABASE_RETENTION_POLICIES["global_decision_events"]["keep_rows"] == 5000
+    assert "5000" in database.DATABASE_TABLE_GROWTH_AUDIT["global_decision_events"]["retention"]

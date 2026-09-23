@@ -2,8 +2,9 @@ from __future__ import annotations
 
 """Canonical, research-only observation bus for Oracle.
 
-This module mirrors already-persisted Oracle evidence into one append-only,
-deduplicated timeline. It never participates in order approval, sizing, broker
+This module mirrors durable, decision-level persisted Oracle evidence into one append-only,
+deduplicated timeline. High-frequency decision-funnel telemetry remains in its bounded
+source table instead of being copied permanently into Brain memory. It never participates in order approval, sizing, broker
 submission, or live-money controls. Event time and ingestion time remain
 separate so downstream research can enforce point-in-time boundaries.
 """
@@ -16,7 +17,6 @@ from typing import Any
 SOURCE_SPECS = (
     ("signals", "signal", "created_at", "market", "symbol"),
     ("oracle_decision_audit", "council_decision", "created_at", "market", "symbol"),
-    ("global_decision_events", "decision_funnel", "created_at", "market", "symbol"),
     ("intelligence_events", "market_intelligence", "event_time", None, "symbol"),
 )
 DEFAULT_BATCH = 500
