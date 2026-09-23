@@ -176,7 +176,7 @@ except Exception:
     source_health=[]
 if source_health:
     st.subheader("Intelligence Data Lineage & Health")
-    st.dataframe(source_health, use_container_width=True, hide_index=True)
+    st.dataframe(source_health, width="stretch", hide_index=True)
     st.caption("Provider → freshness → confidence is visible. Stale evidence remains research evidence and is not silently treated as current.")
 
 # Learning + validation cockpit (research-only).

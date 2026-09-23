@@ -28,7 +28,7 @@ if not health.get("ok"):
 
 left, middle, spacer = st.columns([1, 1, 4])
 with left:
-    if st.button("Refresh now", type="primary", use_container_width=True):
+    if st.button("Refresh now", type="primary", width="stretch"):
         st.rerun()
 with middle:
     auto_refresh = st.toggle("Sync data every 60s", value=False)
@@ -108,7 +108,7 @@ for key in ("macro", "energy", "logistics", "crypto", "finance", "consumer", "te
         "Verified": int(item.get("verified") or 0),
         "Avg confidence": round(float(item.get("confidence") or 0.0), 2),
     })
-st.dataframe(pd.DataFrame(domain_rows), use_container_width=True, hide_index=True)
+st.dataframe(pd.DataFrame(domain_rows), width="stretch", hide_index=True)
 
 top_events = world_state.get("top_events", [])
 if top_events:
@@ -124,7 +124,7 @@ if top_events:
             }
             for item in top_events[:10]
         ]),
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
     )
 else:
@@ -149,7 +149,7 @@ if opportunities:
                 for item in opportunities[:18]
             ]
         ),
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
     )
 else:
@@ -171,7 +171,7 @@ if replay:
                 for item in replay[:40]
             ]
         ),
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
     )
 else:
