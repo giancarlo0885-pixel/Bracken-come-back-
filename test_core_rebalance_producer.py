@@ -209,3 +209,20 @@ def test_plain_high_quality_hold_is_not_core_rebalance_candidate():
     assert signal.action == "HOLD"
     assert getattr(signal, "portfolio_intent", None) is None
     assert getattr(signal, "rebalance_intent", None) is None
+
+
+def test_optimizer_allocation_logs_proposal_not_execution_buy():
+    class CaptureLog(_Log):
+        def __init__(self):
+            self.messages = []
+        def info(self, message, *args, **kwargs):
+            self.messages.append(message % args if args else message)
+
+    worker = _worker()
+    worker.log = CaptureLog()
+    patch._install_core_rebalance_producer(worker)
+    signal = _hold_signal()
+    worker._v39_prioritize_signals("crypto", [signal], _verified_prices(), [{"symbol": "BTC-USD"}], "deep")
+
+    assert any(message.startswith("CORE_REBALANCE_PROPOSED |") for message in worker.log.messages)
+    assert not any(message.startswith("CORE_REBALANCE_BUY |") for message in worker.log.messages)
