@@ -407,7 +407,8 @@ def record_generation_outcomes(limit: int = 250) -> int:
 def generation_research_report(conn: Any, generation: int, config_hash: str) -> dict[str, Any]:
     """Freeze auditable post-cost evidence for a completed AEVE research generation."""
     row = conn.execute("""
-        SELECT COUNT(*) FILTER (WHERE would_trade)::int AS accepted_trades,
+        SELECT COUNT(*)::int AS window_trades,
+               COUNT(*) FILTER (WHERE would_trade)::int AS accepted_trades,
                AVG(net_pnl) FILTER (WHERE would_trade) AS expectancy,
                SUM(net_pnl) FILTER (WHERE would_trade) AS net_pnl,
                SUM(CASE WHEN would_trade AND net_pnl>0 THEN net_pnl ELSE 0 END) AS gross_win,
@@ -427,6 +428,7 @@ def generation_research_report(conn: Any, generation: int, config_hash: str) -> 
         "generation": generation,
         "config_hash": config_hash,
         "provenance_version": PROVENANCE_VERSION,
+        "window_trades": int(row.get("window_trades") or 0),
         "accepted_trades": int(row.get("accepted_trades") or 0),
         "expectancy": _f(row.get("expectancy")),
         "net_pnl": _f(row.get("net_pnl")),
@@ -462,25 +464,26 @@ def maybe_advance_generation() -> bool:
         config_hash = row.get("config_hash")
         batch = conn.execute("""
             WITH x AS (
-                SELECT net_pnl,mfe_pct,mae_pct,excursion_sample_count,cost_pct
+                SELECT net_pnl,mfe_pct,mae_pct,excursion_sample_count,cost_pct,would_trade
                 FROM paper_aeve_generation_outcomes
                 WHERE generation=%s AND config_hash=%s AND provenance_version=%s
-                  AND would_trade=TRUE
                 ORDER BY observed_at ASC
                 LIMIT %s
             )
-            SELECT COUNT(*) AS samples,
-                   AVG(net_pnl) AS expectancy,
-                   SUM(CASE WHEN net_pnl>0 THEN net_pnl ELSE 0 END) AS gross_win,
-                   ABS(SUM(CASE WHEN net_pnl<0 THEN net_pnl ELSE 0 END)) AS gross_loss,
-                   AVG(CASE WHEN net_pnl>0 THEN 1.0 ELSE 0.0 END) AS win_rate,
-                   AVG(mfe_pct) FILTER (WHERE excursion_sample_count>0) AS avg_mfe,
-                   AVG(mae_pct) FILTER (WHERE excursion_sample_count>0) AS avg_mae,
-                   AVG(cost_pct) AS avg_cost
+            SELECT COUNT(*) AS window_samples,
+                   COUNT(*) FILTER (WHERE would_trade) AS samples,
+                   AVG(net_pnl) FILTER (WHERE would_trade) AS expectancy,
+                   SUM(CASE WHEN would_trade AND net_pnl>0 THEN net_pnl ELSE 0 END) AS gross_win,
+                   ABS(SUM(CASE WHEN would_trade AND net_pnl<0 THEN net_pnl ELSE 0 END)) AS gross_loss,
+                   AVG(CASE WHEN would_trade THEN CASE WHEN net_pnl>0 THEN 1.0 ELSE 0.0 END END) AS win_rate,
+                   AVG(mfe_pct) FILTER (WHERE would_trade AND excursion_sample_count>0) AS avg_mfe,
+                   AVG(mae_pct) FILTER (WHERE would_trade AND excursion_sample_count>0) AS avg_mae,
+                   AVG(cost_pct) FILTER (WHERE would_trade) AS avg_cost
             FROM x
         """, (cfg.generation, config_hash, PROVENANCE_VERSION, BATCH_SIZE)).fetchone() or {}
+        window_samples = int(batch.get("window_samples") or 0)
         samples = int(batch.get("samples") or 0)
-        if samples < BATCH_SIZE:
+        if window_samples < BATCH_SIZE:
             return False
         gross_loss = _f(batch.get("gross_loss"))
         d = BatchDiagnostics(
@@ -493,6 +496,12 @@ def maybe_advance_generation() -> bool:
             avg_cost_pct=_f(batch.get("avg_cost")),
         )
         nxt, diagnosis = next_generation(cfg, d)
+        if nxt.generation == cfg.generation:
+            # A complete forward window with too few accepted AEVE samples is still
+            # a completed research generation. Advance the generation identity
+            # without relaxing any gate or manufacturing challenger acceptance.
+            nxt = replace(cfg, generation=cfg.generation + 1)
+            diagnosis = f"{diagnosis}_hold_formula"
         conn.execute("UPDATE paper_aeve_generations SET status='SUPERSEDED' WHERE generation=%s", (cfg.generation,))
         conn.execute("""
             INSERT INTO paper_aeve_generations(
@@ -500,12 +509,12 @@ def maybe_advance_generation() -> bool:
             ) VALUES (%s,%s::jsonb,%s,%s,%s,%s,%s,'ACTIVE')
         """, (
             nxt.generation, json.dumps(asdict(nxt)), generation_config_hash(nxt), diagnosis,
-            d.samples, d.expectancy, d.profit_factor,
+            window_samples, d.expectancy, d.profit_factor,
         ))
         log.info(
-            "AEVE GENERATION ADVANCE | from=%s | from_config_hash=%s | to=%s | to_config_hash=%s | diagnosis=%s | samples=%s | expectancy=%.6f | pf=%.4f | mode=shadow | execution_impact=NONE | broker_submission=NONE | live_trading=DISARMED",
+            "AEVE GENERATION ADVANCE | from=%s | from_config_hash=%s | to=%s | to_config_hash=%s | diagnosis=%s | window_samples=%s | accepted_samples=%s | expectancy=%.6f | pf=%.4f | mode=shadow | execution_impact=NONE | broker_submission=NONE | live_trading=DISARMED",
             cfg.generation, config_hash, nxt.generation, generation_config_hash(nxt),
-            diagnosis, d.samples, d.expectancy, d.profit_factor,
+            diagnosis, window_samples, d.samples, d.expectancy, d.profit_factor,
         )
         return True
 
