@@ -128,7 +128,7 @@ DATABASE_RETENTION_POLICIES = {
     "opportunity_rankings": {"keep_rows": 12000, "batch_size": DATABASE_RETENTION_BATCH_SIZE, "classification": "append-only analytical/ephemeral"},
     "oracle_decision_audit": {"keep_rows": 12000, "batch_size": DATABASE_RETENTION_BATCH_SIZE, "classification": "append-only analytical/ephemeral"},
     "opportunity_radar_assessments": {"keep_rows": 12000, "batch_size": DATABASE_RETENTION_BATCH_SIZE, "classification": "append-only analytical/ephemeral"},
-    "global_decision_events": {"keep_rows": 20000, "batch_size": DATABASE_RETENTION_BATCH_SIZE, "classification": "append-only analytical/ephemeral"},
+    "global_decision_events": {"keep_rows": 5000, "batch_size": DATABASE_RETENTION_BATCH_SIZE, "classification": "append-only analytical/ephemeral"},
 }
 DATABASE_TABLE_GROWTH_AUDIT = {
     "portfolios": {"class": "canonical financial records", "inserted_by": "initialize_database/portfolio bootstrap", "frequency": "one row per market", "retention": "never auto-delete"},
@@ -168,7 +168,7 @@ DATABASE_TABLE_GROWTH_AUDIT = {
     "provider_budget_ledger": {"class": "governance/provider quota records", "inserted_by": "provider budget manager", "frequency": "provider/capability/day", "retention": "preserve recent quota history until archive strategy exists"},
     "invalid_symbol_quarantine": {"class": "governance/provider safety records", "inserted_by": "provider symbol quarantine", "frequency": "provider-symbol failures", "retention": "preserve until retry policy/archive exists"},
     "global_model_governance": {"class": "governance/model records", "inserted_by": "champion/challenger governance", "frequency": "model lifecycle changes", "retention": "never auto-delete"},
-    "global_decision_events": {"class": "append-only analytical/ephemeral records", "inserted_by": "global adaptive engine", "frequency": "worker decision funnel events", "retention": "keep newest 20000 rows"},
+    "global_decision_events": {"class": "append-only analytical/ephemeral records", "inserted_by": "global adaptive engine", "frequency": "worker decision funnel events", "retention": "keep newest 5000 rows"},
     "oracle_brain_entries": {"class": "durable research knowledge", "inserted_by": "Oracle Brain learning/engineering workflows", "frequency": "meaningful evidence revisions only", "retention": "never auto-delete"},
     "oracle_brain_sources": {"class": "durable research source memory", "inserted_by": "Oracle Brain source ingestion", "frequency": "new intelligence events", "retention": "preserve until archive strategy exists"},
     "oracle_brain_episodes": {"class": "durable exact-provenance episodic memory", "inserted_by": "Oracle Brain outcome learner", "frequency": "one per exact-provenance closed paper trade", "retention": "never auto-delete"},
