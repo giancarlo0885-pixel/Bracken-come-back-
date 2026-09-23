@@ -508,6 +508,27 @@ def mark_provider_cooldown_live(provider: str, *, seconds: int, reason: str = "p
     return {"active": True, "reason": reason}
 
 
+def _compact_decision_event_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Keep the ephemeral funnel trace small without weakening canonical provenance.
+
+    Full decision features and portfolio context remain in global_decision_ledger.
+    global_decision_events is a short-lived UI/diagnostic trace, so duplicating the
+    full optimizer plan on every candidate creates avoidable PostgreSQL/WAL churn.
+    """
+    keys = (
+        "scan_id", "signal_id", "forecast_id", "execution_claim_id", "trade_id",
+        "symbol", "action", "asset_class", "scan_type", "quote_verified",
+        "tradeable", "qualified_for_capital", "expected_edge_pct",
+        "edge_provenance", "confidence", "data_quality_score", "risk_score",
+        "reason", "created_at",
+    )
+    compact = {key: payload.get(key) for key in keys if payload.get(key) is not None}
+    rejection_reasons = payload.get("rejection_reasons")
+    if rejection_reasons:
+        compact["rejection_reasons"] = list(rejection_reasons)
+    return compact
+
+
 def persist_decision_event(conn: Any, *, market: str, symbol: str, stage: str, decision_id: str | None = None, payload: dict[str, Any] | None = None, rejection_reason: str | None = None) -> str:
     payload = payload or {}
     identity = canonical_identity({**payload, "symbol": symbol, "asset_class": payload.get("asset_class") or ("crypto" if market == "crypto" else "stock")})
@@ -549,7 +570,7 @@ def persist_decision_event(conn: Any, *, market: str, symbol: str, stage: str, d
         """INSERT INTO global_decision_events
            (decision_id, market, symbol, stage, rejection_reason, payload, created_at)
            VALUES (%s,%s,%s,%s,%s,%s::jsonb,%s)""",
-        (did, market, symbol, stage, rejection_reason, _json(payload), created_at),
+        (did, market, symbol, stage, rejection_reason, _json(_compact_decision_event_payload(payload)), created_at),
     )
     return did
 
