@@ -51,7 +51,7 @@ def install_core_rebalance_observability(worker: Any) -> None:
             signal for signal in signals or []
             if _core_rebalance_intent(signal) in {CORE_REBALANCE_CANDIDATE_INTENT, CORE_REBALANCE_BUY_INTENT}
         ]
-        buys = [signal for signal in candidates if _core_rebalance_intent(signal) == CORE_REBALANCE_BUY_INTENT]
+        proposals = [signal for signal in candidates if _core_rebalance_intent(signal) == CORE_REBALANCE_BUY_INTENT]
         decisions = dict(getattr(worker, "_core_rebalance_optimizer_decisions", {}) or {})
 
         entry_signals = [
@@ -118,12 +118,12 @@ def install_core_rebalance_observability(worker: Any) -> None:
                     }
                 )
             worker.log.info(
-                "CORE_REBALANCE_TRACE | scan=%s | deployment_gap=%.2f | signals=%d | candidates=%d | buys=%d | entry_signals=%d | sample=%s",
+                "CORE_REBALANCE_TRACE | scan=%s | deployment_gap=%.2f | signals=%d | candidates=%d | proposals=%d | entry_signals=%d | sample=%s",
                 scan_type,
                 deployment_gap,
                 len(signals or []),
                 len(candidates),
-                len(buys),
+                len(proposals),
                 len(entry_signals),
                 sample,
             )
