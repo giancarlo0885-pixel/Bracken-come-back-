@@ -387,3 +387,44 @@ def test_local_provider_budget_does_not_block_without_database_url(monkeypatch):
     monkeypatch.delenv("DATABASE_URL", raising=False)
     result = v39.reserve_provider_budget_live("polygon", "us_history", daily_budget=1)
     assert result["reserved"] is True
+
+
+def test_compact_decision_event_payload_drops_large_duplicate_optimizer_context():
+    payload = fresh_quote("AAPL")
+    payload.update({
+        "scan_id": "scan-1",
+        "signal_id": 42,
+        "forecast_id": "fc-1",
+        "portfolio_context": {"allocations": [{"symbol": "AAPL", "blob": "x" * 10000}]},
+        "features": {"history": ["x" * 10000]},
+        "rejection_reasons": ["not allocated"],
+    })
+
+    compact = v39._compact_decision_event_payload(payload)
+
+    assert compact["symbol"] == "AAPL"
+    assert compact["signal_id"] == 42
+    assert compact["forecast_id"] == "fc-1"
+    assert compact["rejection_reasons"] == ["not allocated"]
+    assert "portfolio_context" not in compact
+    assert "features" not in compact
+
+
+def test_compact_decision_event_payload_keeps_execution_provenance_keys():
+    compact = v39._compact_decision_event_payload({
+        "symbol": "BTC-USD",
+        "action": "BUY",
+        "execution_claim_id": "claim-7",
+        "trade_id": "trade-9",
+        "scan_type": "fast",
+        "reason": "paper fill persisted",
+    })
+
+    assert compact == {
+        "symbol": "BTC-USD",
+        "action": "BUY",
+        "execution_claim_id": "claim-7",
+        "trade_id": "trade-9",
+        "scan_type": "fast",
+        "reason": "paper fill persisted",
+    }
