@@ -227,7 +227,7 @@ def _install_core_rebalance_producer(market_worker_module: Any) -> None:
             _set_signal_value(signal, "v39_rebalance_approved_amount", approved_amount)
             _normalize_core_rebalance_action(signal)
             market_worker_module.log.info(
-                "CORE_REBALANCE_BUY | market=%s | symbol=%s | approved_amount=%s | action=%s",
+                "CORE_REBALANCE_PROPOSED | market=%s | symbol=%s | approved_amount=%s | action=%s",
                 market,
                 symbol,
                 approved_amount,
