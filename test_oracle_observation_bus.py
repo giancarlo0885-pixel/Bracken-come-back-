@@ -71,3 +71,12 @@ def test_observation_bus_has_no_execution_authority():
     assert all(item not in source for item in forbidden)
     migration = Path("migrations/20260922_oracle_observation_bus.sql").read_text(encoding="utf-8")
     assert "CHECK (execution_impact = 'NONE')" in migration
+
+
+def test_high_volume_decision_funnel_is_not_permanently_mirrored():
+    import oracle_observation_bus as bus
+    source_names = [spec[0] for spec in bus.SOURCE_SPECS]
+    assert "global_decision_events" not in source_names
+    assert "oracle_decision_audit" in source_names
+    assert "signals" in source_names
+    assert "intelligence_events" in source_names
