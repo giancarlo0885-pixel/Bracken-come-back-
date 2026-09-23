@@ -202,3 +202,33 @@ def test_postgres_bootstrap_advisory_lock_runs_migrations_once():
 def test_decision_funnel_retention_is_bounded_for_storage_safety():
     assert database.DATABASE_RETENTION_POLICIES["global_decision_events"]["keep_rows"] == 5000
     assert "5000" in database.DATABASE_TABLE_GROWTH_AUDIT["global_decision_events"]["retention"]
+
+
+class _RetentionProbeResult:
+    def __init__(self, row):
+        self._row = row
+    def fetchone(self):
+        return self._row
+
+
+class _RetentionProbeConn:
+    def __init__(self, row):
+        self.row = row
+        self.params = None
+    def execute(self, sql, params=()):
+        self.params = params
+        return _RetentionProbeResult(self.row)
+
+
+def test_retention_hysteresis_skips_cleanup_inside_bounded_slack():
+    conn = _RetentionProbeConn(None)
+    due = database._retention_cleanup_due(conn, "signals", keep_rows=5000, batch_size=500)
+    assert due is False
+    assert conn.params == (6000,)
+
+
+def test_retention_hysteresis_triggers_after_bounded_overshoot():
+    conn = _RetentionProbeConn({"id": 1})
+    due = database._retention_cleanup_due(conn, "signals", keep_rows=5000, batch_size=500)
+    assert due is True
+    assert conn.params == (6000,)
