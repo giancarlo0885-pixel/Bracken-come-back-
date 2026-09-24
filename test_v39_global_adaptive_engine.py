@@ -428,3 +428,44 @@ def test_compact_decision_event_payload_keeps_execution_provenance_keys():
         "scan_type": "fast",
         "reason": "paper fill persisted",
     }
+
+
+def test_persist_decision_event_can_skip_ephemeral_trace_without_losing_canonical_ledger(monkeypatch):
+    calls = []
+    class Result:
+        def fetchone(self): return None
+    class Conn:
+        def execute(self, sql, params=()):
+            calls.append((sql, params))
+            return Result()
+    v39.persist_decision_event(
+        Conn(),
+        market="cash",
+        symbol="AAPL",
+        stage="surveillance",
+        payload={"signal_id": "sig-1", "created_at": "2026-09-23T00:00:00+00:00"},
+        emit_ephemeral_trace=False,
+    )
+    sql = "\n".join(item[0] for item in calls)
+    assert "INSERT INTO global_decision_ledger" in sql
+    assert "INSERT INTO global_decision_events" not in sql
+
+
+def test_persist_decision_event_keeps_ephemeral_trace_for_meaningful_transition():
+    calls = []
+    class Result:
+        def fetchone(self): return None
+    class Conn:
+        def execute(self, sql, params=()):
+            calls.append((sql, params))
+            return Result()
+    v39.persist_decision_event(
+        Conn(),
+        market="cash",
+        symbol="AAPL",
+        stage="portfolio_approved",
+        payload={"signal_id": "sig-2", "created_at": "2026-09-23T00:00:01+00:00"},
+    )
+    sql = "\n".join(item[0] for item in calls)
+    assert "INSERT INTO global_decision_ledger" in sql
+    assert "INSERT INTO global_decision_events" in sql
