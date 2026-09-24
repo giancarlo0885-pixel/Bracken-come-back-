@@ -87,7 +87,7 @@ def _merge_entry_features(existing: Any, persisted_signal: Any) -> dict[str, Any
     return merged
 
 
-def repair_unknown_regimes(limit: int = 1000) -> int:
+def repair_unknown_regimes(limit: int = 1000, market: str = "crypto") -> int:
     """Enrich incomplete shadow regime labels from the exact persisted entry signal.
 
     Earlier versions only revisited ``*vol_unknown`` rows. Once volatility began
@@ -101,8 +101,9 @@ def repair_unknown_regimes(limit: int = 1000) -> int:
     if not active():
         return 0
     from database import connect
-    from paper_regime_economics_shadow import classify_regime
+    from paper_regime_economics_shadow import _normalize_market, classify_regime
 
+    normalized_market = _normalize_market(market)
     repaired = 0
     with connect() as conn:
         rows = list(
@@ -111,12 +112,12 @@ def repair_unknown_regimes(limit: int = 1000) -> int:
                 SELECT m.trade_id, m.regime, tl.entry_signal_id, tl.feature_snapshot
                 FROM paper_regime_trade_metrics m
                 JOIN trade_ledger tl ON tl.trade_id=m.trade_id
-                WHERE m.market='crypto'
+                WHERE m.market=%s
                   AND tl.entry_signal_id IS NOT NULL
                 ORDER BY m.exit_time DESC
                 LIMIT %s
                 """,
-                (max(1, int(limit)),),
+                (normalized_market, max(1, int(limit))),
             ).fetchall()
         )
         for row in rows:
@@ -166,10 +167,10 @@ def install_entry_signal_regime_fallback(shadow_module: Any | None = None) -> bo
     if getattr(original, "_entry_signal_regime_fallback_v1", False):
         return True
 
-    def wrapped(limit: int = 250) -> int:
-        created = original(limit)
+    def wrapped(limit: int = 250, market: str = "crypto") -> int:
+        created = original(limit, market=market)
         try:
-            repaired = repair_unknown_regimes(max(1000, int(limit)))
+            repaired = repair_unknown_regimes(max(1000, int(limit)), market=market)
             if repaired:
                 log.info(
                     "PAPER REGIME ENTRY SIGNAL FALLBACK | repaired=%s | source=immutable_entry_signal | "
