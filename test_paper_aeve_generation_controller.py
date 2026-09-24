@@ -131,7 +131,7 @@ def test_generation_window_counts_all_valid_outcomes_and_tracks_acceptance_separ
     assert "WHERE generation=%s" in source
     assert "config_hash=%s" in source
     assert "provenance_version=%s" in source
-    assert PROVENANCE_VERSION == 3
+    assert PROVENANCE_VERSION == 4
 
 
 def test_completed_window_with_insufficient_acceptance_advances_identity_without_tuning():
@@ -252,7 +252,7 @@ def test_aeve_loss_streak_query_excludes_candidate_and_future_outcomes():
     import inspect
     import paper_aeve_generation_controller as controller
     source = inspect.getsource(controller.record_generation_outcomes)
-    query_start = source.index("SELECT net_pnl")
+    query_start = source.index("SELECT round_trip_net_pnl AS net_pnl")
     query_end = source.index("fetchall()", query_start)
     streak_query = source[query_start:query_end]
     assert "exit_time < %s" in streak_query
@@ -284,15 +284,18 @@ def test_evaluator_passes_independent_entry_inputs_and_persists_version(monkeypa
 
     class Conn:
         def execute(self, sql, params=None):
+            if 'SELECT started_at FROM paper_aeve_provenance_epochs' in sql:
+                return Result([dict(started_at='2026-09-22')])
             if 'JOIN trade_ledger' in sql:
                 return Result([dict(trade_id='entry-1', regime='range', entry_time='2026-09-23',
-                    exit_time='2026-09-24', net_pnl=1, quantity=1, entry_price=100, fees=0.15,
+                    exit_time='2026-09-24', net_pnl=0.85, round_trip_fees=0.15,
+                    cost_provenance='exact_lot', quantity=1, entry_price=100,
                     feature_snapshot=dict(features), aeve_generation=cfg.generation,
                     aeve_config_json=cfg.__dict__, aeve_config_hash=identity)])
             if 'COUNT(*) AS samples' in sql:
                 return Result([dict(samples=80, expectancy=0.1, gross_win=2, gross_loss=1,
                                     mfe=1.1, mae=-0.3)])
-            if 'SELECT net_pnl' in sql:
+            if 'SELECT round_trip_net_pnl AS net_pnl' in sql:
                 return Result([])
             if 'INSERT INTO paper_aeve_generation_outcomes' in sql:
                 inserted.append(params)
@@ -323,10 +326,36 @@ def test_evaluator_passes_independent_entry_inputs_and_persists_version(monkeypa
     assert rebound_changed[0]['rebound_from_low_pct'] == pytest.approx(0.20)
     assert rebound_changed[1].dip_quality == dip_changed[1].dip_quality
     assert rebound_changed[1].rebound_quality != dip_changed[1].rebound_quality
-    assert all(row[-1] == 3 for row in inserted)
+    assert all(row[-2] == 4 for row in inserted)
+    assert all(row[-1] == "exact_lot" for row in inserted)
     assert all(item[0]['config'] == cfg.__dict__ for item in captured)
-    assert 'input_schema=dip_depth_rebound_v1' in caplog.text
+    assert 'input_schema=dip_depth_rebound_round_trip_v2' in caplog.text
     assert 'dip_depth_pct=1.25 | rebound_from_low_pct=0.2' in caplog.text
     features.pop('dip_depth_pct')
     assert controller.record_generation_outcomes() == 1
     assert inserted[-1][8] is False
+
+
+def test_aeve_v4_uses_durable_forward_epoch_and_exact_round_trip_costs():
+    import inspect
+    import paper_aeve_generation_controller as controller
+    schema = inspect.getsource(controller.ensure_schema)
+    producer = inspect.getsource(controller.record_generation_outcomes)
+    assert "paper_aeve_provenance_epochs" in schema
+    assert "exact_lot_round_trip" in schema
+    assert "m.entry_time >= %s" in producer
+    assert "m.cost_provenance='exact_lot'" in producer
+    assert "m.round_trip_net_pnl AS net_pnl" in producer
+    assert "m.round_trip_fees" in producer
+    assert "_f(row.get(\"round_trip_fees\"))" in producer
+    assert "l.fees" not in producer
+    assert PROVENANCE_VERSION == 4
+
+
+def test_aeve_v4_prior_economics_are_exact_round_trip_only():
+    import inspect
+    import paper_aeve_generation_controller as controller
+    source = inspect.getsource(controller.record_generation_outcomes)
+    assert "AVG(round_trip_net_pnl) AS expectancy" in source
+    assert "cost_provenance='exact_lot' AND round_trip_net_pnl IS NOT NULL" in source
+    assert "SELECT round_trip_net_pnl AS net_pnl" in source
