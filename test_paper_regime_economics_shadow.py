@@ -84,3 +84,8 @@ def test_stock_worker_installs_cash_regime_learning():
     source = Path("stock_worker.py").read_text(encoding="utf-8")
     assert "from paper_regime_economics_shadow import install_paper_regime_economics_shadow" in source
     assert 'install_paper_regime_economics_shadow("cash")' in source
+
+
+def test_summary_market_filter_casts_nullable_parameter_for_postgres():
+    source = Path("paper_regime_economics_shadow.py").read_text(encoding="utf-8")
+    assert "WHERE (%s::text IS NULL OR market=%s::text)" in source
