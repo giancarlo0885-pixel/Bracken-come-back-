@@ -767,10 +767,10 @@ def _v39_signal_opportunity(market: str, signal: Any, prices: dict[str, Any], ra
     }
 
 
-def _v39_record_event(market: str, symbol: str, stage: str, payload: dict[str, Any], rejection_reason: str | None = None) -> None:
+def _v39_record_event(market: str, symbol: str, stage: str, payload: dict[str, Any], rejection_reason: str | None = None, *, emit_ephemeral_trace: bool = True) -> None:
     try:
         with connect() as conn:
-            persist_decision_event(conn, market=market, symbol=symbol, stage=stage, payload=payload, rejection_reason=rejection_reason)
+            persist_decision_event(conn, market=market, symbol=symbol, stage=stage, payload=payload, rejection_reason=rejection_reason, emit_ephemeral_trace=emit_ephemeral_trace)
     except Exception as exc:
         log.debug("V39 decision event skipped | market=%s | symbol=%s | stage=%s | error=%s", market, symbol, stage, exc)
 
@@ -820,7 +820,17 @@ def _v39_prioritize_signals(market: str, signals: list[Any], prices: dict[str, A
         symbol = str(opportunity.get("symbol") or "").upper()
         stage = "portfolio_approved" if symbol in allocation_set else "verified_quote" if opportunity.get("quote_verified") else "surveillance"
         reason = None if symbol in allocation_set else ("optimizer did not allocate capital" if opportunity.get("qualified_for_capital") else "not capital qualified")
-        _v39_record_event(market, symbol, stage, {**opportunity, "portfolio_context": plan}, reason)
+        # Preserve every candidate in the canonical ledger, but only materialize
+        # the short-lived UI trace for meaningful state transitions. Routine
+        # surveillance/verified-quote observations otherwise dominate DB churn.
+        _v39_record_event(
+            market,
+            symbol,
+            stage,
+            {**opportunity, "portfolio_context": plan},
+            reason,
+            emit_ephemeral_trace=(stage == "portfolio_approved"),
+        )
     ordered = sorted(
         signals,
         key=lambda signal: (
