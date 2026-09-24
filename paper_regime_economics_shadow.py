@@ -328,7 +328,7 @@ def emit_summary(market: str | None = None) -> None:
                            AVG(mae_pct) FILTER (WHERE excursion_sample_count > 0) AS avg_mae_pct,
                            SUM(CASE WHEN excursion_sample_count > 0 THEN 1 ELSE 0 END) AS excursion_trades
                     FROM paper_regime_trade_metrics
-                    WHERE (%s IS NULL OR market=%s)
+                    WHERE (%s::text IS NULL OR market=%s::text)
                     GROUP BY market, strategy, regime
                     ORDER BY samples DESC
                     LIMIT 20
