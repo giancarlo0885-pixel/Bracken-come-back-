@@ -398,7 +398,7 @@ def reserve_provider_budget_db(conn: Any, provider: str, capability: str, *, dai
     budget = max(0, int(daily_budget))
     # Initialize the provider/capability/day row atomically before locking it.
     # Multiple stock/crypto workers can reach a new key at the same time; the
-    # unique key arbitrates creation and the subsequent FOR UPDATE serializes
+    # unique key arbitrates creation and the subsequent row lock serializes
     # reservations without leaking duplicate-key failures into the transaction.
     conn.execute(
         """INSERT INTO provider_budget_ledger
