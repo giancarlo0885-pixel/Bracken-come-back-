@@ -101,12 +101,31 @@ def _excursion_percentages(entry_price: Any, prices: list[float]) -> tuple[float
     return max(0.0, max(returns)), min(0.0, min(returns))
 
 
+def _relation_columns(conn: Any, relation: str) -> dict[str, bool]:
+    rows = list(conn.execute(
+        """
+        SELECT a.attname,a.attnotnull
+        FROM pg_attribute a
+        WHERE a.attrelid=to_regclass(%s)
+          AND a.attnum>0 AND NOT a.attisdropped
+        """,
+        (relation,),
+    ).fetchall())
+    return {str(row.get("attname")): bool(row.get("attnotnull")) for row in rows}
+
+
 def ensure_schema() -> None:
     if not active():
         return
     from database import connect
 
     with connect() as conn:
+        # Stock and crypto can start concurrently. Serialize only schema checks;
+        # once the columns exist, restarts avoid heavyweight ALTER TABLE locks.
+        conn.execute(
+            "SELECT pg_advisory_xact_lock(hashtext(%s))",
+            ("paper_regime_economics_schema_v2",),
+        )
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS paper_regime_price_samples (
@@ -144,6 +163,9 @@ def ensure_schema() -> None:
                 mae_pct DOUBLE PRECISION,
                 excursion_sample_count INTEGER NOT NULL DEFAULT 0,
                 schema_version TEXT NOT NULL,
+                round_trip_net_pnl DOUBLE PRECISION,
+                round_trip_fees DOUBLE PRECISION,
+                cost_provenance TEXT NOT NULL DEFAULT 'legacy_unknown',
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             )
             """
@@ -154,9 +176,15 @@ def ensure_schema() -> None:
             ON paper_regime_trade_metrics(strategy, regime, exit_time)
             """
         )
-        conn.execute("ALTER TABLE paper_regime_trade_metrics ADD COLUMN IF NOT EXISTS round_trip_net_pnl DOUBLE PRECISION")
-        conn.execute("ALTER TABLE paper_regime_trade_metrics ADD COLUMN IF NOT EXISTS round_trip_fees DOUBLE PRECISION")
-        conn.execute("ALTER TABLE paper_regime_trade_metrics ADD COLUMN IF NOT EXISTS cost_provenance TEXT NOT NULL DEFAULT 'legacy_unknown'")
+        columns = _relation_columns(conn, "paper_regime_trade_metrics")
+        if "round_trip_net_pnl" not in columns:
+            conn.execute("ALTER TABLE paper_regime_trade_metrics ADD COLUMN round_trip_net_pnl DOUBLE PRECISION")
+        if "round_trip_fees" not in columns:
+            conn.execute("ALTER TABLE paper_regime_trade_metrics ADD COLUMN round_trip_fees DOUBLE PRECISION")
+        if "cost_provenance" not in columns:
+            conn.execute(
+                "ALTER TABLE paper_regime_trade_metrics ADD COLUMN cost_provenance TEXT NOT NULL DEFAULT 'legacy_unknown'"
+            )
 
 
 def repair_excursion_anchors() -> int:
