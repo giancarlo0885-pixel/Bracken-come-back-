@@ -77,7 +77,7 @@ def test_regime_shadow_queries_are_market_scoped_not_crypto_hardcoded():
     assert "WHERE market=%s AND side='SELL'" in source
     assert "WHERE market=%s AND symbol=%s" in source
     assert "VALUES (%s,%s,%s,%s,'canonical_position',%s)" in source
-    assert "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)" in source
+    assert "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)" in source
 
 
 def test_stock_worker_installs_cash_regime_learning():
