@@ -8,7 +8,7 @@ import threading
 from typing import Any
 
 log = logging.getLogger("paper-entry-edge-challenger")
-_VERSION = "entry-edge-challenger-v1"
+_VERSION = "entry-edge-challenger-v2-round-trip-cost"
 _THREAD: threading.Thread | None = None
 _STOP = threading.Event()
 
@@ -53,6 +53,10 @@ def entry_edge_score(*, mfe_pct: float, mae_pct: float, round_trip_cost_pct: flo
 def ensure_schema() -> None:
     if not active():
         return
+    # The entrypoint starts this challenger before crypto_worker imports its
+    # regime telemetry installer, so establish the shared research columns here.
+    from paper_regime_economics_shadow import ensure_schema as ensure_regime_schema
+    ensure_regime_schema()
     from database import connect
     with connect() as conn:
         conn.execute("""
@@ -92,9 +96,10 @@ def ensure_schema() -> None:
 
 def _prior_loss_streak(conn: Any, strategy: str, regime: str, entry_time: datetime) -> int:
     rows = list(conn.execute("""
-        SELECT m.net_pnl
+        SELECT m.round_trip_net_pnl AS net_pnl
         FROM paper_regime_trade_metrics m
         WHERE m.strategy=%s AND m.regime=%s AND m.exit_time < %s
+          AND m.cost_provenance='exact_lot' AND m.round_trip_net_pnl IS NOT NULL
         ORDER BY m.exit_time DESC LIMIT 6
     """, (strategy, regime, entry_time)).fetchall())
     streak = 0
@@ -121,11 +126,14 @@ def evaluate_new_closes(limit: int = 250) -> int:
         if not epoch:
             return 0
         rows = list(conn.execute("""
-            SELECT m.trade_id,m.strategy,m.regime,m.entry_time,m.exit_time,m.net_pnl,
-                   l.quantity,l.entry_price,l.fees
+            SELECT m.trade_id,m.strategy,m.regime,m.entry_time,m.exit_time,
+                   m.round_trip_net_pnl,m.round_trip_fees,m.cost_provenance,
+                   l.quantity,l.entry_price
             FROM paper_regime_trade_metrics m
             JOIN trade_ledger l ON l.trade_id=m.trade_id
             WHERE m.exit_time >= %s AND m.strategy='oracle_council_v3'
+              AND m.cost_provenance='exact_lot'
+              AND m.round_trip_net_pnl IS NOT NULL AND m.round_trip_fees IS NOT NULL
               AND m.entry_time IS NOT NULL AND m.exit_time IS NOT NULL
               AND NOT EXISTS (
                   SELECT 1 FROM paper_entry_edge_challenger_results r WHERE r.trade_id=m.trade_id
@@ -139,16 +147,18 @@ def evaluate_new_closes(limit: int = 250) -> int:
             entry_time = row.get("entry_time")
             prior = conn.execute("""
                 SELECT COUNT(*) AS samples,
-                       AVG(m.net_pnl) AS expectancy,
+                       AVG(m.round_trip_net_pnl) AS expectancy,
                        AVG(m.mfe_pct) FILTER (WHERE m.excursion_sample_count>0) AS mfe,
                        AVG(m.mae_pct) FILTER (WHERE m.excursion_sample_count>0) AS mae,
-                       SUM(CASE WHEN m.net_pnl>0 THEN m.net_pnl ELSE 0 END) AS gross_win,
-                       ABS(SUM(CASE WHEN m.net_pnl<0 THEN m.net_pnl ELSE 0 END)) AS gross_loss,
+                       SUM(CASE WHEN m.round_trip_net_pnl>0 THEN m.round_trip_net_pnl ELSE 0 END) AS gross_win,
+                       ABS(SUM(CASE WHEN m.round_trip_net_pnl<0 THEN m.round_trip_net_pnl ELSE 0 END)) AS gross_loss,
                        AVG(CASE WHEN l.quantity>0 AND l.entry_price>0
-                           THEN (l.fees/(l.quantity*l.entry_price))*100.0 END) AS cost_pct
+                           THEN (m.round_trip_fees/(l.quantity*l.entry_price))*100.0 END) AS cost_pct
                 FROM paper_regime_trade_metrics m
                 JOIN trade_ledger l ON l.trade_id=m.trade_id
                 WHERE m.strategy=%s AND m.regime=%s AND m.exit_time < %s
+                  AND m.cost_provenance='exact_lot'
+                  AND m.round_trip_net_pnl IS NOT NULL AND m.round_trip_fees IS NOT NULL
             """, (strategy, regime, entry_time)).fetchone() or {}
             samples = int(prior.get("samples") or 0)
             expectancy = _num(prior.get("expectancy"))
@@ -165,7 +175,7 @@ def evaluate_new_closes(limit: int = 250) -> int:
             )
             # Insufficient history always abstains. This is shadow telemetry only.
             would_trade = bool(samples >= 25 and expectancy > 0 and pf > 1.0 and score > 0.20)
-            pnl = _num(row.get("net_pnl"))
+            pnl = _num(row.get("round_trip_net_pnl"))
             avoided_loss = -pnl if (not would_trade and pnl < 0) else 0.0
             missed_winner = pnl if (not would_trade and pnl > 0) else 0.0
             conn.execute("""
