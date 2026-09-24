@@ -255,3 +255,9 @@ def test_brain_lifecycle_provenance_joins_canonical_trade_ledger():
     assert "t.entry_signal_id IS NOT NULL" in source
     assert "t.feature_snapshot IS NOT NULL" in source
     assert "WHERE entry_signal_id IS NOT NULL AND feature_snapshot IS NOT NULL" not in source
+
+
+def test_brain_prefers_round_trip_correct_research_economics():
+    source = Path("oracle_brain_learning.py").read_text(encoding="utf-8")
+    assert "COALESCE(m.round_trip_net_pnl,m.net_pnl) AS net_pnl" in source
+    assert "COALESCE(m.round_trip_fees,m.fees) AS fees" in source
