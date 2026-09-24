@@ -270,7 +270,7 @@ def test_postgres_v39_sector_enrichment_and_decision_ledger_persistence():
             ("V39SEC",),
         ).fetchone()
     assert record["stage"] == "portfolio_rejected"
-    assert "optimizer_allocation_required" in str(record["rejection_reasons"])
+    assert record["rejection_reason"] == "optimizer_allocation_required"
 
 
 def test_postgres_v39_provider_budget_shared_ledger_exhausts_once():
@@ -495,7 +495,10 @@ def test_routine_rejection_does_not_write_durable_decision_ledger():
         payload={"features": {"score": 0.1}}, rejection_reason="not_capital_qualified"
     )
     assert did
-    assert calls == []
+    sql = "\\n".join(statement for statement, _ in calls)
+    assert "INSERT INTO global_decision_ledger" not in sql
+    assert "INSERT INTO global_asset_identities" not in sql
+    assert "INSERT INTO global_decision_events" in sql
 
 
 def test_paper_execution_still_writes_durable_decision_ledger():
