@@ -780,7 +780,7 @@ function inspect(kind,data){
   if(kind==="node"){eyebrow="CITY DISTRICT";title=data.title;metric=data.metric;detail=data.detail;}
   else if(kind==="resident"){eyebrow="ORACLE CITY WORKER · VISUAL ONLY";title=data.title;metric=String(data.state||"IDLE").replaceAll("_"," ");detail=data.detail+" Assigned district: "+String(data.destination||"unknown")+". This worker cannot place or approve trades.";}
   else if(kind==="position"){eyebrow="PORTFOLIO POSITION";title=data.symbol+" · "+String(data.market||"").toUpperCase();metric=money(data.value);detail="Quantity "+String(data.quantity)+". Portfolio mini-tower height reflects known marked exposure only.";}
-  else if(kind==="cohort"){eyebrow=data.control?"STRATEGY ARENA · CONTROL":"STRATEGY ARENA · PAPER EVIDENCE";title=String(data.strategy||"unknown").replaceAll("_"," ")+" · "+String(data.regime||"unknown");metric=String(data.evidence_state||"RESEARCH ONLY")+" · "+String(data.samples||0)+" samples";detail=(data.expectancy==null?"Expectancy unavailable":"Expectancy "+Number(data.expectancy).toFixed(6))+" · "+(data.profit_factor==null?"PF unavailable":"PF "+Number(data.profit_factor).toFixed(3))+". Visual evidence does not grant promotion or execution authority.";}
+  else if(kind==="cohort"){eyebrow=data.control?"STRATEGY ARENA · CONTROL":"STRATEGY ARENA · PAPER EVIDENCE";title=(data.market?String(data.market).toUpperCase()+" · ":"")+String(data.strategy||"unknown").replaceAll("_"," ")+" · "+String(data.regime||"unknown");metric=String(data.evidence_state||"RESEARCH ONLY")+" · "+String(data.samples||0)+" samples";detail=(data.expectancy==null?"Expectancy unavailable":"Expectancy "+Number(data.expectancy).toFixed(6))+" · "+(data.profit_factor==null?"PF unavailable":"PF "+Number(data.profit_factor).toFixed(3))+". Visual evidence does not grant promotion or execution authority.";}
   else if(kind==="brain"){eyebrow="ORACLE BRAIN · "+String(data.kind||"NODE").toUpperCase();title=data.title;metric=data.metric;detail=data.detail;}
   inspector.innerHTML="<div class='eyebrow'>"+esc(eyebrow)+"</div><h3>"+esc(title)+"</h3><div class='metric'>"+esc(metric)+"</div><p>"+esc(detail)+"</p>";
   inspector.classList.add("open");
@@ -800,7 +800,7 @@ function hoverText(kind,data){
   if(kind==="node")return [data.title,data.metric];
   if(kind==="resident")return [data.title,String(data.state||"IDLE").replaceAll("_"," ")];
   if(kind==="position")return [data.symbol+" · "+String(data.market||"").toUpperCase(),money(data.value)];
-  if(kind==="cohort")return [String(data.strategy||"strategy").replaceAll("_"," "),String(data.evidence_state||"RESEARCH ONLY")];
+  if(kind==="cohort")return [(data.market?String(data.market).toUpperCase()+" · ":"")+String(data.strategy||"strategy").replaceAll("_"," "),String(data.evidence_state||"RESEARCH ONLY")];
   if(kind==="brain")return [data.title,data.metric];
   return ["Oracle City","Select for details"];
 }
