@@ -251,3 +251,70 @@ def test_initialize_database_skips_compatibility_ddl_when_schema_is_established(
     portfolio_seed = body.index('for market in ("cash", "crypto"):')
     assert guard < create_loop < migration_loop < portfolio_seed
     assert "ALTER TABLE portfolios" in body
+
+
+def test_global_decision_ledger_retention_policy_protects_linked_provenance():
+    assert database.DATABASE_RETENTION_POLICIES["global_decision_ledger"]["keep_rows"] == 12000
+    eligible = database._global_decision_ledger_eligible_sql()
+    assert "trade_id IS NULL" in eligible
+    assert "execution_claim_id IS NULL" in eligible
+    assert "global_forecast_outcomes" in eligible
+    assert "trade/execution/outcome-linked" in database.DATABASE_TABLE_GROWTH_AUDIT["global_decision_ledger"]["retention"]
+    migration_source = open("migrations.py", encoding="utf-8").read()
+    assert "global_decision_ledger SET (autovacuum_vacuum_scale_factor = 0.005" in migration_source
+
+
+@pytest.mark.skipif(not os.getenv("DATABASE_URL"), reason="PostgreSQL integration test runs in CI service container")
+def test_postgres_global_decision_ledger_retention_keeps_newest_and_protected_rows():
+    database.initialize_database()
+    prefix = f"retention-ledger-{int(datetime.now(timezone.utc).timestamp() * 1000000)}"
+    with database.connect() as conn:
+        for idx in range(6):
+            conn.execute(
+                """INSERT INTO global_decision_ledger
+                   (decision_id,market,symbol,asset_class,features,portfolio_context,decision,rejection_reasons,created_at)
+                   VALUES (%s,'cash',%s,'stock','{}'::jsonb,'{}'::jsonb,'rejected','[]'::jsonb,%s)""",
+                (f"{prefix}-u-{idx}", f"U{idx}", f"2026-01-01T00:00:0{idx}+00:00"),
+            )
+        conn.execute(
+            """INSERT INTO global_decision_ledger
+               (decision_id,trade_id,market,symbol,asset_class,features,portfolio_context,decision,rejection_reasons,created_at)
+               VALUES (%s,999999,'cash','TRADEKEEP','stock','{}'::jsonb,'{}'::jsonb,'executed','[]'::jsonb,'2026-01-01T00:00:10+00:00')""",
+            (f"{prefix}-trade",),
+        )
+        conn.execute(
+            """INSERT INTO global_decision_ledger
+               (decision_id,execution_claim_id,market,symbol,asset_class,features,portfolio_context,decision,rejection_reasons,created_at)
+               VALUES (%s,%s,'cash','CLAIMKEEP','stock','{}'::jsonb,'{}'::jsonb,'approved','[]'::jsonb,'2026-01-01T00:00:11+00:00')""",
+            (f"{prefix}-claim", f"{prefix}-claim-id"),
+        )
+        conn.execute(
+            """INSERT INTO global_decision_ledger
+               (decision_id,forecast_id,market,symbol,asset_class,features,portfolio_context,decision,rejection_reasons,created_at)
+               VALUES (%s,%s,'cash','OUTCOMEKEEP','stock','{}'::jsonb,'{}'::jsonb,'observed','[]'::jsonb,'2026-01-01T00:00:12+00:00')""",
+            (f"{prefix}-outcome", f"{prefix}-forecast"),
+        )
+        conn.execute(
+            """INSERT INTO global_forecast_outcomes
+               (decision_id,forecast_id,symbol,horizon,realized_return_pct,created_at)
+               VALUES (%s,%s,'OUTCOMEKEEP','1d',1.0,'2026-01-02T00:00:00+00:00')""",
+            (f"{prefix}-outcome", f"{prefix}-forecast"),
+        )
+    original = database.DATABASE_RETENTION_POLICIES["global_decision_ledger"]
+    database.DATABASE_RETENTION_POLICIES["global_decision_ledger"] = {**original, "keep_rows": 2, "batch_size": 2}
+    try:
+        deleted = database.trim_old_records()
+    finally:
+        database.DATABASE_RETENTION_POLICIES["global_decision_ledger"] = original
+    with database.connect() as conn:
+        kept_unlinked = conn.execute(
+            "SELECT decision_id FROM global_decision_ledger WHERE decision_id LIKE %s ORDER BY created_at DESC",
+            (f"{prefix}-u-%",),
+        ).fetchall()
+        protected = conn.execute(
+            "SELECT decision_id FROM global_decision_ledger WHERE decision_id IN (%s,%s,%s)",
+            (f"{prefix}-trade", f"{prefix}-claim", f"{prefix}-outcome"),
+        ).fetchall()
+    assert deleted["global_decision_ledger"] >= 4
+    assert [row["decision_id"] for row in kept_unlinked] == [f"{prefix}-u-5", f"{prefix}-u-4"]
+    assert len(protected) == 3
