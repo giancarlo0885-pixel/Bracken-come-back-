@@ -11,7 +11,7 @@ from typing import Any
 
 
 log = logging.getLogger("paper-regime-economics")
-_SCHEMA_VERSION = "regime-economics-v1-shadow-anchor-fix1"
+_SCHEMA_VERSION = "regime-economics-v2-round-trip-cost"
 _THREAD: threading.Thread | None = None
 _STOP = threading.Event()
 
@@ -154,6 +154,9 @@ def ensure_schema() -> None:
             ON paper_regime_trade_metrics(strategy, regime, exit_time)
             """
         )
+        conn.execute("ALTER TABLE paper_regime_trade_metrics ADD COLUMN IF NOT EXISTS round_trip_net_pnl DOUBLE PRECISION")
+        conn.execute("ALTER TABLE paper_regime_trade_metrics ADD COLUMN IF NOT EXISTS round_trip_fees DOUBLE PRECISION")
+        conn.execute("ALTER TABLE paper_regime_trade_metrics ADD COLUMN IF NOT EXISTS cost_provenance TEXT NOT NULL DEFAULT 'legacy_unknown'")
 
 
 def repair_excursion_anchors() -> int:
@@ -174,6 +177,43 @@ def repair_excursion_anchors() -> int:
             (_SCHEMA_VERSION,),
         )
         return max(0, int(getattr(result, "rowcount", 0) or 0))
+
+
+def _round_trip_accounting(conn: Any, trade: dict[str, Any]) -> tuple[float | None,float | None,str]:
+    """Recover exact round-trip costs from the immutable entry lot when unique."""
+    market = _normalize_market(trade.get("market"))
+    symbol = str(trade.get("symbol") or "").upper()
+    entry_time = trade.get("entry_time")
+    entry_price = _num(trade.get("entry_price"))
+    quantity = abs(_num(trade.get("quantity")))
+    signal_id = str(trade.get("entry_signal_id") or "").strip()
+    decision_id = str(trade.get("entry_decision_id") or "").strip()
+    if not symbol or entry_time is None or entry_price <= 0 or quantity <= 0 or not signal_id:
+        return None,None,"incomplete_entry_provenance"
+    rows=list(conn.execute(
+        """
+        SELECT entry_fees,quantity_opened
+        FROM position_lots
+        WHERE market=%s AND symbol=%s
+          AND NULLIF(opened_at,'')::timestamptz=%s
+          AND entry_signal_id=%s
+          AND (%s='' OR COALESCE(entry_decision_id,'')=%s)
+          AND ABS(entry_price-%s) <= GREATEST(1e-10,ABS(%s)*1e-9)
+        ORDER BY id ASC LIMIT 2
+        """,
+        (market,symbol,entry_time,signal_id,decision_id,decision_id,entry_price,entry_price),
+    ).fetchall())
+    if len(rows) != 1:
+        return None,None,"ambiguous_or_missing_entry_lot"
+    lot=rows[0]
+    opened_qty=abs(_num(lot.get("quantity_opened")))
+    if opened_qty <= 0 or quantity-opened_qty > max(1e-10,opened_qty*1e-9):
+        return None,None,"invalid_entry_lot_quantity"
+    entry_fee=max(0.0,_num(lot.get("entry_fees"))) * (quantity/opened_qty)
+    exit_fee=max(0.0,_num(trade.get("fees")))
+    gross=_num(trade.get("gross_pnl"))
+    total_fee=entry_fee+exit_fee
+    return gross-total_fee,total_fee,"exact_lot"
 
 
 def sample_open_positions(market: str = "crypto") -> int:
@@ -242,7 +282,8 @@ def finalize_closed_trades(limit: int = 250, market: str = "crypto") -> int:
         trades = list(
             conn.execute(
                 """
-                SELECT trade_id, symbol, strategy, net_pnl, fees,
+                SELECT trade_id, market, symbol, strategy, quantity, gross_pnl, net_pnl, fees,
+                       entry_signal_id,entry_decision_id,
                        NULLIF(entry_time,'')::timestamptz AS entry_time,
                        NULLIF(exit_time,'')::timestamptz AS exit_time,
                        entry_price, exit_price, feature_snapshot
@@ -258,12 +299,10 @@ def finalize_closed_trades(limit: int = 250, market: str = "crypto") -> int:
             trade_id = str(trade.get("trade_id") or "").strip()
             if not trade_id:
                 continue
-            exists = conn.execute(
-                "SELECT 1 FROM paper_regime_trade_metrics WHERE trade_id=%s LIMIT 1",
+            existing = conn.execute(
+                "SELECT trade_id,cost_provenance FROM paper_regime_trade_metrics WHERE trade_id=%s LIMIT 1",
                 (trade_id,),
-            ).fetchone()
-            if exists:
-                continue
+            ).fetchone() or {}
 
             symbol = str(trade.get("symbol") or "").upper()
             entry_time = trade.get("entry_time")
@@ -290,14 +329,25 @@ def finalize_closed_trades(limit: int = 250, market: str = "crypto") -> int:
             # Entry is the factual 0% excursion anchor; forward samples supply the path.
             excursion_count = len(prices)
             mfe_pct, mae_pct = _excursion_percentages(entry_price, prices)
+            round_trip_net,round_trip_fees,cost_provenance=_round_trip_accounting(conn,dict(trade))
+            if existing:
+                if cost_provenance == "exact_lot" and str(existing.get("cost_provenance") or "") != "exact_lot":
+                    conn.execute(
+                        """UPDATE paper_regime_trade_metrics
+                           SET round_trip_net_pnl=%s,round_trip_fees=%s,cost_provenance=%s,schema_version=%s
+                           WHERE trade_id=%s""",
+                        (round_trip_net,round_trip_fees,cost_provenance,_SCHEMA_VERSION,trade_id),
+                    )
+                    created += 1
+                continue
 
             conn.execute(
                 """
                 INSERT INTO paper_regime_trade_metrics(
                     trade_id,market,symbol,strategy,regime,entry_time,exit_time,
                     entry_price,exit_price,net_pnl,fees,mfe_pct,mae_pct,
-                    excursion_sample_count,schema_version
-                ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    excursion_sample_count,schema_version,round_trip_net_pnl,round_trip_fees,cost_provenance
+                ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                 ON CONFLICT (trade_id) DO NOTHING
                 """,
                 (
@@ -305,6 +355,7 @@ def finalize_closed_trades(limit: int = 250, market: str = "crypto") -> int:
                     entry_time, exit_time, entry_price or None, exit_price or None,
                     _num(trade.get("net_pnl")), max(0.0, _num(trade.get("fees"))),
                     mfe_pct, mae_pct, excursion_count, _SCHEMA_VERSION,
+                    round_trip_net,round_trip_fees,cost_provenance,
                 ),
             )
             created += 1
@@ -322,8 +373,9 @@ def emit_summary(market: str | None = None) -> None:
                 conn.execute(
                     """
                     SELECT market, strategy, regime, COUNT(*) AS samples,
-                           SUM(net_pnl) AS net_pnl, SUM(fees) AS fees,
-                           AVG(net_pnl) AS expectancy,
+                           SUM(COALESCE(round_trip_net_pnl,net_pnl)) AS net_pnl,
+                           SUM(COALESCE(round_trip_fees,fees)) AS fees,
+                           AVG(COALESCE(round_trip_net_pnl,net_pnl)) AS expectancy,
                            AVG(mfe_pct) FILTER (WHERE excursion_sample_count > 0) AS avg_mfe_pct,
                            AVG(mae_pct) FILTER (WHERE excursion_sample_count > 0) AS avg_mae_pct,
                            SUM(CASE WHEN excursion_sample_count > 0 THEN 1 ELSE 0 END) AS excursion_trades
