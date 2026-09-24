@@ -31,30 +31,37 @@ snapshot = build_oracle_brain_snapshot(rows)
 # outcomes produced by the AEVE evaluator; Council approvals/signals are not trades.
 try:
     aeve_rows = rows("""
-        SELECT g.generation,g.started_at,g.config_hash,g.status,
-               COUNT(o.id)::int AS observed_outcomes,
-               COUNT(o.id) FILTER (WHERE o.would_trade)::int AS accepted_trades,
+        WITH current_provenance AS (
+          SELECT MAX(provenance_version)::int AS provenance_version
+          FROM paper_aeve_provenance_epochs
+        )
+        SELECT g.generation,g.started_at,g.config_hash,g.status,cp.provenance_version,
+               COUNT(o.id) FILTER (WHERE o.provenance_version=cp.provenance_version)::int AS observed_outcomes,
                COUNT(o.id) FILTER (
-                   WHERE o.would_trade AND o.provenance_version >= 2
+                   WHERE o.would_trade AND o.provenance_version=cp.provenance_version
+               )::int AS accepted_trades,
+               COUNT(o.id) FILTER (
+                   WHERE o.would_trade AND o.provenance_version=cp.provenance_version
                      AND o.config_hash = g.config_hash
                )::int AS verified_trades,
                COUNT(o.id) FILTER (
                    WHERE o.would_trade AND o.net_pnl > 0
-                     AND o.provenance_version >= 2 AND o.config_hash = g.config_hash
+                     AND o.provenance_version=cp.provenance_version AND o.config_hash = g.config_hash
                )::int AS winners,
                COUNT(o.id) FILTER (
                    WHERE o.would_trade AND o.net_pnl <= 0
-                     AND o.provenance_version >= 2 AND o.config_hash = g.config_hash
+                     AND o.provenance_version=cp.provenance_version AND o.config_hash = g.config_hash
                )::int AS non_winners,
                COALESCE(SUM(o.net_pnl) FILTER (
-                   WHERE o.would_trade AND o.provenance_version >= 2
+                   WHERE o.would_trade AND o.provenance_version=cp.provenance_version
                      AND o.config_hash = g.config_hash
                ),0)::double precision AS net_pnl
         FROM paper_aeve_generations g
+        CROSS JOIN current_provenance cp
         LEFT JOIN paper_aeve_generation_outcomes o
           ON o.generation=g.generation AND o.config_hash=g.config_hash
         WHERE g.status='ACTIVE'
-        GROUP BY g.generation,g.started_at,g.config_hash,g.status
+        GROUP BY g.generation,g.started_at,g.config_hash,g.status,cp.provenance_version
         ORDER BY g.generation DESC LIMIT 1
     """)
 except Exception:
@@ -95,7 +102,8 @@ try:
         FROM paper_aeve_generation_outcomes o
         JOIN paper_aeve_generations g
           ON g.generation=o.generation AND g.config_hash=o.config_hash
-        WHERE g.status='ACTIVE' AND o.provenance_version>=2
+        WHERE g.status='ACTIVE'
+          AND o.provenance_version=(SELECT MAX(provenance_version) FROM paper_aeve_provenance_epochs)
     """)
 except Exception:
     aeve_diag = []
@@ -140,9 +148,18 @@ try:
         )
         SELECT
           a.generation,a.config_hash,a.started_at,
-          COUNT(o.id) FILTER (WHERE o.would_trade AND o.provenance_version>=2)::int AS aeve_trades,
-          COUNT(o.id) FILTER (WHERE o.would_trade AND o.provenance_version>=2)::int AS provenance_v2,
-          COUNT(o.id) FILTER (WHERE o.would_trade AND o.provenance_version<2)::int AS legacy_provenance
+          COUNT(o.id) FILTER (
+            WHERE o.would_trade
+              AND o.provenance_version=(SELECT MAX(provenance_version) FROM paper_aeve_provenance_epochs)
+          )::int AS aeve_trades,
+          COUNT(o.id) FILTER (
+            WHERE o.would_trade
+              AND o.provenance_version=(SELECT MAX(provenance_version) FROM paper_aeve_provenance_epochs)
+          )::int AS current_provenance,
+          COUNT(o.id) FILTER (
+            WHERE o.would_trade
+              AND o.provenance_version<>(SELECT MAX(provenance_version) FROM paper_aeve_provenance_epochs)
+          )::int AS legacy_provenance
         FROM active a LEFT JOIN paper_aeve_generation_outcomes o
           ON o.generation=a.generation AND o.config_hash=a.config_hash
         GROUP BY a.generation,a.config_hash,a.started_at
@@ -158,7 +175,7 @@ if cockpit:
     c1,c2,c3,c4=st.columns(4)
     c1.metric("Verified AEVE", f"{completed:,} / 1,000")
     c2.metric("Learning velocity", f"{tph:.2f}/hr")
-    c3.metric("Provenance v2", int(cp.get("provenance_v2") or 0))
+    c3.metric("Current provenance", int(cp.get("current_provenance") or 0))
     c4.metric("Legacy provenance", int(cp.get("legacy_provenance") or 0))
     st.caption("The authoritative generation table stores immutable config/provenance identity. Entry-time knowledge snapshots remain in canonical Council lifecycle evidence; they are not duplicated into AEVE outcomes.")
 
@@ -380,7 +397,8 @@ with st.expander("Recent exact-provenance episodes"):
                     {
                         "Market": item["market"],
                         "Symbol": item["symbol"],
-                        "Strategy": item["strategy"],
+                        "Market": item.get("market", "unknown"),
+                    "Strategy": item["strategy"],
                         "Regime": item["regime"],
                         "Net P&L": item["net_pnl"],
                         "MFE %": item["mfe_pct"],
