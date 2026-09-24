@@ -195,3 +195,18 @@ def test_active_fails_closed_for_live(monkeypatch):
     assert fallback.active() is True
     monkeypatch.setenv("LIVE_TRADING_ARMED", "true")
     assert fallback.active() is False
+
+
+def test_wrapper_preserves_market_argument(monkeypatch):
+    _paper(monkeypatch)
+    calls = []
+
+    def original(limit=250, market="crypto"):
+        calls.append(("finalize", limit, market))
+        return 3
+
+    shadow = SimpleNamespace(finalize_closed_trades=original)
+    monkeypatch.setattr(fallback, "repair_unknown_regimes", lambda limit=1000, market="crypto": calls.append(("repair", limit, market)) or 0)
+    assert fallback.install_entry_signal_regime_fallback(shadow) is True
+    assert shadow.finalize_closed_trades(17, market="cash") == 3
+    assert calls == [("finalize", 17, "cash"), ("repair", 1000, "cash")]
