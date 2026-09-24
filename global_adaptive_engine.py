@@ -396,6 +396,17 @@ def reserve_provider_budget_db(conn: Any, provider: str, capability: str, *, dai
     utc_date = now_dt.date().isoformat()
     timestamp = now_dt.isoformat()
     budget = max(0, int(daily_budget))
+    # Initialize the provider/capability/day row atomically before locking it.
+    # Multiple stock/crypto workers can reach a new key at the same time; the
+    # unique key arbitrates creation and the subsequent FOR UPDATE serializes
+    # reservations without leaking duplicate-key failures into the transaction.
+    conn.execute(
+        """INSERT INTO provider_budget_ledger
+           (provider,capability,utc_date,entitlement,daily_budget,requests_used,remaining_budget,data_mode,updated_at)
+           VALUES (%s,%s,%s,%s,%s,0,%s,%s,%s)
+           ON CONFLICT (provider,capability,utc_date) DO NOTHING""",
+        (provider, capability, utc_date, entitlement, budget, budget, data_mode, timestamp),
+    )
     existing = conn.execute(
         """SELECT * FROM provider_budget_ledger
            WHERE provider=%s AND capability=%s AND utc_date=%s
@@ -403,13 +414,7 @@ def reserve_provider_budget_db(conn: Any, provider: str, capability: str, *, dai
         (provider, capability, utc_date),
     ).fetchone()
     if not existing:
-        conn.execute(
-            """INSERT INTO provider_budget_ledger
-               (provider,capability,utc_date,entitlement,daily_budget,requests_used,remaining_budget,data_mode,updated_at)
-               VALUES (%s,%s,%s,%s,%s,0,%s,%s,%s)""",
-            (provider, capability, utc_date, entitlement, budget, budget, data_mode, timestamp),
-        )
-        existing = {"requests_used": 0, "remaining_budget": budget, "cooldown_until": None}
+        return {"reserved": False, "reason": "provider budget row unavailable after atomic initialization"}
     cooldown_until = _parse_aware_datetime(existing.get("cooldown_until"))
     if cooldown_until and cooldown_until > now_dt.astimezone(timezone.utc):
         return {"reserved": False, "reason": "provider capability in cooldown", "remaining": int(existing.get("remaining_budget") or 0)}
