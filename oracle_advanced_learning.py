@@ -49,41 +49,42 @@ def _canonical_json_hash(value: Any) -> str:
 
 
 def _compact_replay_snapshot(decision: dict[str,Any], observations: list[dict[str,Any]]) -> tuple[dict[str,Any],str]:
-    """Reference canonical evidence instead of duplicating large JSON payloads.
+    """Reference canonical evidence without changing historical lineage semantics.
 
     Full decision payloads remain in oracle_decision_audit and full observation
     payloads remain in oracle_brain_observations. The replay stores stable
-    identifiers plus content hashes so historical lineage stays auditable
-    without copying the same evidence into TOAST for every replay.
+    identifiers plus content hashes, while lineage_hash is still computed from
+    the exact full snapshot shape used by the legacy implementation.
     """
     decision_payload=_obj(decision.get("payload"))
-    refs=[]
-    lineage_material={
-        "decision_id":decision.get("id"),
-        "decision_payload_sha256":_canonical_json_hash(decision_payload),
-        "observations":[],
+    legacy_snapshot={
+        "decision_payload":decision_payload,
+        "approved":bool(decision.get("approved")),
+        "observations":[dict(row) for row in observations],
     }
+    legacy_raw=json.dumps(legacy_snapshot,default=str,sort_keys=True,separators=(",",":"))
+    lineage_hash=hashlib.sha256(legacy_raw.encode()).hexdigest()
+
+    refs=[]
     for row in observations:
         item=dict(row)
         payload=_obj(item.get("payload"))
-        ref={
+        refs.append({
             "event_key":item.get("event_key"),
             "source_table":item.get("source_table"),
             "observation_type":item.get("observation_type"),
             "event_time":item.get("event_time"),
             "payload_sha256":_canonical_json_hash(payload),
-        }
-        refs.append(ref)
-        lineage_material["observations"].append(ref)
+        })
     snapshot={
         "decision_ref":{
             "decision_id":decision.get("id"),
             "approved":bool(decision.get("approved")),
-            "payload_sha256":lineage_material["decision_payload_sha256"],
+            "payload_sha256":_canonical_json_hash(decision_payload),
         },
         "observation_refs":refs,
     }
-    return snapshot,_canonical_json_hash(lineage_material)
+    return snapshot,lineage_hash
 
 
 def build_decision_replays(conn: Any, *, limit: int=200) -> dict[str,int]:
