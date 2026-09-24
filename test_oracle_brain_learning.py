@@ -89,6 +89,8 @@ def test_episode_requires_exact_entry_provenance():
         "gross_pnl": 11.0,
         "fees": 1.0,
         "exit_price": 106.0,
+        "exit_reason": "profit_target",
+        "risk_snapshot": {"spread_pct": 0.001, "slippage_pct": 0.0005, "market_impact_pct": 0.0002},
         "mfe_pct": 8.0,
         "mae_pct": -3.0,
         "excursion_sample_count": 12,
@@ -119,6 +121,10 @@ def test_episode_requires_exact_entry_provenance():
     assert episode["outcome_snapshot"]["holding_seconds"] == 7200.0
     assert episode["outcome_snapshot"]["mfe_pct"] == 8.0
     assert episode["outcome_snapshot"]["mae_pct"] == -3.0
+    assert episode["outcome_snapshot"]["exit_reason"] == "profit_target"
+    assert episode["outcome_snapshot"]["execution_costs"]["spread_pct"] == 0.001
+    assert episode["outcome_snapshot"]["execution_costs"]["slippage_pct"] == 0.0005
+    assert episode["outcome_snapshot"]["execution_costs"]["market_impact_pct"] == 0.0002
 
 
 def test_regime_summary_requires_mature_sample_depth():
@@ -246,3 +252,17 @@ def test_brain_page_visualizes_sources_episodes_links_and_queue():
     assert "Active contradictions" in source
     assert "Exact trade episodes" in source
     assert "execution authority: NONE" in source
+
+
+def test_similar_episode_evidence_is_exact_entry_research_only():
+    episodes = [
+        {"episode_key": "a", "trade_id": "A", "strategy": "dip_rebound", "regime": "trend_up", "provenance_status": "exact", "feature_snapshot": {"momentum_20d": 0.20, "volume_ratio": 1.4}, "net_pnl": 5.0, "return_pct": 0.02, "mfe_pct": 3.0, "mae_pct": -1.0},
+        {"episode_key": "b", "trade_id": "B", "strategy": "dip_rebound", "regime": "trend_up", "provenance_status": "exact", "feature_snapshot": {"momentum_20d": -0.50, "volume_ratio": 3.5}, "net_pnl": -2.0, "return_pct": -0.01, "mfe_pct": 0.5, "mae_pct": -3.0},
+        {"episode_key": "bad", "trade_id": "BAD", "strategy": "dip_rebound", "regime": "trend_up", "provenance_status": "unknown", "feature_snapshot": {"momentum_20d": 0.21, "volume_ratio": 1.41}, "net_pnl": 99.0},
+    ]
+    result = learning.similar_episode_evidence({"momentum_20d": 0.21, "volume_ratio": 1.45}, episodes, strategy="dip_rebound", regime="trend_up")
+    assert [row["trade_id"] for row in result] == ["A", "B"]
+    assert result[0]["similarity"] > result[1]["similarity"]
+    source = inspect.getsource(learning.similar_episode_evidence)
+    assert "submit_order" not in source
+    assert "process_signals" not in source
