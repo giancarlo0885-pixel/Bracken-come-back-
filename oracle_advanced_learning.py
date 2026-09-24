@@ -43,6 +43,49 @@ def _deep(p: dict[str,Any], keys: tuple[str,...]) -> float|None:
     return None
 
 
+def _canonical_json_hash(value: Any) -> str:
+    raw=json.dumps(value,default=str,sort_keys=True,separators=(",",":"))
+    return hashlib.sha256(raw.encode()).hexdigest()
+
+
+def _compact_replay_snapshot(decision: dict[str,Any], observations: list[dict[str,Any]]) -> tuple[dict[str,Any],str]:
+    """Reference canonical evidence instead of duplicating large JSON payloads.
+
+    Full decision payloads remain in oracle_decision_audit and full observation
+    payloads remain in oracle_brain_observations. The replay stores stable
+    identifiers plus content hashes so historical lineage stays auditable
+    without copying the same evidence into TOAST for every replay.
+    """
+    decision_payload=_obj(decision.get("payload"))
+    refs=[]
+    lineage_material={
+        "decision_id":decision.get("id"),
+        "decision_payload_sha256":_canonical_json_hash(decision_payload),
+        "observations":[],
+    }
+    for row in observations:
+        item=dict(row)
+        payload=_obj(item.get("payload"))
+        ref={
+            "event_key":item.get("event_key"),
+            "source_table":item.get("source_table"),
+            "observation_type":item.get("observation_type"),
+            "event_time":item.get("event_time"),
+            "payload_sha256":_canonical_json_hash(payload),
+        }
+        refs.append(ref)
+        lineage_material["observations"].append(ref)
+    snapshot={
+        "decision_ref":{
+            "decision_id":decision.get("id"),
+            "approved":bool(decision.get("approved")),
+            "payload_sha256":lineage_material["decision_payload_sha256"],
+        },
+        "observation_refs":refs,
+    }
+    return snapshot,_canonical_json_hash(lineage_material)
+
+
 def build_decision_replays(conn: Any, *, limit: int=200) -> dict[str,int]:
     decisions=list(conn.execute(
         """SELECT id,market,symbol,approved,payload,created_at FROM oracle_decision_audit d
@@ -59,10 +102,8 @@ def build_decision_replays(conn: Any, *, limit: int=200) -> dict[str,int]:
                ORDER BY event_time::timestamptz DESC,id DESC LIMIT 100""",
             (d.get("created_at"),d.get("market"),d.get("symbol"))
         ).fetchall())
-        snapshot={"decision_payload":_obj(d.get("payload")),"approved":bool(d.get("approved")),
-                  "observations":[dict(x) for x in observations]}
+        snapshot,digest=_compact_replay_snapshot(dict(d),[dict(x) for x in observations])
         raw=json.dumps(snapshot,default=str,sort_keys=True,separators=(",",":"))
-        digest=hashlib.sha256(raw.encode()).hexdigest()
         conn.execute(
             """INSERT INTO oracle_decision_replays(
                  decision_id,market,symbol,decision_time,observation_count,replay_snapshot,lineage_hash,execution_impact
