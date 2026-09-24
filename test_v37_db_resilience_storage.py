@@ -21,28 +21,18 @@ def test_database_ready_missing_url_is_configuration_failure(monkeypatch):
     assert result["transient"] is False
 
 
-@pytest.mark.parametrize(
-    "message",
-    [
-        "database system is in recovery mode",
-        "server closed the connection unexpectedly",
-        "connection reset by peer",
-        "unexpected EOF on client connection",
-    ],
-)
+@pytest.mark.parametrize("message", ["database system is in recovery mode", "server closed the connection unexpectedly", "connection reset by peer", "unexpected EOF on client connection"])
 def test_transient_database_errors_are_classified(message):
     assert database.is_transient_database_error(RuntimeError(message)) is True
 
 
 def test_wait_for_database_ready_retries_until_available(monkeypatch):
     attempts = []
-
     def fake_ready():
         attempts.append(1)
         if len(attempts) < 3:
             return {"ok": False, "transient": True, "message": "database system is in recovery mode"}
         return {"ok": True, "transient": False, "message": "ready"}
-
     monkeypatch.setattr(database, "database_ready", fake_ready)
     result = database.wait_for_database_ready(initial_delay=0.01, max_delay=0.01)
     assert result["ok"] is True
@@ -68,7 +58,6 @@ def test_worker_bootstrap_waits_then_runs_migrations(monkeypatch):
     monkeypatch.setattr(market_worker, "_ensure_status_table", lambda: calls.append("status"))
     monkeypatch.setattr(market_worker, "bootstrap_database_with_lock", lambda fn: calls.append("bootstrap") or fn())
     import migrations
-
     monkeypatch.setattr(migrations, "run_migrations", lambda: calls.append("migrations"))
     assert market_worker._bootstrap_worker_database("Stock Market") is True
     assert calls == ["wait", "bootstrap", "migrations", "status"]
@@ -79,13 +68,11 @@ def test_worker_bootstrap_retries_transient_initialization(monkeypatch):
     monkeypatch.setattr(market_worker, "_wait_for_worker_database", lambda label: True)
     monkeypatch.setattr(market_worker, "_ensure_status_table", lambda: None)
     monkeypatch.setattr(market_worker, "is_transient_database_error", lambda exc: "recovery" in str(exc))
-
     def fake_bootstrap(fn):
         calls["bootstrap"] += 1
         if calls["bootstrap"] == 1:
             raise RuntimeError("database system is in recovery mode")
         return None
-
     monkeypatch.setattr(market_worker, "bootstrap_database_with_lock", fake_bootstrap)
     assert market_worker._bootstrap_worker_database("Stock Market") is True
     assert calls["bootstrap"] == 2
@@ -100,20 +87,7 @@ def test_worker_bootstrap_programming_error_fails_loudly(monkeypatch):
 
 
 def test_central_execution_policy_remains_disabled():
-    result = execution_policy.execution_policy(
-        market="cash",
-        intent="entry",
-        overrides={
-            "ENABLE_AUTOTRADE": False,
-            "ENABLE_STOCK_AUTOTRADE": False,
-            "ENABLE_CRYPTO_AUTOTRADE": False,
-            "ENABLE_NEW_ENTRIES": False,
-            "ENABLE_AUTOMATED_EXITS": False,
-            "ENABLE_PORTFOLIO_ROTATION": False,
-            "ENABLE_BROKER_SUBMISSION": False,
-            "GLOBAL_KILL_SWITCH": False,
-        },
-    )
+    result = execution_policy.execution_policy(market="cash", intent="entry", overrides={"ENABLE_AUTOTRADE": False, "ENABLE_STOCK_AUTOTRADE": False, "ENABLE_CRYPTO_AUTOTRADE": False, "ENABLE_NEW_ENTRIES": False, "ENABLE_AUTOMATED_EXITS": False, "ENABLE_PORTFOLIO_ROTATION": False, "ENABLE_BROKER_SUBMISSION": False, "GLOBAL_KILL_SWITCH": False})
     assert result.allowed is False
 
 
@@ -127,17 +101,14 @@ def test_retention_policies_do_not_include_canonical_tables():
 
 def test_storage_report_capacity_status(monkeypatch):
     monkeypatch.setattr(database, "DATABASE_VOLUME_CAPACITY_GB", 1.0)
-
     class FakeConn:
         def execute(self, sql, params=()):
             if "pg_database_size" in sql:
                 return SimpleNamespace(fetchone=lambda: {"name": "unit", "bytes": int(0.8 * 1024**3)})
             return SimpleNamespace(fetchall=lambda: [{"table": "signals", "total_bytes": 2048, "table_bytes": 1024, "index_bytes": 1024, "live_rows": 10, "dead_rows": 1, "last_autovacuum": None, "last_autoanalyze": None}])
-
     class Ctx:
         def __enter__(self): return FakeConn()
         def __exit__(self, *args): return False
-
     monkeypatch.setattr(database, "connect", lambda: Ctx())
     report = database.database_storage_report()
     assert report["status"] == "warning"
@@ -151,7 +122,6 @@ def test_maintenance_lock_skip_does_not_crash(monkeypatch):
     class LockCtx:
         def __enter__(self): return False
         def __exit__(self, *args): return False
-
     monkeypatch.setattr(database, "database_advisory_lock", lambda *args, **kwargs: LockCtx())
     result = database.run_database_maintenance()
     assert result["ok"] is True
@@ -200,24 +170,18 @@ def test_postgres_bootstrap_advisory_lock_runs_migrations_once():
 
 
 def test_decision_funnel_retention_is_bounded_for_storage_safety():
-    assert database.DATABASE_RETENTION_POLICIES["global_decision_events"]["keep_rows"] == 5000
-    assert "5000" in database.DATABASE_TABLE_GROWTH_AUDIT["global_decision_events"]["retention"]
+    assert database.DATABASE_RETENTION_POLICIES["global_decision_events"]["keep_rows"] == 1000
+    assert "1000" in database.DATABASE_TABLE_GROWTH_AUDIT["global_decision_events"]["retention"]
 
 
 class _RetentionProbeResult:
-    def __init__(self, row):
-        self._row = row
-    def fetchone(self):
-        return self._row
+    def __init__(self, row): self._row = row
+    def fetchone(self): return self._row
 
 
 class _RetentionProbeConn:
-    def __init__(self, row):
-        self.row = row
-        self.params = None
-    def execute(self, sql, params=()):
-        self.params = params
-        return _RetentionProbeResult(self.row)
+    def __init__(self, row): self.row = row; self.params = None
+    def execute(self, sql, params=()): self.params = params; return _RetentionProbeResult(self.row)
 
 
 def test_retention_hysteresis_skips_cleanup_inside_bounded_slack():
@@ -232,3 +196,14 @@ def test_retention_hysteresis_triggers_after_bounded_overshoot():
     due = database._retention_cleanup_due(conn, "signals", keep_rows=5000, batch_size=500)
     assert due is True
     assert conn.params == (6000,)
+
+
+def test_high_churn_tables_get_aggressive_autovacuum_settings():
+    database_source = open("database.py", encoding="utf-8").read()
+    migration_source = open("migrations.py", encoding="utf-8").read()
+    assert "global_decision_events SET (autovacuum_vacuum_scale_factor = 0.005" in migration_source
+    assert "oracle_decision_audit SET (autovacuum_vacuum_scale_factor = 0.01" in migration_source
+    assert "opportunity_radar_assessments SET (autovacuum_vacuum_scale_factor = 0.01" in migration_source
+    assert "signals SET (autovacuum_vacuum_scale_factor = 0.01" in database_source
+    assert "VACUUM FULL" not in database_source
+    assert "VACUUM FULL" not in migration_source

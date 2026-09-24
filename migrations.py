@@ -166,14 +166,17 @@ REPAIR_STATEMENTS = [
         message TEXT, updated_at TEXT NOT NULL)""",
 ]
 
+POST_MIGRATION_MAINTENANCE = [
+    "ALTER TABLE oracle_decision_audit SET (autovacuum_vacuum_scale_factor = 0.01, autovacuum_vacuum_threshold = 50, autovacuum_analyze_scale_factor = 0.02, autovacuum_analyze_threshold = 50)",
+    "ALTER TABLE opportunity_radar_assessments SET (autovacuum_vacuum_scale_factor = 0.01, autovacuum_vacuum_threshold = 50, autovacuum_analyze_scale_factor = 0.02, autovacuum_analyze_threshold = 50)",
+    "ALTER TABLE global_decision_events SET (autovacuum_vacuum_scale_factor = 0.005, autovacuum_vacuum_threshold = 25, autovacuum_analyze_scale_factor = 0.01, autovacuum_analyze_threshold = 25)",
+]
+
 
 def _repair_database(conn) -> None:
     for statement in REPAIR_STATEMENTS:
         conn.execute(statement)
 
-    # Upgrade legacy paper portfolios to institutional simulated capital while
-    # preserving all existing profits/losses and positions. This runs once per
-    # portfolio because starting_balance is raised to the configured target.
     if PAPER_CAPITAL_UPGRADE:
         for market, target, leverage in (
             ("cash", float(STOCK_STARTING_BALANCE), float(STOCK_PAPER_LEVERAGE)),
@@ -192,13 +195,9 @@ def _repair_database(conn) -> None:
                 WHERE market = %s
                   AND starting_balance < %s
                 """,
-                (
-                    target, target, target, leverage, PAPER_BROKER_PROFILE,
-                    utc_now(), utc_now(), market, target,
-                ),
+                (target, target, target, leverage, PAPER_BROKER_PROFILE, utc_now(), utc_now(), market, target),
             )
 
-    # Keep broker settings synchronized even after the capital upgrade.
     conn.execute(
         """
         UPDATE portfolios
@@ -209,10 +208,6 @@ def _repair_database(conn) -> None:
         """,
         (float(CRYPTO_PAPER_LEVERAGE), float(STOCK_PAPER_LEVERAGE), PAPER_BROKER_PROFILE, utc_now()),
     )
-
-    # Keep the canonical market keys used by workers, portfolios, and dashboard.
-    # Older builds wrote the stock heartbeat under ``stock``. Copy the newest
-    # legacy state into ``cash`` when needed, then remove the duplicate row.
     conn.execute(
         """
         INSERT INTO market_worker_status(market,status,message,last_run,heartbeat)
@@ -220,18 +215,13 @@ def _repair_database(conn) -> None:
         FROM market_worker_status
         WHERE market='stock'
         ON CONFLICT (market) DO UPDATE SET
-            status = CASE
-                WHEN COALESCE(EXCLUDED.heartbeat, '') > COALESCE(market_worker_status.heartbeat, '')
-                THEN EXCLUDED.status ELSE market_worker_status.status END,
-            message = CASE
-                WHEN COALESCE(EXCLUDED.heartbeat, '') > COALESCE(market_worker_status.heartbeat, '')
-                THEN EXCLUDED.message ELSE market_worker_status.message END,
+            status = CASE WHEN COALESCE(EXCLUDED.heartbeat, '') > COALESCE(market_worker_status.heartbeat, '') THEN EXCLUDED.status ELSE market_worker_status.status END,
+            message = CASE WHEN COALESCE(EXCLUDED.heartbeat, '') > COALESCE(market_worker_status.heartbeat, '') THEN EXCLUDED.message ELSE market_worker_status.message END,
             last_run = GREATEST(EXCLUDED.last_run, market_worker_status.last_run),
             heartbeat = GREATEST(EXCLUDED.heartbeat, market_worker_status.heartbeat)
         """
     )
     conn.execute("DELETE FROM market_worker_status WHERE market='stock'")
-
 
 
 def run_migrations() -> list[str]:
@@ -240,29 +230,27 @@ def run_migrations() -> list[str]:
     applied: list[str] = []
 
     with connect() as conn:
-        # All three Railway services may boot together. The transaction-level
-        # advisory lock prevents migration races and releases on commit/rollback.
         conn.execute("SELECT pg_advisory_xact_lock(%s)", (MIGRATION_LOCK_ID,))
         _repair_database(conn)
 
-        existing = {
-            record["version"]
-            for record in conn.execute("SELECT version FROM schema_migrations").fetchall()
-        }
-        if not folder.exists():
-            return applied
+        existing = {record["version"] for record in conn.execute("SELECT version FROM schema_migrations").fetchall()}
+        if folder.exists():
+            for path in sorted(folder.glob("*.sql")):
+                if path.name in existing:
+                    continue
+                sql = path.read_text(encoding="utf-8").strip()
+                if sql:
+                    conn.execute(sql)
+                conn.execute(
+                    """INSERT INTO schema_migrations(version,applied_at)
+                       VALUES (%s,%s) ON CONFLICT(version) DO NOTHING""",
+                    (path.name, utc_now()),
+                )
+                applied.append(path.name)
 
-        for path in sorted(folder.glob("*.sql")):
-            if path.name in existing:
-                continue
-            sql = path.read_text(encoding="utf-8").strip()
-            if sql:
-                conn.execute(sql)
-            conn.execute(
-                """INSERT INTO schema_migrations(version,applied_at)
-                   VALUES (%s,%s) ON CONFLICT(version) DO NOTHING""",
-                (path.name, utc_now()),
-            )
-            applied.append(path.name)
+        # These tables are created by repair statements or versioned migrations.
+        # Apply storage tuning only after schema creation to keep clean bootstrap valid.
+        for statement in POST_MIGRATION_MAINTENANCE:
+            conn.execute(statement)
 
     return applied
