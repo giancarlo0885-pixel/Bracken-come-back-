@@ -69,7 +69,8 @@ def render_oracle_brain_component(snapshot: dict[str, Any]) -> str:
         ],
         "regimes": [
             {
-                "key": f"{item.get('strategy')}::{item.get('regime')}",
+                "key": f"{item.get('market')}::{item.get('strategy')}::{item.get('regime')}",
+                "market": item.get("market"),
                 "strategy": item.get("strategy"),
                 "regime": item.get("regime"),
                 "samples": item.get("samples"),
@@ -216,7 +217,7 @@ function buildNodes(){
   (D.entries||[]).forEach(v=>raw.push({kind:"lesson",key:"brain:"+String(v.key||v.title),label:v.title||v.key,sub:v.category||"durable lesson",value:Number(v.confidence||.5)}));
   (D.sources||[]).forEach(v=>raw.push({kind:"source",key:"source:"+String(v.key||v.title),label:v.title||v.key,sub:(v.provider||"source")+" · "+(v.category||"uncategorized"),value:Number(v.confidence||.4)*Number(v.freshness==null?1:v.freshness)}));
   (D.episodes||[]).forEach(v=>raw.push({kind:"episode",key:"episode:"+String(v.key||v.symbol),label:(v.symbol||"outcome")+" · "+(v.strategy||"strategy"),sub:(v.regime||"unknown")+" · P/L "+Number(v.pnl||0).toFixed(4),value:Number(v.confidence||.5),pnl:Number(v.pnl||0)}));
-  (D.regimes||[]).forEach(v=>raw.push({kind:"regime",key:"regime:"+String(v.key),label:(v.strategy||"strategy")+" · "+(v.regime||"regime"),sub:String(v.samples||0)+" samples · expectancy "+Number(v.expectancy||0).toFixed(5),value:Math.min(1,Number(v.samples||0)/200),state:v.state}));
+  (D.regimes||[]).forEach(v=>raw.push({kind:"regime",key:"regime:"+String(v.key),label:(v.market?String(v.market).toUpperCase()+" · ":"")+(v.strategy||"strategy")+" · "+(v.regime||"regime"),sub:String(v.samples||0)+" samples · expectancy "+Number(v.expectancy||0).toFixed(5),value:Math.min(1,Number(v.samples||0)/200),state:v.state}));
   nodes=raw.slice(0,210).map((n,i)=>({...n,...pointFor(n.key,i),phase:(hash(n.key)%628)/100,r:2.3+Math.min(5.5,5.5*Math.max(.08,n.value||.1))}));
   const map=new Map(nodes.map((n,i)=>[n.key,i]));
   edges=[];
