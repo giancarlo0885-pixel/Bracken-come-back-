@@ -1201,8 +1201,19 @@ def initialize_database() -> None:
             for statement in create_statements:
                 cursor.execute(statement)
 
-            for statement in migration_statements:
-                cursor.execute(statement)
+            # Established production databases already have durable migration
+            # history. Replaying ALTER TABLE compatibility repairs on every
+            # rolling web/worker startup takes AccessExclusive locks on hot
+            # portfolio/position relations and can deadlock active transactions.
+            # Fresh/legacy databases with no migration history still receive the
+            # full compatibility repair; later schema changes belong in versioned
+            # SQL migrations handled by run_migrations().
+            cursor.execute("SELECT COUNT(*) AS count FROM schema_migrations")
+            history_row = cursor.fetchone() or {}
+            has_migration_history = int(history_row.get("count") or 0) > 0
+            if not has_migration_history:
+                for statement in migration_statements:
+                    cursor.execute(statement)
 
             for market in ("cash", "crypto"):
                 starting_capital = float(
