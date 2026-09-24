@@ -31,3 +31,34 @@ def test_walk_forward_is_time_ordered_and_research_only():
 def test_advanced_schema_has_no_execution_authority():
     migration=Path("migrations/20260922_oracle_advanced_learning.sql").read_text(encoding="utf-8")
     assert migration.count("CHECK (execution_impact='NONE')") == 5
+
+
+def test_compact_replay_snapshot_keeps_lineage_without_large_payload_copies():
+    decision={"id":42,"approved":True,"payload":{"blob":"x"*500000}}
+    observations=[
+        {
+            "event_key":"obs-1",
+            "source_table":"signals",
+            "observation_type":"signal",
+            "event_time":"2026-09-24T00:00:00+00:00",
+            "payload":{"blob":"y"*500000},
+        }
+    ]
+    snapshot,digest=a._compact_replay_snapshot(decision,observations)
+    encoded=__import__("json").dumps(snapshot,sort_keys=True,separators=(",",":"))
+    assert "decision_payload" not in snapshot
+    assert "observations" not in snapshot
+    assert snapshot["decision_ref"]["decision_id"] == 42
+    assert snapshot["decision_ref"]["payload_sha256"]
+    assert snapshot["observation_refs"][0]["event_key"] == "obs-1"
+    assert snapshot["observation_refs"][0]["payload_sha256"]
+    assert "blob" not in encoded
+    assert len(encoded) < 5000
+    assert len(digest) == 64
+
+
+def test_replay_source_still_uses_canonical_audit_and_observation_tables():
+    source=Path("oracle_advanced_learning.py").read_text(encoding="utf-8")
+    assert "FROM oracle_decision_audit d" in source
+    assert "FROM oracle_brain_observations" in source
+    assert "payload_sha256" in source
