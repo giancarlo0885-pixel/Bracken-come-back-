@@ -266,10 +266,10 @@ def test_postgres_v39_sector_enrichment_and_decision_ledger_persistence():
             rejection_reason="optimizer_allocation_required",
         )
         record = conn.execute(
-            "SELECT decision, rejection_reasons FROM global_decision_ledger WHERE symbol=%s ORDER BY created_at DESC LIMIT 1",
+            "SELECT stage, rejection_reason FROM global_decision_events WHERE symbol=%s ORDER BY created_at DESC LIMIT 1",
             ("V39SEC",),
         ).fetchone()
-    assert record["decision"] == "portfolio_rejected"
+    assert record["stage"] == "portfolio_rejected"
     assert "optimizer_allocation_required" in str(record["rejection_reasons"])
 
 
@@ -448,7 +448,7 @@ def test_persist_decision_event_can_skip_ephemeral_trace_without_losing_canonica
         emit_ephemeral_trace=False,
     )
     sql = "\n".join(item[0] for item in calls)
-    assert "INSERT INTO global_decision_ledger" in sql
+    assert "INSERT INTO global_decision_ledger" not in sql
     assert "INSERT INTO global_decision_events" not in sql
 
 
@@ -468,7 +468,7 @@ def test_persist_decision_event_keeps_ephemeral_trace_for_meaningful_transition(
         payload={"signal_id": "sig-2", "created_at": "2026-09-23T00:00:01+00:00"},
     )
     sql = "\n".join(item[0] for item in calls)
-    assert "INSERT INTO global_decision_ledger" in sql
+    assert "INSERT INTO global_decision_ledger" not in sql
     assert "INSERT INTO global_decision_events" in sql
 
 
