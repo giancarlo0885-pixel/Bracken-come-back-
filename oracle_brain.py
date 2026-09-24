@@ -157,15 +157,15 @@ def build_oracle_brain_snapshot(fetch_rows: FetchRows) -> dict[str, Any]:
     regime_rows = _safe_rows(
         fetch_rows,
         """
-        SELECT strategy, regime, COUNT(*)::int AS samples,
-               SUM(net_pnl) AS net_pnl,
-               SUM(fees) AS fees,
-               AVG(net_pnl) AS expectancy,
+        SELECT market, strategy, regime, COUNT(*)::int AS samples,
+               SUM(COALESCE(round_trip_net_pnl,net_pnl)) AS net_pnl,
+               SUM(COALESCE(round_trip_fees,fees)) AS fees,
+               AVG(COALESCE(round_trip_net_pnl,net_pnl)) AS expectancy,
                AVG(mfe_pct) FILTER (WHERE excursion_sample_count > 0) AS avg_mfe_pct,
                AVG(mae_pct) FILTER (WHERE excursion_sample_count > 0) AS avg_mae_pct,
                SUM(CASE WHEN excursion_sample_count > 0 THEN 1 ELSE 0 END)::int AS excursion_trades
         FROM paper_regime_trade_metrics
-        GROUP BY strategy, regime
+        GROUP BY market, strategy, regime
         ORDER BY samples DESC
         LIMIT 40
         """,
@@ -176,6 +176,7 @@ def build_oracle_brain_snapshot(fetch_rows: FetchRows) -> dict[str, Any]:
         expectancy = _num(row.get("expectancy"), 0.0)
         regimes.append(
             {
+                "market": str(row.get("market") or "unknown"),
                 "strategy": str(row.get("strategy") or "unknown"),
                 "regime": str(row.get("regime") or "unknown"),
                 "samples": samples,
