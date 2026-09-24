@@ -534,12 +534,21 @@ def _compact_decision_event_payload(payload: dict[str, Any]) -> dict[str, Any]:
     return compact
 
 
+def _decision_requires_durable_ledger(stage: str, payload: dict[str, Any]) -> bool:
+    """Keep only execution/outcome provenance in the durable decision ledger."""
+    if payload.get("trade_id") is not None or payload.get("execution_claim_id") is not None:
+        return True
+    return str(stage or "").lower() == "paper_trade_executed"
+
+
 def persist_decision_event(conn: Any, *, market: str, symbol: str, stage: str, decision_id: str | None = None, payload: dict[str, Any] | None = None, rejection_reason: str | None = None, emit_ephemeral_trace: bool = True) -> str:
     payload = payload or {}
     identity = canonical_identity({**payload, "symbol": symbol, "asset_class": payload.get("asset_class") or ("crypto" if market == "crypto" else "stock")})
     did = decision_id or _decision_id(market, symbol, payload.get("signal_id"), payload.get("created_at"))
     created_at = utc_now()
     reasons = [rejection_reason] if rejection_reason else list(payload.get("rejection_reasons") or [])
+    if not _decision_requires_durable_ledger(stage, payload):
+        return did
     conn.execute(
         """INSERT INTO global_asset_identities
            (canonical_id, asset_class, exchange, native_symbol, currency, provider_aliases, created_at, updated_at)
