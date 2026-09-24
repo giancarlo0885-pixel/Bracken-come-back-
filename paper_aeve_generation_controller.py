@@ -20,7 +20,7 @@ log = logging.getLogger("paper-aeve-generation-controller")
 _THREAD: threading.Thread | None = None
 _STOP = threading.Event()
 BATCH_SIZE = 1000
-PROVENANCE_VERSION = 3
+PROVENANCE_VERSION = 4
 _REQUIRED_RESEARCH_RELATIONS = ("paper_aeve_generation_outcomes",)
 
 
@@ -208,10 +208,28 @@ def ensure_schema() -> None:
                 UNIQUE(generation, trade_id)
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS paper_aeve_provenance_epochs (
+                provenance_version SMALLINT PRIMARY KEY,
+                started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                input_schema TEXT NOT NULL,
+                cost_semantics TEXT NOT NULL
+            )
+        """)
+        conn.execute(
+            """INSERT INTO paper_aeve_provenance_epochs(
+                   provenance_version,input_schema,cost_semantics
+               ) VALUES (%s,'dip_depth_rebound_round_trip_v2','exact_lot_round_trip')
+               ON CONFLICT (provenance_version) DO NOTHING""",
+            (PROVENANCE_VERSION,),
+        )
         conn.execute("ALTER TABLE paper_aeve_generations ADD COLUMN IF NOT EXISTS config_hash TEXT")
         conn.execute("ALTER TABLE paper_aeve_generation_outcomes ADD COLUMN IF NOT EXISTS config_hash TEXT")
         conn.execute(
             "ALTER TABLE paper_aeve_generation_outcomes ADD COLUMN IF NOT EXISTS provenance_version SMALLINT NOT NULL DEFAULT 1"
+        )
+        conn.execute(
+            "ALTER TABLE paper_aeve_generation_outcomes ADD COLUMN IF NOT EXISTS cost_provenance TEXT NOT NULL DEFAULT 'legacy_unknown'"
         )
         generation_rows = list(conn.execute(
             "SELECT generation,config_json,config_hash FROM paper_aeve_generations"
@@ -284,16 +302,25 @@ def record_generation_outcomes(limit: int = 250) -> int:
         active_cfg, active_generation_row = _load_active(conn)
         if not active_generation_row:
             return 0
+        provenance_epoch = conn.execute(
+            "SELECT started_at FROM paper_aeve_provenance_epochs WHERE provenance_version=%s",
+            (PROVENANCE_VERSION,),
+        ).fetchone() or {}
+        provenance_started_at = provenance_epoch.get("started_at")
+        if provenance_started_at is None:
+            return 0
         log.info(
-            "AEVE EVALUATOR HANDSHAKE | generation=%s | config_hash=%s | provenance_version=%s | input_schema=dip_depth_rebound_v1 | config=%s | mode=shadow | execution_impact=NONE | broker_submission=NONE | live_trading=DISARMED",
+            "AEVE EVALUATOR HANDSHAKE | generation=%s | config_hash=%s | provenance_version=%s | input_schema=dip_depth_rebound_round_trip_v2 | config=%s | mode=shadow | execution_impact=NONE | broker_submission=NONE | live_trading=DISARMED",
             active_cfg.generation,
             active_generation_row.get("config_hash"),
             PROVENANCE_VERSION,
             json.dumps(generation_config_payload(active_cfg), sort_keys=True, separators=(",", ":")),
         )
         rows = list(conn.execute("""
-            SELECT m.trade_id,m.regime,m.entry_time,m.exit_time,m.net_pnl,m.mfe_pct,m.mae_pct,
-                   m.excursion_sample_count,l.quantity,l.entry_price,l.fees,l.feature_snapshot,
+            SELECT m.trade_id,m.regime,m.entry_time,m.exit_time,
+                   m.round_trip_net_pnl AS net_pnl,m.round_trip_fees,
+                   m.cost_provenance,m.mfe_pct,m.mae_pct,
+                   m.excursion_sample_count,l.quantity,l.entry_price,l.feature_snapshot,
                    g.generation AS aeve_generation,g.config_json AS aeve_config_json,
                    g.config_hash AS aeve_config_hash
             FROM paper_regime_trade_metrics m
@@ -307,13 +334,17 @@ def record_generation_outcomes(limit: int = 250) -> int:
             ) g ON TRUE
             WHERE m.strategy='oracle_council_v3'
               AND m.entry_time IS NOT NULL AND m.exit_time IS NOT NULL
+              AND m.entry_time >= %s
+              AND m.cost_provenance='exact_lot'
+              AND m.round_trip_net_pnl IS NOT NULL
+              AND m.round_trip_fees IS NOT NULL
               AND NOT EXISTS (
                   SELECT 1 FROM paper_aeve_generation_outcomes o
                   WHERE o.generation=g.generation AND o.config_hash=g.config_hash
                     AND o.trade_id=m.trade_id
               )
             ORDER BY m.exit_time ASC LIMIT %s
-        """, (max(1, int(limit)),)).fetchall())
+        """, (provenance_started_at, max(1, int(limit)))).fetchall())
 
         for row in rows:
             generation_row = {
@@ -325,22 +356,24 @@ def record_generation_outcomes(limit: int = 250) -> int:
             config_snapshot = asdict(cfg)
             entry_time = row.get("entry_time")
             prior = conn.execute("""
-                SELECT COUNT(*) AS samples,AVG(net_pnl) AS expectancy,
-                       SUM(CASE WHEN net_pnl>0 THEN net_pnl ELSE 0 END) AS gross_win,
-                       ABS(SUM(CASE WHEN net_pnl<0 THEN net_pnl ELSE 0 END)) AS gross_loss,
+                SELECT COUNT(*) AS samples,AVG(round_trip_net_pnl) AS expectancy,
+                       SUM(CASE WHEN round_trip_net_pnl>0 THEN round_trip_net_pnl ELSE 0 END) AS gross_win,
+                       ABS(SUM(CASE WHEN round_trip_net_pnl<0 THEN round_trip_net_pnl ELSE 0 END)) AS gross_loss,
                        AVG(mfe_pct) FILTER (WHERE excursion_sample_count>0) AS mfe,
                        AVG(mae_pct) FILTER (WHERE excursion_sample_count>0) AS mae
                 FROM paper_regime_trade_metrics
                 WHERE strategy='oracle_council_v3' AND regime=%s AND exit_time < %s
+                  AND cost_provenance='exact_lot' AND round_trip_net_pnl IS NOT NULL
             """, (row.get("regime"), entry_time)).fetchone() or {}
             samples = int(prior.get("samples") or 0)
             # Reconstruct the consecutive Council loss streak strictly as of the
             # candidate entry. Rows closing at/after entry_time are excluded so
             # AEVE cannot learn from the candidate outcome or any future trade.
             prior_results = list(conn.execute("""
-                SELECT net_pnl
+                SELECT round_trip_net_pnl AS net_pnl
                 FROM paper_regime_trade_metrics
                 WHERE strategy='oracle_council_v3' AND exit_time < %s
+                  AND cost_provenance='exact_lot' AND round_trip_net_pnl IS NOT NULL
                 ORDER BY exit_time DESC
                 LIMIT %s
             """, (entry_time, max(1, int(cfg.max_loss_streak) + 1))).fetchall())
@@ -355,7 +388,7 @@ def record_generation_outcomes(limit: int = 250) -> int:
             cost_pct = 0.0
             qty, price = _f(row.get("quantity")), _f(row.get("entry_price"))
             if qty > 0 and price > 0:
-                cost_pct = max(0.0, (_f(row.get("fees")) / (qty * price)) * 100.0)
+                cost_pct = max(0.0, (_f(row.get("round_trip_fees")) / (qty * price)) * 100.0)
             features = row.get("feature_snapshot") if isinstance(row.get("feature_snapshot"), dict) else {}
             edge = None
             for key in ("net_expected_value_pct","expected_return_pct","forecast_return_pct","possible_move_pct","expected_move_pct","edge_pct"):
@@ -388,17 +421,17 @@ def record_generation_outcomes(limit: int = 250) -> int:
                 INSERT INTO paper_aeve_generation_outcomes(
                     generation,trade_id,observed_at,net_pnl,mfe_pct,mae_pct,
                     excursion_sample_count,cost_pct,would_trade,score,config_json,config_hash,
-                    provenance_version
-                ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s)
+                    provenance_version,cost_provenance
+                ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s,%s)
                 ON CONFLICT (generation,trade_id) DO NOTHING
             """, (
                 cfg.generation,row.get("trade_id"),row.get("exit_time"),_f(row.get("net_pnl")),
                 row.get("mfe_pct"),row.get("mae_pct"),int(row.get("excursion_sample_count") or 0),
                 cost_pct,(decision.would_trade if entry_evidence_complete else False),decision.score,
-                json.dumps(config_snapshot),config_hash,PROVENANCE_VERSION,
+                json.dumps(config_snapshot),config_hash,PROVENANCE_VERSION,"exact_lot",
             ))
             log.info(
-                "AEVE SHADOW RESULT | trade_id=%s | generation=%s | config_hash=%s | provenance_version=%s | would_trade=%s | score=%.6f | input_schema=dip_depth_rebound_v1 | dip_depth_pct=%s | rebound_from_low_pct=%s | entry_evidence_complete=%s | mode=shadow | execution_impact=NONE | broker_submission=NONE | live_trading=DISARMED",
+                "AEVE SHADOW RESULT | trade_id=%s | generation=%s | config_hash=%s | provenance_version=%s | would_trade=%s | score=%.6f | input_schema=dip_depth_rebound_round_trip_v2 | dip_depth_pct=%s | rebound_from_low_pct=%s | entry_evidence_complete=%s | mode=shadow | execution_impact=NONE | broker_submission=NONE | live_trading=DISARMED",
                 row.get("trade_id"), cfg.generation, config_hash, PROVENANCE_VERSION,
                 bool(decision.would_trade if entry_evidence_complete else False), decision.score,
                 max(0.0, _f(dip_depth)) * 100.0 if entry_evidence_complete else None,
