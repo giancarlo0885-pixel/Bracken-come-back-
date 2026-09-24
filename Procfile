@@ -1,3 +1,1 @@
-web: python start_web.py
-stock-worker: python stock_worker.py
-crypto-worker: python crypto_worker.py
+web: python research_v63_cross_asset.py
