@@ -171,11 +171,18 @@ def ensure_schema() -> None:
 
     # The AEVE research query consumes Regime Economics output. Initialize that
     # paper-only schema first so service start ordering cannot produce UndefinedTable.
-    from paper_regime_economics_shadow import ensure_schema as ensure_regime_schema
+    from paper_regime_economics_shadow import (
+        _relation_columns,
+        ensure_schema as ensure_regime_schema,
+    )
     ensure_regime_schema()
 
     from database import connect
     with connect() as conn:
+        conn.execute(
+            "SELECT pg_advisory_xact_lock(hashtext(%s))",
+            ("paper_aeve_generation_schema_v4",),
+        )
         conn.execute("""
             CREATE TABLE IF NOT EXISTS paper_aeve_generations (
                 generation INTEGER PRIMARY KEY,
@@ -205,6 +212,7 @@ def ensure_schema() -> None:
                 config_json JSONB NOT NULL,
                 config_hash TEXT,
                 provenance_version SMALLINT NOT NULL DEFAULT 1,
+                cost_provenance TEXT NOT NULL DEFAULT 'legacy_unknown',
                 UNIQUE(generation, trade_id)
             )
         """)
@@ -223,14 +231,20 @@ def ensure_schema() -> None:
                ON CONFLICT (provenance_version) DO NOTHING""",
             (PROVENANCE_VERSION,),
         )
-        conn.execute("ALTER TABLE paper_aeve_generations ADD COLUMN IF NOT EXISTS config_hash TEXT")
-        conn.execute("ALTER TABLE paper_aeve_generation_outcomes ADD COLUMN IF NOT EXISTS config_hash TEXT")
-        conn.execute(
-            "ALTER TABLE paper_aeve_generation_outcomes ADD COLUMN IF NOT EXISTS provenance_version SMALLINT NOT NULL DEFAULT 1"
-        )
-        conn.execute(
-            "ALTER TABLE paper_aeve_generation_outcomes ADD COLUMN IF NOT EXISTS cost_provenance TEXT NOT NULL DEFAULT 'legacy_unknown'"
-        )
+        generation_columns = _relation_columns(conn, "paper_aeve_generations")
+        outcome_columns = _relation_columns(conn, "paper_aeve_generation_outcomes")
+        if "config_hash" not in generation_columns:
+            conn.execute("ALTER TABLE paper_aeve_generations ADD COLUMN config_hash TEXT")
+        if "config_hash" not in outcome_columns:
+            conn.execute("ALTER TABLE paper_aeve_generation_outcomes ADD COLUMN config_hash TEXT")
+        if "provenance_version" not in outcome_columns:
+            conn.execute(
+                "ALTER TABLE paper_aeve_generation_outcomes ADD COLUMN provenance_version SMALLINT NOT NULL DEFAULT 1"
+            )
+        if "cost_provenance" not in outcome_columns:
+            conn.execute(
+                "ALTER TABLE paper_aeve_generation_outcomes ADD COLUMN cost_provenance TEXT NOT NULL DEFAULT 'legacy_unknown'"
+            )
         generation_rows = list(conn.execute(
             "SELECT generation,config_json,config_hash FROM paper_aeve_generations"
         ).fetchall())
@@ -253,8 +267,10 @@ def ensure_schema() -> None:
                 "UPDATE paper_aeve_generation_outcomes SET config_hash=%s WHERE id=%s",
                 (generation_config_hash(effective), outcome_row.get("id")),
             )
-        conn.execute("ALTER TABLE paper_aeve_generations ALTER COLUMN config_hash SET NOT NULL")
-        conn.execute("ALTER TABLE paper_aeve_generation_outcomes ALTER COLUMN config_hash SET NOT NULL")
+        if not generation_columns.get("config_hash", False):
+            conn.execute("ALTER TABLE paper_aeve_generations ALTER COLUMN config_hash SET NOT NULL")
+        if not outcome_columns.get("config_hash", False):
+            conn.execute("ALTER TABLE paper_aeve_generation_outcomes ALTER COLUMN config_hash SET NOT NULL")
         conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_paper_aeve_generation_outcomes_generation_observed
             ON paper_aeve_generation_outcomes(generation, observed_at)
