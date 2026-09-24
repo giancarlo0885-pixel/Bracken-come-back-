@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import paper_entry_edge_challenger_shadow as challenger
 
 
@@ -43,3 +45,13 @@ def test_active_requires_paper_and_disarmed(monkeypatch):
     assert challenger.active() is True
     monkeypatch.setenv("LIVE_TRADING_ARMED", "true")
     assert challenger.active() is False
+
+
+def test_challenger_v2_requires_exact_round_trip_cost_evidence():
+    source = Path("paper_entry_edge_challenger_shadow.py").read_text(encoding="utf-8")
+    assert 'entry-edge-challenger-v2-round-trip-cost' in source
+    assert "m.cost_provenance='exact_lot'" in source
+    assert "m.round_trip_net_pnl" in source
+    assert "m.round_trip_fees" in source
+    assert "l.fees/(l.quantity*l.entry_price)" not in source
+    assert "gate=0.20pct" in source
