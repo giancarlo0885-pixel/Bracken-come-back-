@@ -7,12 +7,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-RUN python -m ensurepip --upgrade \
-    && python -m pip install --upgrade pip setuptools wheel
+RUN python -m pip install --no-cache-dir requests numpy pandas scikit-learn
 
-COPY requirements.txt ./
-RUN python -m pip install -r requirements.txt
-
-COPY . .
+COPY research_v63_cross_asset.py ./
 
 CMD ["python", "-u", "research_v63_cross_asset.py"]
