@@ -1202,7 +1202,7 @@ def initialize_database() -> None:
                 cursor.execute(statement)
 
             existing_portfolio_columns = {
-                row[0]
+                row["column_name"]
                 for row in cursor.execute(
                     """SELECT column_name FROM information_schema.columns
                        WHERE table_schema = current_schema() AND table_name = 'portfolios'"""
