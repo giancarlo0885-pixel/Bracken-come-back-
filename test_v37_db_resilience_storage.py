@@ -13,6 +13,7 @@ import execution_policy
 import market_worker
 
 
+from pathlib import Path
 def test_database_ready_missing_url_is_configuration_failure(monkeypatch):
     monkeypatch.setattr(database, "DATABASE_URL", "")
     result = database.database_ready()
@@ -207,3 +208,14 @@ def test_high_churn_tables_get_aggressive_autovacuum_settings():
     assert "signals SET (autovacuum_vacuum_scale_factor = 0.01" in database_source
     assert "VACUUM FULL" not in database_source
     assert "VACUUM FULL" not in migration_source
+
+
+def test_initialize_database_skips_repeat_compatibility_ddl_with_migration_history():
+    source = Path("database.py").read_text(encoding="utf-8")
+    start = source.index("def initialize_database")
+    end = source.index("\n\n# =========================================================\n# GENERAL DATABASE HELPERS", start)
+    body = source[start:end]
+    assert 'SELECT COUNT(*) AS count FROM schema_migrations' in body
+    assert 'if not has_migration_history:' in body
+    assert body.index('if not has_migration_history:') < body.index('for statement in migration_statements:')
+    assert 'later schema changes belong in versioned' in body
