@@ -359,3 +359,18 @@ def test_aeve_v4_prior_economics_are_exact_round_trip_only():
     assert "AVG(round_trip_net_pnl) AS expectancy" in source
     assert "cost_provenance='exact_lot' AND round_trip_net_pnl IS NOT NULL" in source
     assert "SELECT round_trip_net_pnl AS net_pnl" in source
+
+
+def test_aeve_schema_repairs_use_catalog_guards_instead_of_repeat_alter():
+    import inspect
+    import paper_aeve_generation_controller as controller
+    source = inspect.getsource(controller.ensure_schema)
+    assert "paper_aeve_generation_schema_v4" in source
+    assert "_relation_columns" in source
+    assert 'if "config_hash" not in generation_columns' in source
+    assert 'if "config_hash" not in outcome_columns' in source
+    assert 'if "provenance_version" not in outcome_columns' in source
+    assert 'if "cost_provenance" not in outcome_columns' in source
+    assert 'if not generation_columns.get("config_hash", False)' in source
+    assert 'if not outcome_columns.get("config_hash", False)' in source
+    assert "ADD COLUMN IF NOT EXISTS config_hash" not in source
