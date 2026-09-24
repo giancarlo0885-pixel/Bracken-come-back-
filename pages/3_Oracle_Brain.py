@@ -114,10 +114,11 @@ if aeve_diag:
 try:
     lifecycle = rows("""
         SELECT COUNT(*)::int AS closed_trades,
-               COUNT(*) FILTER (WHERE entry_time IS NOT NULL AND exit_time IS NOT NULL)::int AS complete_lifecycle,
-               COUNT(*) FILTER (WHERE entry_signal_id IS NOT NULL AND feature_snapshot IS NOT NULL)::int AS exact_entry_provenance
-        FROM paper_regime_trade_metrics
-        WHERE strategy='oracle_council_v3'
+               COUNT(*) FILTER (WHERE m.entry_time IS NOT NULL AND m.exit_time IS NOT NULL)::int AS complete_lifecycle,
+               COUNT(*) FILTER (WHERE t.entry_signal_id IS NOT NULL AND t.feature_snapshot IS NOT NULL)::int AS exact_entry_provenance
+        FROM paper_regime_trade_metrics m
+        LEFT JOIN trade_ledger t ON t.trade_id=m.trade_id
+        WHERE m.strategy='oracle_council_v3'
     """)
 except Exception:
     lifecycle = []

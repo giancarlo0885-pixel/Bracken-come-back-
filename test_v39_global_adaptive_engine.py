@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 import os
 
 import pytest
@@ -469,3 +470,13 @@ def test_persist_decision_event_keeps_ephemeral_trace_for_meaningful_transition(
     sql = "\n".join(item[0] for item in calls)
     assert "INSERT INTO global_decision_ledger" in sql
     assert "INSERT INTO global_decision_events" in sql
+
+
+def test_provider_budget_initialization_is_conflict_safe_before_row_lock():
+    source = Path("global_adaptive_engine.py").read_text(encoding="utf-8")
+    start = source.index("def reserve_provider_budget_db")
+    end = source.index("\n\nPROVIDER_WIDE_CAPABILITY", start)
+    function_source = source[start:end]
+    assert "ON CONFLICT (provider,capability,utc_date) DO NOTHING" in function_source
+    assert function_source.index("ON CONFLICT (provider,capability,utc_date) DO NOTHING") < function_source.index("FOR UPDATE")
+    assert "provider budget row unavailable after atomic initialization" in function_source

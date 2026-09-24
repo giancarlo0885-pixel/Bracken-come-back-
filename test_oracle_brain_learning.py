@@ -246,3 +246,12 @@ def test_brain_page_visualizes_sources_episodes_links_and_queue():
     assert "Active contradictions" in source
     assert "Exact trade episodes" in source
     assert "execution authority: NONE" in source
+
+
+def test_brain_lifecycle_provenance_joins_canonical_trade_ledger():
+    source = Path("pages/3_Oracle_Brain.py").read_text(encoding="utf-8")
+    assert "FROM paper_regime_trade_metrics m" in source
+    assert "LEFT JOIN trade_ledger t ON t.trade_id=m.trade_id" in source
+    assert "t.entry_signal_id IS NOT NULL" in source
+    assert "t.feature_snapshot IS NOT NULL" in source
+    assert "WHERE entry_signal_id IS NOT NULL AND feature_snapshot IS NOT NULL" not in source
