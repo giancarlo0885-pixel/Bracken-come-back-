@@ -277,6 +277,27 @@ def bootstrap_database_with_lock(run_migrations_func: Callable[[], Any]) -> Any:
 # DATABASE INITIALIZATION
 # =========================================================
 
+def _established_schema_history(conn: Any) -> bool:
+    """Return True only when the versioned schema ledger already has history.
+
+    Established production databases should not replay compatibility DDL on
+    every process restart. Unapplied versioned migrations remain the authority
+    for future schema changes.
+    """
+    try:
+        relation = conn.execute(
+            "SELECT to_regclass('public.schema_migrations') AS relation"
+        ).fetchone() or {}
+        if relation.get("relation") is None:
+            return False
+        row = conn.execute(
+            "SELECT EXISTS (SELECT 1 FROM schema_migrations LIMIT 1) AS has_history"
+        ).fetchone() or {}
+        return bool(row.get("has_history"))
+    except Exception:
+        return False
+
+
 def initialize_database() -> None:
     create_statements = [
         """
@@ -1197,12 +1218,14 @@ def initialize_database() -> None:
     ]
 
     with connect() as conn:
+        established_schema = _established_schema_history(conn)
         with conn.cursor() as cursor:
-            for statement in create_statements:
-                cursor.execute(statement)
+            if not established_schema:
+                for statement in create_statements:
+                    cursor.execute(statement)
 
-            for statement in migration_statements:
-                cursor.execute(statement)
+                for statement in migration_statements:
+                    cursor.execute(statement)
 
             for market in ("cash", "crypto"):
                 starting_capital = float(
