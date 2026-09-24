@@ -53,6 +53,10 @@ def entry_edge_score(*, mfe_pct: float, mae_pct: float, round_trip_cost_pct: flo
 def ensure_schema() -> None:
     if not active():
         return
+    # The entrypoint starts this challenger before crypto_worker imports its
+    # regime telemetry installer, so establish the shared research columns here.
+    from paper_regime_economics_shadow import ensure_schema as ensure_regime_schema
+    ensure_regime_schema()
     from database import connect
     with connect() as conn:
         conn.execute("""
