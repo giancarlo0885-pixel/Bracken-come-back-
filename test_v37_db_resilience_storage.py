@@ -318,3 +318,83 @@ def test_postgres_global_decision_ledger_retention_keeps_newest_and_protected_ro
     assert deleted["global_decision_ledger"] >= 4
     assert [row["decision_id"] for row in kept_unlinked] == [f"{prefix}-u-5", f"{prefix}-u-4"]
     assert len(protected) == 3
+
+
+def test_retention_cleanup_is_bounded_per_maintenance_pass(monkeypatch):
+    class Result:
+        rowcount = 1000
+
+    class Conn:
+        def __init__(self):
+            self.delete_calls = 0
+        def execute(self, sql, params=()):
+            if "DELETE FROM signals" in sql:
+                self.delete_calls += 1
+                return Result()
+            class Row:
+                def fetchone(self):
+                    return {"id": 1}
+            return Row()
+
+    conn = Conn()
+    deleted = database._apply_retention_policy(
+        conn,
+        "signals",
+        {"keep_rows": 6000, "batch_size": 1000},
+        max_batches=3,
+    )
+    assert deleted == 3000
+    assert conn.delete_calls == 3
+
+
+def test_global_decision_ledger_cleanup_is_bounded_per_pass(monkeypatch):
+    class Result:
+        rowcount = 1000
+
+    class Conn:
+        def __init__(self):
+            self.delete_calls = 0
+        def execute(self, sql, params=()):
+            if "DELETE FROM global_decision_ledger" in sql:
+                self.delete_calls += 1
+                return Result()
+            class Row:
+                def fetchone(self):
+                    return {"decision_id": "old"}
+            return Row()
+
+    conn = Conn()
+    deleted = database._trim_global_decision_ledger(
+        conn, keep_rows=12000, batch_size=1000, max_batches=2
+    )
+    assert deleted == 2000
+    assert conn.delete_calls == 2
+
+
+def test_trim_old_records_prioritizes_ledger_and_commits_each_table(monkeypatch):
+    entered = []
+    exited = []
+    applied = []
+
+    class Conn:
+        pass
+
+    class Ctx:
+        def __enter__(self):
+            entered.append(len(entered))
+            return Conn()
+        def __exit__(self, exc_type, exc, tb):
+            exited.append(len(exited))
+
+    monkeypatch.setattr(database, "connect", lambda: Ctx())
+    monkeypatch.setattr(database, "_retention_table_exists", lambda conn, table: True)
+    monkeypatch.setattr(
+        database,
+        "_apply_retention_policy",
+        lambda conn, table, policy, max_batches=5: applied.append((table, max_batches)) or 0,
+    )
+    result = database.trim_old_records()
+    assert list(result)[0] == "global_decision_ledger"
+    assert applied[0] == ("global_decision_ledger", 5)
+    assert len(entered) == len(database.DATABASE_RETENTION_POLICIES)
+    assert len(exited) == len(database.DATABASE_RETENTION_POLICIES)

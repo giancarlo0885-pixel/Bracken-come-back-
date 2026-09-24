@@ -1754,12 +1754,13 @@ def _global_decision_ledger_cleanup_due(conn: Any, *, keep_rows: int, batch_size
     return bool(probe)
 
 
-def _trim_global_decision_ledger(conn: Any, *, keep_rows: int, batch_size: int) -> int:
+def _trim_global_decision_ledger(conn: Any, *, keep_rows: int, batch_size: int, max_batches: int = 5) -> int:
     if not _global_decision_ledger_cleanup_due(conn, keep_rows=keep_rows, batch_size=batch_size):
         return 0
     eligible_sql = _global_decision_ledger_eligible_sql()
     deleted_total = 0
-    while True:
+    batches = 0
+    while batches < max_batches:
         deleted = conn.execute(
             f"""
             WITH doomed AS (
@@ -1776,6 +1777,7 @@ def _trim_global_decision_ledger(conn: Any, *, keep_rows: int, batch_size: int) 
             (keep_rows, batch_size),
         ).rowcount or 0
         deleted_total += deleted
+        batches += 1
         if deleted < batch_size:
             break
     return deleted_total
@@ -1796,7 +1798,7 @@ def _retention_cleanup_due(conn: Any, table: str, *, keep_rows: int, batch_size:
     return bool(probe)
 
 
-def _apply_retention_policy(conn: Any, table: str, policy: dict[str, Any]) -> int:
+def _apply_retention_policy(conn: Any, table: str, policy: dict[str, Any], *, max_batches: int = 5) -> int:
     if table in CANONICAL_PROTECTED_TABLES:
         raise ValueError(f"Refusing retention cleanup for protected table: {table}")
     if table not in DATABASE_RETENTION_POLICIES:
@@ -1806,11 +1808,12 @@ def _apply_retention_policy(conn: Any, table: str, policy: dict[str, Any]) -> in
     if keep_rows <= 0:
         return 0
     if table == "global_decision_ledger":
-        return _trim_global_decision_ledger(conn, keep_rows=keep_rows, batch_size=batch_size)
+        return _trim_global_decision_ledger(conn, keep_rows=keep_rows, batch_size=batch_size, max_batches=max_batches)
     if not _retention_cleanup_due(conn, table, keep_rows=keep_rows, batch_size=batch_size):
         return 0
     deleted_total = 0
-    while True:
+    batches = 0
+    while batches < max_batches:
         deleted = conn.execute(
             f"""
             WITH doomed AS (
@@ -1828,6 +1831,7 @@ def _apply_retention_policy(conn: Any, table: str, policy: dict[str, Any]) -> in
             (keep_rows, batch_size),
         ).rowcount or 0
         deleted_total += deleted
+        batches += 1
         if deleted < batch_size:
             break
     return deleted_total
@@ -1839,13 +1843,26 @@ def _retention_table_exists(conn: Any, table: str) -> bool:
 
 
 def trim_old_records() -> dict[str, int]:
+    """Run a bounded retention pass, committing each table independently.
+
+    Per-table commits prevent one high-churn relation from holding a single
+    transaction open across the entire maintenance sweep. Each policy is also
+    capped to a small number of delete batches per pass.
+    """
     deleted_by_table: dict[str, int] = {}
-    with connect() as conn:
-        for table, policy in DATABASE_RETENTION_POLICIES.items():
+    tables = list(DATABASE_RETENTION_POLICIES)
+    if "global_decision_ledger" in tables:
+        tables.remove("global_decision_ledger")
+        tables.insert(0, "global_decision_ledger")
+    for table in tables:
+        policy = DATABASE_RETENTION_POLICIES[table]
+        with connect() as conn:
             if not _retention_table_exists(conn, table):
                 deleted_by_table[table] = 0
                 continue
-            deleted_by_table[table] = _apply_retention_policy(conn, table, policy)
+            deleted_by_table[table] = _apply_retention_policy(
+                conn, table, policy, max_batches=5
+            )
     return deleted_by_table
 
 
