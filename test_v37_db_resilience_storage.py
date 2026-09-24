@@ -207,3 +207,47 @@ def test_high_churn_tables_get_aggressive_autovacuum_settings():
     assert "signals SET (autovacuum_vacuum_scale_factor = 0.01" in database_source
     assert "VACUUM FULL" not in database_source
     assert "VACUUM FULL" not in migration_source
+
+
+class _SchemaHistoryResult:
+    def __init__(self, row):
+        self.row = row
+    def fetchone(self):
+        return self.row
+
+
+class _SchemaHistoryConn:
+    def __init__(self, relation="schema_migrations", has_history=True):
+        self.relation = relation
+        self.has_history = has_history
+        self.calls = []
+    def execute(self, sql, params=()):
+        self.calls.append(sql)
+        if "to_regclass" in sql:
+            return _SchemaHistoryResult({"relation": self.relation})
+        if "SELECT EXISTS" in sql:
+            return _SchemaHistoryResult({"has_history": self.has_history})
+        raise AssertionError(sql)
+
+
+def test_established_schema_history_detects_versioned_database():
+    conn = _SchemaHistoryConn()
+    assert database._established_schema_history(conn) is True
+    assert len(conn.calls) == 2
+
+
+def test_established_schema_history_fails_open_for_fresh_database():
+    assert database._established_schema_history(_SchemaHistoryConn(relation=None)) is False
+    assert database._established_schema_history(_SchemaHistoryConn(has_history=False)) is False
+
+
+def test_initialize_database_skips_compatibility_ddl_when_schema_is_established():
+    source = open("database.py", encoding="utf-8").read()
+    start = source.index("def initialize_database")
+    body = source[start:]
+    guard = body.index("if not established_schema:")
+    create_loop = body.index("for statement in create_statements:")
+    migration_loop = body.index("for statement in migration_statements:")
+    portfolio_seed = body.index('for market in ("cash", "crypto"):')
+    assert guard < create_loop < migration_loop < portfolio_seed
+    assert "ALTER TABLE portfolios" in body
