@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import paper_regime_economics_shadow as regime
 
 
@@ -61,3 +63,24 @@ def test_excursions_preserve_observed_two_sided_path():
 def test_excursions_remain_unavailable_without_forward_samples():
     assert regime._excursion_percentages(100.0, []) == (None, None)
     assert regime._excursion_percentages(0.0, [100.0]) == (None, None)
+
+
+def test_market_normalization_supports_cash_and_stock_alias():
+    assert regime._normalize_market("crypto") == "crypto"
+    assert regime._normalize_market("cash") == "cash"
+    assert regime._normalize_market("stock") == "cash"
+
+
+def test_regime_shadow_queries_are_market_scoped_not_crypto_hardcoded():
+    source = Path("paper_regime_economics_shadow.py").read_text(encoding="utf-8")
+    assert "WHERE market=%s AND COALESCE(quantity,0) > 0" in source
+    assert "WHERE market=%s AND side='SELL'" in source
+    assert "WHERE market=%s AND symbol=%s" in source
+    assert "VALUES (%s,%s,%s,%s,'canonical_position',%s)" in source
+    assert "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)" in source
+
+
+def test_stock_worker_installs_cash_regime_learning():
+    source = Path("stock_worker.py").read_text(encoding="utf-8")
+    assert "from paper_regime_economics_shadow import install_paper_regime_economics_shadow" in source
+    assert 'install_paper_regime_economics_shadow("cash")' in source
