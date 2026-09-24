@@ -839,14 +839,14 @@ def build_oracle_city_snapshot(
         )
     regime_economics = _safe_select(
         fetch_rows,
-        """SELECT strategy,regime,COUNT(*)::int AS samples,
-                  AVG(net_pnl) AS expectancy,
-                  SUM(CASE WHEN net_pnl>0 THEN net_pnl ELSE 0 END) AS gross_win,
-                  ABS(SUM(CASE WHEN net_pnl<0 THEN net_pnl ELSE 0 END)) AS gross_loss,
+        """SELECT market,strategy,regime,COUNT(*)::int AS samples,
+                  AVG(COALESCE(round_trip_net_pnl,net_pnl)) AS expectancy,
+                  SUM(CASE WHEN COALESCE(round_trip_net_pnl,net_pnl)>0 THEN COALESCE(round_trip_net_pnl,net_pnl) ELSE 0 END) AS gross_win,
+                  ABS(SUM(CASE WHEN COALESCE(round_trip_net_pnl,net_pnl)<0 THEN COALESCE(round_trip_net_pnl,net_pnl) ELSE 0 END)) AS gross_loss,
                   AVG(mfe_pct) FILTER (WHERE excursion_sample_count>0) AS avg_mfe_pct,
                   AVG(mae_pct) FILTER (WHERE excursion_sample_count>0) AS avg_mae_pct
            FROM paper_regime_trade_metrics
-           GROUP BY strategy,regime
+           GROUP BY market,strategy,regime
            ORDER BY samples DESC
            LIMIT 40""",
         (), warnings, "strategy evidence unavailable",
@@ -1203,6 +1203,7 @@ def build_oracle_city_snapshot(
         else:
             evidence_state = "RESEARCH ONLY"
         strategy_arena.append({
+            "market": str(row.get("market") or "unknown"),
             "strategy": str(row.get("strategy") or "unknown"),
             "regime": str(row.get("regime") or "unknown"),
             "samples": samples,
