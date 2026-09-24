@@ -15,6 +15,4 @@ RUN python -m pip install -r requirements.txt
 
 COPY . .
 
-EXPOSE 8501
-
-CMD ["python", "start_web.py"]
+CMD ["python", "-u", "research_v63_cross_asset.py"]
