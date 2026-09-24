@@ -266,11 +266,11 @@ def test_postgres_v39_sector_enrichment_and_decision_ledger_persistence():
             rejection_reason="optimizer_allocation_required",
         )
         record = conn.execute(
-            "SELECT decision, rejection_reasons FROM global_decision_ledger WHERE symbol=%s ORDER BY created_at DESC LIMIT 1",
+            "SELECT stage, rejection_reason FROM global_decision_events WHERE symbol=%s ORDER BY created_at DESC LIMIT 1",
             ("V39SEC",),
         ).fetchone()
-    assert record["decision"] == "portfolio_rejected"
-    assert "optimizer_allocation_required" in str(record["rejection_reasons"])
+    assert record["stage"] == "portfolio_rejected"
+    assert record["rejection_reason"] == "optimizer_allocation_required"
 
 
 def test_postgres_v39_provider_budget_shared_ledger_exhausts_once():
@@ -448,7 +448,7 @@ def test_persist_decision_event_can_skip_ephemeral_trace_without_losing_canonica
         emit_ephemeral_trace=False,
     )
     sql = "\n".join(item[0] for item in calls)
-    assert "INSERT INTO global_decision_ledger" in sql
+    assert "INSERT INTO global_decision_ledger" not in sql
     assert "INSERT INTO global_decision_events" not in sql
 
 
@@ -468,7 +468,7 @@ def test_persist_decision_event_keeps_ephemeral_trace_for_meaningful_transition(
         payload={"signal_id": "sig-2", "created_at": "2026-09-23T00:00:01+00:00"},
     )
     sql = "\n".join(item[0] for item in calls)
-    assert "INSERT INTO global_decision_ledger" in sql
+    assert "INSERT INTO global_decision_ledger" not in sql
     assert "INSERT INTO global_decision_events" in sql
 
 
@@ -480,3 +480,52 @@ def test_provider_budget_initialization_is_conflict_safe_before_row_lock():
     assert "ON CONFLICT (provider,capability,utc_date) DO NOTHING" in function_source
     assert function_source.index("ON CONFLICT (provider,capability,utc_date) DO NOTHING") < function_source.index("FOR UPDATE")
     assert "provider budget row unavailable after atomic initialization" in function_source
+
+
+def test_routine_rejection_does_not_write_durable_decision_ledger():
+    calls = []
+    class Conn:
+        def execute(self, sql, params=()):
+            calls.append((sql, params))
+            class Result:
+                rowcount = 1
+            return Result()
+    did = v39.persist_decision_event(
+        Conn(), market="cash", symbol="NOISE", stage="portfolio_rejected",
+        payload={"features": {"score": 0.1}}, rejection_reason="not_capital_qualified"
+    )
+    assert did
+    sql = "\\n".join(statement for statement, _ in calls)
+    assert "INSERT INTO global_decision_ledger" not in sql
+    assert "INSERT INTO global_asset_identities" not in sql
+    assert "INSERT INTO global_decision_events" in sql
+
+
+def test_paper_execution_still_writes_durable_decision_ledger():
+    calls = []
+    class Conn:
+        def execute(self, sql, params=()):
+            calls.append((sql, params))
+            class Result:
+                rowcount = 1
+            return Result()
+    v39.persist_decision_event(
+        Conn(), market="cash", symbol="KEEP", stage="paper_trade_executed",
+        payload={"features": {"score": 0.9}}, emit_ephemeral_trace=False
+    )
+    assert "INSERT INTO global_decision_ledger" in "\n".join(sql for sql, _ in calls)
+
+
+def test_trade_linked_decision_still_writes_durable_ledger():
+    calls = []
+    class Conn:
+        def execute(self, sql, params=()):
+            calls.append((sql, params))
+            class Result:
+                rowcount = 1
+            return Result()
+    v39.persist_decision_event(
+        Conn(), market="cash", symbol="KEEP", stage="execution_approved",
+        payload={"trade_id": 42}, emit_ephemeral_trace=False
+    )
+    assert "INSERT INTO global_decision_ledger" in "\n".join(sql for sql, _ in calls)

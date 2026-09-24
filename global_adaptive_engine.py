@@ -534,43 +534,42 @@ def _compact_decision_event_payload(payload: dict[str, Any]) -> dict[str, Any]:
     return compact
 
 
+def _decision_requires_durable_ledger(stage: str, payload: dict[str, Any]) -> bool:
+    """Keep only execution/outcome provenance in the durable decision ledger."""
+    if payload.get("trade_id") is not None or payload.get("execution_claim_id") is not None:
+        return True
+    return str(stage or "").lower() == "paper_trade_executed"
+
+
 def persist_decision_event(conn: Any, *, market: str, symbol: str, stage: str, decision_id: str | None = None, payload: dict[str, Any] | None = None, rejection_reason: str | None = None, emit_ephemeral_trace: bool = True) -> str:
     payload = payload or {}
     identity = canonical_identity({**payload, "symbol": symbol, "asset_class": payload.get("asset_class") or ("crypto" if market == "crypto" else "stock")})
     did = decision_id or _decision_id(market, symbol, payload.get("signal_id"), payload.get("created_at"))
     created_at = utc_now()
     reasons = [rejection_reason] if rejection_reason else list(payload.get("rejection_reasons") or [])
-    conn.execute(
-        """INSERT INTO global_asset_identities
-           (canonical_id, asset_class, exchange, native_symbol, currency, provider_aliases, created_at, updated_at)
-           VALUES (%s,%s,%s,%s,%s,%s::jsonb,%s,%s)
-           ON CONFLICT (canonical_id) DO UPDATE SET provider_aliases=EXCLUDED.provider_aliases, updated_at=EXCLUDED.updated_at""",
-        (identity["canonical_id"], identity["asset_class"], identity["exchange"], identity["native_symbol"], identity["currency"], _json(identity.get("provider_aliases") or {}), created_at, created_at),
-    )
-    conn.execute(
-        """INSERT INTO global_decision_ledger
-           (decision_id, scan_id, signal_id, forecast_id, execution_claim_id, trade_id, canonical_id, market, symbol, asset_class,
-            features, portfolio_context, decision, rejection_reasons, created_at)
-           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s::jsonb,%s,%s::jsonb,%s)
-           ON CONFLICT (decision_id) DO UPDATE SET decision=EXCLUDED.decision, rejection_reasons=EXCLUDED.rejection_reasons""",
-        (
-            did,
-            payload.get("scan_id"),
-            str(payload.get("signal_id")) if payload.get("signal_id") is not None else None,
-            payload.get("forecast_id"),
-            payload.get("execution_claim_id"),
-            payload.get("trade_id"),
-            identity["canonical_id"],
-            market,
-            symbol,
-            identity["asset_class"],
-            _json(payload.get("features") or payload),
-            _json(payload.get("portfolio_context") or {}),
-            stage,
-            _json(reasons),
-            created_at,
-        ),
-    )
+    if _decision_requires_durable_ledger(stage, payload):
+        conn.execute(
+            """INSERT INTO global_asset_identities
+               (canonical_id, asset_class, exchange, native_symbol, currency, provider_aliases, created_at, updated_at)
+               VALUES (%s,%s,%s,%s,%s,%s::jsonb,%s,%s)
+               ON CONFLICT (canonical_id) DO UPDATE SET provider_aliases=EXCLUDED.provider_aliases, updated_at=EXCLUDED.updated_at""",
+            (identity["canonical_id"], identity["asset_class"], identity["exchange"], identity["native_symbol"], identity["currency"], _json(identity.get("provider_aliases") or {}), created_at, created_at),
+        )
+        conn.execute(
+            """INSERT INTO global_decision_ledger
+               (decision_id, scan_id, signal_id, forecast_id, execution_claim_id, trade_id, canonical_id, market, symbol, asset_class,
+                features, portfolio_context, decision, rejection_reasons, created_at)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s::jsonb,%s,%s::jsonb,%s)
+               ON CONFLICT (decision_id) DO UPDATE SET decision=EXCLUDED.decision, rejection_reasons=EXCLUDED.rejection_reasons""",
+            (
+                did, payload.get("scan_id"),
+                str(payload.get("signal_id")) if payload.get("signal_id") is not None else None,
+                payload.get("forecast_id"), payload.get("execution_claim_id"), payload.get("trade_id"),
+                identity["canonical_id"], market, symbol, identity["asset_class"],
+                _json(payload.get("features") or payload), _json(payload.get("portfolio_context") or {}),
+                stage, _json(reasons), created_at,
+            ),
+        )
     if emit_ephemeral_trace:
         conn.execute(
             """INSERT INTO global_decision_events
