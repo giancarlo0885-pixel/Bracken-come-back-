@@ -1201,7 +1201,24 @@ def initialize_database() -> None:
             for statement in create_statements:
                 cursor.execute(statement)
 
+            existing_portfolio_columns = {
+                row[0]
+                for row in cursor.execute(
+                    """SELECT column_name FROM information_schema.columns
+                       WHERE table_schema = current_schema() AND table_name = 'portfolios'"""
+                ).fetchall()
+            }
+            portfolio_column_repairs = {
+                "broker_profile", "leverage_limit", "margin_debt",
+                "margin_interest_accrued", "margin_interest_updated_at",
+                "peak_equity", "risk_state",
+            }
             for statement in migration_statements:
+                normalized = " ".join(statement.split()).lower()
+                if normalized.startswith("alter table portfolios add column if not exists"):
+                    column = normalized.split("add column if not exists", 1)[1].strip().split()[0]
+                    if column in portfolio_column_repairs and column in existing_portfolio_columns:
+                        continue
                 cursor.execute(statement)
 
             for market in ("cash", "crypto"):
