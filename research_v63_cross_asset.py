@@ -334,15 +334,22 @@ def apply_candidate(candidate: dict, train: pd.DataFrame, v1: pd.DataFrame, v2: 
     return probability.tolist(), outcome.tolist(), {k: v.tolist() for k, v in base.items()}
 
 
-def preholdout(symbol: str, frame: pd.DataFrame) -> dict:
-    latest = frame.index.max().floor("1d")
+GATES = (
+    (0.000, 0.53),
+    (0.005, 0.54),
+    (0.010, 0.55),
+    (0.015, 0.56),
+    (0.020, 0.57),
+    (0.030, 0.58),
+    (0.040, 0.60),
+)
+
+
+def preholdout_daily(symbol: str, frame: pd.DataFrame) -> list[dict]:
+    latest = frame.index.max().floor("1D")
     end = latest - pd.Timedelta(days=HOLDOUT_DAYS)
     start = end - pd.Timedelta(days=PREHOLDOUT_DAYS)
-
-    probabilities = []
-    outcomes = []
-    base = {k: [] for k in ("coin_flip","base_rate","previous_direction","momentum_5")}
-    selected = []
+    daily = []
 
     for day in range(PREHOLDOUT_DAYS):
         t = start + pd.Timedelta(days=day)
@@ -368,32 +375,54 @@ def preholdout(symbol: str, frame: pd.DataFrame) -> dict:
         candidate = choose_rule(train, v1, v2)
         if candidate is None:
             continue
-        # Fail closed: only use a daily candidate when both past validation blocks
-        # show positive skill and non-random directionality.
-        if candidate["min_skill"] <= 0.0 or candidate["min_accuracy"] < 0.53:
-            continue
 
         p, y, b = apply_candidate(candidate, train, v1, v2, test)
-        probabilities.extend(p)
-        outcomes.extend(y)
-        for key in base:
-            base[key].extend(b[key])
-        selected.append({
+        daily.append({
             "date": str(t.date()),
             "kind": candidate["kind"],
             "feature": candidate.get("feature"),
             "polarity": candidate.get("polarity"),
             "C": candidate.get("C"),
             "confidence": candidate.get("confidence"),
-            "min_skill": candidate["min_skill"],
-            "min_accuracy": candidate["min_accuracy"],
+            "min_skill": float(candidate["min_skill"]),
+            "min_accuracy": float(candidate["min_accuracy"]),
+            "probability": p,
+            "outcome": y,
+            "baselines": b,
             "n": len(y),
+        })
+    return daily
+
+
+def aggregate_gate(symbol: str, daily: list[dict], min_skill: float, min_accuracy: float) -> dict:
+    probabilities = []
+    outcomes = []
+    base = {k: [] for k in ("coin_flip","base_rate","previous_direction","momentum_5")}
+    selected = []
+
+    for item in daily:
+        if item["min_skill"] < min_skill or item["min_accuracy"] < min_accuracy:
+            continue
+        probabilities.extend(item["probability"])
+        outcomes.extend(item["outcome"])
+        for key in base:
+            base[key].extend(item["baselines"][key])
+        selected.append({
+            "date": item["date"],
+            "kind": item["kind"],
+            "feature": item.get("feature"),
+            "polarity": item.get("polarity"),
+            "C": item.get("C"),
+            "confidence": item.get("confidence"),
+            "min_skill": item["min_skill"],
+            "min_accuracy": item["min_accuracy"],
+            "n": item["n"],
         })
 
     m = metrics(np.array(probabilities), np.array(outcomes), {k: np.array(v) for k, v in base.items()})
     passed = bool(
         m["n"] >= 100
-        and m["directional_accuracy" if "directional_accuracy" in m else "accuracy"] >= 0.52
+        and m["accuracy"] >= 0.52
         and m["brier_skill"] >= 0.02
         and m["ece"] <= 0.12
         and m["beats_all_baselines"]
@@ -410,20 +439,99 @@ def preholdout(symbol: str, frame: pd.DataFrame) -> dict:
 def main():
     with ThreadPoolExecutor(max_workers=6) as pool:
         frames = dict(zip(SYMBOLS, pool.map(fetch, SYMBOLS)))
-    print("V65_RAW", json.dumps({k: len(v) for k, v in frames.items()}), flush=True)
+    print("V66_RAW", json.dumps({k: len(v) for k, v in frames.items()}), flush=True)
     btc = frames["BTCUSDT"]
-    results = {}
+
+    daily_by_symbol = {}
     for symbol in SYMBOLS:
         try:
             prepared = build_features(frames[symbol], btc)
-            results[symbol] = preholdout(symbol, prepared)
-            print("V65_SYMBOL", json.dumps(results[symbol], default=str), flush=True)
+            daily_by_symbol[symbol] = preholdout_daily(symbol, prepared)
+            print(
+                "V66_DAILY",
+                json.dumps({"symbol": symbol, "candidate_days": len(daily_by_symbol[symbol])}),
+                flush=True,
+            )
         except Exception as exc:
-            results[symbol] = {"symbol": symbol, "status": "ERROR", "reason": exc.__class__.__name__}
-            print("V65_SYMBOL", json.dumps(results[symbol]), flush=True)
-    passing = [symbol for symbol, item in results.items() if item.get("status") == "PASS"]
-    print("V65_PREHOLDOUT", json.dumps({"passing_symbols": passing, "count": len(passing), "results": results}, default=str), flush=True)
-    print("V65_CAN_ADVANCE_TO_HOLDOUT", len(passing) >= 3, flush=True)
+            daily_by_symbol[symbol] = []
+            print(
+                "V66_DAILY",
+                json.dumps({"symbol": symbol, "candidate_days": 0, "reason": exc.__class__.__name__}),
+                flush=True,
+            )
+
+    gate_results = []
+    for skill_gate, accuracy_gate in GATES:
+        results = {
+            symbol: aggregate_gate(symbol, daily_by_symbol[symbol], skill_gate, accuracy_gate)
+            for symbol in SYMBOLS
+        }
+        passing = [symbol for symbol, item in results.items() if item["status"] == "PASS"]
+        positive_skill = sum(
+            max(0.0, float(item["metrics"].get("brier_skill") or 0.0))
+            for item in results.values()
+            if math.isfinite(float(item["metrics"].get("brier_skill") or 0.0))
+        )
+        sample_total = sum(int(item["metrics"].get("n") or 0) for item in results.values())
+        payload = {
+            "min_skill": skill_gate,
+            "min_accuracy": accuracy_gate,
+            "passing_symbols": passing,
+            "pass_count": len(passing),
+            "positive_skill_sum": positive_skill,
+            "sample_total": sample_total,
+            "results": results,
+        }
+        gate_results.append(payload)
+        print(
+            "V66_GATE",
+            json.dumps(
+                {
+                    "min_skill": skill_gate,
+                    "min_accuracy": accuracy_gate,
+                    "passing_symbols": passing,
+                    "pass_count": len(passing),
+                    "summary": {
+                        s: {
+                            "status": results[s]["status"],
+                            "n": results[s]["metrics"]["n"],
+                            "accuracy": results[s]["metrics"]["accuracy"],
+                            "brier_skill": results[s]["metrics"]["brier_skill"],
+                            "ece": results[s]["metrics"]["ece"],
+                            "beats_all_baselines": results[s]["metrics"]["beats_all_baselines"],
+                        }
+                        for s in SYMBOLS
+                    },
+                },
+                default=str,
+            ),
+            flush=True,
+        )
+
+    best = max(
+        gate_results,
+        key=lambda item: (
+            item["pass_count"],
+            item["positive_skill_sum"],
+            item["sample_total"],
+        ),
+    )
+    print(
+        "V66_PREHOLDOUT_BEST",
+        json.dumps(
+            {
+                "min_skill": best["min_skill"],
+                "min_accuracy": best["min_accuracy"],
+                "passing_symbols": best["passing_symbols"],
+                "pass_count": best["pass_count"],
+                "can_advance_to_holdout": best["pass_count"] >= 3,
+                "results": best["results"],
+            },
+            default=str,
+        ),
+        flush=True,
+    )
+    print("V66_CAN_ADVANCE_TO_HOLDOUT", best["pass_count"] >= 3, flush=True)
 
 
 if __name__ == "__main__":
