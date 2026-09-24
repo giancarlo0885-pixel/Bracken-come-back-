@@ -86,6 +86,48 @@ def test_stock_worker_installs_cash_regime_learning():
     assert 'install_paper_regime_economics_shadow("cash")' in source
 
 
+class _Result:
+    def __init__(self, rows):
+        self._rows = rows
+    def fetchall(self):
+        return self._rows
+
+
+class _LotConn:
+    def execute(self, sql, params=None):
+        if "FROM position_lots" in sql:
+            return _Result([{"entry_fees": 2.0, "quantity_opened": 10.0}])
+        return _Result([])
+
+
+def test_round_trip_accounting_allocates_entry_and_exit_fees_once():
+    net, fees, provenance = regime._round_trip_accounting(
+        _LotConn(),
+        {
+            "market": "crypto",
+            "symbol": "BTC-USD",
+            "entry_time": "2026-09-24T00:00:00+00:00",
+            "entry_price": 100.0,
+            "quantity": 5.0,
+            "entry_signal_id": "sig-1",
+            "entry_decision_id": "dec-1",
+            "fees": 1.0,
+            "gross_pnl": 10.0,
+        },
+    )
+    assert provenance == "exact_lot"
+    assert fees == 2.0
+    assert net == 8.0
+
+
+def test_round_trip_cost_columns_are_additive_research_fields():
+    source = Path("paper_regime_economics_shadow.py").read_text(encoding="utf-8")
+    assert "ADD COLUMN IF NOT EXISTS round_trip_net_pnl DOUBLE PRECISION" in source
+    assert "ADD COLUMN IF NOT EXISTS round_trip_fees DOUBLE PRECISION" in source
+    assert "ADD COLUMN IF NOT EXISTS cost_provenance TEXT" in source
+    assert "COALESCE(round_trip_net_pnl,net_pnl)" in source
+
+
 def test_summary_market_filter_casts_nullable_parameter_for_postgres():
     source = Path("paper_regime_economics_shadow.py").read_text(encoding="utf-8")
     assert "WHERE (%s::text IS NULL OR market=%s::text)" in source
