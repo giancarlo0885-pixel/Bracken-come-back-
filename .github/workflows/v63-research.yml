@@ -1,0 +1,27 @@
+name: V63 Research Validation
+
+on:
+  push:
+    branches:
+      - research/v63-cross-asset-15m
+    paths:
+      - research_v63_cross_asset.py
+      - .github/workflows/v63-research.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - name: Install research dependencies
+        run: python -m pip install requests numpy pandas scikit-learn
+      - name: Run V63 cross-asset validation
+        run: python -u research_v63_cross_asset.py
