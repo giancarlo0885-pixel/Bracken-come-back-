@@ -1761,13 +1761,14 @@ def _apply_retention_policy(conn: Any, table: str, policy: dict[str, Any]) -> in
                 SELECT {key_column}
                 FROM {table}
                 WHERE {eligible_sql}
-                ORDER BY {order_column}
+                ORDER BY {order_column} DESC
+                OFFSET %s
                 LIMIT %s
             )
             DELETE FROM {table}
             WHERE {key_column} IN (SELECT {key_column} FROM doomed)
             """,
-            (batch_size,),
+            (keep_rows, batch_size),
         ).rowcount or 0
         deleted_total += deleted
         if deleted < batch_size:
