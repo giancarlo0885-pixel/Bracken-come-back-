@@ -29,6 +29,15 @@ def active() -> bool:
     )
 
 
+def _normalize_market(market: Any) -> str:
+    value = str(market or "crypto").strip().lower()
+    if value == "stock":
+        value = "cash"
+    if value not in {"cash", "crypto"}:
+        raise ValueError("market must be cash or crypto")
+    return value
+
+
 def _num(value: Any, default: float = 0.0) -> float:
     try:
         result = float(value)
@@ -167,12 +176,13 @@ def repair_excursion_anchors() -> int:
         return max(0, int(getattr(result, "rowcount", 0) or 0))
 
 
-def sample_open_positions() -> int:
+def sample_open_positions(market: str = "crypto") -> int:
     """Persist observed canonical paper prices for forward MFE/MAE measurement."""
     if not active():
         return 0
     from database import connect
 
+    normalized_market = _normalize_market(market)
     inserted = 0
     now = datetime.now(timezone.utc)
     with connect() as conn:
@@ -181,8 +191,9 @@ def sample_open_positions() -> int:
                 """
                 SELECT symbol, current_price, average_price, entry_price
                 FROM positions
-                WHERE market='crypto' AND COALESCE(quantity,0) > 0
-                """
+                WHERE market=%s AND COALESCE(quantity,0) > 0
+                """,
+                (normalized_market,),
             ).fetchall()
         )
         for row in positions:
@@ -192,39 +203,40 @@ def sample_open_positions() -> int:
             conn.execute(
                 """
                 INSERT INTO paper_regime_price_samples(market,symbol,observed_at,price,source,schema_version)
-                VALUES ('crypto',%s,%s,%s,'canonical_position',%s)
+                VALUES (%s,%s,%s,%s,'canonical_position',%s)
                 """,
-                (str(row.get("symbol") or "").upper(), now, price, _SCHEMA_VERSION),
+                (normalized_market, str(row.get("symbol") or "").upper(), now, price, _SCHEMA_VERSION),
             )
             inserted += 1
     return inserted
 
 
-def _memory_regime(conn: Any, symbol: str, entry_time: datetime | None) -> str | None:
+def _memory_regime(conn: Any, market: str, symbol: str, entry_time: datetime | None) -> str | None:
     if not entry_time:
         return None
     try:
         item = conn.execute(
             """
             SELECT regime FROM market_memory_observations
-            WHERE market='crypto' AND symbol=%s
+            WHERE market=%s AND symbol=%s
               AND NULLIF(created_at,'')::timestamptz <= %s
             ORDER BY NULLIF(created_at,'')::timestamptz DESC LIMIT 1
             """,
-            (symbol, entry_time),
+            (market, symbol, entry_time),
         ).fetchone()
         return str(item.get("regime") or "").strip() if item else None
     except Exception:
         return None
 
 
-def finalize_closed_trades(limit: int = 250) -> int:
+def finalize_closed_trades(limit: int = 250, market: str = "crypto") -> int:
     """Materialize regime economics from canonical closes without changing execution."""
     if not active():
         return 0
     from database import connect
     from paper_strategy_economics import normalize_strategy_identity
 
+    normalized_market = _normalize_market(market)
     created = 0
     with connect() as conn:
         trades = list(
@@ -235,11 +247,11 @@ def finalize_closed_trades(limit: int = 250) -> int:
                        NULLIF(exit_time,'')::timestamptz AS exit_time,
                        entry_price, exit_price, feature_snapshot
                 FROM trade_ledger
-                WHERE market='crypto' AND side='SELL' AND exit_time IS NOT NULL
+                WHERE market=%s AND side='SELL' AND exit_time IS NOT NULL
                 ORDER BY NULLIF(exit_time,'')::timestamptz DESC
                 LIMIT %s
                 """,
-                (max(1, int(limit)),),
+                (normalized_market, max(1, int(limit))),
             ).fetchall()
         )
         for trade in trades:
@@ -260,7 +272,7 @@ def finalize_closed_trades(limit: int = 250) -> int:
             exit_price = _num(trade.get("exit_price"))
             regime = classify_regime(
                 feature_snapshot=trade.get("feature_snapshot"),
-                memory_regime=_memory_regime(conn, symbol, entry_time),
+                memory_regime=_memory_regime(conn, normalized_market, symbol, entry_time),
             )
 
             prices: list[float] = []
@@ -268,10 +280,10 @@ def finalize_closed_trades(limit: int = 250) -> int:
                 sampled = conn.execute(
                     """
                     SELECT price FROM paper_regime_price_samples
-                    WHERE market='crypto' AND symbol=%s AND observed_at BETWEEN %s AND %s
+                    WHERE market=%s AND symbol=%s AND observed_at BETWEEN %s AND %s
                     ORDER BY observed_at ASC
                     """,
-                    (symbol, entry_time, exit_time),
+                    (normalized_market, symbol, entry_time, exit_time),
                 ).fetchall()
                 prices = [_num(item.get("price")) for item in sampled if _num(item.get("price")) > 0]
 
@@ -285,11 +297,11 @@ def finalize_closed_trades(limit: int = 250) -> int:
                     trade_id,market,symbol,strategy,regime,entry_time,exit_time,
                     entry_price,exit_price,net_pnl,fees,mfe_pct,mae_pct,
                     excursion_sample_count,schema_version
-                ) VALUES (%s,'crypto',%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                 ON CONFLICT (trade_id) DO NOTHING
                 """,
                 (
-                    trade_id, symbol, normalize_strategy_identity(trade.get("strategy")), regime,
+                    trade_id, normalized_market, symbol, normalize_strategy_identity(trade.get("strategy")), regime,
                     entry_time, exit_time, entry_price or None, exit_price or None,
                     _num(trade.get("net_pnl")), max(0.0, _num(trade.get("fees"))),
                     mfe_pct, mae_pct, excursion_count, _SCHEMA_VERSION,
@@ -299,32 +311,35 @@ def finalize_closed_trades(limit: int = 250) -> int:
     return created
 
 
-def emit_summary() -> None:
+def emit_summary(market: str | None = None) -> None:
     if not active():
         return
     try:
         from database import connect
+        normalized_market = _normalize_market(market) if market is not None else None
         with connect() as conn:
             rows = list(
                 conn.execute(
                     """
-                    SELECT strategy, regime, COUNT(*) AS samples,
+                    SELECT market, strategy, regime, COUNT(*) AS samples,
                            SUM(net_pnl) AS net_pnl, SUM(fees) AS fees,
                            AVG(net_pnl) AS expectancy,
                            AVG(mfe_pct) FILTER (WHERE excursion_sample_count > 0) AS avg_mfe_pct,
                            AVG(mae_pct) FILTER (WHERE excursion_sample_count > 0) AS avg_mae_pct,
                            SUM(CASE WHEN excursion_sample_count > 0 THEN 1 ELSE 0 END) AS excursion_trades
                     FROM paper_regime_trade_metrics
-                    GROUP BY strategy, regime
+                    WHERE (%s IS NULL OR market=%s)
+                    GROUP BY market, strategy, regime
                     ORDER BY samples DESC
                     LIMIT 20
-                    """
+                    """,
+                    (normalized_market, normalized_market),
                 ).fetchall()
             )
         for row in rows:
             log.info(
-                "PAPER REGIME ECONOMICS | strategy=%s | regime=%s | samples=%s | net_pnl=%.4f | fees=%.4f | expectancy=%.6f | avg_mfe_pct=%s | avg_mae_pct=%s | excursion_trades=%s | mode=shadow | execution_impact=NONE | live_trading=DISARMED",
-                row.get("strategy"), row.get("regime"), row.get("samples"),
+                "PAPER REGIME ECONOMICS | market=%s | strategy=%s | regime=%s | samples=%s | net_pnl=%.4f | fees=%.4f | expectancy=%.6f | avg_mfe_pct=%s | avg_mae_pct=%s | excursion_trades=%s | mode=shadow | execution_impact=NONE | live_trading=DISARMED",
+                row.get("market"), row.get("strategy"), row.get("regime"), row.get("samples"),
                 _num(row.get("net_pnl")), _num(row.get("fees")), _num(row.get("expectancy")),
                 "NA" if row.get("avg_mfe_pct") is None else f"{_num(row.get('avg_mfe_pct')):.4f}",
                 "NA" if row.get("avg_mae_pct") is None else f"{_num(row.get('avg_mae_pct')):.4f}",
@@ -334,26 +349,27 @@ def emit_summary() -> None:
         log.warning("PAPER REGIME ECONOMICS | status=UNAVAILABLE | reason=%s", exc.__class__.__name__)
 
 
-def _loop(interval_seconds: float) -> None:
+def _loop(interval_seconds: float, market: str) -> None:
     cycles = 0
     while not _STOP.wait(interval_seconds):
         if not active():
             return
         try:
-            sample_open_positions()
-            finalize_closed_trades()
+            sample_open_positions(market)
+            finalize_closed_trades(market=market)
             cycles += 1
             if cycles == 1 or cycles % 10 == 0:
-                emit_summary()
+                emit_summary(market)
         except Exception as exc:
             log.warning("PAPER REGIME ECONOMICS | sampler=ERROR | reason=%s", exc.__class__.__name__)
 
 
-def install_paper_regime_economics_shadow() -> bool:
+def install_paper_regime_economics_shadow(market: str = "crypto") -> bool:
     """Start shadow-only regime/MFE/MAE telemetry; never mutates execution state."""
     global _THREAD
     if not active():
         return False
+    normalized_market = _normalize_market(market)
     ensure_schema()
     repaired = repair_excursion_anchors()
     if repaired:
@@ -363,19 +379,19 @@ def install_paper_regime_economics_shadow() -> bool:
         )
     # Capture immediately so fresh positions have an initial observed point.
     try:
-        sample_open_positions()
-        finalize_closed_trades()
-        emit_summary()
+        sample_open_positions(normalized_market)
+        finalize_closed_trades(market=normalized_market)
+        emit_summary(normalized_market)
     except Exception as exc:
         log.warning("PAPER REGIME ECONOMICS | startup=DEGRADED | reason=%s", exc.__class__.__name__)
     if _THREAD and _THREAD.is_alive():
         return True
     interval = max(15.0, _num(os.getenv("PAPER_REGIME_SAMPLE_SECONDS", "60"), 60.0))
     _STOP.clear()
-    _THREAD = threading.Thread(target=_loop, args=(interval,), name="paper-regime-shadow", daemon=True)
+    _THREAD = threading.Thread(target=_loop, args=(interval, normalized_market), name=f"paper-regime-shadow-{normalized_market}", daemon=True)
     _THREAD.start()
     log.info(
-        "PAPER REGIME ECONOMICS | active=True | version=%s | mode=shadow | sample_seconds=%.1f | execution_impact=NONE | broker_submission=NONE | live_trading=DISARMED",
-        _SCHEMA_VERSION, interval,
+        "PAPER REGIME ECONOMICS | market=%s | active=True | version=%s | mode=shadow | sample_seconds=%.1f | execution_impact=NONE | broker_submission=NONE | live_trading=DISARMED",
+        normalized_market, _SCHEMA_VERSION, interval,
     )
     return True
