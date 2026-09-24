@@ -45,7 +45,15 @@ def test_compact_replay_snapshot_keeps_lineage_without_large_payload_copies():
         }
     ]
     snapshot,digest=a._compact_replay_snapshot(decision,observations)
-    encoded=__import__("json").dumps(snapshot,sort_keys=True,separators=(",",":"))
+    json_mod=__import__("json")
+    hashlib_mod=__import__("hashlib")
+    encoded=json_mod.dumps(snapshot,sort_keys=True,separators=(",",":"))
+    legacy={
+        "decision_payload":decision["payload"],
+        "approved":True,
+        "observations":observations,
+    }
+    legacy_raw=json_mod.dumps(legacy,default=str,sort_keys=True,separators=(",",":"))
     assert "decision_payload" not in snapshot
     assert "observations" not in snapshot
     assert snapshot["decision_ref"]["decision_id"] == 42
@@ -54,6 +62,7 @@ def test_compact_replay_snapshot_keeps_lineage_without_large_payload_copies():
     assert snapshot["observation_refs"][0]["payload_sha256"]
     assert "blob" not in encoded
     assert len(encoded) < 5000
+    assert digest == hashlib_mod.sha256(legacy_raw.encode()).hexdigest()
     assert len(digest) == 64
 
 
