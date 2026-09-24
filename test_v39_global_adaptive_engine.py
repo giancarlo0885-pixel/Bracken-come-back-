@@ -480,3 +480,49 @@ def test_provider_budget_initialization_is_conflict_safe_before_row_lock():
     assert "ON CONFLICT (provider,capability,utc_date) DO NOTHING" in function_source
     assert function_source.index("ON CONFLICT (provider,capability,utc_date) DO NOTHING") < function_source.index("FOR UPDATE")
     assert "provider budget row unavailable after atomic initialization" in function_source
+
+
+def test_routine_rejection_does_not_write_durable_decision_ledger():
+    calls = []
+    class Conn:
+        def execute(self, sql, params=()):
+            calls.append((sql, params))
+            class Result:
+                rowcount = 1
+            return Result()
+    did = v39.persist_decision_event(
+        Conn(), market="cash", symbol="NOISE", stage="portfolio_rejected",
+        payload={"features": {"score": 0.1}}, rejection_reason="not_capital_qualified"
+    )
+    assert did
+    assert calls == []
+
+
+def test_paper_execution_still_writes_durable_decision_ledger():
+    calls = []
+    class Conn:
+        def execute(self, sql, params=()):
+            calls.append((sql, params))
+            class Result:
+                rowcount = 1
+            return Result()
+    v39.persist_decision_event(
+        Conn(), market="cash", symbol="KEEP", stage="paper_trade_executed",
+        payload={"features": {"score": 0.9}}, emit_ephemeral_trace=False
+    )
+    assert "INSERT INTO global_decision_ledger" in "\n".join(sql for sql, _ in calls)
+
+
+def test_trade_linked_decision_still_writes_durable_ledger():
+    calls = []
+    class Conn:
+        def execute(self, sql, params=()):
+            calls.append((sql, params))
+            class Result:
+                rowcount = 1
+            return Result()
+    v39.persist_decision_event(
+        Conn(), market="cash", symbol="KEEP", stage="execution_approved",
+        payload={"trade_id": 42}, emit_ephemeral_trace=False
+    )
+    assert "INSERT INTO global_decision_ledger" in "\n".join(sql for sql, _ in calls)
