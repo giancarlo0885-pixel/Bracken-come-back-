@@ -408,7 +408,31 @@ def _run_scheduled_database_maintenance(label: str) -> None:
         if result.get("skipped"):
             log.info("%s database maintenance skipped: %s", label, result.get("reason"))
         else:
-            log.info("%s database maintenance complete: %s", label, result.get("deleted", {}))
+            storage = result.get("storage") or {}
+            largest = [
+                {
+                    "table": item.get("table"),
+                    "total_size": item.get("total_size"),
+                    "table_size": item.get("table_size"),
+                    "index_size": item.get("index_size"),
+                    "live_rows": item.get("live_rows"),
+                    "dead_rows": item.get("dead_rows"),
+                    "last_autovacuum": item.get("last_autovacuum"),
+                    "last_autoanalyze": item.get("last_autoanalyze"),
+                }
+                for item in (storage.get("largest_tables") or [])[:8]
+            ]
+            log.info(
+                "%s database maintenance complete: deleted=%s storage=%s",
+                label,
+                result.get("deleted", {}),
+                {
+                    "database_size": storage.get("database_size"),
+                    "used_pct": storage.get("used_pct"),
+                    "status": storage.get("status"),
+                    "largest_tables": largest,
+                },
+            )
     except Exception as exc:
         log.warning("%s database maintenance failed; worker will retry later: %s", label, exc)
 
