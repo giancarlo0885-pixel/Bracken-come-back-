@@ -92,9 +92,10 @@ def ensure_schema() -> None:
 
 def _prior_loss_streak(conn: Any, strategy: str, regime: str, entry_time: datetime) -> int:
     rows = list(conn.execute("""
-        SELECT m.net_pnl
+        SELECT m.round_trip_net_pnl AS net_pnl
         FROM paper_regime_trade_metrics m
         WHERE m.strategy=%s AND m.regime=%s AND m.exit_time < %s
+          AND m.cost_provenance='exact_lot' AND m.round_trip_net_pnl IS NOT NULL
         ORDER BY m.exit_time DESC LIMIT 6
     """, (strategy, regime, entry_time)).fetchall())
     streak = 0
