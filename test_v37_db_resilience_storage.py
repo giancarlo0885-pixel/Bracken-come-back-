@@ -207,3 +207,40 @@ def test_high_churn_tables_get_aggressive_autovacuum_settings():
     assert "signals SET (autovacuum_vacuum_scale_factor = 0.01" in database_source
     assert "VACUUM FULL" not in database_source
     assert "VACUUM FULL" not in migration_source
+
+
+def test_worker_maintenance_logs_storage_relations(monkeypatch, caplog):
+    monkeypatch.setattr(
+        market_worker,
+        "run_database_maintenance",
+        lambda: {
+            "ok": True,
+            "skipped": False,
+            "deleted": {"signals": 12},
+            "storage": {
+                "database_size": "41.8GB",
+                "used_pct": 104.4,
+                "status": "critical",
+                "largest_tables": [
+                    {
+                        "table": "signals",
+                        "total_size": "9.5GB",
+                        "table_size": "4.0GB",
+                        "index_size": "5.5GB",
+                        "live_rows": 6000,
+                        "dead_rows": 2500,
+                        "last_autovacuum": None,
+                        "last_autoanalyze": None,
+                    }
+                ],
+            },
+        },
+    )
+    with caplog.at_level("INFO"):
+        market_worker._run_scheduled_database_maintenance("Stock Market")
+    message = caplog.text
+    assert "database maintenance complete" in message
+    assert "41.8GB" in message
+    assert "signals" in message
+    assert "9.5GB" in message
+    assert "dead_rows" in message
