@@ -642,8 +642,10 @@ def _sync_trade_episodes(conn: Any, market: str, *, limit: int = _EPISODE_BATCH)
         conn.execute(
             """
             SELECT m.trade_id,m.market,m.symbol,m.strategy,m.regime,m.entry_time,m.exit_time,
-                   m.entry_price,m.exit_price,m.net_pnl,m.fees,m.mfe_pct,m.mae_pct,
-                   m.excursion_sample_count,
+                   m.entry_price,m.exit_price,
+                   COALESCE(m.round_trip_net_pnl,m.net_pnl) AS net_pnl,
+                   COALESCE(m.round_trip_fees,m.fees) AS fees,
+                   m.mfe_pct,m.mae_pct,m.excursion_sample_count,
                    t.quantity,t.entry_signal_id,t.entry_decision_id,t.entry_forecast_id,
                    t.entry_quote_id,t.feature_snapshot
             FROM paper_regime_trade_metrics m
