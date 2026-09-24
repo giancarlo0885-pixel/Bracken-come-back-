@@ -128,6 +128,7 @@ DATABASE_RETENTION_POLICIES = {
     "opportunity_rankings": {"keep_rows": 12000, "batch_size": DATABASE_RETENTION_BATCH_SIZE, "classification": "append-only analytical/ephemeral"},
     "oracle_decision_audit": {"keep_rows": 12000, "batch_size": DATABASE_RETENTION_BATCH_SIZE, "classification": "append-only analytical/ephemeral"},
     "opportunity_radar_assessments": {"keep_rows": 12000, "batch_size": DATABASE_RETENTION_BATCH_SIZE, "classification": "append-only analytical/ephemeral"},
+    "global_decision_ledger": {"keep_rows": 12000, "batch_size": DATABASE_RETENTION_BATCH_SIZE, "classification": "decision audit; preserve execution/outcome-linked provenance"},
     "global_decision_events": {"keep_rows": 1000, "batch_size": DATABASE_RETENTION_BATCH_SIZE, "classification": "append-only analytical/ephemeral"},
 }
 DATABASE_TABLE_GROWTH_AUDIT = {
@@ -163,7 +164,7 @@ DATABASE_TABLE_GROWTH_AUDIT = {
     "position_audits": {"class": "governance/audit records", "inserted_by": "position audit", "frequency": "audit events", "retention": "preserve until archive strategy exists"},
     "risk_events": {"class": "governance/audit records", "inserted_by": "risk engine", "frequency": "risk checks/events", "retention": "preserve until archive strategy exists"},
     "global_asset_identities": {"class": "canonical identity records", "inserted_by": "global adaptive engine", "frequency": "one per canonical asset identity", "retention": "never auto-delete"},
-    "global_decision_ledger": {"class": "governance/audit records", "inserted_by": "global adaptive engine", "frequency": "decision-level audit", "retention": "preserve until archive strategy exists"},
+    "global_decision_ledger": {"class": "governance/audit records", "inserted_by": "global adaptive engine", "frequency": "decision-level audit", "retention": "keep newest 12000 unlinked rows; never auto-delete trade/execution/outcome-linked decisions"},
     "global_forecast_outcomes": {"class": "governance/audit records", "inserted_by": "learning loop outcome evaluator", "frequency": "decision horizon outcomes", "retention": "preserve until archive strategy exists"},
     "provider_budget_ledger": {"class": "governance/provider quota records", "inserted_by": "provider budget manager", "frequency": "provider/capability/day", "retention": "preserve recent quota history until archive strategy exists"},
     "invalid_symbol_quarantine": {"class": "governance/provider safety records", "inserted_by": "provider symbol quarantine", "frequency": "provider-symbol failures", "retention": "preserve until retry policy/archive exists"},
@@ -1732,6 +1733,54 @@ def save_intelligence_event(
 # DATABASE CLEANUP
 # =========================================================
 
+def _global_decision_ledger_eligible_sql() -> str:
+    return (
+        "trade_id IS NULL AND execution_claim_id IS NULL "
+        "AND NOT EXISTS ("
+        "SELECT 1 FROM global_forecast_outcomes gfo "
+        "WHERE gfo.decision_id = global_decision_ledger.decision_id"
+        ")"
+    )
+
+
+def _global_decision_ledger_cleanup_due(conn: Any, *, keep_rows: int, batch_size: int) -> bool:
+    slack_rows = max(batch_size, max(1, keep_rows // 5))
+    eligible_sql = _global_decision_ledger_eligible_sql()
+    probe = conn.execute(
+        "SELECT decision_id FROM global_decision_ledger "
+        f"WHERE {eligible_sql} ORDER BY created_at DESC OFFSET %s LIMIT 1",
+        (keep_rows + slack_rows,),
+    ).fetchone()
+    return bool(probe)
+
+
+def _trim_global_decision_ledger(conn: Any, *, keep_rows: int, batch_size: int) -> int:
+    if not _global_decision_ledger_cleanup_due(conn, keep_rows=keep_rows, batch_size=batch_size):
+        return 0
+    eligible_sql = _global_decision_ledger_eligible_sql()
+    deleted_total = 0
+    while True:
+        deleted = conn.execute(
+            f"""
+            WITH doomed AS (
+                SELECT decision_id
+                FROM global_decision_ledger
+                WHERE {eligible_sql}
+                ORDER BY created_at DESC
+                OFFSET %s
+                LIMIT %s
+            )
+            DELETE FROM global_decision_ledger
+            WHERE decision_id IN (SELECT decision_id FROM doomed)
+            """,
+            (keep_rows, batch_size),
+        ).rowcount or 0
+        deleted_total += deleted
+        if deleted < batch_size:
+            break
+    return deleted_total
+
+
 def _retention_cleanup_due(conn: Any, table: str, *, keep_rows: int, batch_size: int) -> bool:
     """Avoid constant INSERT/DELETE churn by trimming only after a bounded overshoot.
 
@@ -1756,6 +1805,8 @@ def _apply_retention_policy(conn: Any, table: str, policy: dict[str, Any]) -> in
     batch_size = max(1, int(policy.get("batch_size") or DATABASE_RETENTION_BATCH_SIZE))
     if keep_rows <= 0:
         return 0
+    if table == "global_decision_ledger":
+        return _trim_global_decision_ledger(conn, keep_rows=keep_rows, batch_size=batch_size)
     if not _retention_cleanup_due(conn, table, keep_rows=keep_rows, batch_size=batch_size):
         return 0
     deleted_total = 0
