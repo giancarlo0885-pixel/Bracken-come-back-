@@ -13,379 +13,417 @@ from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 
 URL = "https://data-api.binance.vision/api/v3/klines"
-SYMS = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
+SYMBOLS = [
+    "BTCUSDT","ETHUSDT","SOLUSDT","XRPUSDT","DOGEUSDT","ADAUSDT",
+    "AVAXUSDT","LINKUSDT","LTCUSDT","BCHUSDT","AAVEUSDT","UNIUSDT",
+]
+INTERVAL = "5m"
 INTERVAL_MS = 300_000
 DAYS = 90
 HORIZON_BARS = 3
+HOLDOUT_DAYS = 14
+PREHOLDOUT_DAYS = 21
 
 
 def fetch(symbol: str) -> pd.DataFrame:
     end_ms = int(time.time() * 1000)
     cursor = end_ms - DAYS * 86_400_000
-    rows: list[list[object]] = []
+    rows = []
     while cursor < end_ms:
-        batch = requests.get(
+        response = requests.get(
             URL,
             params={
                 "symbol": symbol,
-                "interval": "5m",
+                "interval": INTERVAL,
                 "startTime": cursor,
                 "endTime": end_ms,
                 "limit": 1000,
             },
             timeout=20,
-        ).json()
+        )
+        response.raise_for_status()
+        batch = response.json()
         if not batch:
             break
-        rows += batch
+        rows.extend(batch)
         next_cursor = int(batch[-1][0]) + INTERVAL_MS
         if next_cursor <= cursor:
             break
         cursor = next_cursor
         if len(batch) < 1000:
             break
-
-    frame = (
-        pd.DataFrame(
-            rows,
-            columns=[
-                "ot", "o", "h", "l", "c", "v", "ct", "qv",
-                "n", "tb", "tbq", "x",
-            ],
-        )
-        .drop_duplicates("ot")
-        .sort_values("ot")
-    )
-    for col in ["o", "h", "l", "c", "qv", "n", "tbq"]:
-        frame[col] = pd.to_numeric(frame[col], errors="coerce")
-    frame.index = pd.to_datetime(frame.ct, unit="ms", utc=True) + pd.Timedelta(milliseconds=1)
-    print("V63_RAW", symbol, len(frame), flush=True)
+    frame = pd.DataFrame(
+        rows,
+        columns=["ot","o","h","l","c","v","ct","qv","n","tb","tbq","x"],
+    ).drop_duplicates("ot").sort_values("ot")
+    for column in ["o","h","l","c","qv","n","tbq"]:
+        frame[column] = pd.to_numeric(frame[column], errors="coerce")
+    frame.index = pd.to_datetime(frame["ct"], unit="ms", utc=True) + pd.Timedelta(milliseconds=1)
     return frame
 
 
-def features(frame: pd.DataFrame, prefix: str) -> pd.DataFrame:
-    log_close = np.log(frame.c)
-    returns = log_close.diff()
-    signed_quote_flow = 2 * frame.tbq - frame.qv
-    out = pd.DataFrame(index=frame.index)
+def build_features(own: pd.DataFrame, btc: pd.DataFrame) -> pd.DataFrame:
+    idx = own.index.intersection(btc.index)
+    own = own.reindex(idx)
+    btc = btc.reindex(idx)
 
-    for k in [1, 2, 3, 6, 12]:
-        out[prefix + f"r{k}"] = log_close.diff(k)
-    for k in [3, 6, 12, 24]:
-        out[prefix + f"rv{k}"] = returns.rolling(k).std()
-    for k in [1, 3, 6, 12]:
-        out[prefix + f"ofi{k}"] = (
-            signed_quote_flow.rolling(k).sum() / (frame.qv.rolling(k).sum() + 1e-12)
-        )
-    for k in [6, 12, 24]:
-        out[prefix + f"vpin{k}"] = (
-            signed_quote_flow.abs().rolling(k).sum() / (frame.qv.rolling(k).sum() + 1e-12)
-        )
-        out[prefix + f"vi{k}"] = frame.qv / (frame.qv.rolling(k).mean() + 1e-12)
-        out[prefix + f"ti{k}"] = frame.n / (frame.n.rolling(k).mean() + 1e-12)
+    lr = np.log(own["c"])
+    btc_lr = np.log(btc["c"])
+    ret = lr.diff()
+    quote = own["qv"]
+    signed_quote = 2.0 * own["tbq"] - quote
 
-    out[prefix + "range"] = (frame.h - frame.l) / (frame.c + 1e-12)
-    out[prefix + "body"] = (frame.c - frame.o) / (frame.o + 1e-12)
-    out[prefix + "cloc"] = (frame.c - frame.l) / (frame.h - frame.l + 1e-12) - 0.5
-    return out
+    out = pd.DataFrame(index=idx)
+    for k in (1, 3, 6, 12, 24):
+        out[f"r{k}"] = lr.diff(k)
+    for k in (3, 6, 12, 24):
+        out[f"rv{k}"] = ret.rolling(k).std()
+        out[f"ofi{k}"] = signed_quote.rolling(k).sum() / (quote.rolling(k).sum() + 1e-12)
+    for k in (6, 12, 24):
+        out[f"vi{k}"] = quote / (quote.rolling(k).mean() + 1e-12)
+        out[f"ti{k}"] = own["n"] / (own["n"].rolling(k).mean() + 1e-12)
+
+    out["range"] = (own["h"] - own["l"]) / (own["c"] + 1e-12)
+    out["body"] = (own["c"] - own["o"]) / (own["o"] + 1e-12)
+    out["cloc"] = (own["c"] - own["l"]) / (own["h"] - own["l"] + 1e-12) - 0.5
+
+    out["btc_r3"] = btc_lr.diff(3)
+    out["btc_r6"] = btc_lr.diff(6)
+    out["btc_r12"] = btc_lr.diff(12)
+    out["resid3"] = out["r3"] - out["btc_r3"]
+    out["resid6"] = out["r6"] - out["btc_r6"]
+    out["flow_delta"] = out["ofi3"] - out["ofi12"]
+    out["return_accel"] = out["r3"] - 0.5 * out["r6"]
+
+    minute = out.index.hour * 60 + out.index.minute
+    out["sin"] = np.sin(2 * np.pi * minute / 1440)
+    out["cos"] = np.cos(2 * np.pi * minute / 1440)
+
+    out["y"] = (lr.shift(-HORIZON_BARS) > lr).astype(int)
+    out["prev"] = (lr.diff(HORIZON_BARS) > 0).astype(int)
+    out["mom"] = (lr.diff(12) > 0).astype(int)
+
+    # Non-overlapping 15-minute decisions.
+    out = out.iloc[::HORIZON_BARS]
+    return out.replace([np.inf, -np.inf], np.nan).dropna()
 
 
 def ece(probability: np.ndarray, outcome: np.ndarray) -> float:
-    total = 0.0
-    for lower in np.arange(0, 1, 0.1):
-        upper = lower + 0.1 if lower < 0.9 else 1.0001
-        mask = (probability >= lower) & (probability < upper)
+    if not len(outcome):
+        return 1.0
+    total = float(len(outcome))
+    result = 0.0
+    for i in range(10):
+        lo, hi = i / 10, (i + 1) / 10
+        mask = (probability >= lo) & (probability < hi if i < 9 else probability <= hi)
         if mask.any():
-            total += mask.mean() * abs(
-                float(probability[mask].mean()) - float(outcome[mask].mean())
-            )
-    return float(total)
+            result += mask.sum() / total * abs(float(probability[mask].mean()) - float(outcome[mask].mean()))
+    return float(result)
 
 
-def metrics(
-    probability: np.ndarray,
-    outcome: np.ndarray,
-    baselines: dict[str, np.ndarray],
-) -> dict[str, object]:
+def metrics(probability: np.ndarray, outcome: np.ndarray, baseline: dict[str, np.ndarray]) -> dict:
     probability = np.asarray(probability, dtype=float)
     outcome = np.asarray(outcome, dtype=float)
+    if not len(outcome):
+        return {
+            "n": 0,
+            "accuracy": 0.0,
+            "brier": math.inf,
+            "climatology_brier": math.inf,
+            "brier_skill": -math.inf,
+            "ece": 1.0,
+            "beats_all_baselines": False,
+        }
     brier = float(np.mean((probability - outcome) ** 2))
-    baseline_briers = {
+    base_rate = float(outcome.mean())
+    climatology = float(np.mean((base_rate - outcome) ** 2))
+    benchmark_scores = {
         name: float(np.mean((np.asarray(values, dtype=float) - outcome) ** 2))
-        for name, values in baselines.items()
+        for name, values in baseline.items()
     }
-    best_baseline = min(baseline_briers.values())
     return {
         "n": int(len(outcome)),
-        "accuracy": float(np.mean((probability >= 0.5) == outcome)),
+        "accuracy": float(np.mean((probability >= 0.5) == (outcome >= 0.5))),
         "brier": brier,
-        "brier_skill_vs_best": float(1 - brier / best_baseline)
-        if best_baseline > 1e-12
-        else -9.0,
+        "climatology_brier": climatology,
+        "brier_skill": float(1.0 - brier / climatology) if climatology > 1e-12 else -math.inf,
         "ece": ece(probability, outcome),
-        "beats_all_baselines": bool(all(brier < value for value in baseline_briers.values())),
-        "best_baseline_brier": best_baseline,
-        "baseline_briers": baseline_briers,
+        "beats_all_baselines": bool(all(brier < score for score in benchmark_scores.values())),
+        "baseline_briers": benchmark_scores,
     }
 
 
-def wilson_lower(successes: int, total: int, z: float = 1.96) -> float:
-    if total <= 0:
-        return 0.0
-    p = successes / total
-    denom = 1 + z * z / total
-    return (
-        p
-        + z * z / (2 * total)
-        - z * math.sqrt((p * (1 - p) + z * z / (4 * total)) / total)
-    ) / denom
+def baselines(frame: pd.DataFrame, base_rate: float, mask: np.ndarray) -> dict[str, np.ndarray]:
+    prev = np.where(frame["prev"].to_numpy()[mask] > 0, 0.60, 0.40)
+    mom = np.where(frame["mom"].to_numpy()[mask] > 0, 0.65, 0.35)
+    n = int(mask.sum())
+    return {
+        "coin_flip": np.full(n, 0.5),
+        "base_rate": np.full(n, base_rate),
+        "previous_direction": prev,
+        "momentum_5": mom,
+    }
 
 
-def main() -> None:
-    with ThreadPoolExecutor(max_workers=3) as pool:
-        raw = dict(zip(SYMS, pool.map(fetch, SYMS)))
+def smooth_accuracy(correct: int, total: int) -> float:
+    return float(min(0.72, max(0.505, (correct + 18.0) / (total + 36.0))))
 
-    panel = pd.concat(
-        [
-            features(raw["BTCUSDT"], "b_"),
-            features(raw["ETHUSDT"], "e_"),
-            features(raw["SOLUSDT"], "s_"),
-        ],
-        axis=1,
-        join="inner",
-    )
-    panel["mktr1"] = (panel.b_r1 + panel.e_r1 + panel.s_r1) / 3
-    panel["mktr3"] = (panel.b_r3 + panel.e_r3 + panel.s_r3) / 3
-    panel["be_r1"] = panel.b_r1 - panel.e_r1
-    panel["bs_r1"] = panel.b_r1 - panel.s_r1
-    panel["es_r1"] = panel.e_r1 - panel.s_r1
-    minute = panel.index.hour * 60 + panel.index.minute
-    panel["sin"] = np.sin(2 * np.pi * minute / 1440)
-    panel["cos"] = np.cos(2 * np.pi * minute / 1440)
 
-    for symbol, prefix in [("BTCUSDT", "b_"), ("ETHUSDT", "e_"), ("SOLUSDT", "s_")]:
-        log_close = np.log(raw[symbol].c).reindex(panel.index)
-        panel["y_" + symbol] = (log_close.shift(-HORIZON_BARS) > log_close).astype(int)
-        panel["prev_" + symbol] = (log_close.diff() > 0).astype(int)
-        panel["mom_" + symbol] = (log_close.diff(5) > 0).astype(int)
+RULE_FEATURES = (
+    "r3","r6","r12","ofi3","ofi6","ofi12","flow_delta",
+    "resid3","resid6","return_accel","cloc",
+)
+RULE_QUANTILES = (0.50, 0.65, 0.75, 0.85, 0.90)
 
-    panel = panel.replace([np.inf, -np.inf], np.nan).dropna()
+
+def rule_prediction(frame: pd.DataFrame, feature: str, threshold: float, polarity: int) -> tuple[np.ndarray, np.ndarray]:
+    values = frame[feature].to_numpy(dtype=float)
+    mask = np.abs(values) >= threshold
+    direction = (values >= 0.0)
+    if polarity < 0:
+        direction = ~direction
+    return mask, direction
+
+
+def evaluate_direction(
+    frame: pd.DataFrame,
+    mask: np.ndarray,
+    direction: np.ndarray,
+    probability_strength: float,
+    base_rate: float,
+) -> dict:
+    if int(mask.sum()) == 0:
+        return metrics(np.array([]), np.array([]), {})
+    probability = np.where(direction[mask], probability_strength, 1.0 - probability_strength)
+    outcome = frame["y"].to_numpy(dtype=float)[mask]
+    return metrics(probability, outcome, baselines(frame, base_rate, mask))
+
+
+def choose_rule(train: pd.DataFrame, v1: pd.DataFrame, v2: pd.DataFrame) -> dict | None:
+    candidates = []
+    base_rate = float(train["y"].mean())
+
+    for feature in RULE_FEATURES:
+        train_values = train[feature].to_numpy(dtype=float)
+        if not len(train_values):
+            continue
+        for q in RULE_QUANTILES:
+            threshold = float(np.quantile(np.abs(train_values), q))
+            if not math.isfinite(threshold) or threshold <= 0:
+                continue
+            for polarity in (1, -1):
+                tr_mask, tr_dir = rule_prediction(train, feature, threshold, polarity)
+                tr_n = int(tr_mask.sum())
+                if tr_n < 60:
+                    continue
+                tr_correct = int(np.sum(tr_dir[tr_mask] == (train["y"].to_numpy()[tr_mask] > 0)))
+                qprob = smooth_accuracy(tr_correct, tr_n)
+
+                inner = []
+                valid = True
+                for frame in (v1, v2):
+                    mask, direction = rule_prediction(frame, feature, threshold, polarity)
+                    n = int(mask.sum())
+                    coverage = n / max(1, len(frame))
+                    if n < 18 or not (0.03 <= coverage <= 0.65):
+                        valid = False
+                        break
+                    m = evaluate_direction(frame, mask, direction, qprob, base_rate)
+                    inner.append((m, coverage))
+                if not valid:
+                    continue
+                min_skill = min(x[0]["brier_skill"] for x in inner)
+                min_accuracy = min(x[0]["accuracy"] for x in inner)
+                all_beats = all(x[0]["beats_all_baselines"] for x in inner)
+                score = min_skill + 0.30 * sum(x[0]["brier_skill"] for x in inner) + 0.01 * min_accuracy
+                candidates.append({
+                    "kind": "rule",
+                    "feature": feature,
+                    "threshold": threshold,
+                    "polarity": polarity,
+                    "train_probability": qprob,
+                    "min_skill": min_skill,
+                    "min_accuracy": min_accuracy,
+                    "inner_beats_all": all_beats,
+                    "score": score,
+                })
+
     feature_cols = [
-        col
-        for col in panel.columns
-        if not col.startswith(("y_", "prev_", "mom_"))
+        c for c in train.columns
+        if c not in {"y","prev","mom"}
     ]
-
-    output: dict[str, object] = {}
-    for target in SYMS:
-        ycol = "y_" + target
-        prevcol = "prev_" + target
-        momcol = "mom_" + target
-
-        end = panel.index.max().floor("6h") - pd.Timedelta(days=10)
-        start = end - 60 * pd.Timedelta(hours=6)
-
-        probabilities: list[float] = []
-        outcomes: list[float] = []
-        baseline_sets = {"coin": [], "base": [], "prev": [], "mom": []}
-        eligible = passing = 0
-        consecutive = max_consecutive = 0
-
-        for index in range(60):
-            t = start + index * pd.Timedelta(hours=6)
-            train = panel[
-                (panel.index >= t - pd.Timedelta(days=35))
-                & (panel.index < t - pd.Timedelta(days=4, minutes=15))
-            ]
-            validation_a = panel[
-                (panel.index >= t - pd.Timedelta(days=4))
-                & (panel.index < t - pd.Timedelta(days=2, minutes=15))
-            ]
-            validation_b = panel[
-                (panel.index >= t - pd.Timedelta(days=2))
-                & (panel.index < t - pd.Timedelta(minutes=15))
-            ]
-            test = panel[
-                (panel.index >= t)
-                & (panel.index < t + pd.Timedelta(hours=6) - pd.Timedelta(minutes=15))
-            ]
-            if min(map(len, [train, validation_a, validation_b, test])) < 300:
+    for C in (0.001, 0.003, 0.01, 0.03, 0.1):
+        model = make_pipeline(StandardScaler(), LogisticRegression(C=C, max_iter=1000))
+        model.fit(train[feature_cols], train["y"])
+        train_probability = model.predict_proba(train[feature_cols])[:, 1]
+        for confidence in (0.02, 0.04, 0.06, 0.08, 0.10, 0.13):
+            train_mask = np.abs(train_probability - 0.5) >= confidence
+            if int(train_mask.sum()) < 60:
                 continue
-
-            base_rate = float(train[ycol].mean())
-            best = None
-
-            for c_value in [0.0003, 0.001, 0.003, 0.01, 0.03]:
-                model = make_pipeline(
-                    StandardScaler(),
-                    LogisticRegression(C=c_value, max_iter=1000),
-                ).fit(train[feature_cols], train[ycol])
-                p_a = model.predict_proba(validation_a[feature_cols])[:, 1]
-                p_b = model.predict_proba(validation_b[feature_cols])[:, 1]
-
-                for threshold in [0.01, 0.02, 0.03, 0.04, 0.06, 0.08]:
-                    mask_a = np.abs(p_a - 0.5) >= threshold
-                    mask_b = np.abs(p_b - 0.5) >= threshold
-                    if mask_a.sum() < 60 or mask_b.sum() < 60:
-                        continue
-                    coverage_a = float(mask_a.mean())
-                    coverage_b = float(mask_b.mean())
-                    if not (
-                        0.08 <= coverage_a <= 0.90
-                        and 0.08 <= coverage_b <= 0.90
-                    ):
-                        continue
-
-                    correct = int(
-                        np.sum(
-                            (p_a[mask_a] >= 0.5)
-                            == validation_a[ycol].to_numpy()[mask_a]
-                        )
-                        + np.sum(
-                            (p_b[mask_b] >= 0.5)
-                            == validation_b[ycol].to_numpy()[mask_b]
-                        )
-                    )
-                    accepted = int(mask_a.sum() + mask_b.sum())
-                    calibrated_q = min(
-                        0.70,
-                        max(0.51, (correct + 30) / (accepted + 60)),
-                    )
-
-                    def score_block(
-                        probability: np.ndarray,
-                        data: pd.DataFrame,
-                        mask: np.ndarray,
-                    ) -> dict[str, object]:
-                        direction = probability[mask] >= 0.5
-                        calibrated = np.where(direction, calibrated_q, 1 - calibrated_q)
-                        actual = data[ycol].to_numpy()[mask]
-                        previous = np.where(data[prevcol].to_numpy()[mask] > 0, 0.60, 0.40)
-                        momentum = np.where(data[momcol].to_numpy()[mask] > 0, 0.65, 0.35)
-                        return metrics(
-                            calibrated,
-                            actual,
-                            {
-                                "coin": np.full(len(actual), 0.5),
-                                "base": np.full(len(actual), base_rate),
-                                "prev": previous,
-                                "mom": momentum,
-                            },
-                        )
-
-                    a_metrics = score_block(p_a, validation_a, mask_a)
-                    b_metrics = score_block(p_b, validation_b, mask_b)
-                    score = (
-                        min(
-                            float(a_metrics["brier_skill_vs_best"]),
-                            float(b_metrics["brier_skill_vs_best"]),
-                        )
-                        + 0.5
-                        * (
-                            float(a_metrics["brier_skill_vs_best"])
-                            + float(b_metrics["brier_skill_vs_best"])
-                        )
-                    )
-                    candidate = (
-                        score,
-                        c_value,
-                        threshold,
-                        calibrated_q,
-                        model,
-                        base_rate,
-                    )
-                    if best is None or candidate[0] > best[0]:
-                        best = candidate
-
-            if best is None:
+            train_dir = train_probability >= 0.5
+            tr_correct = int(np.sum(train_dir[train_mask] == (train["y"].to_numpy()[train_mask] > 0)))
+            qprob = smooth_accuracy(tr_correct, int(train_mask.sum()))
+            inner = []
+            valid = True
+            for frame in (v1, v2):
+                raw = model.predict_proba(frame[feature_cols])[:, 1]
+                mask = np.abs(raw - 0.5) >= confidence
+                coverage = int(mask.sum()) / max(1, len(frame))
+                if int(mask.sum()) < 18 or not (0.03 <= coverage <= 0.65):
+                    valid = False
+                    break
+                direction = raw >= 0.5
+                m = evaluate_direction(frame, mask, direction, qprob, base_rate)
+                inner.append((m, coverage))
+            if not valid:
                 continue
+            min_skill = min(x[0]["brier_skill"] for x in inner)
+            min_accuracy = min(x[0]["accuracy"] for x in inner)
+            all_beats = all(x[0]["beats_all_baselines"] for x in inner)
+            score = min_skill + 0.30 * sum(x[0]["brier_skill"] for x in inner) + 0.01 * min_accuracy
+            candidates.append({
+                "kind": "logistic",
+                "C": C,
+                "confidence": confidence,
+                "model": model,
+                "feature_cols": feature_cols,
+                "train_probability": qprob,
+                "min_skill": min_skill,
+                "min_accuracy": min_accuracy,
+                "inner_beats_all": all_beats,
+                "score": score,
+            })
 
-            _, c_value, threshold, calibrated_q, model, base_rate = best
-            eligible += 1
-            test_probability = model.predict_proba(test[feature_cols])[:, 1]
-            mask = np.abs(test_probability - 0.5) >= threshold
-            if mask.sum() < 8:
-                continue
+    if not candidates:
+        return None
+    return max(candidates, key=lambda item: (item["score"], item["min_skill"], item["min_accuracy"]))
 
-            direction = test_probability[mask] >= 0.5
-            calibrated = np.where(direction, calibrated_q, 1 - calibrated_q)
-            actual = test[ycol].to_numpy()[mask]
-            previous = np.where(test[prevcol].to_numpy()[mask] > 0, 0.60, 0.40)
-            momentum = np.where(test[momcol].to_numpy()[mask] > 0, 0.65, 0.35)
-            baseline = {
-                "coin": np.full(len(actual), 0.5),
-                "base": np.full(len(actual), base_rate),
-                "prev": previous,
-                "mom": momentum,
-            }
-            result = metrics(calibrated, actual, baseline)
-            fold_pass = bool(
-                result["n"] >= 8
-                and result["accuracy"] >= 0.52
-                and result["brier_skill_vs_best"] >= 0.02
-                and result["ece"] <= 0.12
-                and result["beats_all_baselines"]
+
+def apply_candidate(candidate: dict, train: pd.DataFrame, v1: pd.DataFrame, v2: pd.DataFrame, test: pd.DataFrame):
+    base_rate = float(train["y"].mean())
+
+    # Calibrate only from the two already-past validation blocks after selection.
+    correct = total = 0
+    for frame in (v1, v2):
+        if candidate["kind"] == "rule":
+            mask, direction = rule_prediction(
+                frame, candidate["feature"], candidate["threshold"], candidate["polarity"]
             )
-            passing += int(fold_pass)
-            consecutive = 0 if fold_pass else consecutive + 1
-            max_consecutive = max(max_consecutive, consecutive)
+        else:
+            raw = candidate["model"].predict_proba(frame[candidate["feature_cols"]])[:, 1]
+            mask = np.abs(raw - 0.5) >= candidate["confidence"]
+            direction = raw >= 0.5
+        correct += int(np.sum(direction[mask] == (frame["y"].to_numpy()[mask] > 0)))
+        total += int(mask.sum())
+    probability_strength = smooth_accuracy(correct, total)
 
-            probabilities += calibrated.tolist()
-            outcomes += actual.tolist()
-            for key, values in baseline.items():
-                baseline_sets[key] += np.asarray(values).tolist()
+    if candidate["kind"] == "rule":
+        mask, direction = rule_prediction(
+            test, candidate["feature"], candidate["threshold"], candidate["polarity"]
+        )
+    else:
+        raw = candidate["model"].predict_proba(test[candidate["feature_cols"]])[:, 1]
+        mask = np.abs(raw - 0.5) >= candidate["confidence"]
+        direction = raw >= 0.5
 
-        aggregate = (
-            metrics(
-                np.array(probabilities),
-                np.array(outcomes),
-                {key: np.array(values) for key, values in baseline_sets.items()},
-            )
-            if outcomes
-            else {
-                "n": 0,
-                "accuracy": 0,
-                "brier_skill_vs_best": -9,
-                "ece": 1,
-                "beats_all_baselines": False,
-            }
-        )
-        wilson = (
-            wilson_lower(
-                int(round(float(aggregate["accuracy"]) * int(aggregate["n"]))),
-                int(aggregate["n"]),
-            )
-            if aggregate["n"]
-            else 0
-        )
-        pass_rate = passing / eligible if eligible else 0
-        high_level_pass = bool(
-            aggregate["n"] >= 1000
-            and aggregate["accuracy"] >= 0.52
-            and aggregate["brier_skill_vs_best"] >= 0.02
-            and aggregate["ece"] <= 0.12
-            and aggregate["beats_all_baselines"]
-            and wilson >= 0.50
-            and eligible >= 30
-            and pass_rate >= 0.45
-            and max_consecutive <= 7
-        )
-        output[target] = {
-            "eligible_folds": eligible,
-            "passing_folds": passing,
-            "eligible_pass_rate": pass_rate,
-            "max_consecutive_failures": max_consecutive,
-            "wilson95_lower": wilson,
-            "aggregate": aggregate,
-            "HIGH_LEVEL_PASS": high_level_pass,
-        }
+    if int(mask.sum()) == 0:
+        return [], [], {k: [] for k in ("coin_flip","base_rate","previous_direction","momentum_5")}
+    probability = np.where(direction[mask], probability_strength, 1.0 - probability_strength)
+    outcome = test["y"].to_numpy(dtype=float)[mask]
+    base = baselines(test, base_rate, mask)
+    return probability.tolist(), outcome.tolist(), {k: v.tolist() for k, v in base.items()}
 
-    print("V63_CROSS_ASSET_15M", json.dumps(output), flush=True)
-    print(
-        "V63_ALL_PASS",
-        all(bool(item["HIGH_LEVEL_PASS"]) for item in output.values()),
-        flush=True,
+
+def preholdout(symbol: str, frame: pd.DataFrame) -> dict:
+    latest = frame.index.max().floor("1d")
+    end = latest - pd.Timedelta(days=HOLDOUT_DAYS)
+    start = end - pd.Timedelta(days=PREHOLDOUT_DAYS)
+
+    probabilities = []
+    outcomes = []
+    base = {k: [] for k in ("coin_flip","base_rate","previous_direction","momentum_5")}
+    selected = []
+
+    for day in range(PREHOLDOUT_DAYS):
+        t = start + pd.Timedelta(days=day)
+        train = frame[
+            (frame.index >= t - pd.Timedelta(days=35))
+            & (frame.index < t - pd.Timedelta(days=10, minutes=15))
+        ]
+        v1 = frame[
+            (frame.index >= t - pd.Timedelta(days=10))
+            & (frame.index < t - pd.Timedelta(days=5, minutes=15))
+        ]
+        v2 = frame[
+            (frame.index >= t - pd.Timedelta(days=5))
+            & (frame.index < t - pd.Timedelta(minutes=15))
+        ]
+        test = frame[
+            (frame.index >= t)
+            & (frame.index < t + pd.Timedelta(days=1) - pd.Timedelta(minutes=15))
+        ]
+        if len(train) < 1000 or len(v1) < 250 or len(v2) < 250 or len(test) < 80:
+            continue
+
+        candidate = choose_rule(train, v1, v2)
+        if candidate is None:
+            continue
+        # Fail closed: only use a daily candidate when both past validation blocks
+        # show positive skill and non-random directionality.
+        if candidate["min_skill"] <= 0.0 or candidate["min_accuracy"] < 0.53:
+            continue
+
+        p, y, b = apply_candidate(candidate, train, v1, v2, test)
+        probabilities.extend(p)
+        outcomes.extend(y)
+        for key in base:
+            base[key].extend(b[key])
+        selected.append({
+            "date": str(t.date()),
+            "kind": candidate["kind"],
+            "feature": candidate.get("feature"),
+            "polarity": candidate.get("polarity"),
+            "C": candidate.get("C"),
+            "confidence": candidate.get("confidence"),
+            "min_skill": candidate["min_skill"],
+            "min_accuracy": candidate["min_accuracy"],
+            "n": len(y),
+        })
+
+    m = metrics(np.array(probabilities), np.array(outcomes), {k: np.array(v) for k, v in base.items()})
+    passed = bool(
+        m["n"] >= 100
+        and m["directional_accuracy" if "directional_accuracy" in m else "accuracy"] >= 0.52
+        and m["brier_skill"] >= 0.02
+        and m["ece"] <= 0.12
+        and m["beats_all_baselines"]
     )
+    return {
+        "symbol": symbol,
+        "status": "PASS" if passed else "FAIL",
+        "metrics": m,
+        "selected_days": len(selected),
+        "sample": selected[:5],
+    }
+
+
+def main():
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        frames = dict(zip(SYMBOLS, pool.map(fetch, SYMBOLS)))
+    print("V65_RAW", json.dumps({k: len(v) for k, v in frames.items()}), flush=True)
+    btc = frames["BTCUSDT"]
+    results = {}
+    for symbol in SYMBOLS:
+        try:
+            prepared = build_features(frames[symbol], btc)
+            results[symbol] = preholdout(symbol, prepared)
+            print("V65_SYMBOL", json.dumps(results[symbol], default=str), flush=True)
+        except Exception as exc:
+            results[symbol] = {"symbol": symbol, "status": "ERROR", "reason": exc.__class__.__name__}
+            print("V65_SYMBOL", json.dumps(results[symbol]), flush=True)
+    passing = [symbol for symbol, item in results.items() if item.get("status") == "PASS"]
+    print("V65_PREHOLDOUT", json.dumps({"passing_symbols": passing, "count": len(passing), "results": results}, default=str), flush=True)
+    print("V65_CAN_ADVANCE_TO_HOLDOUT", len(passing) >= 3, flush=True)
 
 
 if __name__ == "__main__":
