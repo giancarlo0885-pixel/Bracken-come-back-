@@ -403,3 +403,121 @@ def test_expected_edge_consumes_explicit_calibrated_provenance():
     from paper_strategy_economics import expected_edge_pct
     assert expected_edge_pct({"calibrated_expected_edge_pct": 0.42}) == 0.42
     assert expected_edge_pct({"expected_edge_pct": -0.31}) == -0.31
+
+
+def _enable_paper_unbounded(monkeypatch):
+    monkeypatch.setenv("EXECUTION_MODE", "paper")
+    monkeypatch.setenv("PAPER_AUTONOMOUS_LEARNING", "true")
+    monkeypatch.setenv("PAPER_UNBOUNDED_LEARNING", "true")
+    monkeypatch.setenv("ENABLE_BROKER_SUBMISSION", "false")
+    monkeypatch.setenv("LIVE_TRADING_ARMED", "false")
+
+
+def test_paper_unbounded_learning_turns_negative_economics_into_bounded_exploration(monkeypatch):
+    _enable_paper_unbounded(monkeypatch)
+    worker = _worker()
+    monkeypatch.setattr(adaptive, "hard_risk_gate", lambda item: {"allowed": True, "reasons": []})
+    monkeypatch.setattr(bridge, "_adaptive_meaningful_entry_floor", lambda item, *, equity, minimum_notional: 2.0)
+    monkeypatch.setattr(
+        bridge,
+        "fee_edge_allows_entry",
+        lambda item: (False, "edge_below_round_trip_cost:-0.30<0.55", -0.30, 0.55),
+    )
+    install_strategic_rebalance_optimizer_bridge(worker)
+
+    plan = worker.adaptive_portfolio_optimizer(
+        [_candidate(
+            tactical_action="BUY",
+            paper_unbounded_learning=True,
+            core_target_amount=25.0,
+        )],
+        {"cash": 2000.0, "equity": 2000.0, "buying_power": 2000.0},
+        [],
+        engine="crypto",
+    )
+
+    assert len(plan["allocations"]) == 1
+    allocation = plan["allocations"][0]
+    assert allocation["amount"] == 5.0
+    assert allocation["paper_learning_exploration"] is True
+    assert allocation["economics_observed_only"] is True
+    assert allocation["economics_reason"].startswith("edge_below_round_trip_cost")
+    assert allocation["expected_edge_pct"] == -0.30
+    assert allocation["estimated_round_trip_cost_pct"] == 0.55
+    assert plan["rejections"] == []
+
+
+def test_paper_unbounded_learning_promotes_tiny_strategic_gap_to_minimum_learning_fill(monkeypatch):
+    _enable_paper_unbounded(monkeypatch)
+    worker = _worker()
+    monkeypatch.setattr(adaptive, "hard_risk_gate", lambda item: {"allowed": True, "reasons": []})
+    monkeypatch.setattr(bridge, "_adaptive_meaningful_entry_floor", lambda item, *, equity, minimum_notional: 2.0)
+    monkeypatch.setattr(
+        bridge,
+        "fee_edge_allows_entry",
+        lambda item: (True, "edge_ok", 0.25, 0.10),
+    )
+    install_strategic_rebalance_optimizer_bridge(worker)
+
+    plan = worker.adaptive_portfolio_optimizer(
+        [_candidate(
+            tactical_action="BUY",
+            paper_unbounded_learning=True,
+            core_target_amount=0.02,
+        )],
+        {"cash": 2000.0, "equity": 2000.0, "buying_power": 2000.0},
+        [],
+        engine="crypto",
+    )
+
+    assert len(plan["allocations"]) == 1
+    allocation = plan["allocations"][0]
+    assert allocation["amount"] == 2.0
+    assert allocation["paper_learning_exploration"] is True
+    assert allocation["economics_observed_only"] is False
+    assert plan["rejections"] == []
+
+
+def test_paper_exploration_requires_explicit_safe_qualification(monkeypatch):
+    _enable_paper_unbounded(monkeypatch)
+    worker = _worker()
+    monkeypatch.setattr(adaptive, "hard_risk_gate", lambda item: {"allowed": True, "reasons": []})
+    monkeypatch.setattr(
+        bridge,
+        "fee_edge_allows_entry",
+        lambda item: (False, "known_negative", -0.40, 0.20),
+    )
+    install_strategic_rebalance_optimizer_bridge(worker)
+
+    plan = worker.adaptive_portfolio_optimizer(
+        [_candidate(tactical_action="BUY", paper_unbounded_learning=False)],
+        {"cash": 2000.0, "equity": 2000.0, "buying_power": 2000.0},
+        [],
+        engine="crypto",
+    )
+
+    assert plan["allocations"] == []
+    assert plan["rejections"][0]["reason"] == "economics_blocked"
+
+
+def test_paper_exploration_cannot_activate_when_broker_submission_is_enabled(monkeypatch):
+    _enable_paper_unbounded(monkeypatch)
+    monkeypatch.setenv("ENABLE_BROKER_SUBMISSION", "true")
+    worker = _worker()
+    monkeypatch.setattr(adaptive, "hard_risk_gate", lambda item: {"allowed": True, "reasons": []})
+    monkeypatch.setattr(
+        bridge,
+        "fee_edge_allows_entry",
+        lambda item: (False, "known_negative", -0.40, 0.20),
+    )
+    install_strategic_rebalance_optimizer_bridge(worker)
+
+    plan = worker.adaptive_portfolio_optimizer(
+        [_candidate(tactical_action="BUY", paper_unbounded_learning=True)],
+        {"cash": 2000.0, "equity": 2000.0, "buying_power": 2000.0},
+        [],
+        engine="crypto",
+    )
+
+    assert plan["allocations"] == []
+    assert plan["rejections"][0]["reason"] == "economics_blocked"
