@@ -18,6 +18,7 @@ _STRATEGIC_ENTRY_ACTIONS = {"HOLD", "BUY", "STRONG_BUY", "ACCUMULATE", "LONG"}
 _DEFAULT_MEANINGFUL_ENTRY_PCT = 0.005
 _DEFAULT_MAX_MEANINGFUL_ENTRY_PCT = 0.01
 _DEFAULT_TINY_GAP_COOLDOWN_SECONDS = 60.0
+_DEFAULT_PAPER_EXPLORATION_PCT = 0.0025
 
 
 def _env_float(name: str, default: float, *, low: float, high: float) -> float:
@@ -71,6 +72,28 @@ def _entry_candidate(item: dict[str, Any]) -> bool:
         "ACCUMULATE",
         "LONG",
     }
+
+
+def _paper_unbounded_exploration(item: dict[str, Any]) -> bool:
+    """Allow additional evidence collection only inside the isolated paper learner."""
+    return bool(
+        item.get("paper_unbounded_learning") is True
+        and str(os.getenv("EXECUTION_MODE", "paper") or "paper").strip().lower() == "paper"
+        and str(os.getenv("PAPER_AUTONOMOUS_LEARNING", "false") or "").strip().lower() in {"1", "true", "yes", "on"}
+        and str(os.getenv("PAPER_UNBOUNDED_LEARNING", "false") or "").strip().lower() in {"1", "true", "yes", "on"}
+        and str(os.getenv("ENABLE_BROKER_SUBMISSION", "false") or "").strip().lower() not in {"1", "true", "yes", "on"}
+        and str(os.getenv("LIVE_TRADING_ARMED", "false") or "").strip().lower() not in {"1", "true", "yes", "on"}
+    )
+
+
+def _paper_exploration_cap(equity: float, meaningful_entry_floor: float) -> float:
+    pct = _env_float(
+        "PAPER_LEARNING_EXPLORATION_PCT",
+        _DEFAULT_PAPER_EXPLORATION_PCT,
+        low=0.001,
+        high=0.01,
+    )
+    return round(max(meaningful_entry_floor, equity * pct), 2)
 
 
 def _confidence_fraction(item: dict[str, Any]) -> float:
@@ -301,32 +324,49 @@ def install_strategic_rebalance_optimizer_bridge(worker: Any) -> None:
             # economics gate. Mature known-negative evidence must not be logged as
             # APPROVED merely because the candidate has capital capacity.
             economics_allowed, economics_reason, expected_edge, estimated_cost = fee_edge_allows_entry(item)
+            economics_observed_only = False
+            economics_identity = {
+                "cohort": str(item.get("cohort") or item.get("economic_cohort") or "").strip() or None,
+                "strategy": strategy_identity(item),
+                "regime": str(item.get("regime") or item.get("market_regime") or "").strip() or None,
+            }
             if not economics_allowed:
-                economics_identity = {
-                    "cohort": str(item.get("cohort") or item.get("economic_cohort") or "").strip() or None,
-                    "strategy": strategy_identity(item),
-                    "regime": str(item.get("regime") or item.get("market_regime") or "").strip() or None,
-                }
-                rejections.append({
-                    "symbol": symbol,
-                    "reason": "economics_blocked",
-                    "economics_reason": economics_reason,
-                    "expected_edge_pct": expected_edge,
-                    "estimated_round_trip_cost_pct": estimated_cost,
-                    "economics_identity": economics_identity,
-                    "watch_only": True,
-                })
-                _log_optimizer_decision(
-                    worker,
-                    symbol,
-                    status="WATCH",
-                    reason="economics_blocked",
-                    economics_reason=economics_reason,
-                    expected_edge_pct=expected_edge if expected_edge is not None else "unknown",
-                    estimated_round_trip_cost_pct=round(estimated_cost, 6),
-                    economics_identity=economics_identity,
-                )
-                continue
+                if _paper_unbounded_exploration(item) and _entry_candidate(item):
+                    # In the isolated paper learner, known/uncertain economics are evidence,
+                    # not a total data-starvation veto. The allocation is capped below and
+                    # remains impossible to route to a broker or armed live path.
+                    economics_observed_only = True
+                    _log_optimizer_decision(
+                        worker,
+                        symbol,
+                        status="EXPLORE",
+                        reason="paper_economics_observed_only",
+                        economics_reason=economics_reason,
+                        expected_edge_pct=expected_edge if expected_edge is not None else "unknown",
+                        estimated_round_trip_cost_pct=round(estimated_cost, 6),
+                        economics_identity=economics_identity,
+                    )
+                else:
+                    rejections.append({
+                        "symbol": symbol,
+                        "reason": "economics_blocked",
+                        "economics_reason": economics_reason,
+                        "expected_edge_pct": expected_edge,
+                        "estimated_round_trip_cost_pct": estimated_cost,
+                        "economics_identity": economics_identity,
+                        "watch_only": True,
+                    })
+                    _log_optimizer_decision(
+                        worker,
+                        symbol,
+                        status="WATCH",
+                        reason="economics_blocked",
+                        economics_reason=economics_reason,
+                        expected_edge_pct=expected_edge if expected_edge is not None else "unknown",
+                        estimated_round_trip_cost_pct=round(estimated_cost, 6),
+                        economics_identity=economics_identity,
+                    )
+                    continue
 
             # A configured core gap is an allocation ceiling. If that ceiling is
             # already below the unchanged meaningful-entry floor, no downstream
@@ -338,10 +378,17 @@ def install_strategic_rebalance_optimizer_bridge(worker: Any) -> None:
                 minimum_notional=minimum_notional,
             )
             strategic_target_gap = adaptive._finite(item.get("core_target_amount"))
+            paper_floor_override = bool(
+                _paper_unbounded_exploration(item)
+                and _explicit_strategic_rebalance(item)
+                and strategic_target_gap > 0
+                and strategic_target_gap + 1e-9 < meaningful_entry_floor
+            )
             if (
                 _explicit_strategic_rebalance(item)
                 and strategic_target_gap > 0
                 and strategic_target_gap + 1e-9 < meaningful_entry_floor
+                and not paper_floor_override
             ):
                 now = time.monotonic()
                 tiny_state = _tiny_gap_state(item, meaningful_entry_floor)
@@ -415,7 +462,16 @@ def install_strategic_rebalance_optimizer_bridge(worker: Any) -> None:
             # not merely a reason to enter. Never let the generic optimizer buy
             # more than the remaining gap that produced the authorization.
             if _explicit_strategic_rebalance(item) and strategic_target_gap > 0:
-                candidate_amount = min(candidate_amount, strategic_target_gap)
+                if paper_floor_override:
+                    candidate_amount = min(candidate_amount, meaningful_entry_floor)
+                else:
+                    candidate_amount = min(candidate_amount, strategic_target_gap)
+
+            if economics_observed_only:
+                candidate_amount = min(
+                    candidate_amount,
+                    _paper_exploration_cap(equity, meaningful_entry_floor),
+                )
 
             if candidate_amount <= 0:
                 rejections.append({"symbol": symbol, "reason": "no capital capacity"})
@@ -508,13 +564,22 @@ def install_strategic_rebalance_optimizer_bridge(worker: Any) -> None:
                     "core_target_gap": round(strategic_target_gap, 2) if strategic_target_gap > 0 else None,
                     "meaningful_entry_floor": meaningful_entry_floor,
                     "entry_floor_mode": "adaptive_equity_spread_liquidity_confidence",
+                    "paper_learning_exploration": economics_observed_only or paper_floor_override,
+                    "economics_observed_only": economics_observed_only,
+                    "economics_reason": economics_reason if economics_observed_only else None,
+                    "expected_edge_pct": expected_edge if economics_observed_only else None,
+                    "estimated_round_trip_cost_pct": estimated_cost if economics_observed_only else None,
                 }
             )
             _log_optimizer_decision(
                 worker,
                 symbol,
                 status="CANDIDATE_ALLOCATED",
-                reason="candidate_capital_reserved_for_downstream_validation",
+                reason=(
+                    "paper_learning_exploration_candidate"
+                    if economics_observed_only or paper_floor_override
+                    else "candidate_capital_reserved_for_downstream_validation"
+                ),
                 candidate_amount=round(executable_amount, 2),
                 cash_before=round(cash, 2),
                 reserve=round(reserve, 2),
