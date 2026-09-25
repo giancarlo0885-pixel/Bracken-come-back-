@@ -55,3 +55,11 @@ def test_challenger_v2_requires_exact_round_trip_cost_evidence():
     assert "m.round_trip_fees" in source
     assert "l.fees/(l.quantity*l.entry_price)" not in source
     assert "gate=0.20pct" in source
+
+
+def test_challenger_results_are_version_scoped_for_generation_isolation():
+    source = Path("paper_entry_edge_challenger_shadow.py").read_text(encoding="utf-8")
+    assert "PRIMARY KEY (version, trade_id)" in source
+    assert "r.version=%s AND r.trade_id=m.trade_id" in source
+    assert "ON CONFLICT (version, trade_id) DO NOTHING" in source
+    assert "(epoch.get(\"started_at\"), _VERSION, max(1, int(limit)))" in source
