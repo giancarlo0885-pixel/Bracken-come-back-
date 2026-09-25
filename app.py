@@ -790,7 +790,7 @@ elif page == "Oracle Brain":
 
     st.subheader("Oracle Brain — Living Learning Map")
     brain_snapshot = build_oracle_brain_snapshot(rows)
-    st.iframe(render_oracle_brain_component(brain_snapshot), height=610, scrolling=False)
+    st.iframe(render_oracle_brain_component(brain_snapshot), height=610)
 
 elif page == "Market Focus":
     render_global_pit_section()
