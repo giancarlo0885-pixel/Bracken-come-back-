@@ -130,6 +130,7 @@ DATABASE_RETENTION_POLICIES = {
     "opportunity_radar_assessments": {"keep_rows": 12000, "batch_size": DATABASE_RETENTION_BATCH_SIZE, "classification": "append-only analytical/ephemeral"},
     "global_decision_ledger": {"keep_rows": 12000, "batch_size": DATABASE_RETENTION_BATCH_SIZE, "classification": "decision audit; preserve execution/outcome-linked provenance"},
     "global_decision_events": {"keep_rows": 1000, "batch_size": DATABASE_RETENTION_BATCH_SIZE, "classification": "append-only analytical/ephemeral"},
+    "forecast_validation": {"keep_rows": 15000, "batch_size": DATABASE_RETENTION_BATCH_SIZE, "classification": "governance/audit records; preserve until archive strategy exists"},
 }
 DATABASE_TABLE_GROWTH_AUDIT = {
     "portfolios": {"class": "canonical financial records", "inserted_by": "initialize_database/portfolio bootstrap", "frequency": "one row per market", "retention": "never auto-delete"},
@@ -149,7 +150,7 @@ DATABASE_TABLE_GROWTH_AUDIT = {
     "opportunity_rankings": {"class": "append-only analytical/ephemeral records", "inserted_by": "market_worker rank persistence", "frequency": "scan candidates", "retention": "keep newest 12000 rows"},
     "oracle_decision_audit": {"class": "append-only analytical/ephemeral records", "inserted_by": "market_worker decision persistence", "frequency": "ranked scan candidates", "retention": "keep newest 12000 rows"},
     "opportunity_radar_assessments": {"class": "append-only analytical/ephemeral records", "inserted_by": "market_worker radar persistence", "frequency": "ranked scan candidates", "retention": "keep newest 12000 rows"},
-    "forecast_validation": {"class": "governance/audit records", "inserted_by": "forecast quality validation", "frequency": "realized forecast outcomes", "retention": "preserve until archive strategy exists"},
+    "forecast_validation": {"class": "governance/audit records", "inserted_by": "forecast quality validation", "frequency": "realized forecast outcomes", "retention": "keep newest 15000 rows; preserve governance/audit provenance"},
     "recommendations": {"class": "append-only analytical/ephemeral records", "inserted_by": "advisor recommendations", "frequency": "advisor generation", "retention": "recommended conservative row/age policy after usage review"},
     "recommendation_evidence": {"class": "append-only analytical/ephemeral records", "inserted_by": "advisor evidence persistence", "frequency": "per recommendation", "retention": "recommended conservative row/age policy after usage review"},
     "strategy_signals": {"class": "append-only analytical/ephemeral records", "inserted_by": "strategy engine", "frequency": "strategy evaluation", "retention": "recommended conservative row/age policy after usage review"},
@@ -182,7 +183,7 @@ DATABASE_TABLE_GROWTH_AUDIT = {
     "oracle_calibration_buckets": {"class": "research validation rollups", "inserted_by": "Oracle validation layer", "frequency": "learning sync", "retention": "never auto-delete"},
     "oracle_validation_weaknesses": {"class": "research weakness evidence", "inserted_by": "Oracle validation layer", "frequency": "learning sync", "retention": "never auto-delete"},
     "oracle_paper_promotion_evidence": {"class": "research promotion evidence", "inserted_by": "Oracle validation layer", "frequency": "learning sync", "retention": "never auto-delete"},
-    "oracle_decision_replays": {"class": "advanced research evidence", "inserted_by": "Oracle advanced learning", "frequency": "learning sync", "retention": "never auto-delete"},
+    "oracle_decision_replays": {"class": "advanced research evidence", "inserted_by": "Oracle advanced learning", "frequency": "learning sync", "retention": "never auto-delete (canonical protected table); autovacuum tuned aggressively to control dead-tuple bloat under high churn"},
 }
 
 
