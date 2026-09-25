@@ -70,6 +70,11 @@ def assess_opportunity_radar(signal: Any, *, market: str = "cash") -> RadarAsses
             )
         )
     )
+    brain_outcome_adjustment = _clip(
+        _number(_value(signal, "brain_outcome_adjustment", 0.0)),
+        -4.0,
+        3.0,
+    )
 
     # Independent strategy lenses. Scores are comparable but not probabilities.
     breakout = _clip(
@@ -173,7 +178,8 @@ def assess_opportunity_radar(signal: Any, *, market: str = "cash") -> RadarAsses
         (setup_score - 65) * 0.08
         + (durability - 55) * 0.035
         + (urgency - 55) * 0.02
-        - crowding * 0.035,
+        - crowding * 0.035
+        + brain_outcome_adjustment,
         -6.0,
         6.0,
     )
@@ -192,6 +198,10 @@ def assess_opportunity_radar(signal: Any, *, market: str = "cash") -> RadarAsses
         reasons.append("catalyst intensity is above normal")
     if external_catalyst >= 70:
         reasons.append("independent event radar found a high-priority market catalyst")
+    if brain_outcome_adjustment > 0:
+        reasons.append("mature exact-provenance Brain outcomes support this setup")
+    elif brain_outcome_adjustment < 0:
+        warnings.append("mature exact-provenance Brain outcomes penalize this setup")
     if setup_separation < 5:
         warnings.append("setup classification is mixed")
     if crowding >= 65:
@@ -212,6 +222,8 @@ def assess_opportunity_radar(signal: Any, *, market: str = "cash") -> RadarAsses
     )
     if external_catalyst > 0:
         summary += f" Independent event catalyst: {external_catalyst:.0f}/100."
+    if brain_outcome_adjustment:
+        summary += f" Brain outcome ranking adjustment: {brain_outcome_adjustment:+.2f}."
     if warnings:
         summary += " Warnings: " + "; ".join(warnings) + "."
 
