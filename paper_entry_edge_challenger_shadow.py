@@ -67,7 +67,7 @@ def ensure_schema() -> None:
         """)
         conn.execute("""
             CREATE TABLE IF NOT EXISTS paper_entry_edge_challenger_results (
-                trade_id TEXT PRIMARY KEY,
+                trade_id TEXT NOT NULL,
                 version TEXT NOT NULL,
                 strategy TEXT NOT NULL,
                 regime TEXT NOT NULL,
@@ -85,7 +85,8 @@ def ensure_schema() -> None:
                 actual_net_pnl DOUBLE PRECISION NOT NULL,
                 avoided_loss DOUBLE PRECISION NOT NULL DEFAULT 0,
                 missed_winner DOUBLE PRECISION NOT NULL DEFAULT 0,
-                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                PRIMARY KEY (version, trade_id)
             )
         """)
         conn.execute(
@@ -136,10 +137,10 @@ def evaluate_new_closes(limit: int = 250) -> int:
               AND m.round_trip_net_pnl IS NOT NULL AND m.round_trip_fees IS NOT NULL
               AND m.entry_time IS NOT NULL AND m.exit_time IS NOT NULL
               AND NOT EXISTS (
-                  SELECT 1 FROM paper_entry_edge_challenger_results r WHERE r.trade_id=m.trade_id
+                  SELECT 1 FROM paper_entry_edge_challenger_results r WHERE r.version=%s AND r.trade_id=m.trade_id
               )
             ORDER BY m.exit_time ASC LIMIT %s
-        """, (epoch.get("started_at"), max(1, int(limit)))).fetchall())
+        """, (epoch.get("started_at"), _VERSION, max(1, int(limit)))).fetchall())
 
         for row in rows:
             strategy = normalize_strategy_identity(row.get("strategy"))
@@ -185,7 +186,7 @@ def evaluate_new_closes(limit: int = 250) -> int:
                     prior_cost_pct,prior_loss_streak,edge_score,would_trade,actual_net_pnl,
                     avoided_loss,missed_winner
                 ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                ON CONFLICT (trade_id) DO NOTHING
+                ON CONFLICT (version, trade_id) DO NOTHING
             """, (
                 row.get("trade_id"),_VERSION,strategy,regime,entry_time,row.get("exit_time"),samples,
                 expectancy,pf,mfe,mae,cost_pct,streak,score,would_trade,pnl,avoided_loss,missed_winner,
