@@ -340,3 +340,11 @@ def test_brain_visual_payload_executes_client_side_metrics():
     assert 'document.getElementById("newCycle").textContent=Number(A.learned_this_cycle||0).toLocaleString();' in component
     assert "requestAnimationFrame(draw)" in component
     assert "buildNodes();" in component
+
+
+def test_app_brain_iframe_uses_supported_streamlit_signature():
+    source = Path("app.py").read_text(encoding="utf-8")
+    brain_iframe = next(line for line in source.splitlines() if "render_oracle_brain_component(brain_snapshot)" in line)
+    assert "st.iframe(" in brain_iframe
+    assert "height=610" in brain_iframe
+    assert "scrolling=" not in brain_iframe
