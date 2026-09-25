@@ -171,6 +171,8 @@ POST_MIGRATION_MAINTENANCE = [
     "ALTER TABLE oracle_decision_audit SET (autovacuum_vacuum_scale_factor = 0.01, autovacuum_vacuum_threshold = 50, autovacuum_analyze_scale_factor = 0.02, autovacuum_analyze_threshold = 50)",
     "ALTER TABLE opportunity_radar_assessments SET (autovacuum_vacuum_scale_factor = 0.01, autovacuum_vacuum_threshold = 50, autovacuum_analyze_scale_factor = 0.02, autovacuum_analyze_threshold = 50)",
     "ALTER TABLE global_decision_events SET (autovacuum_vacuum_scale_factor = 0.005, autovacuum_vacuum_threshold = 25, autovacuum_analyze_scale_factor = 0.01, autovacuum_analyze_threshold = 25)",
+    "ALTER TABLE oracle_decision_replays SET (autovacuum_vacuum_scale_factor = 0.01, autovacuum_vacuum_threshold = 50, autovacuum_analyze_scale_factor = 0.02, autovacuum_analyze_threshold = 50)",
+    "ALTER TABLE forecast_validation SET (autovacuum_vacuum_scale_factor = 0.015, autovacuum_vacuum_threshold = 75, autovacuum_analyze_scale_factor = 0.02, autovacuum_analyze_threshold = 75)",
 ]
 
 

@@ -371,6 +371,133 @@ def test_global_decision_ledger_cleanup_is_bounded_per_pass(monkeypatch):
     assert conn.delete_calls == 2
 
 
+def test_forecast_validation_retention_policy_registered_with_keep_rows_and_batching():
+    policy = database.DATABASE_RETENTION_POLICIES["forecast_validation"]
+    assert policy["keep_rows"] == 15000
+    assert policy["batch_size"] == database.DATABASE_RETENTION_BATCH_SIZE
+    assert "keep newest 15000 rows" in database.DATABASE_TABLE_GROWTH_AUDIT["forecast_validation"]["retention"]
+
+
+def test_forecast_validation_retention_deletes_oldest_rows_beyond_keep_rows():
+    class Result:
+        rowcount = 500
+
+    class Conn:
+        def __init__(self):
+            self.delete_calls = 0
+
+        def execute(self, sql, params=()):
+            if "DELETE FROM forecast_validation" in sql:
+                self.delete_calls += 1
+                return Result()
+
+            class Row:
+                def fetchone(self):
+                    return {"id": 1}
+            return Row()
+
+    conn = Conn()
+    deleted = database._apply_retention_policy(
+        conn,
+        "forecast_validation",
+        {"keep_rows": 15000, "batch_size": 500},
+        max_batches=1,
+    )
+    assert deleted == 500
+    assert conn.delete_calls == 1
+
+
+def test_oracle_decision_replays_is_never_added_to_generic_retention_policies():
+    # oracle_decision_replays remains a canonical protected table (advanced
+    # research evidence). It must never be eligible for the generic
+    # id-ordered retention sweep, which has no provenance-aware exclusion
+    # for global_decision_ledger / oracle_brain_* / oracle_counterfactual_outcomes /
+    # oracle_calibration_buckets linkage.
+    assert "oracle_decision_replays" in database.CANONICAL_PROTECTED_TABLES
+    assert "oracle_decision_replays" not in database.DATABASE_RETENTION_POLICIES
+    assert database.CANONICAL_PROTECTED_TABLES.isdisjoint(database.DATABASE_RETENTION_POLICIES)
+
+
+def test_oracle_decision_replays_generic_retention_call_is_refused():
+    class Conn:
+        def execute(self, sql, params=()):
+            raise AssertionError("should not execute SQL for a protected table")
+
+    with pytest.raises(ValueError, match="protected table"):
+        database._apply_retention_policy(
+            Conn(), "oracle_decision_replays", {"keep_rows": 10000, "batch_size": 500}
+        )
+
+
+def test_oracle_decision_replays_and_forecast_validation_get_aggressive_autovacuum():
+    migration_source = open("migrations.py", encoding="utf-8").read()
+    assert "oracle_decision_replays SET (autovacuum_vacuum_scale_factor = 0.01" in migration_source
+    assert "forecast_validation SET (autovacuum_vacuum_scale_factor = 0.015" in migration_source
+
+
+@pytest.mark.skipif(not os.getenv("DATABASE_URL"), reason="PostgreSQL integration test runs in CI service container")
+def test_postgres_autovacuum_reloptions_applied_for_high_churn_tables():
+    database.initialize_database()
+    import migrations
+    migrations.run_migrations()
+    with database.connect() as conn:
+        rows = {
+            row["relname"]: row["reloptions"]
+            for row in conn.execute(
+                "SELECT relname, reloptions FROM pg_class "
+                "WHERE relname IN ('oracle_decision_replays','forecast_validation')"
+            ).fetchall()
+        }
+    for table in ("oracle_decision_replays", "forecast_validation"):
+        options = " ".join(rows.get(table) or [])
+        assert "autovacuum_vacuum_scale_factor" in options
+        assert "autovacuum_analyze_scale_factor" in options
+
+
+@pytest.mark.skipif(not os.getenv("DATABASE_URL"), reason="PostgreSQL integration test runs in CI service container")
+def test_postgres_forecast_validation_retention_keeps_newest_rows():
+    database.initialize_database()
+    now = datetime.now(timezone.utc).isoformat()
+    with database.connect() as conn:
+        for idx in range(6):
+            conn.execute(
+                "INSERT INTO forecast_validation (symbol,asset_class,created_at) VALUES (%s,'stock',%s)",
+                (f"FVAL{idx}", now),
+            )
+    original = database.DATABASE_RETENTION_POLICIES["forecast_validation"]
+    database.DATABASE_RETENTION_POLICIES["forecast_validation"] = {**original, "keep_rows": 3, "batch_size": 2}
+    try:
+        deleted = database.trim_old_records()
+    finally:
+        database.DATABASE_RETENTION_POLICIES["forecast_validation"] = original
+    with database.connect() as conn:
+        remaining = conn.execute(
+            "SELECT COUNT(*) AS total FROM forecast_validation WHERE symbol LIKE 'FVAL%'"
+        ).fetchone()["total"]
+    assert deleted["forecast_validation"] >= 3
+    assert remaining == 3
+
+
+@pytest.mark.skipif(not os.getenv("DATABASE_URL"), reason="PostgreSQL integration test runs in CI service container")
+def test_postgres_trade_execution_and_brain_learning_workflow_survives_maintenance():
+    """Integration smoke test: run a paper trade + Brain learning write, then a
+    maintenance pass, and confirm no canonical/durable evidence is lost."""
+    database.initialize_database()
+    now = datetime.now(timezone.utc).isoformat()
+    with database.connect() as conn:
+        conn.execute(
+            "INSERT INTO trades (market,symbol,side,quantity,price,value,realized_pnl,score,reason,created_at) "
+            "VALUES ('cash','MAINT','BUY',1,1,1,0,NULL,'unit',%s)",
+            (now,),
+        )
+    database.trim_old_records()
+    with database.connect() as conn:
+        trade_count = conn.execute(
+            "SELECT COUNT(*) AS total FROM trades WHERE symbol='MAINT'"
+        ).fetchone()["total"]
+    assert trade_count == 1
+
+
 def test_trim_old_records_prioritizes_ledger_and_commits_each_table(monkeypatch):
     entered = []
     exited = []
