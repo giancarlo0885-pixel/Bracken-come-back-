@@ -12,6 +12,7 @@ from typing import Any
 
 from event_opportunity_scanner import active_event_watchlist, event_context_for_symbol
 from market_intelligence_bridge import brain_context_for_signal
+from oracle_brain_feedback import outcome_memory_for_signal
 
 
 _INSTALLED = False
@@ -88,6 +89,22 @@ def install_event_opportunity_runtime(market_worker_module: Any) -> None:
                 "citations": [],
                 "execution_impact": "NONE",
             }
+        try:
+            brain_outcome_context = outcome_memory_for_signal(
+                signal,
+                market=market,
+                symbol=symbol,
+            )
+        except Exception:
+            brain_outcome_context = {
+                "ranking_adjustment": 0.0,
+                "execution_impact": "NONE",
+                "status": "unavailable",
+            }
+        brain_outcome_adjustment = float(brain_outcome_context.get("ranking_adjustment") or 0.0)
+        setattr(signal, "brain_outcome_adjustment", brain_outcome_adjustment)
+        setattr(signal, "brain_outcome_context", brain_outcome_context)
+
         event_score = float(event_context.get("score") or 0.0)
         brain_score = float(brain_context.get("catalyst_score") or 0.0)
         score = max(event_score, brain_score)
@@ -107,6 +124,15 @@ def install_event_opportunity_runtime(market_worker_module: Any) -> None:
             suffix = (
                 f"Bounded external catalyst context: {', '.join(parts)}; "
                 "price/volume confirmation and all Council/risk vetoes still apply."
+            )
+            setattr(signal, "reason", f"{reason} {suffix}".strip())
+        if brain_outcome_adjustment:
+            reason = str(getattr(signal, "reason", "") or "").strip()
+            direction = "support" if brain_outcome_adjustment > 0 else "penalty"
+            suffix = (
+                f"Mature exact-provenance Brain outcomes add a bounded ranking {direction} "
+                f"of {brain_outcome_adjustment:+.2f} points; Council, quote, risk, capacity, "
+                "and execution gates remain authoritative."
             )
             setattr(signal, "reason", f"{reason} {suffix}".strip())
         return signal

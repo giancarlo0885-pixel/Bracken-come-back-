@@ -60,6 +60,22 @@ def _digest(*parts: Any) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
 
 
+def _normalized_strategy_identity(value: Any) -> str:
+    """Use the same stable strategy identity as paper economics.
+
+    Dynamic Council rationale and always-on pulse text changes every scan. Brain
+    memory must aggregate those observations under the same stable strategy key
+    or mature evidence fragments into many pseudo-strategies.
+    """
+    try:
+        from paper_strategy_economics import normalize_strategy_identity
+
+        normalized = normalize_strategy_identity(value)
+    except Exception:
+        normalized = str(value or "").strip() or "unattributed"
+    return str(normalized or "unattributed")[:160]
+
+
 def freshness_score(
     observed_at: Any,
     *,
@@ -238,7 +254,7 @@ def episode_from_row(row: dict[str, Any], *, now: datetime | None = None) -> dic
     )
     fresh = freshness_score(exit_time, now=now, half_life_days=45.0)
     confidence = min(0.99, 0.82 + fresh * 0.17)
-    strategy = str(row.get("strategy") or "unknown")
+    strategy = _normalized_strategy_identity(row.get("strategy"))
     regime = str(row.get("regime") or "unknown")
     market = str(row.get("market") or "unknown")
     symbol = str(row.get("symbol") or "unknown").upper()
@@ -680,6 +696,8 @@ def _sync_trade_episodes(conn: Any, market: str, *, limit: int = _EPISODE_BATCH)
             )
             VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'exact',%s,%s,%s,%s::jsonb,%s::jsonb,%s::jsonb,'NONE')
             ON CONFLICT (episode_key) DO UPDATE SET
+                strategy=EXCLUDED.strategy,
+                regime=EXCLUDED.regime,
                 net_pnl=EXCLUDED.net_pnl,
                 fees=EXCLUDED.fees,
                 return_pct=EXCLUDED.return_pct,
@@ -876,7 +894,7 @@ def _sync_regime_lessons_and_queue(conn: Any, market: str) -> tuple[int, int]:
     )
     grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for row in rows:
-        key = (str(row.get("strategy") or "unknown"), str(row.get("regime") or "unknown"))
+        key = (_normalized_strategy_identity(row.get("strategy")), str(row.get("regime") or "unknown"))
         grouped.setdefault(key, []).append(dict(row))
 
     lessons = 0
