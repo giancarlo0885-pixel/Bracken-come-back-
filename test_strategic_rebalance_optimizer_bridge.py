@@ -413,10 +413,15 @@ def _enable_paper_unbounded(monkeypatch):
     monkeypatch.setenv("LIVE_TRADING_ARMED", "false")
 
 
-def test_paper_unbounded_learning_turns_negative_economics_into_bounded_exploration(monkeypatch):
+def test_paper_unbounded_learning_keeps_known_negative_economics_observation_only(monkeypatch):
     _enable_paper_unbounded(monkeypatch)
     worker = _worker()
-    monkeypatch.setattr(adaptive, "hard_risk_gate", lambda item: {"allowed": True, "reasons": []})
+    hard_gate_calls = []
+    monkeypatch.setattr(
+        adaptive,
+        "hard_risk_gate",
+        lambda item: hard_gate_calls.append(item) or {"allowed": True, "reasons": []},
+    )
     monkeypatch.setattr(bridge, "_adaptive_meaningful_entry_floor", lambda item, *, equity, minimum_notional: 2.0)
     monkeypatch.setattr(
         bridge,
@@ -436,16 +441,45 @@ def test_paper_unbounded_learning_turns_negative_economics_into_bounded_explorat
         engine="crypto",
     )
 
+    assert plan["allocations"] == []
+    assert plan["rejections"][0]["reason"] == "economics_blocked"
+    assert plan["rejections"][0]["watch_only"] is True
+    assert plan["rejections"][0]["expected_edge_pct"] == -0.30
+    assert plan["rejections"][0]["estimated_round_trip_cost_pct"] == 0.55
+    assert hard_gate_calls == []
+
+
+def test_paper_unbounded_learning_allows_bounded_exploration_for_insufficient_evidence(monkeypatch):
+    _enable_paper_unbounded(monkeypatch)
+    worker = _worker()
+    monkeypatch.setattr(adaptive, "hard_risk_gate", lambda item: {"allowed": True, "reasons": []})
+    monkeypatch.setattr(bridge, "_adaptive_meaningful_entry_floor", lambda item, *, equity, minimum_notional: 2.0)
+    monkeypatch.setattr(
+        bridge,
+        "fee_edge_allows_entry",
+        lambda item: (False, "edge_unavailable_insufficient_evidence", None, 0.55),
+    )
+    install_strategic_rebalance_optimizer_bridge(worker)
+
+    plan = worker.adaptive_portfolio_optimizer(
+        [_candidate(
+            tactical_action="BUY",
+            paper_unbounded_learning=True,
+            core_target_amount=25.0,
+        )],
+        {"cash": 2000.0, "equity": 2000.0, "buying_power": 2000.0},
+        [],
+        engine="crypto",
+    )
+
     assert len(plan["allocations"]) == 1
     allocation = plan["allocations"][0]
     assert allocation["amount"] == 5.0
     assert allocation["paper_learning_exploration"] is True
     assert allocation["economics_observed_only"] is True
-    assert allocation["economics_reason"].startswith("edge_below_round_trip_cost")
-    assert allocation["expected_edge_pct"] == -0.30
+    assert allocation["expected_edge_pct"] is None
     assert allocation["estimated_round_trip_cost_pct"] == 0.55
     assert plan["rejections"] == []
-
 
 def test_paper_unbounded_learning_promotes_tiny_strategic_gap_to_minimum_learning_fill(monkeypatch):
     _enable_paper_unbounded(monkeypatch)
