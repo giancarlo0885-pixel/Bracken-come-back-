@@ -331,10 +331,19 @@ def install_strategic_rebalance_optimizer_bridge(worker: Any) -> None:
                 "regime": str(item.get("regime") or item.get("market_regime") or "").strip() or None,
             }
             if not economics_allowed:
-                if _paper_unbounded_exploration(item) and _entry_candidate(item):
-                    # In the isolated paper learner, known/uncertain economics are evidence,
-                    # not a total data-starvation veto. The allocation is capped below and
-                    # remains impossible to route to a broker or armed live path.
+                # Exploration is only justified when economics are genuinely unknown /
+                # insufficiently sampled. A known negative edge is already useful evidence
+                # and must remain observation-only rather than manufacturing losing fills.
+                insufficient_evidence = (
+                    expected_edge is None
+                    and "insufficient_evidence" in str(economics_reason or "").lower()
+                    and "known_negative" not in str(economics_reason or "").lower()
+                )
+                if (
+                    insufficient_evidence
+                    and _paper_unbounded_exploration(item)
+                    and _entry_candidate(item)
+                ):
                     economics_observed_only = True
                     _log_optimizer_decision(
                         worker,
