@@ -759,6 +759,18 @@ def _v39_signal_opportunity(market: str, signal: Any, prices: dict[str, Any], ra
         "confidence": getattr(signal, "confidence", 0.0),
         "data_quality_score": quote.get("data_quality_score") or ranked.get("data_quality_score") or 0.0,
         "risk_score": risk_score,
+        # Preserve economics/learning identity through the optimizer boundary.
+        # Without these fields fee-aware planning sees mature cohorts as
+        # "unattributed" and may allocate them as if economics were unknown.
+        "strategy": getattr(signal, "strategy", None) or ranked.get("strategy"),
+        "strategy_name": getattr(signal, "strategy_name", None) or ranked.get("strategy_name"),
+        "source_strategy": getattr(signal, "source_strategy", None) or ranked.get("source_strategy"),
+        "regime": getattr(signal, "regime", None) or ranked.get("regime") or ranked.get("market_regime"),
+        "market_regime": getattr(signal, "market_regime", None) or ranked.get("market_regime"),
+        "cohort": getattr(signal, "cohort", None) or ranked.get("cohort"),
+        "economic_cohort": getattr(signal, "economic_cohort", None) or ranked.get("economic_cohort"),
+        "model": getattr(signal, "model", None) or ranked.get("model") or ranked.get("forecast_model"),
+        "model_version": getattr(signal, "model_version", None) or ranked.get("model_version") or ranked.get("forecast_model_version"),
         "scan_type": scan_type,
         "signal_id": signal_id,
         "forecast_id": forecast_id,
