@@ -200,6 +200,17 @@ def install_strategic_core_rebalance_producer(worker: Any) -> None:
                 patch._set_signal_value(signal, "core_target_weight", row.get("Target Weight"))
                 patch._set_signal_value(signal, "core_current_value", patch._numeric(row.get("Current Core Value")))
                 patch._set_signal_value(signal, "core_plan_reason", row.get("Reason"))
+                # Preserve any explicit upstream strategy. When none exists, give
+                # configured portfolio-rebalance entries their own stable economics
+                # identity instead of pooling them into the global "unattributed"
+                # bucket.
+                if not any(
+                    str(patch._signal_value(signal, field, "") or "").strip()
+                    for field in ("strategy_name", "source_strategy", "strategy")
+                ):
+                    patch._set_signal_value(signal, "source_strategy", "configured_core_rebalance")
+                if not str(patch._signal_value(signal, "economic_cohort", "") or "").strip():
+                    patch._set_signal_value(signal, "economic_cohort", "configured_core_rebalance")
                 # The optimizer is the single authority for the adaptive meaningful-entry floor.
                 # Do not persist a producer-side legacy floor before the optimizer evaluates this candidate.
                 patch._set_signal_value(signal, "core_meaningful_entry_floor", None)
