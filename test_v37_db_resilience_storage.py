@@ -198,6 +198,61 @@ def test_retention_hysteresis_triggers_after_bounded_overshoot():
     assert conn.params == (6000,)
 
 
+class _VacuumConnection:
+    def __init__(self, statements):
+        self.statements = statements
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+    def execute(self, sql):
+        self.statements.append(sql)
+
+
+class _VacuumDriver:
+    def __init__(self):
+        self.calls = []
+        self.statements = []
+
+    def connect(self, url, **kwargs):
+        self.calls.append((url, kwargs))
+        return _VacuumConnection(self.statements)
+
+
+def test_retention_vacuum_targets_only_tables_that_deleted_rows(monkeypatch):
+    driver = _VacuumDriver()
+    monkeypatch.setattr(database, "psycopg", driver)
+    monkeypatch.setattr(database, "_database_url", lambda: "postgresql://unit")
+
+    result = database._vacuum_deleted_retention_tables(
+        {"signals": 1293, "forecasts": 0, "trades": 900}
+    )
+
+    assert result == {"vacuumed": ["signals"], "failed": {}}
+    assert driver.calls == [
+        ("postgresql://unit", {"connect_timeout": 15, "autocommit": True})
+    ]
+    assert driver.statements == [
+        'VACUUM (ANALYZE, SKIP_LOCKED) public."signals"'
+    ]
+
+
+def test_retention_vacuum_is_fail_open(monkeypatch):
+    class BusyDriver:
+        def connect(self, *args, **kwargs):
+            raise RuntimeError("relation busy")
+
+    monkeypatch.setattr(database, "psycopg", BusyDriver())
+    monkeypatch.setattr(database, "_database_url", lambda: "postgresql://unit")
+
+    result = database._vacuum_deleted_retention_tables({"forecasts": 1035})
+
+    assert result == {"vacuumed": [], "failed": {"forecasts": "RuntimeError"}}
+
+
 def test_high_churn_tables_get_aggressive_autovacuum_settings():
     database_source = open("database.py", encoding="utf-8").read()
     migration_source = open("migrations.py", encoding="utf-8").read()
