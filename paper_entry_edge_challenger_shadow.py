@@ -89,6 +89,14 @@ def ensure_schema() -> None:
                 PRIMARY KEY (version, trade_id)
             )
         """)
+        # Existing production tables may predate the version-scoped primary key.
+        # CREATE TABLE IF NOT EXISTS does not retrofit constraints, so establish
+        # the exact arbiter required by the idempotent versioned upsert.
+        conn.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS
+                paper_entry_edge_challenger_results_version_trade_id_uq
+            ON paper_entry_edge_challenger_results(version, trade_id)
+        """)
         conn.execute(
             "INSERT INTO paper_entry_edge_challenger_epoch(version,started_at) VALUES (%s,NOW()) ON CONFLICT (version) DO NOTHING",
             (_VERSION,),
@@ -238,9 +246,19 @@ def install_paper_entry_edge_challenger_shadow() -> bool:
     global _THREAD
     if not active():
         return False
-    ensure_schema()
-    evaluate_new_closes()
-    emit_summary()
+    try:
+        ensure_schema()
+        evaluate_new_closes()
+        emit_summary()
+    except Exception as exc:
+        # A research-only challenger must never prevent the Council worker from
+        # starting. Preserve the failure for diagnostics and fail open.
+        log.warning(
+            "PAPER ENTRY EDGE CHALLENGER | startup=ERROR | reason=%s | "
+            "execution_impact=NONE | broker_submission=NONE | live_trading=DISARMED",
+            exc.__class__.__name__,
+        )
+        return False
     if _THREAD and _THREAD.is_alive():
         return True
     interval = max(30.0, _num(os.getenv("PAPER_ENTRY_EDGE_SAMPLE_SECONDS", "60"), 60.0))
