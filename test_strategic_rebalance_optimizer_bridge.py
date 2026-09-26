@@ -604,3 +604,45 @@ def test_paper_exploration_cannot_activate_when_broker_submission_is_enabled(mon
 
     assert plan["allocations"] == []
     assert plan["rejections"][0]["reason"] == "economics_blocked"
+
+
+def test_unknown_economics_exploration_cap_is_cumulative_open_exposure(monkeypatch):
+    _enable_paper_unbounded(monkeypatch)
+    worker = _worker()
+    monkeypatch.setattr(adaptive, "hard_risk_gate", lambda item: {"allowed": True, "reasons": []})
+    monkeypatch.setattr(
+        bridge,
+        "_adaptive_meaningful_entry_floor",
+        lambda item, *, equity, minimum_notional: 2.0,
+    )
+    monkeypatch.setattr(
+        bridge,
+        "fee_edge_allows_entry",
+        lambda item: (True, "edge_unavailable_insufficient_evidence_exploration", None, 0.50),
+    )
+    install_strategic_rebalance_optimizer_bridge(worker)
+    candidate = _candidate(
+        tactical_action="BUY",
+        paper_unbounded_learning=True,
+        core_target_amount=25.0,
+    )
+    portfolio = {"cash": 2000.0, "equity": 2000.0, "buying_power": 2000.0}
+
+    partially_used = worker.adaptive_portfolio_optimizer(
+        [candidate],
+        portfolio,
+        [{"symbol": "BTC-USD", "market_value": 3.0, "sector": "Crypto"}],
+        engine="crypto",
+    )
+    exhausted = worker.adaptive_portfolio_optimizer(
+        [candidate],
+        portfolio,
+        [{"symbol": "BTC-USD", "market_value": 5.0, "sector": "Crypto"}],
+        engine="crypto",
+    )
+
+    assert partially_used["allocations"][0]["amount"] == 2.0
+    assert partially_used["allocations"][0]["paper_learning_exploration"] is True
+    assert 3.0 + partially_used["allocations"][0]["amount"] == 5.0
+    assert exhausted["allocations"] == []
+    assert exhausted["rejections"][0]["reason"] == "no capital capacity"
