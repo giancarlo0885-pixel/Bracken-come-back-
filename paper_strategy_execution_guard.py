@@ -101,6 +101,50 @@ def _open_position_accumulation_allows(symbol: str) -> tuple[bool, str]:
     return True, f"open_position_accumulation_cooldown_elapsed:{age_minutes:.2f}/{interval:.2f}m"
 
 
+def _remaining_cumulative_tier_capacity(symbol: str, tier_target: float) -> tuple[float | None, float]:
+    """Return remaining open cost-basis capacity for a sub-baseline paper tier.
+
+    Tier sizing is a total open-exposure cap, not a fresh order allowance on each
+    scan. None means persisted position state could not be read and callers must
+    fail closed rather than refresh the cap.
+    """
+    cap = max(0.0, _number(tier_target))
+    try:
+        import oracle_bot
+
+        position = oracle_bot.row(
+            """
+            SELECT quantity, current_price, average_price, entry_price
+            FROM positions
+            WHERE market='crypto' AND symbol=%s
+            LIMIT 1
+            """,
+            (str(symbol or "").upper(),),
+        )
+    except Exception as exc:
+        log.warning(
+            "PAPER TIER CUMULATIVE CAP | symbol=%s | state=UNAVAILABLE | reason=%s | action=BLOCK",
+            str(symbol or "").upper(),
+            exc.__class__.__name__,
+        )
+        return None, 0.0
+
+    if not position:
+        return round(cap, 2), 0.0
+
+    quantity = max(0.0, _number(position.get("quantity")))
+    basis_price = max(
+        0.0,
+        _number(
+            position.get("average_price")
+            or position.get("entry_price")
+            or position.get("current_price")
+        ),
+    )
+    current_value = max(0.0, quantity * basis_price)
+    return max(0.0, round(cap - current_value, 2)), current_value
+
+
 def _with_entry_economics_provenance(
     signal: Any,
     verified_quote: dict[str, Any] | None,
@@ -250,6 +294,15 @@ def install_paper_strategy_execution_guard() -> bool:
             if sized > base_target and not regime_ok:
                 sized = base_target
                 size_reason = f"positive_boost_withheld:{regime_reason}"
+            if scorecard.size_multiplier < 1.0:
+                remaining, current_value = _remaining_cumulative_tier_capacity(symbol, sized)
+                if remaining is None:
+                    return _blocked_buy("paper_tier_position_state_unavailable")
+                sized = min(sized, remaining)
+                size_reason = (
+                    f"{size_reason}:cumulative_remaining={sized:.2f}:"
+                    f"current={current_value:.2f}"
+                )
             economics.log_economics(
                 scorecard,
                 symbol=symbol,
