@@ -15,6 +15,7 @@ from config import (
     PAPER_BROKER_MODE, UI_AUTO_REFRESH, UI_REFRESH_SECONDS,
 )
 from dashboard_helpers import (
+    actionable_decision_buckets,
     as_float,
     balanced_data_status,
     balanced_money_bar,
@@ -22,6 +23,7 @@ from dashboard_helpers import (
     balanced_portfolio_rows,
     capital_allocation_rows,
     capital_deployment_status,
+    market_capital_allocation_rows,
     compact_money_text,
     format_quantity,
     format_asset_price,
@@ -690,10 +692,12 @@ combined_start = stock_metrics["starting_balance"] + crypto_metrics["starting_ba
 combined_return = ((combined_equity / combined_start) - 1) * 100 if combined_start else 0.0
 combined_buying_power = stock_metrics["buying_power"] + crypto_metrics["buying_power"]
 combined_margin_debt = stock_metrics["margin_debt"] + crypto_metrics["margin_debt"]
-ready_decisions = [d for d in decisions if bool(d.get("trade_eligible")) and not live_data_status(d)["blocks_execution"]]
-buy_decisions = [d for d in ready_decisions if d["action"] == "BUY"]
-sell_decisions = [d for d in ready_decisions if d["action"] == "SELL"]
-waiting_for_data = [d for d in decisions if live_data_status(d)["blocks_execution"] or not bool(d.get("trade_eligible"))]
+decision_buckets = actionable_decision_buckets(decisions, all_positions)
+ready_decisions = decision_buckets["ready"]
+buy_decisions = decision_buckets["buys"]
+sell_decisions = decision_buckets["sells"]
+bearish_watch_decisions = decision_buckets["bearish_watch"]
+waiting_for_data = decision_buckets["waiting"]
 
 with st.sidebar:
     st.markdown("## GARIBALDI ORACLE")
@@ -860,7 +864,7 @@ elif page == "Crypto":
 elif page == "Dashboard":
     # The headline must never promote stale or unverified data. Ready decisions
     # may include HOLD/SELL risk actions, but all have passed the same quote gate.
-    top = buy_decisions[0] if buy_decisions else (ready_decisions[0] if ready_decisions else None)
+    top = buy_decisions[0] if buy_decisions else (sell_decisions[0] if sell_decisions else None)
     stock_scores = simple_portfolio_scores(stock_metrics, stock_positions, len([d for d in buy_decisions if d.get("market") == "cash"]))
     crypto_scores = simple_portfolio_scores(crypto_metrics, crypto_positions, len([d for d in buy_decisions if d.get("market") == "crypto"]))
     combined_metrics = {
@@ -902,7 +906,7 @@ elif page == "Dashboard":
         st.info("Oracle right now: WAITING FOR BETTER SETUPS. No investment has passed every safety check yet.")
 
     st.markdown("<div class='section-title'>TOP OPPORTUNITIES</div>", unsafe_allow_html=True)
-    table_decisions = buy_decisions[:10] if buy_decisions else ready_decisions[:10]
+    table_decisions = buy_decisions[:10]
     if table_decisions:
         opportunity_rows = pd.DataFrame(balanced_opportunity_rows(table_decisions, limit=10))
 
@@ -935,7 +939,15 @@ elif page == "Dashboard":
                 st.write(f"- {point}")
             st.caption(f"Data status: {selected.get('data_status') or live_data_status(selected)['detail']}")
     else:
-        st.info("No current opportunities are available yet.")
+        st.info("No qualified buy is ready right now. Capital remains available while Oracle waits for a verified post-cost edge.")
+
+    if sell_decisions:
+        st.markdown("<div class='section-title'>RISK ACTIONS ON CURRENT HOLDINGS</div>", unsafe_allow_html=True)
+        st.dataframe(
+            pd.DataFrame(balanced_opportunity_rows(sell_decisions[:10], limit=10)),
+            width="stretch",
+            hide_index=True,
+        )
 
     st.markdown("<div class='section-title'>WHAT I OWN</div>", unsafe_allow_html=True)
     all_positions = stock_positions + crypto_positions
@@ -982,11 +994,13 @@ elif page == "Dashboard":
         st.write("The planner considers opportunity score, confidence, expected return, risk, current exposure, cash reserve, duplicate exposure, concentration, and data freshness. The paper execution path still rechecks every hard safeguard before any simulated order.")
 
     st.markdown("<div class='section-title'>CAPITAL ALLOCATION</div>", unsafe_allow_html=True)
-    allocation_rows = capital_allocation_rows(
-        buy_decisions[:8],
-        combined_metrics,
-        stock_positions + crypto_positions,
-        market="crypto" if buy_decisions and str(buy_decisions[0].get("market") or "").lower() == "crypto" else "cash",
+    allocation_rows = market_capital_allocation_rows(
+        buy_decisions,
+        stock_metrics,
+        stock_positions,
+        crypto_metrics,
+        crypto_positions,
+        limit_per_market=4,
     )
     st.dataframe(pd.DataFrame(allocation_rows), width="stretch", hide_index=True)
 
