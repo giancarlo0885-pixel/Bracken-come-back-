@@ -433,5 +433,6 @@ def test_v39_prioritize_clears_stale_resolved_edge_when_new_scan_has_none(monkey
     market_worker._v39_prioritize_signals("crypto", [signal], prices, ranked, "fast")
 
     assert getattr(signal, "expected_edge_pct", None) is None
+    assert getattr(signal, "edge_provenance", None) is None
     assert getattr(signal, "v39_resolved_expected_edge_pct", None) is None
     assert getattr(signal, "v39_edge_provenance", None) is None
