@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+
 import global_adaptive_engine as adaptive
 import runtime_integrity_patch as patch
 import strategic_rebalance_optimizer_bridge as bridge
@@ -73,3 +75,49 @@ def test_unbounded_gate_still_relaxes_genuine_entry_action(monkeypatch):
     assert result["reasons"] == []
     assert result["paper_observed_risk_reasons"] == ["paper-observed tactical threshold"]
     assert result["authorization_basis"] == "paper_unbounded_learning"
+
+
+def test_natively_qualified_buy_keeps_unbounded_learning_marker(monkeypatch):
+    _enable_unbounded_paper(monkeypatch)
+    monkeypatch.setattr(
+        bridge,
+        "_adaptive_meaningful_entry_floor",
+        lambda item, *, equity, minimum_notional: minimum_notional,
+    )
+
+    signal = SimpleNamespace(symbol="AAVE-USD", action="BUY")
+    worker = SimpleNamespace()
+    worker._v39_signal_opportunity = lambda market, signal, prices, ranked, scan_type: {
+        "symbol": "AAVE-USD",
+        "action": "BUY",
+        "qualified_for_capital": True,
+        "stages": ["surveillance", "buy_signal", "verified_quote"],
+    }
+
+    qualification.install_paper_core_rebalance_qualification(worker)
+    result = worker._v39_signal_opportunity("crypto", signal, {}, {}, "fast")
+
+    assert result["qualified_for_capital"] is True
+    assert result["paper_unbounded_learning"] is True
+    assert result["tactical_action"] == "BUY"
+    assert result["capital_qualification_basis"] == "v39_native_qualified_buy_signal"
+    assert "paper_unbounded_learning" in result["stages"]
+
+
+def test_natively_qualified_buy_is_not_tagged_when_live_is_armed(monkeypatch):
+    _enable_unbounded_paper(monkeypatch)
+    monkeypatch.setenv("LIVE_TRADING_ARMED", "true")
+    signal = SimpleNamespace(symbol="AAVE-USD", action="BUY")
+    worker = SimpleNamespace(
+        _v39_signal_opportunity=lambda market, signal, prices, ranked, scan_type: {
+            "symbol": "AAVE-USD",
+            "action": "BUY",
+            "qualified_for_capital": True,
+            "stages": ["buy_signal"],
+        }
+    )
+
+    qualification.install_paper_core_rebalance_qualification(worker)
+    result = worker._v39_signal_opportunity("crypto", signal, {}, {}, "fast")
+
+    assert "paper_unbounded_learning" not in result
