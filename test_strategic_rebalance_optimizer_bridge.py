@@ -33,6 +33,9 @@ def _candidate(**overrides):
         "opportunity_score": 95.0,
         "avg_dollar_volume": 1_000_000_000.0,
         "spread_pct": 0.01,
+        # General optimizer tests exercise sizing/risk behavior with established
+        # positive economics. Unknown-economics behavior has dedicated fixtures.
+        "expected_edge_pct": 1.0,
         "sector": "Crypto",
     }
     item.update(overrides)
