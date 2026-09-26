@@ -361,3 +361,78 @@ def test_persisted_forecast_edge_requires_exact_identity(monkeypatch):
 
     assert market_worker._v39_persisted_forecast_edge("crypto", "BTC-USD", None, "1") == (None, None)
     assert market_worker._v39_persisted_forecast_edge("crypto", "BTC-USD", "fc-1", None) == (None, None)
+
+
+def test_v39_prioritize_hands_resolved_edge_to_execution_signal(monkeypatch):
+    import market_worker
+
+    signal = _signal("AAVE-USD")
+    signal.action = "BUY"
+    signal.expected_move_pct = None
+    prices = {"AAVE-USD": _quote("AAVE-USD", 155.0)}
+    ranked = [_ranked("AAVE-USD", expected_move_pct=1.25, expected_return=None)]
+
+    captured = {}
+    def optimizer(opportunities, portfolio, positions, *, engine):
+        captured["opportunities"] = opportunities
+        return {"allocations": [], "rejections": []}
+
+    monkeypatch.setattr(
+        market_worker,
+        "_v39_position_rows",
+        lambda market: ({"cash": 2000.0, "equity": 2000.0, "buying_power": 2000.0}, []),
+    )
+    monkeypatch.setattr(market_worker, "adaptive_portfolio_optimizer", optimizer)
+    monkeypatch.setattr(market_worker, "_v39_record_event", lambda *args, **kwargs: None)
+    monkeypatch.setattr(market_worker, "_execution_quote_eligible", lambda quote: True)
+
+    ordered = market_worker._v39_prioritize_signals(
+        "crypto", [signal], prices, ranked, "deep"
+    )
+
+    assert ordered == [signal]
+    assert captured["opportunities"][0]["expected_edge_pct"] == 1.25
+    assert signal.expected_edge_pct == 1.25
+    assert signal.v39_resolved_expected_edge_pct == 1.25
+    assert signal.edge_provenance == "forecast_expected_move_pct"
+    assert signal.v39_edge_provenance == "forecast_expected_move_pct"
+
+
+def test_v39_prioritize_clears_stale_resolved_edge_when_new_scan_has_none(monkeypatch):
+    import market_worker
+
+    signal = _signal("AAVE-USD")
+    signal.action = "BUY"
+    signal.expected_move_pct = None
+    signal.expected_edge_pct = 1.25
+    signal.v39_resolved_expected_edge_pct = 1.25
+    signal.edge_provenance = "forecast_expected_move_pct"
+    signal.v39_edge_provenance = "forecast_expected_move_pct"
+
+    prices = {"AAVE-USD": _quote("AAVE-USD", 155.0)}
+    ranked = [{"symbol": "AAVE-USD", "risk_score": 50.0, "spread_pct": 0.01}]
+
+    monkeypatch.setattr(
+        market_worker,
+        "_v39_position_rows",
+        lambda market: ({"cash": 2000.0, "equity": 2000.0, "buying_power": 2000.0}, []),
+    )
+    monkeypatch.setattr(
+        market_worker,
+        "adaptive_portfolio_optimizer",
+        lambda opportunities, portfolio, positions, *, engine: {"allocations": [], "rejections": []},
+    )
+    monkeypatch.setattr(market_worker, "_v39_record_event", lambda *args, **kwargs: None)
+    monkeypatch.setattr(market_worker, "_execution_quote_eligible", lambda quote: True)
+    monkeypatch.setattr(
+        market_worker,
+        "_v39_persisted_forecast_edge",
+        lambda market, symbol, forecast_id, signal_id: (None, None),
+    )
+
+    market_worker._v39_prioritize_signals("crypto", [signal], prices, ranked, "fast")
+
+    assert getattr(signal, "expected_edge_pct", None) is None
+    assert getattr(signal, "edge_provenance", None) is None
+    assert getattr(signal, "v39_resolved_expected_edge_pct", None) is None
+    assert getattr(signal, "v39_edge_provenance", None) is None
