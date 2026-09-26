@@ -13,12 +13,24 @@ from paper_model_governance import (
 )
 
 
-def _metrics(*, brier: float, samples: int = 1000, accuracy: float = 0.526, ece: float = 0.0188):
+def _metrics(
+    *,
+    brier: float,
+    samples: int = 1000,
+    accuracy: float = 0.526,
+    ece: float = 0.0188,
+    closed_paper_trades: int = 30,
+    paper_expectancy: float | None = 0.01,
+    paper_profit_factor: float | None = 1.10,
+):
     return {
         "sample_count": samples,
         "directional_accuracy": accuracy,
         "expected_calibration_error": ece,
         "brier_skill_score": brier,
+        "closed_paper_trades": closed_paper_trades,
+        "paper_expectancy": paper_expectancy,
+        "paper_profit_factor": paper_profit_factor,
     }
 
 
@@ -61,6 +73,55 @@ def test_nonnegative_brier_can_be_paper_qualified(monkeypatch):
     assert result.tier == PAPER_QUALIFIED
     assert result.paper_qualified is True
     assert result.capital_qualified is False
+
+
+def test_paper_qualification_requires_realized_after_cost_economics(monkeypatch):
+    monkeypatch.setenv("PAPER_EXPLORATORY_MIN_BRIER_SKILL", "-0.01")
+    monkeypatch.setenv("PAPER_QUALIFIED_MIN_BRIER_SKILL", "0.00")
+    monkeypatch.setenv("PAPER_QUALIFIED_MIN_CLOSED_TRADES", "30")
+    monkeypatch.setenv("PAPER_QUALIFIED_MIN_EXPECTANCY", "0.0")
+    monkeypatch.setenv("PAPER_QUALIFIED_MIN_PROFIT_FACTOR", "1.0")
+
+    result = classify_paper_model_metrics(
+        "m",
+        "v",
+        _metrics(
+            brier=0.05,
+            closed_paper_trades=0,
+            paper_expectancy=None,
+            paper_profit_factor=None,
+        ),
+        temporal_leakage_ok=True,
+        recent_walk_forward_runs=3,
+        distinct_symbols=3,
+    )
+
+    assert result.tier == PAPER_EXPLORATORY
+    assert result.exploratory_eligible is True
+    assert result.paper_qualified is False
+    assert result.closed_paper_trades == 0
+    assert result.paper_expectancy is None
+    assert result.paper_profit_factor is None
+    assert any("closed paper trades" in reason for reason in result.reasons)
+
+
+def test_paper_trade_economics_uses_realized_net_pnl(monkeypatch):
+    monkeypatch.setattr(
+        paper_gov,
+        "rows",
+        lambda sql, params=None: [
+            {"net_pnl": 2.0},
+            {"net_pnl": 1.0},
+            {"net_pnl": -1.5},
+            {"net_pnl": -0.5},
+        ],
+    )
+
+    result = paper_gov._paper_trade_economics("m", "v")
+
+    assert result["closed_paper_trades"] == 4
+    assert result["paper_expectancy"] == 0.25
+    assert result["paper_profit_factor"] == 1.5
 
 
 def test_brier_below_exploratory_floor_remains_research(monkeypatch):
