@@ -408,7 +408,12 @@ def _run_scheduled_database_maintenance(label: str) -> None:
         if result.get("skipped"):
             log.info("%s database maintenance skipped: %s", label, result.get("reason"))
         else:
-            log.info("%s database maintenance complete: %s", label, result.get("deleted", {}))
+            log.info(
+                "%s database maintenance complete: deleted=%s vacuum=%s",
+                label,
+                result.get("deleted", {}),
+                result.get("vacuum", {}),
+            )
     except Exception as exc:
         log.warning("%s database maintenance failed; worker will retry later: %s", label, exc)
 
