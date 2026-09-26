@@ -100,13 +100,35 @@ def test_positive_size_boost_requires_model_validation(monkeypatch):
         expectancy=0.15,
         profit_factor=1.40,
         model_validated=False,
+        paper_tier="PAPER_QUALIFIED",
     ) == 1.0
     assert econ._multiplier(
         sample_count=40,
         expectancy=0.15,
         profit_factor=1.40,
         model_validated=True,
+        paper_tier="CAPITAL_QUALIFIED",
     ) == 1.25
+
+
+def test_paper_tiers_bound_sizing_fail_closed(monkeypatch):
+    _paper(monkeypatch)
+    monkeypatch.setenv("PAPER_STRATEGY_EXPLORATION_FLOOR", "0.35")
+    monkeypatch.setenv("PAPER_RESEARCH_MAX_SIZE_MULTIPLIER", "0.35")
+    monkeypatch.setenv("PAPER_EXPLORATORY_MAX_SIZE_MULTIPLIER", "0.75")
+    monkeypatch.setenv("PAPER_STRATEGY_MAX_SIZE_MULTIPLIER", "1.25")
+
+    common = dict(
+        sample_count=40,
+        expectancy=0.15,
+        profit_factor=1.40,
+        model_validated=False,
+    )
+
+    assert econ._multiplier(**common, paper_tier="RESEARCH") == 0.35
+    assert econ._multiplier(**common, paper_tier="PAPER_EXPLORATORY") == 0.75
+    assert econ._multiplier(**common, paper_tier="PAPER_QUALIFIED") == 1.0
+    assert econ._multiplier(**common, paper_tier="UNKNOWN") == 0.35
 
 
 def test_strategy_identity_prefers_explicit_strategy():
