@@ -69,6 +69,8 @@ def test_configured_core_gap_tags_only_matching_hold(monkeypatch):
     assert btc.portfolio_intent == patch.CORE_REBALANCE_CANDIDATE_INTENT
     assert btc.core_rebalance_source == "configured_core_allocation_gap"
     assert btc.core_target_amount == 240.0
+    assert btc.source_strategy == "configured_core_rebalance"
+    assert btc.economic_cohort == "configured_core_rebalance"
     assert btc.action == "HOLD"
     assert not hasattr(eth, "portfolio_intent")
     assert eth.action == "SELL"
@@ -139,3 +141,39 @@ def test_previous_buy_approval_is_removed_when_core_gap_disappears(monkeypatch):
     assert signal.v39_optimizer_approved_amount is None
     assert signal.v39_optimizer_allocation == {}
     assert runtime._promotion_rejection_reason(signal).startswith("intent_changed:")
+
+
+def test_configured_core_gap_preserves_explicit_upstream_strategy(monkeypatch):
+    signal = SimpleNamespace(
+        symbol="BTC-USD",
+        action="HOLD",
+        score=0.70,
+        confidence=0.70,
+        strategy="oracle_council_v3",
+        economic_cohort="council_core",
+    )
+    worker = SimpleNamespace()
+    worker.log = _Log()
+    worker._v39_position_rows = lambda market: ({"cash": 2000.0, "equity": 2000.0}, [])
+    worker._v39_prioritize_signals = lambda market, signals, prices, ranked, scan_type: signals
+    monkeypatch.setattr(
+        runtime,
+        "crypto_core_rebalance_plan",
+        lambda prices, portfolio, positions: [{
+            "Asset": "BTC-USD",
+            "Bucket": "Core",
+            "Target Weight": "40%",
+            "Current Core Value": 0.0,
+            "Amount": 240.0,
+            "Reason": "Underweight core holding.",
+        }],
+    )
+
+    runtime.install_strategic_core_rebalance_producer(worker)
+    worker._v39_prioritize_signals(
+        "crypto", [signal], {"BTC-USD": {"price": 100.0}}, [], "fast"
+    )
+
+    assert signal.strategy == "oracle_council_v3"
+    assert not hasattr(signal, "source_strategy")
+    assert signal.economic_cohort == "council_core"
