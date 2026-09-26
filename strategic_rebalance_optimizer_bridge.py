@@ -326,15 +326,10 @@ def install_strategic_rebalance_optimizer_bridge(worker: Any) -> None:
             economics_allowed, economics_reason, expected_edge, estimated_cost = fee_edge_allows_entry(item)
             # fee_edge_allows_entry intentionally permits missing-edge paper
             # exploration for the final execution guard. At the optimizer
-            # boundary, however, missing edge must be classified as exploration
-            # so it receives the bounded exploration cap rather than normal
-            # candidate sizing.
-            if (
-                economics_allowed
-                and expected_edge is None
-                and "insufficient_evidence" in str(economics_reason or "").lower()
-                and _paper_unbounded_exploration(item)
-            ):
+            # boundary, every missing edge must first leave the ordinary
+            # allocation path. The block below may then admit it only through
+            # the explicitly enabled, bounded paper-exploration lane.
+            if economics_allowed and expected_edge is None:
                 economics_allowed = False
             economics_observed_only = False
             economics_identity = {
