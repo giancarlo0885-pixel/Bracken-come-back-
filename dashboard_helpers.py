@@ -234,9 +234,13 @@ def simple_portfolio_scores(
 
     if invested_pct < 25:
         capital_use = "MOSTLY CASH"
-        status = "NEEDS MORE INVESTMENTS"
+        status = "CAPITAL AVAILABLE"
         capital_score = 45
-        explanation = "Most of your money is still sitting in cash. The Oracle is looking for strong opportunities before investing more."
+        explanation = (
+            "Capital is available and qualified opportunities are ready for sizing."
+            if opportunity_count > 0
+            else "Capital is available. Oracle is scanning for a qualified post-cost entry; cash is not a fault state."
+        )
     elif invested_pct > 92:
         capital_use = "HEAVILY INVESTED"
         status = "WATCH CASH LEVELS"
@@ -290,6 +294,53 @@ def simple_portfolio_scores(
             f"Safety is {safety.lower()}, diversification is {diversification.lower()}, "
             f"money use is {capital_use.lower()}, and opportunity is {opportunity.lower()}."
         ),
+    }
+
+
+def actionable_decision_buckets(
+    decisions: list[dict[str, Any]],
+    positions: list[dict[str, Any]],
+) -> dict[str, list[dict[str, Any]]]:
+    """Separate executable entries, owned-position exits, and non-owned bearish views.
+
+    A SELL is actionable only when Oracle currently owns a positive quantity of
+    that symbol. Bearish signals for unowned symbols remain useful surveillance
+    evidence but must never appear as executable sell opportunities.
+    """
+    owned_symbols = {
+        str(position.get("symbol") or "").upper()
+        for position in positions
+        if as_float(position.get("quantity")) > 0
+    }
+    ready: list[dict[str, Any]] = []
+    buys: list[dict[str, Any]] = []
+    sells: list[dict[str, Any]] = []
+    bearish_watch: list[dict[str, Any]] = []
+    waiting: list[dict[str, Any]] = []
+
+    for decision in decisions:
+        fresh_and_eligible = bool(decision.get("trade_eligible")) and not live_data_status(decision)["blocks_execution"]
+        if not fresh_and_eligible:
+            waiting.append(decision)
+            continue
+
+        action = str(decision.get("action") or "").upper()
+        symbol = str(decision.get("symbol") or "").upper()
+        ready.append(decision)
+        if action == "BUY":
+            buys.append(decision)
+        elif action == "SELL":
+            if symbol in owned_symbols:
+                sells.append(decision)
+            else:
+                bearish_watch.append(decision)
+
+    return {
+        "ready": ready,
+        "buys": buys,
+        "sells": sells,
+        "bearish_watch": bearish_watch,
+        "waiting": waiting,
     }
 
 
@@ -797,6 +848,40 @@ def capital_allocation_rows(
             }
         )
     return rows
+
+
+def market_capital_allocation_rows(
+    opportunities: list[dict[str, Any]],
+    stock_metrics: dict[str, Any],
+    stock_positions: list[dict[str, Any]],
+    crypto_metrics: dict[str, Any],
+    crypto_positions: list[dict[str, Any]],
+    *,
+    limit_per_market: int = 4,
+) -> list[dict[str, Any]]:
+    """Size each market against its own cash, equity, exposure, and buying power."""
+    output: list[dict[str, Any]] = []
+    specs = (
+        ("Stock", "cash", stock_metrics, stock_positions),
+        ("Crypto", "crypto", crypto_metrics, crypto_positions),
+    )
+    for label, market, metrics, positions in specs:
+        market_opportunities = [
+            item
+            for item in opportunities
+            if str(item.get("market") or "").lower() == market
+            and str(item.get("action") or "").upper() == "BUY"
+        ]
+        market_rows = capital_allocation_rows(
+            market_opportunities[: max(0, int(limit_per_market))],
+            metrics,
+            positions,
+            market=market,
+            limit=limit_per_market,
+        )
+        for row in market_rows:
+            output.append({"Portfolio": label, **row})
+    return output
 
 
 def simple_mode_visible_text(samples: list[str]) -> str:
