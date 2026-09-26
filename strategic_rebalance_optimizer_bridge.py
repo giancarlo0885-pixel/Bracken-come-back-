@@ -324,6 +324,18 @@ def install_strategic_rebalance_optimizer_bridge(worker: Any) -> None:
             # economics gate. Mature known-negative evidence must not be logged as
             # APPROVED merely because the candidate has capital capacity.
             economics_allowed, economics_reason, expected_edge, estimated_cost = fee_edge_allows_entry(item)
+            # fee_edge_allows_entry intentionally permits missing-edge paper
+            # exploration for the final execution guard. At the optimizer
+            # boundary, however, missing edge must be classified as exploration
+            # so it receives the bounded exploration cap rather than normal
+            # candidate sizing.
+            if (
+                economics_allowed
+                and expected_edge is None
+                and "insufficient_evidence" in str(economics_reason or "").lower()
+                and _paper_unbounded_exploration(item)
+            ):
+                economics_allowed = False
             economics_observed_only = False
             economics_identity = {
                 "cohort": str(item.get("cohort") or item.get("economic_cohort") or "").strip() or None,
