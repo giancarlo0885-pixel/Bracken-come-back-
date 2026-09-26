@@ -417,6 +417,17 @@ def test_oracle_city_defaults_to_city_first_uncluttered_view():
     assert 'else inspector.classList.remove("open")' in rendered
 
 
+def test_oracle_city_does_not_persist_brain_map_as_default_view():
+    rendered = render_oracle_city_component({"nodes": [], "flows": [], "replay": []})
+    assert 'const CITY_VIEW_STORAGE_KEY="oracle-city-view-v2"' in rendered
+    assert "if(brainMode)return;" in rendered
+    assert "brainMode=false;" in rendered
+    assert "showCityObjects(true);" in rendered
+    assert "brainGroup.visible=false;" in rendered
+    assert 'brainButton.classList.remove("active")' in rendered
+    assert 'brainButton.textContent="BRAIN"' in rendered
+
+
 def test_oracle_city_day_night_cycle_uses_viewer_local_clock():
     rendered = render_oracle_city_component({"nodes": [], "flows": [], "replay": []})
     assert "new Date()" in rendered
