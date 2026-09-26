@@ -522,6 +522,9 @@ def test_paper_unbounded_learning_promotes_tiny_strategic_gap_to_minimum_learnin
     assert allocation["amount"] == 2.0
     assert allocation["paper_learning_exploration"] is True
     assert allocation["economics_observed_only"] is False
+    assert allocation["economics_reason"] == "edge_ok"
+    assert allocation["expected_edge_pct"] == 0.25
+    assert allocation["estimated_round_trip_cost_pct"] == 0.10
     assert plan["rejections"] == []
 
 
