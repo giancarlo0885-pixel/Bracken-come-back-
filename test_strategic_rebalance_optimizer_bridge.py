@@ -367,9 +367,11 @@ def test_crypto_optimizer_does_not_approve_known_negative_economics(monkeypatch)
     assert hard_gate_calls == []
 
 
-def test_crypto_optimizer_preserves_economics_exploration_when_allowed(monkeypatch):
+def test_crypto_optimizer_reclassifies_allowed_missing_edge_as_bounded_exploration(monkeypatch):
+    _enable_paper_unbounded(monkeypatch)
     worker = _worker()
     monkeypatch.setattr(adaptive, "hard_risk_gate", lambda item: {"allowed": True, "reasons": []})
+    monkeypatch.setattr(bridge, "_adaptive_meaningful_entry_floor", lambda item, *, equity, minimum_notional: 2.0)
     monkeypatch.setattr(
         bridge,
         "fee_edge_allows_entry",
@@ -378,13 +380,24 @@ def test_crypto_optimizer_preserves_economics_exploration_when_allowed(monkeypat
     install_strategic_rebalance_optimizer_bridge(worker)
 
     plan = worker.adaptive_portfolio_optimizer(
-        [_candidate(tactical_action="BUY")],
+        [_candidate(
+            tactical_action="BUY",
+            paper_unbounded_learning=True,
+            core_target_amount=25.0,
+        )],
         {"cash": 2000.0, "equity": 2000.0, "buying_power": 2000.0},
         [],
         engine="crypto",
     )
 
     assert len(plan["allocations"]) == 1
+    allocation = plan["allocations"][0]
+    assert allocation["amount"] == 5.0
+    assert allocation["paper_learning_exploration"] is True
+    assert allocation["economics_observed_only"] is True
+    assert allocation["economics_reason"] == "edge_unavailable_insufficient_evidence_exploration"
+    assert allocation["expected_edge_pct"] is None
+    assert allocation["estimated_round_trip_cost_pct"] == 0.50
 
 
 def test_trace_allocation_is_candidate_not_execution_approval():
