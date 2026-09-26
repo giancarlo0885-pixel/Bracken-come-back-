@@ -484,10 +484,12 @@ def install_strategic_rebalance_optimizer_bridge(worker: Any) -> None:
                     candidate_amount = min(candidate_amount, strategic_target_gap)
 
             if economics_observed_only:
-                candidate_amount = min(
-                    candidate_amount,
-                    _paper_exploration_cap(equity, meaningful_entry_floor),
-                )
+                # The exploration percentage is a total open-exposure cap for
+                # the symbol, not a fresh allowance on every scan. Otherwise
+                # repeated paper fills can multiply the intended risk budget.
+                exploration_cap = _paper_exploration_cap(equity, meaningful_entry_floor)
+                remaining_exploration_capacity = max(0.0, exploration_cap - current)
+                candidate_amount = min(candidate_amount, remaining_exploration_capacity)
 
             if candidate_amount <= 0:
                 rejections.append({"symbol": symbol, "reason": "no capital capacity"})
