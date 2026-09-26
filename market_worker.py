@@ -796,12 +796,19 @@ def _v39_prioritize_signals(market: str, signals: list[Any], prices: dict[str, A
     # cannot silently reuse stale edge evidence on the next optimizer cycle.
     for signal in signals:
         prior_handoff = getattr(signal, "v39_resolved_expected_edge_pct", None)
+        prior_provenance = getattr(signal, "v39_edge_provenance", None)
         current_edge = getattr(signal, "expected_edge_pct", None)
+        current_provenance = getattr(signal, "edge_provenance", None)
         if prior_handoff is not None and current_edge == prior_handoff:
             try:
                 delattr(signal, "expected_edge_pct")
             except Exception:
                 setattr(signal, "expected_edge_pct", None)
+        if prior_provenance is not None and current_provenance == prior_provenance:
+            try:
+                delattr(signal, "edge_provenance")
+            except Exception:
+                setattr(signal, "edge_provenance", None)
         for attr in ("v39_resolved_expected_edge_pct", "v39_edge_provenance"):
             if hasattr(signal, attr):
                 try:
