@@ -272,8 +272,8 @@ def paper_model_governance_assessment(model: str, model_version: str) -> PaperMo
             SELECT probability_up, realized_move_pct, created_at
             FROM forecast_validation
             WHERE model=%s AND COALESCE(model_version,'')=COALESCE(%s,'')
-            ORDER BY created_at DESC
-            LIMIT 5000
+            ORDER BY id DESC
+            LIMIT 1000
             """,
             (model, model_version),
         )
@@ -283,7 +283,7 @@ def paper_model_governance_assessment(model: str, model_version: str) -> PaperMo
             FROM walk_forward_validation_runs
             WHERE model=%s AND COALESCE(model_version,'')=COALESCE(%s,'')
             ORDER BY created_at DESC
-            LIMIT 100
+            LIMIT 20
             """,
             (model, model_version),
         )

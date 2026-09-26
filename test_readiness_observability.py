@@ -66,6 +66,13 @@ def test_emit_capital_readiness_report_logs_sanitized_gate_evidence(caplog, monk
             "minimum_brier_skill": -0.01,
             "paper_qualified_min_brier_skill": 0.0,
             "capital_min_brier_skill": 0.02,
+            "sample_count": 1000,
+            "directional_accuracy": 0.529,
+            "expected_calibration_error": 0.0225,
+            "brier_skill_score": -0.0088,
+            "temporal_leakage_ok": True,
+            "recent_walk_forward_runs": 3,
+            "distinct_symbols": 3,
         },
     )
     logger = logging.getLogger("test-capital-readiness")
@@ -87,6 +94,10 @@ def test_emit_capital_readiness_report_logs_sanitized_gate_evidence(caplog, monk
     assert "paper_exploratory=True" in text
     assert "paper_qualified=False" in text
     assert "paper_capital_qualified=False" in text
+    assert "paper_samples=1000" in text
+    assert "paper_brier_skill=-0.0088" in text
+    assert "paper_walk_forward_runs=3" in text
+    assert "paper_distinct_symbols=3" in text
     assert "paper_min_brier=-0.01" in text
     assert "paper_qualified_min_brier=0.0" in text
     assert "capital_min_brier=0.02" in text

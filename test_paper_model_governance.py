@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
+import paper_model_governance as paper_gov
 from capital_model_governance import assess_model_evidence
 from paper_model_governance import (
     PAPER_EXPLORATORY,
@@ -137,3 +139,38 @@ def test_paper_thresholds_cannot_lower_real_capital_brier_gate(monkeypatch):
     assert capital.eligible_for_approval is False
     assert capital.recommended_status == "shadow"
     assert capital.evidence["minimum_brier_skill"] == 0.02
+
+
+
+def test_paper_assessment_uses_same_current_evidence_windows_as_readiness(monkeypatch):
+    queries: list[str] = []
+
+    def fake_rows(sql, params=None):
+        queries.append(" ".join(str(sql).split()))
+        return []
+
+    expected = classify_paper_model_metrics(
+        "m",
+        "v",
+        _metrics(brier=-0.009),
+        temporal_leakage_ok=True,
+        recent_walk_forward_runs=3,
+        distinct_symbols=3,
+    )
+    monkeypatch.setattr(paper_gov, "rows", fake_rows)
+    monkeypatch.setattr(paper_gov, "assess_paper_model_evidence", lambda *args, **kwargs: expected)
+    monkeypatch.setattr(
+        paper_gov,
+        "model_governance_assessment",
+        lambda *args, **kwargs: SimpleNamespace(eligible_for_approval=False),
+    )
+
+    result = paper_gov.paper_model_governance_assessment("m", "v")
+
+    assert result.tier == PAPER_EXPLORATORY
+    calibration_sql = next(sql for sql in queries if "FROM forecast_validation" in sql)
+    walk_forward_sql = next(sql for sql in queries if "FROM walk_forward_validation_runs" in sql)
+    assert "ORDER BY id DESC" in calibration_sql
+    assert "LIMIT 1000" in calibration_sql
+    assert "ORDER BY created_at DESC" in walk_forward_sql
+    assert "LIMIT 20" in walk_forward_sql

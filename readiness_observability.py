@@ -30,6 +30,13 @@ def _paper_model_state(model: str, model_version: str) -> dict[str, Any]:
             "minimum_brier_skill": thresholds.get("exploratory_min_brier_skill"),
             "paper_qualified_min_brier_skill": thresholds.get("paper_qualified_min_brier_skill"),
             "capital_min_brier_skill": thresholds.get("capital_min_brier_skill"),
+            "sample_count": int(assessment.sample_count or 0),
+            "directional_accuracy": assessment.directional_accuracy,
+            "expected_calibration_error": assessment.expected_calibration_error,
+            "brier_skill_score": assessment.brier_skill_score,
+            "temporal_leakage_ok": bool(assessment.temporal_leakage_ok),
+            "recent_walk_forward_runs": int(assessment.recent_walk_forward_runs or 0),
+            "distinct_symbols": int(assessment.distinct_symbols or 0),
         }
     except Exception:
         return {
@@ -40,6 +47,13 @@ def _paper_model_state(model: str, model_version: str) -> dict[str, Any]:
             "minimum_brier_skill": None,
             "paper_qualified_min_brier_skill": None,
             "capital_min_brier_skill": None,
+            "sample_count": 0,
+            "directional_accuracy": None,
+            "expected_calibration_error": None,
+            "brier_skill_score": None,
+            "temporal_leakage_ok": False,
+            "recent_walk_forward_runs": 0,
+            "distinct_symbols": 0,
         }
 
 
@@ -136,8 +150,10 @@ def emit_capital_readiness_report(
                 "eligible_for_approval=%s | calibration_status=%s | calibration_samples=%s | "
                 "ece=%s | brier_skill=%s | directional_accuracy=%s | walk_forward_ok=%s | "
                 "temporal_leakage_ok=%s | paper_tier=%s | paper_exploratory=%s | "
-                "paper_qualified=%s | paper_capital_qualified=%s | paper_min_brier=%s | "
-                "paper_qualified_min_brier=%s | capital_min_brier=%s",
+                "paper_qualified=%s | paper_capital_qualified=%s | paper_samples=%s | "
+                "paper_ece=%s | paper_brier_skill=%s | paper_directional_accuracy=%s | "
+                "paper_temporal_leakage_ok=%s | paper_walk_forward_runs=%s | paper_distinct_symbols=%s | "
+                "paper_min_brier=%s | paper_qualified_min_brier=%s | capital_min_brier=%s",
                 model,
                 version,
                 str(governance.get("recommended_status") or "unknown"),
@@ -153,6 +169,13 @@ def emit_capital_readiness_report(
                 bool(paper_model.get("exploratory_eligible")),
                 bool(paper_model.get("paper_qualified")),
                 bool(paper_model.get("capital_qualified")),
+                int(paper_model.get("sample_count") or 0),
+                paper_model.get("expected_calibration_error"),
+                paper_model.get("brier_skill_score"),
+                paper_model.get("directional_accuracy"),
+                bool(paper_model.get("temporal_leakage_ok")),
+                int(paper_model.get("recent_walk_forward_runs") or 0),
+                int(paper_model.get("distinct_symbols") or 0),
                 paper_model.get("minimum_brier_skill"),
                 paper_model.get("paper_qualified_min_brier_skill"),
                 paper_model.get("capital_min_brier_skill"),
