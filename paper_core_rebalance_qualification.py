@@ -183,11 +183,24 @@ def install_paper_core_rebalance_qualification(worker: Any) -> None:
             opportunity["portfolio_intent"] = patch._core_rebalance_intent(signal)
             opportunity["tactical_action"] = _signal_action(signal)
 
-        if opportunity.get("qualified_for_capital") is True:
-            return opportunity
-
         action = _signal_action(signal)
         unbounded = _unbounded_paper_learning()
+
+        if opportunity.get("qualified_for_capital") is True:
+            # Naturally qualified BUYs already passed the stricter V39 evidence
+            # checks, but they still need the unbounded-learning marker so the
+            # downstream economics optimizer can distinguish ordinary sizing
+            # from unknown-edge exploration.
+            if unbounded and action in _ENTRY_ACTIONS:
+                opportunity["paper_unbounded_learning"] = True
+                opportunity.setdefault("capital_qualification_basis", "v39_native_qualified_buy_signal")
+                opportunity["tactical_action"] = action
+                stages = list(opportunity.get("stages") or [])
+                if "paper_unbounded_learning" not in stages:
+                    stages.append("paper_unbounded_learning")
+                opportunity["stages"] = stages
+            return opportunity
+
         hard_evidence_ok, evidence = _hard_execution_evidence(
             worker,
             opportunity,
