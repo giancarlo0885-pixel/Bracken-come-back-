@@ -31,6 +31,7 @@ class StrategyEconomics:
     average_holding_minutes: float
     size_multiplier: float
     model_validated: bool
+    model_tier: str = "RESEARCH"
     epoch_name: str = _EPOCH_NAME
 
 
@@ -105,7 +106,7 @@ def _model_identity(signal: Any) -> tuple[str, str]:
 
 
 def model_validation_ok(signal: Any) -> bool:
-    """Permit positive size expansion only when current model governance passes."""
+    """Permit positive size expansion only when real-capital governance passes."""
     model, version = _model_identity(signal)
     if not model:
         return False
@@ -116,6 +117,19 @@ def model_validation_ok(signal: Any) -> bool:
         return bool(assessment.eligible_for_approval)
     except Exception:
         return False
+
+
+def paper_model_tier(signal: Any) -> str:
+    """Return a paper-only evidence tier without authorizing live capital."""
+    model, version = _model_identity(signal)
+    if not model:
+        return "RESEARCH"
+    try:
+        from paper_model_governance import paper_model_governance_assessment
+
+        return str(paper_model_governance_assessment(model, version).tier or "RESEARCH")
+    except Exception:
+        return "RESEARCH"
 
 
 def ensure_post_fix_epoch() -> None:
@@ -337,6 +351,7 @@ def strategy_economics(signal: Any) -> StrategyEconomics:
     gross_loss = abs(sum(losses))
     pf = gross_win / gross_loss if gross_loss > 0 else (999.0 if gross_win > 0 else 0.0)
     validated = model_validation_ok(signal)
+    tier = paper_model_tier(signal)
     expectancy = sum(pnls) / len(pnls) if pnls else 0.0
     multiplier = _multiplier(
         sample_count=len(records),
@@ -358,6 +373,7 @@ def strategy_economics(signal: Any) -> StrategyEconomics:
         average_holding_minutes=(sum(_holding_minutes(item) for item in records) / len(records)) if records else 0.0,
         size_multiplier=multiplier,
         model_validated=validated,
+        model_tier=tier,
     )
     _CACHE[strategy] = (now, result)
     return result
