@@ -333,6 +333,7 @@ def install_strategic_rebalance_optimizer_bridge(worker: Any) -> None:
                 economics_allowed
                 and expected_edge is None
                 and "insufficient_evidence" in str(economics_reason or "").lower()
+                and _paper_unbounded_exploration(item)
             ):
                 economics_allowed = False
             economics_observed_only = False
