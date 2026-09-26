@@ -11,6 +11,38 @@ def _state(checks: dict[str, Any], name: str) -> str:
     return str(item.get("status") or "FAIL")
 
 
+def _paper_model_state(model: str, model_version: str) -> dict[str, Any]:
+    """Best-effort paper-only model classification for sanitized observability.
+
+    Failure to classify never changes capital readiness and never grants paper or
+    broker authority. Real-capital approval remains owned by capital governance.
+    """
+    try:
+        from paper_model_governance import paper_model_governance_assessment
+
+        assessment = paper_model_governance_assessment(model, model_version)
+        thresholds = dict(assessment.thresholds or {})
+        return {
+            "tier": str(assessment.tier or "RESEARCH"),
+            "exploratory_eligible": bool(assessment.exploratory_eligible),
+            "paper_qualified": bool(assessment.paper_qualified),
+            "capital_qualified": bool(assessment.capital_qualified),
+            "minimum_brier_skill": thresholds.get("exploratory_min_brier_skill"),
+            "paper_qualified_min_brier_skill": thresholds.get("paper_qualified_min_brier_skill"),
+            "capital_min_brier_skill": thresholds.get("capital_min_brier_skill"),
+        }
+    except Exception:
+        return {
+            "tier": "UNAVAILABLE",
+            "exploratory_eligible": False,
+            "paper_qualified": False,
+            "capital_qualified": False,
+            "minimum_brier_skill": None,
+            "paper_qualified_min_brier_skill": None,
+            "capital_min_brier_skill": None,
+        }
+
+
 def emit_capital_readiness_report(
     logger: logging.Logger,
     report_builder: Callable[[], dict[str, Any]] | None = None,
@@ -96,13 +128,18 @@ def emit_capital_readiness_report(
         for item in list(models.get("models") or [])[:10]:
             governance = item.get("governance") or {}
             calibration = item.get("calibration") or {}
+            model = str(item.get("model") or "unknown")
+            version = str(item.get("model_version") or "")
+            paper_model = _paper_model_state(model, version)
             logger.info(
                 "CAPITAL READINESS MODEL | model=%s | version=%s | governance_status=%s | "
                 "eligible_for_approval=%s | calibration_status=%s | calibration_samples=%s | "
                 "ece=%s | brier_skill=%s | directional_accuracy=%s | walk_forward_ok=%s | "
-                "temporal_leakage_ok=%s",
-                str(item.get("model") or "unknown"),
-                str(item.get("model_version") or ""),
+                "temporal_leakage_ok=%s | paper_tier=%s | paper_exploratory=%s | "
+                "paper_qualified=%s | paper_capital_qualified=%s | paper_min_brier=%s | "
+                "paper_qualified_min_brier=%s | capital_min_brier=%s",
+                model,
+                version,
                 str(governance.get("recommended_status") or "unknown"),
                 bool(governance.get("eligible_for_approval")),
                 str(calibration.get("status") or "unknown"),
@@ -112,6 +149,13 @@ def emit_capital_readiness_report(
                 calibration.get("directional_accuracy"),
                 bool(item.get("walk_forward_ok")),
                 bool(item.get("temporal_leakage_ok")),
+                paper_model.get("tier"),
+                bool(paper_model.get("exploratory_eligible")),
+                bool(paper_model.get("paper_qualified")),
+                bool(paper_model.get("capital_qualified")),
+                paper_model.get("minimum_brier_skill"),
+                paper_model.get("paper_qualified_min_brier_skill"),
+                paper_model.get("capital_min_brier_skill"),
             )
 
     return report
