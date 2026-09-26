@@ -33,6 +33,9 @@ class PaperModelGovernanceAssessment:
     temporal_leakage_ok: bool
     recent_walk_forward_runs: int
     distinct_symbols: int
+    closed_paper_trades: int
+    paper_expectancy: float | None
+    paper_profit_factor: float | None
     reasons: list[str]
     thresholds: dict[str, Any]
 
@@ -111,6 +114,9 @@ def _thresholds() -> dict[str, Any]:
         "maximum_ece": _float_env("PAPER_MODEL_MAX_ECE", 0.05, 0.0, 1.0),
         "minimum_distinct_symbols": _int_env("PAPER_MODEL_MIN_SYMBOLS", 2, 1, 20),
         "maximum_evidence_age_days": _int_env("PAPER_MODEL_EVIDENCE_MAX_AGE_DAYS", 30, 1, 365),
+        "minimum_closed_paper_trades": _int_env("PAPER_QUALIFIED_MIN_CLOSED_TRADES", 30, 1, 100000),
+        "minimum_paper_expectancy": _float_env("PAPER_QUALIFIED_MIN_EXPECTANCY", 0.0, -1000000.0, 1000000.0),
+        "minimum_paper_profit_factor": _float_env("PAPER_QUALIFIED_MIN_PROFIT_FACTOR", 1.0, 0.0, 1000.0),
         # Observability only. Real-capital governance reads this independently and
         # is intentionally never derived from any PAPER_* setting.
         "capital_min_brier_skill": _float_env("CAPITAL_MIN_BRIER_SKILL", 0.02, -1.0, 1.0),
@@ -136,6 +142,9 @@ def classify_paper_model_metrics(
     accuracy = _finite(metrics.get("directional_accuracy"))
     ece = _finite(metrics.get("expected_calibration_error"))
     brier_skill = _finite(metrics.get("brier_skill_score"))
+    closed_paper_trades = int(metrics.get("closed_paper_trades") or 0)
+    paper_expectancy = _finite(metrics.get("paper_expectancy"))
+    paper_profit_factor = _finite(metrics.get("paper_profit_factor"))
 
     reasons: list[str] = []
     core_ok = True
@@ -164,6 +173,26 @@ def classify_paper_model_metrics(
             f"only {distinct_symbols} distinct walk-forward symbols; needs {thresholds['minimum_distinct_symbols']}"
         )
 
+    paper_economics_ok = True
+    if closed_paper_trades < int(thresholds["minimum_closed_paper_trades"]):
+        paper_economics_ok = False
+        reasons.append(
+            f"only {closed_paper_trades} closed paper trades; needs "
+            f"{thresholds['minimum_closed_paper_trades']}"
+        )
+    if paper_expectancy is None or paper_expectancy < float(thresholds["minimum_paper_expectancy"]):
+        paper_economics_ok = False
+        reasons.append(
+            f"paper expectancy {paper_expectancy} below "
+            f"{thresholds['minimum_paper_expectancy']}"
+        )
+    if paper_profit_factor is None or paper_profit_factor < float(thresholds["minimum_paper_profit_factor"]):
+        paper_economics_ok = False
+        reasons.append(
+            f"paper profit factor {paper_profit_factor} below "
+            f"{thresholds['minimum_paper_profit_factor']}"
+        )
+
     exploratory = bool(
         core_ok
         and brier_skill is not None
@@ -171,13 +200,14 @@ def classify_paper_model_metrics(
     )
     qualified = bool(
         core_ok
+        and paper_economics_ok
         and brier_skill is not None
         and brier_skill >= float(thresholds["paper_qualified_min_brier_skill"])
     )
 
     if qualified:
         tier = PAPER_QUALIFIED
-        reasons.append("paper evidence meets non-negative Brier-skill qualification")
+        reasons.append("paper evidence meets calibration and realized post-cost economics qualification")
     elif exploratory:
         tier = PAPER_EXPLORATORY
         reasons.append("paper evidence is within bounded exploratory Brier tolerance")
@@ -205,6 +235,9 @@ def classify_paper_model_metrics(
         temporal_leakage_ok=bool(temporal_leakage_ok),
         recent_walk_forward_runs=int(recent_walk_forward_runs),
         distinct_symbols=int(distinct_symbols),
+        closed_paper_trades=closed_paper_trades,
+        paper_expectancy=paper_expectancy,
+        paper_profit_factor=paper_profit_factor,
         reasons=reasons,
         thresholds=thresholds,
     )
@@ -216,6 +249,7 @@ def assess_paper_model_evidence(
     calibration_records: Iterable[dict[str, Any]],
     walk_forward_records: Iterable[dict[str, Any]],
     *,
+    paper_trade_metrics: dict[str, Any] | None = None,
     now: datetime | None = None,
 ) -> PaperModelGovernanceAssessment:
     now = now or datetime.now(timezone.utc)
@@ -224,6 +258,8 @@ def assess_paper_model_evidence(
 
     records = [dict(item) for item in calibration_records]
     metrics = evaluate_probability_calibration(records, bins=10).to_dict()
+    if paper_trade_metrics:
+        metrics.update(dict(paper_trade_metrics))
 
     max_age_days = int(_thresholds()["maximum_evidence_age_days"])
     cutoff = now.astimezone(timezone.utc) - timedelta(days=max_age_days)
@@ -264,6 +300,57 @@ def assess_paper_model_evidence(
     )
 
 
+
+def _paper_trade_economics(model: str, model_version: str) -> dict[str, Any]:
+    """Return realized after-cost paper economics from canonical closed trade ledger rows.
+
+    Missing or unreadable evidence fails closed: paper qualification receives zero
+    closed trades and unavailable expectancy/profit factor.
+    """
+    try:
+        realized = rows(
+            """
+            SELECT net_pnl
+            FROM trade_ledger
+            WHERE market='crypto' AND side='SELL'
+              AND model=%s AND COALESCE(model_version,'')=COALESCE(%s,'')
+              AND net_pnl IS NOT NULL
+            ORDER BY id DESC
+            LIMIT 1000
+            """,
+            (model, model_version),
+        )
+    except Exception:
+        return {
+            "closed_paper_trades": 0,
+            "paper_expectancy": None,
+            "paper_profit_factor": None,
+        }
+
+    pnls = [
+        value
+        for item in (realized or [])
+        if (value := _finite(dict(item).get("net_pnl"))) is not None
+    ]
+    if not pnls:
+        return {
+            "closed_paper_trades": 0,
+            "paper_expectancy": None,
+            "paper_profit_factor": None,
+        }
+
+    wins = [value for value in pnls if value > 0]
+    losses = [value for value in pnls if value <= 0]
+    gross_win = sum(wins)
+    gross_loss = abs(sum(losses))
+    profit_factor = gross_win / gross_loss if gross_loss > 0 else (999.0 if gross_win > 0 else 0.0)
+    return {
+        "closed_paper_trades": len(pnls),
+        "paper_expectancy": sum(pnls) / len(pnls),
+        "paper_profit_factor": profit_factor,
+    }
+
+
 def paper_model_governance_assessment(model: str, model_version: str) -> PaperModelGovernanceAssessment:
     """Read current evidence and return a non-authorizing paper model tier."""
     try:
@@ -292,6 +379,7 @@ def paper_model_governance_assessment(model: str, model_version: str) -> PaperMo
             model_version,
             calibration,
             walk_forward,
+            paper_trade_metrics=_paper_trade_economics(model, model_version),
         )
     except Exception as exc:
         return PaperModelGovernanceAssessment(
@@ -308,6 +396,9 @@ def paper_model_governance_assessment(model: str, model_version: str) -> PaperMo
             temporal_leakage_ok=False,
             recent_walk_forward_runs=0,
             distinct_symbols=0,
+            closed_paper_trades=0,
+            paper_expectancy=None,
+            paper_profit_factor=None,
             reasons=[f"paper model evidence unavailable: {exc.__class__.__name__}"],
             thresholds=_thresholds(),
         )
