@@ -367,6 +367,36 @@ def test_crypto_optimizer_does_not_approve_known_negative_economics(monkeypatch)
     assert hard_gate_calls == []
 
 
+def test_crypto_optimizer_keeps_unknown_economics_at_zero_without_explicit_exploration(monkeypatch):
+    worker = _worker()
+    hard_gate_calls = []
+    monkeypatch.setattr(
+        adaptive,
+        "hard_risk_gate",
+        lambda item: hard_gate_calls.append(item) or {"allowed": True, "reasons": []},
+    )
+    monkeypatch.setattr(
+        bridge,
+        "fee_edge_allows_entry",
+        lambda item: (True, "edge_unavailable_insufficient_evidence_exploration", None, 0.50),
+    )
+    install_strategic_rebalance_optimizer_bridge(worker)
+
+    plan = worker.adaptive_portfolio_optimizer(
+        [_candidate(tactical_action="BUY", paper_unbounded_learning=False)],
+        {"cash": 2000.0, "equity": 2000.0, "buying_power": 2000.0},
+        [],
+        engine="crypto",
+    )
+
+    assert plan["allocations"] == []
+    assert plan["rejections"][0]["reason"] == "economics_blocked"
+    assert plan["rejections"][0]["watch_only"] is True
+    assert plan["rejections"][0]["expected_edge_pct"] is None
+    assert plan["rejections"][0]["estimated_round_trip_cost_pct"] == 0.50
+    assert hard_gate_calls == []
+
+
 def test_crypto_optimizer_reclassifies_allowed_missing_edge_as_bounded_exploration(monkeypatch):
     _enable_paper_unbounded(monkeypatch)
     worker = _worker()
