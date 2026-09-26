@@ -723,16 +723,18 @@ function brainFieldPoint(index,total){
 let brainMode=false,workersVisible=true,trafficVisible=true;
 function showCityObjects(on){cityObjects.forEach(o=>{if(o!==brainGroup&&!o.isLight)o.visible=on;});workerObjects.forEach(o=>o.visible=on&&workersVisible);vehicleObjects.forEach(o=>o.visible=on&&trafficVisible);}
 
-const CITY_VIEW_STORAGE_KEY="oracle-city-view-v1";
+const CITY_VIEW_STORAGE_KEY="oracle-city-view-v2";
 function saveCityViewState(){
   try{
+    // Oracle City should always reopen as the city. Do not persist the transient
+    // Brain Map camera/mode into the City page's durable view state.
+    if(brainMode)return;
     localStorage.setItem(CITY_VIEW_STORAGE_KEY,JSON.stringify({
       camera:camera.position.toArray(),
       target:controls.target.toArray(),
       autoRotate:!!controls.autoRotate,
       workersVisible,
-      trafficVisible,
-      brainMode
+      trafficVisible
     }));
   }catch(e){}
 }
@@ -747,12 +749,12 @@ function restoreCityViewState(){
     controls.autoRotate=!!saved.autoRotate;
     workersVisible=saved.workersVisible!==false;
     trafficVisible=saved.trafficVisible!==false;
-    brainMode=!!saved.brainMode;
-    showCityObjects(!brainMode);
-    brainGroup.visible=brainMode;
+    brainMode=false;
+    showCityObjects(true);
+    brainGroup.visible=false;
     const brainButton=document.getElementById("brain");
-    brainButton.classList.toggle("active",brainMode);
-    brainButton.textContent=brainMode?"CITY":"BRAIN";
+    brainButton.classList.remove("active");
+    brainButton.textContent="BRAIN";
     const workersButton=document.getElementById("workers");
     workersButton.textContent=workersVisible?"WORKERS":"WORKERS OFF";
     workersButton.classList.toggle("active",workersVisible);
