@@ -55,7 +55,19 @@ def _report() -> dict:
     }
 
 
-def test_emit_capital_readiness_report_logs_sanitized_gate_evidence(caplog):
+def test_emit_capital_readiness_report_logs_sanitized_gate_evidence(caplog, monkeypatch):
+    monkeypatch.setattr(
+        "readiness_observability._paper_model_state",
+        lambda model, version: {
+            "tier": "PAPER_EXPLORATORY",
+            "exploratory_eligible": True,
+            "paper_qualified": False,
+            "capital_qualified": False,
+            "minimum_brier_skill": -0.01,
+            "paper_qualified_min_brier_skill": 0.0,
+            "capital_min_brier_skill": 0.02,
+        },
+    )
     logger = logging.getLogger("test-capital-readiness")
     with caplog.at_level(logging.INFO, logger=logger.name):
         returned = emit_capital_readiness_report(logger, report_builder=_report)
@@ -71,6 +83,13 @@ def test_emit_capital_readiness_report_logs_sanitized_gate_evidence(caplog):
     assert "capital_authorized=NO" in text
     assert "CAPITAL READINESS MODEL | model=oracle-model" in text
     assert "calibration_samples=12" in text
+    assert "paper_tier=PAPER_EXPLORATORY" in text
+    assert "paper_exploratory=True" in text
+    assert "paper_qualified=False" in text
+    assert "paper_capital_qualified=False" in text
+    assert "paper_min_brier=-0.01" in text
+    assert "paper_qualified_min_brier=0.0" in text
+    assert "capital_min_brier=0.02" in text
 
 
 def test_emit_capital_readiness_report_fails_observably_without_raising(caplog):
