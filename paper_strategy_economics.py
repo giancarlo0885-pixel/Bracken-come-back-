@@ -321,18 +321,72 @@ def _holding_minutes(record: dict[str, Any]) -> float:
         return 0.0
 
 
-def _multiplier(*, sample_count: int, expectancy: float, profit_factor: float, model_validated: bool) -> float:
+def _tier_size_cap(
+    paper_tier: str,
+    *,
+    model_validated: bool,
+    exploration_floor: float,
+    max_boost: float,
+) -> float:
+    """Return the maximum paper sizing multiplier permitted by evidence tier.
+
+    Paper tiers can authorize simulated-paper sizing only. A positive expansion
+    above baseline still requires independent real-capital model validation.
+    Unknown/missing tiers fail closed to the research exploration cap.
+    """
+    tier = str(paper_tier or "RESEARCH").strip().upper()
+    exploratory_cap = min(
+        1.0,
+        max(
+            exploration_floor,
+            _number(os.getenv("PAPER_EXPLORATORY_MAX_SIZE_MULTIPLIER", "0.75"), 0.75),
+        ),
+    )
+    research_cap = min(
+        exploratory_cap,
+        max(
+            0.10,
+            _number(os.getenv("PAPER_RESEARCH_MAX_SIZE_MULTIPLIER", str(exploration_floor)), exploration_floor),
+        ),
+    )
+    if tier == "CAPITAL_QUALIFIED" and model_validated:
+        return max_boost
+    if tier == "PAPER_QUALIFIED":
+        return 1.0
+    if tier == "PAPER_EXPLORATORY":
+        return exploratory_cap
+    return research_cap
+
+
+def _multiplier(
+    *,
+    sample_count: int,
+    expectancy: float,
+    profit_factor: float,
+    model_validated: bool,
+    paper_tier: str = "RESEARCH",
+) -> float:
     min_samples = max(3, int(os.getenv("PAPER_STRATEGY_ECON_MIN_SAMPLES", "8")))
     exploration_floor = min(1.0, max(0.10, _number(os.getenv("PAPER_STRATEGY_EXPLORATION_FLOOR", "0.35"), 0.35)))
     max_boost = max(1.0, min(1.50, _number(os.getenv("PAPER_STRATEGY_MAX_SIZE_MULTIPLIER", "1.25"), 1.25)))
+
     if sample_count < min_samples:
-        return 1.0
-    if expectancy < 0 or profit_factor < 0.90:
+        economics_multiplier = 1.0
+    elif expectancy < 0 or profit_factor < 0.90:
         severity = min(1.0, max(0.0, (0.90 - profit_factor) / 0.90))
-        return round(max(exploration_floor, 0.75 - (0.40 * severity)), 4)
-    if sample_count >= 30 and expectancy > 0 and profit_factor >= 1.20 and model_validated:
-        return max_boost
-    return 1.0
+        economics_multiplier = round(max(exploration_floor, 0.75 - (0.40 * severity)), 4)
+    elif sample_count >= 30 and expectancy > 0 and profit_factor >= 1.20 and model_validated:
+        economics_multiplier = max_boost
+    else:
+        economics_multiplier = 1.0
+
+    tier_cap = _tier_size_cap(
+        paper_tier,
+        model_validated=model_validated,
+        exploration_floor=exploration_floor,
+        max_boost=max_boost,
+    )
+    return round(max(0.0, min(economics_multiplier, tier_cap)), 4)
 
 
 def strategy_economics(signal: Any) -> StrategyEconomics:
@@ -358,6 +412,7 @@ def strategy_economics(signal: Any) -> StrategyEconomics:
         expectancy=expectancy,
         profit_factor=pf,
         model_validated=validated,
+        paper_tier=tier,
     )
     result = StrategyEconomics(
         strategy=strategy,
@@ -465,13 +520,17 @@ def adjusted_optimizer_target(signal: Any, target: float) -> tuple[float, Strate
     if not active() or target <= 0:
         return target, economics, "inactive"
     adjusted = round(target * economics.size_multiplier, 2)
-    reason = (
-        "negative_expectancy_downsize"
-        if economics.size_multiplier < 1.0
-        else "validated_positive_expectancy_boost"
-        if economics.size_multiplier > 1.0
-        else "neutral_size"
-    )
+    tier = str(economics.model_tier or "RESEARCH").upper()
+    if economics.size_multiplier > 1.0:
+        reason = "validated_positive_expectancy_boost"
+    elif tier == "RESEARCH":
+        reason = "research_tier_exploration_cap"
+    elif tier == "PAPER_EXPLORATORY":
+        reason = "paper_exploratory_tier_cap"
+    elif economics.size_multiplier < 1.0:
+        reason = "negative_expectancy_downsize"
+    else:
+        reason = "paper_qualified_neutral_size"
     return max(0.0, adjusted), economics, reason
 
 
@@ -493,7 +552,7 @@ def install_paper_strategy_economics() -> bool:
     ensure_post_fix_epoch()
     log.info(
         "PAPER STRATEGY ECONOMICS | active=True | attribution=normalized_trade_ledger_with_trades_fallback | "
-        "adaptive_sizing=ENABLED | fee_aware_edge=ENABLED | model_governance_boost_gate=ENABLED | "
+        "adaptive_sizing=ENABLED | paper_tier_sizing=ENABLED | fee_aware_edge=ENABLED | model_governance_boost_gate=ENABLED | "
         "epoch=%s | broker_submission=NONE | live_trading=DISARMED",
         _EPOCH_NAME,
     )
