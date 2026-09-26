@@ -100,3 +100,71 @@ def test_event_catalyst_strengthens_radar_without_bypassing_confirmation():
     assert with_event.primary_setup == "EVENT DRIVEN"
     assert with_event.approved is False
     assert "event catalyst is strong but price/volume confirmation is still limited" in with_event.warnings
+
+
+def test_event_table_bootstrap_runs_only_once_per_process(monkeypatch):
+    statements = []
+
+    class Conn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def execute(self, sql, params=()):
+            statements.append(sql)
+            return SimpleNamespace(fetchone=lambda: None, fetchall=lambda: [])
+
+    monkeypatch.setattr(scanner, "connect", lambda: Conn())
+    monkeypatch.setattr(scanner, "_TABLES_READY", False)
+
+    scanner._ensure_tables()
+    scanner._ensure_tables()
+
+    assert sum("CREATE TABLE IF NOT EXISTS event_opportunity_candidates" in sql for sql in statements) == 1
+    assert sum("CREATE INDEX IF NOT EXISTS idx_event_opportunity_score" in sql for sql in statements) == 1
+    assert sum("CREATE INDEX IF NOT EXISTS idx_event_opportunity_symbol" in sql for sql in statements) == 1
+    assert sum("CREATE TABLE IF NOT EXISTS event_opportunity_scanner_status" in sql for sql in statements) == 1
+
+
+def test_duplicate_event_upsert_skips_noop_row_rewrite(monkeypatch):
+    statements = []
+
+    class Conn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def execute(self, sql, params=()):
+            statements.append(sql)
+            return SimpleNamespace(fetchone=lambda: None, fetchall=lambda: [])
+
+    event = scanner.EventOpportunity(
+        event_id="stable-event",
+        category="AI_TECHNOLOGY",
+        title="Nvidia launches AI platform",
+        entity_name="Nvidia",
+        primary_symbol="NVDA",
+        symbol_candidates=["NVDA"],
+        source="Reuters",
+        url="https://example.test/event",
+        published_at="2026-09-26T00:00:00+00:00",
+        detected_at="2026-09-26T01:00:00+00:00",
+        score=88.0,
+        source_quality=1.0,
+        research_only=False,
+        query_category="AI_TECHNOLOGY",
+        factors=["definitive_event"],
+    )
+    monkeypatch.setattr(scanner, "connect", lambda: Conn())
+    monkeypatch.setattr(scanner, "ingest_monitor_record", lambda *args, **kwargs: None)
+
+    scanner._persist_event(event)
+
+    upsert = next(sql for sql in statements if "INSERT INTO event_opportunity_candidates" in sql)
+    assert "WHERE EXCLUDED.category IS DISTINCT FROM event_opportunity_candidates.category" in upsert
+    assert "EXCLUDED.score > event_opportunity_candidates.score" in upsert
+    assert "detected_at IS DISTINCT FROM" not in upsert
