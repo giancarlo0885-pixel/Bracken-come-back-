@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 
 from dashboard_helpers import (
+    actionable_decision_buckets,
     action_class,
     balanced_data_status,
     balanced_money_bar,
@@ -9,6 +10,7 @@ from dashboard_helpers import (
     capital_allocation_rows,
     capital_deployment_status,
     compact_money_text,
+    market_capital_allocation_rows,
     clean_market,
     data_age_label,
     live_data_status,
@@ -66,7 +68,7 @@ def test_cash_heavy_portfolio_is_not_automatically_high_risk():
 
     assert scores["safety"] == "LOW RISK"
     assert scores["capital_use"] == "MOSTLY CASH"
-    assert scores["status"] == "NEEDS MORE INVESTMENTS"
+    assert scores["status"] == "CAPITAL AVAILABLE"
 
 
 def test_under_investment_is_separate_from_safety_risk():
@@ -78,6 +80,33 @@ def test_under_investment_is_separate_from_safety_risk():
     assert scores["safety"] == "LOW RISK"
     assert scores["diversification"] == "POOR"
     assert scores["capital_use"] == "MOSTLY CASH"
+    assert scores["status"] == "CAPITAL AVAILABLE"
+
+
+def test_sell_is_actionable_only_for_an_owned_position():
+    decisions = [
+        {
+            "symbol": "OP-USD",
+            "action": "SELL",
+            "trade_eligible": True,
+            "quote_verified": True,
+            "quote_age_seconds": 5,
+        },
+        {
+            "symbol": "SOL-USD",
+            "action": "SELL",
+            "trade_eligible": True,
+            "quote_verified": True,
+            "quote_age_seconds": 5,
+        },
+    ]
+    buckets = actionable_decision_buckets(
+        decisions,
+        [{"symbol": "SOL-USD", "quantity": 0.5, "current_price": 120.0}],
+    )
+
+    assert [item["symbol"] for item in buckets["sells"]] == ["SOL-USD"]
+    assert [item["symbol"] for item in buckets["bearish_watch"]] == ["OP-USD"]
 
 
 def test_simple_mode_text_hides_technical_terms():
@@ -247,6 +276,52 @@ def test_capital_allocation_rows_explain_position_size():
     assert rows[0]["Position Size $"] != "$0.00"
     assert "final risk budget" in rows[0]["Why This Size"]
     assert compact_money_text(357_000) == "$357K"
+
+
+def test_market_capital_allocation_uses_each_portfolios_own_metrics():
+    opportunities = [
+        {
+            "symbol": "NVDA",
+            "market": "cash",
+            "action": "BUY",
+            "price": 100,
+            "stop_loss": 95,
+            "tier": "A",
+            "confidence": 88,
+            "reward_risk_ratio": 2.0,
+            "market_regime": "risk_on",
+            "avg_dollar_volume": 1_000_000_000,
+            "spread_pct": 0.002,
+        },
+        {
+            "symbol": "BTC-USD",
+            "market": "crypto",
+            "action": "BUY",
+            "price": 50_000,
+            "stop_loss": 48_000,
+            "tier": "A",
+            "confidence": 90,
+            "reward_risk_ratio": 2.0,
+            "market_regime": "risk_on",
+            "dollar_volume_24h": 10_000_000_000,
+            "spread_pct": 0.001,
+        },
+    ]
+
+    rows = market_capital_allocation_rows(
+        opportunities,
+        {"equity": 10_000, "cash": 6_000, "invested": 2_000},
+        [],
+        {"equity": 2_000, "cash": 1_500, "invested": 500},
+        [],
+        limit_per_market=4,
+    )
+
+    by_symbol = {row["Symbol"]: row for row in rows}
+    assert by_symbol["NVDA"]["Portfolio"] == "Stock"
+    assert by_symbol["BTC-USD"]["Portfolio"] == "Crypto"
+    assert by_symbol["NVDA"]["Base Risk $"] == "$100.00"
+    assert by_symbol["BTC-USD"]["Base Risk $"] == "$20.00"
 
 
 def test_stale_buy_is_not_displayed_as_green_buy():
