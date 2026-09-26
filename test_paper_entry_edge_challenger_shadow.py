@@ -60,6 +60,19 @@ def test_challenger_v2_requires_exact_round_trip_cost_evidence():
 def test_challenger_results_are_version_scoped_for_generation_isolation():
     source = Path("paper_entry_edge_challenger_shadow.py").read_text(encoding="utf-8")
     assert "PRIMARY KEY (version, trade_id)" in source
+    assert "paper_entry_edge_challenger_results_version_trade_id_uq" in source
+    assert "ON paper_entry_edge_challenger_results(version, trade_id)" in source
     assert "r.version=%s AND r.trade_id=m.trade_id" in source
     assert "ON CONFLICT (version, trade_id) DO NOTHING" in source
     assert "(epoch.get(\"started_at\"), _VERSION, max(1, int(limit)))" in source
+
+
+def test_shadow_challenger_startup_failure_does_not_block_worker(monkeypatch):
+    monkeypatch.setattr(challenger, "active", lambda: True)
+
+    def broken_schema():
+        raise RuntimeError("legacy constraint mismatch")
+
+    monkeypatch.setattr(challenger, "ensure_schema", broken_schema)
+
+    assert challenger.install_paper_entry_edge_challenger_shadow() is False
