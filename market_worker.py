@@ -790,8 +790,51 @@ def _v39_record_event(market: str, symbol: str, stage: str, payload: dict[str, A
 def _v39_prioritize_signals(market: str, signals: list[Any], prices: dict[str, Any], ranked: list[dict[str, Any]], scan_type: str) -> list[Any]:
     if not signals:
         return signals
+
+    # A V39-resolved edge is valid only for the scan that resolved it. Clear the
+    # prior handoff before rebuilding opportunities so a missing/new forecast
+    # cannot silently reuse stale edge evidence on the next optimizer cycle.
+    for signal in signals:
+        prior_handoff = getattr(signal, "v39_resolved_expected_edge_pct", None)
+        current_edge = getattr(signal, "expected_edge_pct", None)
+        if prior_handoff is not None and current_edge == prior_handoff:
+            try:
+                delattr(signal, "expected_edge_pct")
+            except Exception:
+                setattr(signal, "expected_edge_pct", None)
+        for attr in ("v39_resolved_expected_edge_pct", "v39_edge_provenance"):
+            if hasattr(signal, attr):
+                try:
+                    delattr(signal, attr)
+                except Exception:
+                    setattr(signal, attr, None)
+
     ranked_by_symbol = {str(item.get("symbol", "")).upper(): item for item in ranked or []}
     opportunities = [_v39_signal_opportunity(market, signal, prices, ranked_by_symbol, scan_type) for signal in signals]
+
+    # The optimizer and final execution guard must evaluate the same directional
+    # edge. _v39_signal_opportunity may resolve that edge from ranked evidence or
+    # the exact persisted forecast identity even when the in-memory signal did
+    # not carry it. Hand the resolved value back to the signal for this cycle.
+    signal_by_symbol = {str(getattr(signal, "symbol", "")).upper(): signal for signal in signals}
+    for opportunity in opportunities:
+        symbol = str(opportunity.get("symbol") or "").upper()
+        signal = signal_by_symbol.get(symbol)
+        raw_edge = opportunity.get("expected_edge_pct")
+        try:
+            resolved_edge = float(raw_edge) if raw_edge is not None else None
+            if resolved_edge is not None and not math.isfinite(resolved_edge):
+                resolved_edge = None
+        except (TypeError, ValueError):
+            resolved_edge = None
+        if signal is None or resolved_edge is None:
+            continue
+        setattr(signal, "expected_edge_pct", resolved_edge)
+        setattr(signal, "v39_resolved_expected_edge_pct", resolved_edge)
+        provenance = str(opportunity.get("edge_provenance") or "v39_resolved_edge")
+        setattr(signal, "edge_provenance", provenance)
+        setattr(signal, "v39_edge_provenance", provenance)
+
     intelligence = [item for item in opportunities if item.get("asset_class") not in {"stock", "crypto", "equity", "etf"}]
     opportunities = apply_cross_market_influence(opportunities, intelligence)
     try:
@@ -804,7 +847,6 @@ def _v39_prioritize_signals(market: str, signals: list[Any], prices: dict[str, A
     allocation_symbols = [str(row.get("symbol")).upper() for row in allocations]
     allocation_by_symbol = {str(row.get("symbol")).upper(): row for row in allocations}
     allocation_set = set(allocation_by_symbol)
-    signal_by_symbol = {str(getattr(signal, "symbol", "")).upper(): signal for signal in signals}
     for signal in signals:
         for attr in (
             "planned_trade_value",
