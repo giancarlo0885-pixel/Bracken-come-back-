@@ -587,9 +587,12 @@ def install_strategic_rebalance_optimizer_bridge(worker: Any) -> None:
                     "entry_floor_mode": "adaptive_equity_spread_liquidity_confidence",
                     "paper_learning_exploration": economics_observed_only or paper_floor_override,
                     "economics_observed_only": economics_observed_only,
-                    "economics_reason": economics_reason if economics_observed_only else None,
-                    "expected_edge_pct": expected_edge if economics_observed_only else None,
-                    "estimated_round_trip_cost_pct": estimated_cost if economics_observed_only else None,
+                    # Preserve the exact economics decision for every allocation,
+                    # not only exploration. Execution and City/Brain diagnostics
+                    # can then verify optimizer evidence without reconstructing it.
+                    "economics_reason": economics_reason,
+                    "expected_edge_pct": expected_edge,
+                    "estimated_round_trip_cost_pct": estimated_cost,
                 }
             )
             _log_optimizer_decision(
