@@ -19,6 +19,7 @@ import json
 import logging
 import os
 import re
+from threading import Lock
 from typing import Any
 import xml.etree.ElementTree as ET
 
@@ -37,6 +38,9 @@ EVENT_OPPORTUNITY_RETENTION_DAYS = max(2, int(os.getenv("EVENT_OPPORTUNITY_RETEN
 EVENT_OPPORTUNITY_PROMOTION_SCORE = max(50.0, min(100.0, float(os.getenv("EVENT_OPPORTUNITY_PROMOTION_SCORE", "72"))))
 EVENT_OPPORTUNITY_CONTEXT_SCORE = max(40.0, min(100.0, float(os.getenv("EVENT_OPPORTUNITY_CONTEXT_SCORE", "58"))))
 EVENT_OPPORTUNITY_TIMEOUT_SECONDS = max(5, min(30, int(os.getenv("EVENT_OPPORTUNITY_TIMEOUT_SECONDS", "15"))))
+
+_TABLES_READY = False
+_TABLES_READY_LOCK = Lock()
 
 _QUERY_GROUPS: tuple[tuple[str, str], ...] = (
     ("IPO_LISTING", 'IPO OR "initial public offering" OR "public offer" OR "stock exchange listing" OR "share sale" when:2d'),
@@ -206,9 +210,18 @@ class EventOpportunity:
 
 
 def _ensure_tables() -> None:
-    with connect() as conn:
-        conn.execute(
-            """CREATE TABLE IF NOT EXISTS event_opportunity_candidates (
+    global _TABLES_READY
+    if _TABLES_READY:
+        return
+
+    # Runtime reads call this helper frequently. Bootstrap DDL only once per
+    # process so normal scans cannot repeatedly contend with autovacuum.
+    with _TABLES_READY_LOCK:
+        if _TABLES_READY:
+            return
+        with connect() as conn:
+            conn.execute(
+                """CREATE TABLE IF NOT EXISTS event_opportunity_candidates (
                 event_id TEXT PRIMARY KEY,
                 category TEXT NOT NULL,
                 title TEXT NOT NULL,
@@ -226,24 +239,25 @@ def _ensure_tables() -> None:
                 payload JSONB NOT NULL DEFAULT '{}'::jsonb
             )"""
         )
-        conn.execute(
+            conn.execute(
             """CREATE INDEX IF NOT EXISTS idx_event_opportunity_score
                ON event_opportunity_candidates(score DESC, detected_at DESC)"""
         )
-        conn.execute(
+            conn.execute(
             """CREATE INDEX IF NOT EXISTS idx_event_opportunity_symbol
                ON event_opportunity_candidates(primary_symbol, score DESC, detected_at DESC)"""
         )
-        conn.execute(
-            """CREATE TABLE IF NOT EXISTS event_opportunity_scanner_status (
-                id INTEGER PRIMARY KEY DEFAULT 1,
-                cursor INTEGER NOT NULL DEFAULT 0,
-                status TEXT NOT NULL DEFAULT 'waiting',
-                message TEXT,
-                last_scan_at TEXT,
-                updated_at TEXT NOT NULL
-            )"""
-        )
+            conn.execute(
+                """CREATE TABLE IF NOT EXISTS event_opportunity_scanner_status (
+                    id INTEGER PRIMARY KEY DEFAULT 1,
+                    cursor INTEGER NOT NULL DEFAULT 0,
+                    status TEXT NOT NULL DEFAULT 'waiting',
+                    message TEXT,
+                    last_scan_at TEXT,
+                    updated_at TEXT NOT NULL
+                )"""
+            )
+        _TABLES_READY = True
 
 
 def _parse_dt(value: Any) -> datetime | None:
@@ -507,7 +521,17 @@ def _persist_event(event: EventOpportunity) -> None:
                    source_quality=GREATEST(event_opportunity_candidates.source_quality, EXCLUDED.source_quality),
                    research_only=event_opportunity_candidates.research_only AND EXCLUDED.research_only,
                    query_category=EXCLUDED.query_category,
-                   payload=EXCLUDED.payload""",
+                   payload=EXCLUDED.payload
+               WHERE EXCLUDED.category IS DISTINCT FROM event_opportunity_candidates.category
+                  OR EXCLUDED.entity_name IS DISTINCT FROM event_opportunity_candidates.entity_name
+                  OR (EXCLUDED.primary_symbol <> '' AND EXCLUDED.primary_symbol IS DISTINCT FROM event_opportunity_candidates.primary_symbol)
+                  OR (EXCLUDED.symbol_candidates <> '[]'::jsonb AND EXCLUDED.symbol_candidates IS DISTINCT FROM event_opportunity_candidates.symbol_candidates)
+                  OR (EXCLUDED.source <> '' AND EXCLUDED.source IS DISTINCT FROM event_opportunity_candidates.source)
+                  OR (EXCLUDED.url <> '' AND EXCLUDED.url IS DISTINCT FROM event_opportunity_candidates.url)
+                  OR (EXCLUDED.published_at <> '' AND EXCLUDED.published_at IS DISTINCT FROM event_opportunity_candidates.published_at)
+                  OR EXCLUDED.score > event_opportunity_candidates.score
+                  OR EXCLUDED.source_quality > event_opportunity_candidates.source_quality
+                  OR (event_opportunity_candidates.research_only AND NOT EXCLUDED.research_only)""",
             (
                 event.event_id,
                 event.category,
