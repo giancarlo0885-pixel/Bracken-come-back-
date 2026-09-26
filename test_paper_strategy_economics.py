@@ -213,6 +213,7 @@ def test_strategy_economics_accumulates_normalized_post_fix_closes(monkeypatch):
     ]
     monkeypatch.setattr(econ, "_ledger_records", lambda strategy: records if strategy == "oracle_council_v3" else [])
     monkeypatch.setattr(econ, "model_validation_ok", lambda signal: False)
+    monkeypatch.setattr(econ, "paper_model_tier", lambda signal: "PAPER_EXPLORATORY")
 
     result = econ.strategy_economics(
         {"strategy": "20d momentum +22.0%; RSI 68.0; Oracle Council V3 consensus BUY"}
@@ -223,6 +224,8 @@ def test_strategy_economics_accumulates_normalized_post_fix_closes(monkeypatch):
     assert round(result.net_pnl, 6) == 0.10
     assert round(result.fees, 6) == 0.08
     assert result.average_holding_minutes > 0
+    assert result.model_tier == "PAPER_EXPLORATORY"
+    assert result.model_validated is False
 
 
 def test_missing_edge_blocks_when_mature_strategy_economics_are_known_negative(monkeypatch):

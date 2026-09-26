@@ -478,12 +478,12 @@ def adjusted_optimizer_target(signal: Any, target: float) -> tuple[float, Strate
 def log_economics(economics: StrategyEconomics, *, symbol: str, original_target: float, adjusted_target: float, reason: str) -> None:
     log.info(
         "PAPER STRATEGY ECONOMICS | symbol=%s | strategy=%s | samples=%s | net_pnl=%.4f | fees=%.4f | "
-        "win_rate=%.4f | profit_factor=%.4f | expectancy=%.6f | avg_hold_min=%.2f | model_validated=%s | "
-        "size_multiplier=%.4f | original_target=%.2f | adjusted_target=%.2f | reason=%s | "
+        "win_rate=%.4f | profit_factor=%.4f | expectancy=%.6f | avg_hold_min=%.2f | model_tier=%s | "
+        "model_validated=%s | size_multiplier=%.4f | original_target=%.2f | adjusted_target=%.2f | reason=%s | "
         "mode=paper | broker_submission=NONE | live_trading=DISARMED",
         str(symbol or "").upper(), economics.strategy, economics.sample_count, economics.net_pnl, economics.fees,
         economics.win_rate, economics.profit_factor, economics.expectancy, economics.average_holding_minutes,
-        economics.model_validated, economics.size_multiplier, original_target, adjusted_target, reason,
+        economics.model_tier, economics.model_validated, economics.size_multiplier, original_target, adjusted_target, reason,
     )
 
 
