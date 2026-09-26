@@ -1871,6 +1871,39 @@ def trim_old_records() -> dict[str, int]:
     return deleted_by_table
 
 
+def _vacuum_deleted_retention_tables(deleted_by_table: dict[str, int]) -> dict[str, Any]:
+    """Make pages from bounded retention deletes reusable without rewriting tables.
+
+    VACUUM must run outside a transaction, so each eligible relation gets a short
+    autocommit connection. SKIP_LOCKED keeps maintenance fail-open under normal
+    worker activity. Only configured retention tables with actual deletes qualify;
+    canonical/protected relations can never reach this path.
+    """
+    vacuumed: list[str] = []
+    failed: dict[str, str] = {}
+    if psycopg is None:
+        return {"vacuumed": vacuumed, "failed": {"database": "psycopg unavailable"}}
+    for table, deleted in deleted_by_table.items():
+        if int(deleted or 0) <= 0:
+            continue
+        if table not in DATABASE_RETENTION_POLICIES or table in CANONICAL_PROTECTED_TABLES:
+            continue
+        try:
+            with psycopg.connect(
+                _database_url(),
+                connect_timeout=15,
+                autocommit=True,
+            ) as conn:
+                # The identifier comes exclusively from the static retention-policy allowlist.
+                conn.execute(f'VACUUM (ANALYZE, SKIP_LOCKED) public."{table}"')
+            vacuumed.append(table)
+        except Exception as exc:
+            # Retention has already committed. A busy relation must not fail the
+            # maintenance pass; autovacuum remains the fallback.
+            failed[table] = exc.__class__.__name__
+    return {"vacuumed": vacuumed, "failed": failed}
+
+
 def _human_bytes(value: int | float) -> str:
     size = float(value or 0)
     for unit in ("B", "KB", "MB", "GB", "TB"):
@@ -1970,5 +2003,12 @@ def run_database_maintenance() -> dict[str, Any]:
         if not locked:
             return {"ok": True, "skipped": True, "reason": "maintenance already running"}
         deleted = trim_old_records()
+        vacuum = _vacuum_deleted_retention_tables(deleted)
         report = database_storage_report()
-        return {"ok": True, "skipped": False, "deleted": deleted, "storage": report}
+        return {
+            "ok": True,
+            "skipped": False,
+            "deleted": deleted,
+            "vacuum": vacuum,
+            "storage": report,
+        }
