@@ -1190,7 +1190,39 @@ def test_ordinary_sell_signal_allows_profitable_exit_without_waiting(monkeypatch
     )
 
     assert allowed is True
-    assert "not realizing a loss" in reason
+    assert "not realizing a post-cost loss" in reason
+
+
+def test_ordinary_sell_signal_debounces_reference_gain_that_fills_below_entry(monkeypatch):
+    import oracle_bot
+
+    now = datetime(2026, 9, 27, 6, 3, 20, tzinfo=timezone.utc)
+    monkeypatch.setattr(oracle_bot, "ORDINARY_SELL_MIN_HOLD_MINUTES", 15)
+    monkeypatch.setattr(oracle_bot, "utc_now", lambda: now.isoformat())
+    monkeypatch.setattr(
+        oracle_bot,
+        "row",
+        lambda *args, **kwargs: {"created_at": (now - timedelta(minutes=8)).isoformat()},
+    )
+
+    allowed, reason = oracle_bot._ordinary_sell_signal_allowed(
+        "crypto",
+        {
+            "symbol": "AAVE-USD",
+            "entry_price": 156.74025197,
+            "quantity": 0.31600051,
+        },
+        156.883,
+        {
+            "bid": 156.866,
+            "ask": 156.900,
+            "estimated_slippage_pct": 0.00135,
+            "estimated_fees_pct": 0.0010,
+        },
+    )
+
+    assert allowed is False
+    assert "held=8.0m < 15m" in reason
 
 
 def test_ordinary_sell_signal_allows_losing_exit_after_debounce(monkeypatch):
