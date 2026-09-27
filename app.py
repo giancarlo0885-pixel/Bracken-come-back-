@@ -24,6 +24,7 @@ from dashboard_helpers import (
     capital_allocation_rows,
     capital_deployment_status,
     market_capital_allocation_rows,
+    professional_decision_views,
     compact_money_text,
     format_quantity,
     format_asset_price,
@@ -698,6 +699,7 @@ buy_decisions = decision_buckets["buys"]
 sell_decisions = decision_buckets["sells"]
 bearish_watch_decisions = decision_buckets["bearish_watch"]
 waiting_for_data = decision_buckets["waiting"]
+professional_decisions = professional_decision_views(decisions, all_positions)
 
 with st.sidebar:
     st.markdown("## GARIBALDI ORACLE")
@@ -837,7 +839,16 @@ elif page == "Crypto":
     if crypto_focus["profit_sources"]:
         st.dataframe(pd.DataFrame(crypto_focus["profit_sources"]), width="stretch", hide_index=True)
     else:
-        st.info("Crypto profit attribution will appear after ledgered paper fills close or verified open marks are available.")
+        st.info("Crypto profit attribution will appear after complete ledgered paper round trips are available.")
+
+    accounting_gaps = crypto_focus.get("accounting_gaps") or []
+    if accounting_gaps:
+        st.warning(
+            f"{len(accounting_gaps)} incomplete crypto ledger record(s) were excluded from profit attribution "
+            "until exact entry/exit/accounting evidence is complete."
+        )
+        with st.expander("ACCOUNTING / PROVENANCE GAPS", expanded=False):
+            st.dataframe(pd.DataFrame(accounting_gaps), width="stretch", hide_index=True)
 
     st.markdown("**CORE ALLOCATION**")
     st.dataframe(pd.DataFrame(crypto_focus["core_allocation"]), width="stretch", hide_index=True)
@@ -1520,10 +1531,11 @@ elif page == "Professional":
     tabs = st.tabs(["Evidence Ledger", "Backtesting", "Provider Health", "Raw Signals"])
     with tabs[0]:
         st.markdown("### Evidence behind current decisions")
-        if decisions:
-            selected_symbol = st.selectbox("Decision", [f"{d['symbol']} · {d['action']}" for d in decisions])
-            selected_index = [f"{d['symbol']} · {d['action']}" for d in decisions].index(selected_symbol)
-            d = decisions[selected_index]
+        if professional_decisions:
+            decision_labels = [f"{d['symbol']} · {d['action']}" for d in professional_decisions]
+            selected_symbol = st.selectbox("Decision", decision_labels)
+            selected_index = decision_labels.index(selected_symbol)
+            d = professional_decisions[selected_index]
             supports, cautions = plain_reason(d.get("reason"))
             a, b, c, e = st.columns(4)
             a.metric("Decision", d.get("action", "WAIT"))
@@ -1535,6 +1547,8 @@ elif page == "Professional":
                 st.success(f"Trade-ready data - {freshness['label']}: {freshness['detail']}")
             else:
                 st.warning(f"Not trade-ready - {freshness['label']}: {freshness['detail']}")
+            if d.get("execution_note"):
+                st.info(str(d["execution_note"]))
             st.markdown("### Supporting evidence")
             for point in supports:
                 st.success(point)
@@ -1545,6 +1559,50 @@ elif page == "Professional":
                 st.json(d)
         else:
             st.info("No current decisions are available.")
+
+        st.markdown("### Crypto loss / cooldown evidence")
+        recent_crypto_sells = safe_rows(
+            """SELECT id,symbol,created_at,price,quantity,value,realized_pnl,reason
+               FROM trades
+               WHERE market='crypto' AND UPPER(COALESCE(side,''))='SELL'
+               ORDER BY created_at DESC
+               LIMIT 100"""
+        )
+        if recent_crypto_sells:
+            by_symbol: dict[str, list[dict[str, Any]]] = {}
+            for trade in recent_crypto_sells:
+                by_symbol.setdefault(str(trade.get("symbol") or "").upper(), []).append(trade)
+            streak_rows = []
+            for symbol, symbol_rows in by_symbol.items():
+                streak = 0
+                for trade in symbol_rows:
+                    pnl = trade.get("realized_pnl")
+                    if pnl is None or as_float(pnl) >= 0:
+                        break
+                    streak += 1
+                if streak:
+                    latest = symbol_rows[0]
+                    streak_rows.append(
+                        {
+                            "Symbol": symbol,
+                            "Consecutive realized losses": streak,
+                            "Latest exit": str(latest.get("created_at") or ""),
+                            "Latest realized P/L": latest.get("realized_pnl"),
+                            "Latest exit reason": clean_trade_reason(latest.get("reason")),
+                        }
+                    )
+            if streak_rows:
+                st.dataframe(
+                    pd.DataFrame(sorted(streak_rows, key=lambda row: row["Consecutive realized losses"], reverse=True)),
+                    width="stretch",
+                    hide_index=True,
+                )
+            else:
+                st.success("No symbol currently has a consecutive realized-loss SELL streak in the recent paper evidence.")
+            with st.expander("Recent crypto SELL evidence", expanded=False):
+                st.dataframe(pd.DataFrame(recent_crypto_sells), width="stretch", hide_index=True)
+        else:
+            st.info("No recent crypto SELL evidence is available.")
     with tabs[1]:
         runs = safe_rows("SELECT * FROM backtest_runs ORDER BY id DESC LIMIT 100")
         if runs:
