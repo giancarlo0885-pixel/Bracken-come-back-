@@ -344,6 +344,39 @@ def actionable_decision_buckets(
     }
 
 
+def professional_decision_views(
+    decisions: list[dict[str, Any]],
+    positions: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Return evidence-ledger decisions with ownership-safe execution semantics.
+
+    A model can be bearish on an asset Oracle does not own, but that is not an
+    executable SELL in a long-only paper portfolio. Preserve the evidence while
+    relabeling that state as AVOID and explicitly blocking execution language.
+    """
+    owned_symbols = {
+        str(position.get("symbol") or "").upper()
+        for position in positions
+        if as_float(position.get("quantity")) > 0
+    }
+    views: list[dict[str, Any]] = []
+    for decision in decisions:
+        item = dict(decision)
+        action = str(item.get("action") or "").upper()
+        symbol = str(item.get("symbol") or "").upper()
+        if action == "SELL" and symbol not in owned_symbols:
+            item["source_action"] = "SELL"
+            item["action"] = "AVOID"
+            item["trade_eligible"] = False
+            item["execution_eligible"] = False
+            item["execution_note"] = (
+                "Bearish surveillance signal only. Oracle owns no position in this asset, "
+                "so there is nothing to sell."
+            )
+        views.append(item)
+    return views
+
+
 def simple_money_summary(metrics: dict[str, Any]) -> dict[str, str]:
     start = as_float(metrics.get("starting_balance"))
     equity = as_float(metrics.get("equity"))
