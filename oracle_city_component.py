@@ -139,7 +139,12 @@ const DETAIL=isMobileDevice?0.78:1.15;
 const colors={online:0x4df49b,waiting:0xffd166,offline:0xff6767};
 const aeveData=DATA.aeve||{};
 document.getElementById("cityMood").textContent="CITY MOOD: "+String(DATA.city_mood||"UNKNOWN");
-document.getElementById("aeveProgress").textContent="AEVE: "+(aeveData.accepted==null?"UNAVAILABLE":String(aeveData.accepted))+" / "+String(aeveData.target||1000);
+const aeveObserved=aeveData.observed==null?null:Number(aeveData.observed);
+const aeveAccepted=aeveData.accepted==null?null:Number(aeveData.accepted);
+const aeveTarget=Number(aeveData.target||1000);
+document.getElementById("aeveProgress").textContent=aeveObserved==null
+  ? "AEVE: UNAVAILABLE"
+  : "AEVE: "+String(aeveObserved)+" OBSERVED · "+String(aeveAccepted==null?0:aeveAccepted)+" ACCEPTED / "+String(aeveTarget);
 const safety=DATA.safety||{};
 const executionMode=String(safety.execution_mode||DATA.execution_mode||"paper").toUpperCase();
 document.getElementById("paperState").textContent=executionMode==="PAPER"
