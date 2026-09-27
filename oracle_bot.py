@@ -29,6 +29,7 @@ from market_sessions import (
     parse_utc,
     quote_is_fresh,
 )
+from paper_execution_reality import simulate_fill
 from paper_broker import (
     accrued_interest,
     allocate_purchase,
@@ -151,6 +152,7 @@ def _ordinary_sell_signal_allowed(
     market: str,
     position: dict[str, Any],
     price: float,
+    quote_metadata: dict[str, Any] | None = None,
 ) -> tuple[bool, str]:
     """Debounce only ordinary losing SELL signals immediately after entry.
 
@@ -164,8 +166,21 @@ def _ordinary_sell_signal_allowed(
 
     if not symbol or entry_price <= 0 or current_price <= 0:
         return True, "ordinary sell debounce unavailable"
-    if current_price >= entry_price:
-        return True, "ordinary sell is not realizing a loss"
+    quantity = safe_float(position.get("quantity"))
+    try:
+        simulated_fill = simulate_fill(
+            side="SELL",
+            market=market,
+            reference_price=current_price,
+            quote=quote_metadata,
+            order_value=(quantity * current_price) if quantity > 0 else None,
+        )
+        effective_exit_price = safe_float(simulated_fill.fill_price, current_price)
+    except (TypeError, ValueError):
+        effective_exit_price = current_price
+
+    if effective_exit_price >= entry_price:
+        return True, "ordinary sell is not realizing a post-cost loss"
 
     latest_buy = row(
         """
@@ -3150,6 +3165,7 @@ def process_signals(
                 market,
                 position,
                 price,
+                quote,
             )
             if not sell_allowed:
                 log.info(
