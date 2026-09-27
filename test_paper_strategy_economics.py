@@ -102,7 +102,7 @@ def test_negative_mature_economics_requires_recovery_edge_buffer(monkeypatch):
 
     allowed, reason, edge, cost = econ.fee_edge_allows_entry(signal)
 
-    assert cost == 0.21
+    assert round(cost, 2) == 0.21
     assert edge == 0.30
     assert allowed is False
     assert "recovery_margin=1.50" in reason
@@ -132,7 +132,7 @@ def test_strong_edge_can_clear_negative_economics_recovery_buffer(monkeypatch):
 
     allowed, reason, edge, cost = econ.fee_edge_allows_entry(signal)
 
-    assert cost == 0.21
+    assert round(cost, 2) == 0.21
     assert edge == 0.40
     assert allowed is True
     assert reason == "edge_clears_negative_economics_buffer:margin=1.50"
