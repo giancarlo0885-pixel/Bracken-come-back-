@@ -1150,3 +1150,66 @@ def test_actual_paper_buy_safeguard_calculates_sector_from_realistic_positions(m
     assert ok is False
     assert "sector concentration" in reason
     assert "TECHNOLOGY" in reason
+
+
+def test_ordinary_sell_signal_debounces_fresh_losing_exit(monkeypatch):
+    import oracle_bot
+
+    now = datetime(2026, 9, 27, 5, 30, tzinfo=timezone.utc)
+    monkeypatch.setattr(oracle_bot, "ORDINARY_SELL_MIN_HOLD_MINUTES", 15)
+    monkeypatch.setattr(oracle_bot, "utc_now", lambda: now.isoformat())
+    monkeypatch.setattr(
+        oracle_bot,
+        "row",
+        lambda *args, **kwargs: {"created_at": (now - timedelta(minutes=6)).isoformat()},
+    )
+
+    allowed, reason = oracle_bot._ordinary_sell_signal_allowed(
+        "crypto",
+        {"symbol": "AAVE-USD", "entry_price": 155.25},
+        154.63,
+    )
+
+    assert allowed is False
+    assert "held=6.0m < 15m" in reason
+
+
+def test_ordinary_sell_signal_allows_profitable_exit_without_waiting(monkeypatch):
+    import oracle_bot
+
+    monkeypatch.setattr(
+        oracle_bot,
+        "row",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("database should not be queried")),
+    )
+
+    allowed, reason = oracle_bot._ordinary_sell_signal_allowed(
+        "crypto",
+        {"symbol": "AAVE-USD", "entry_price": 155.25},
+        156.00,
+    )
+
+    assert allowed is True
+    assert "not realizing a loss" in reason
+
+
+def test_ordinary_sell_signal_allows_losing_exit_after_debounce(monkeypatch):
+    import oracle_bot
+
+    now = datetime(2026, 9, 27, 5, 30, tzinfo=timezone.utc)
+    monkeypatch.setattr(oracle_bot, "ORDINARY_SELL_MIN_HOLD_MINUTES", 15)
+    monkeypatch.setattr(oracle_bot, "utc_now", lambda: now.isoformat())
+    monkeypatch.setattr(
+        oracle_bot,
+        "row",
+        lambda *args, **kwargs: {"created_at": (now - timedelta(minutes=20)).isoformat()},
+    )
+
+    allowed, reason = oracle_bot._ordinary_sell_signal_allowed(
+        "crypto",
+        {"symbol": "SOL-USD", "entry_price": 121.20},
+        120.80,
+    )
+
+    assert allowed is True
+    assert "satisfied" in reason
