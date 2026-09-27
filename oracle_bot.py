@@ -101,6 +101,13 @@ DEFAULT_COOLDOWN_MINUTES = int(
     globals().get("TRADE_COOLDOWN_MINUTES", 15)
 )
 
+# Ordinary model SELL signals must not immediately crystallize a small loss after
+# a fresh entry. Hard stop-loss / risk exits use separate paths and are not
+# delayed by this guard.
+ORDINARY_SELL_MIN_HOLD_MINUTES = int(
+    globals().get("ORDINARY_SELL_MIN_HOLD_MINUTES", 15)
+)
+
 DEFAULT_MAX_OPEN_POSITIONS = int(
     globals().get("MAX_OPEN_POSITIONS", 14)
 )
@@ -138,6 +145,56 @@ def safe_text(
 
 def _parse_utc(value: Any) -> datetime | None:
     return parse_utc(value)
+
+
+def _ordinary_sell_signal_allowed(
+    market: str,
+    position: dict[str, Any],
+    price: float,
+) -> tuple[bool, str]:
+    """Debounce only ordinary losing SELL signals immediately after entry.
+
+    Profitable exits remain immediate. Missing/legacy fill timestamps fail open
+    so existing positions are not trapped. Dedicated stop/risk exit paths are
+    unaffected because this helper is called only from the ordinary signal path.
+    """
+    symbol = safe_text(position.get("symbol")).upper()
+    entry_price = safe_float(position.get("entry_price"))
+    current_price = safe_float(price)
+
+    if not symbol or entry_price <= 0 or current_price <= 0:
+        return True, "ordinary sell debounce unavailable"
+    if current_price >= entry_price:
+        return True, "ordinary sell is not realizing a loss"
+
+    latest_buy = row(
+        """
+        SELECT created_at
+        FROM paper_fills
+        WHERE market = %s
+          AND symbol = %s
+          AND side = 'BUY'
+        ORDER BY created_at DESC
+        LIMIT 1
+        """,
+        (market, symbol),
+    )
+    if not latest_buy:
+        return True, "no canonical buy fill timestamp"
+
+    entered_at = _parse_utc(latest_buy.get("created_at"))
+    now = _parse_utc(utc_now())
+    if entered_at is None or now is None:
+        return True, "unparseable canonical buy fill timestamp"
+
+    held_minutes = max(0.0, (now - entered_at).total_seconds() / 60.0)
+    minimum = max(0, ORDINARY_SELL_MIN_HOLD_MINUTES)
+    if held_minutes < minimum:
+        return (
+            False,
+            f"ordinary sell debounce: held={held_minutes:.1f}m < {minimum}m while below entry",
+        )
+    return True, f"ordinary sell debounce satisfied: held={held_minutes:.1f}m"
 
 
 def _entry_forecast_gate(
@@ -3086,6 +3143,20 @@ def process_signals(
                     market.upper(),
                     symbol,
                     quote_reason,
+                )
+                continue
+
+            sell_allowed, sell_reason = _ordinary_sell_signal_allowed(
+                market,
+                position,
+                price,
+            )
+            if not sell_allowed:
+                log.info(
+                    "%s | REJECT SELL | %s | %s",
+                    market.upper(),
+                    symbol,
+                    sell_reason,
                 )
                 continue
 
