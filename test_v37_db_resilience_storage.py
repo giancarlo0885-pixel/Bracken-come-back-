@@ -236,8 +236,16 @@ def test_retention_vacuum_targets_only_tables_that_deleted_rows(monkeypatch):
         ("postgresql://unit", {"connect_timeout": 15, "autocommit": True})
     ]
     assert driver.statements == [
-        'VACUUM (ANALYZE, SKIP_LOCKED) public."signals"'
+        'VACUUM (ANALYZE, SKIP_LOCKED, INDEX_CLEANUP OFF, TRUNCATE OFF) '
+        'public."signals"'
     ]
+
+
+def test_retention_vacuum_disables_index_cleanup_and_truncation():
+    source = open("database.py", encoding="utf-8").read()
+    assert "INDEX_CLEANUP OFF" in source
+    assert "TRUNCATE OFF" in source
+    assert "VACUUM FULL" not in source
 
 
 def test_retention_vacuum_is_fail_open(monkeypatch):
