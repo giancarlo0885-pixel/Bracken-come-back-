@@ -154,6 +154,13 @@ def test_postgres_storage_report_and_retention_protects_canonical_tables():
 
 
 @pytest.mark.skipif(not os.getenv("DATABASE_URL"), reason="PostgreSQL integration test runs in CI service container")
+def test_postgres_retention_vacuum_accepts_low_wal_options():
+    database.initialize_database()
+    result = database._vacuum_deleted_retention_tables({"signals": 1})
+    assert result == {"vacuumed": ["signals"], "failed": {}}
+
+
+@pytest.mark.skipif(not os.getenv("DATABASE_URL"), reason="PostgreSQL integration test runs in CI service container")
 def test_postgres_maintenance_advisory_lock_allows_one_runner():
     database.initialize_database()
     with database.database_advisory_lock(database.DATABASE_MAINTENANCE_LOCK_NAME, wait=False) as locked:
@@ -236,8 +243,16 @@ def test_retention_vacuum_targets_only_tables_that_deleted_rows(monkeypatch):
         ("postgresql://unit", {"connect_timeout": 15, "autocommit": True})
     ]
     assert driver.statements == [
-        'VACUUM (ANALYZE, SKIP_LOCKED) public."signals"'
+        'VACUUM (ANALYZE, SKIP_LOCKED, INDEX_CLEANUP OFF, TRUNCATE OFF) '
+        'public."signals"'
     ]
+
+
+def test_retention_vacuum_disables_index_cleanup_and_truncation():
+    source = open("database.py", encoding="utf-8").read()
+    assert "INDEX_CLEANUP OFF" in source
+    assert "TRUNCATE OFF" in source
+    assert "VACUUM FULL" not in source
 
 
 def test_retention_vacuum_is_fail_open(monkeypatch):

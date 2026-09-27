@@ -1876,8 +1876,11 @@ def _vacuum_deleted_retention_tables(deleted_by_table: dict[str, int]) -> dict[s
 
     VACUUM must run outside a transaction, so each eligible relation gets a short
     autocommit connection. SKIP_LOCKED keeps maintenance fail-open under normal
-    worker activity. Only configured retention tables with actual deletes qualify;
-    canonical/protected relations can never reach this path.
+    worker activity. INDEX_CLEANUP OFF and TRUNCATE OFF keep this frequent pass
+    focused on reusable heap space; autovacuum owns index cleanup and truncation,
+    avoiding WAL amplification and stronger end-of-table locking. Only configured
+    retention tables with actual deletes qualify; canonical/protected relations
+    can never reach this path.
     """
     vacuumed: list[str] = []
     failed: dict[str, str] = {}
@@ -1895,7 +1898,10 @@ def _vacuum_deleted_retention_tables(deleted_by_table: dict[str, int]) -> dict[s
                 autocommit=True,
             ) as conn:
                 # The identifier comes exclusively from the static retention-policy allowlist.
-                conn.execute(f'VACUUM (ANALYZE, SKIP_LOCKED) public."{table}"')
+                conn.execute(
+                    f'VACUUM (ANALYZE, SKIP_LOCKED, INDEX_CLEANUP OFF, TRUNCATE OFF) '
+                    f'public."{table}"'
+                )
             vacuumed.append(table)
         except Exception as exc:
             # Retention has already committed. A busy relation must not fail the
