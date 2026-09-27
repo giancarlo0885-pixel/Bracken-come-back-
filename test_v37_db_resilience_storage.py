@@ -154,6 +154,13 @@ def test_postgres_storage_report_and_retention_protects_canonical_tables():
 
 
 @pytest.mark.skipif(not os.getenv("DATABASE_URL"), reason="PostgreSQL integration test runs in CI service container")
+def test_postgres_retention_vacuum_accepts_low_wal_options():
+    database.initialize_database()
+    result = database._vacuum_deleted_retention_tables({"signals": 1})
+    assert result == {"vacuumed": ["signals"], "failed": {}}
+
+
+@pytest.mark.skipif(not os.getenv("DATABASE_URL"), reason="PostgreSQL integration test runs in CI service container")
 def test_postgres_maintenance_advisory_lock_allows_one_runner():
     database.initialize_database()
     with database.database_advisory_lock(database.DATABASE_MAINTENANCE_LOCK_NAME, wait=False) as locked:
