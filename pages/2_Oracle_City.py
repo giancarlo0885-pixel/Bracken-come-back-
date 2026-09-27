@@ -59,11 +59,15 @@ c5.metric("Money in positions", "$" + f"{summary['known_exposure']:,.2f}")
 
 aeve = snapshot.get("aeve", {})
 safety = snapshot.get("safety", {})
-aeve_progress = "Unavailable / 1000" if aeve.get("accepted") is None else f"{aeve['accepted']} / {aeve.get('target', 1000)}"
+aeve_progress = (
+    "Unavailable"
+    if aeve.get("observed") is None
+    else f"{aeve.get('observed', 0)} observed · {aeve.get('accepted', 0)} accepted / {aeve.get('target', 1000)}"
+)
 m1, m2, m3, m4, m5 = st.columns(5)
 m1.metric("City mood", snapshot.get("city_mood") or "UNKNOWN")
 st.caption("City mood reason: " + str(snapshot.get("city_mood_reason") or "not available"))
-m2.metric("AEVE progress", aeve_progress)
+m2.metric("AEVE forward window", aeve_progress)
 m3.metric("Execution mode", str(safety.get("execution_mode") or snapshot.get("execution_mode") or "unknown").upper())
 m4.metric("Broker submission", "ENABLED" if safety.get("broker_submission_enabled") else "DISABLED")
 m5.metric("Live trading", "ARMED" if safety.get("live_trading_armed") else "DISARMED")

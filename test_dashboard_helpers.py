@@ -11,6 +11,7 @@ from dashboard_helpers import (
     capital_deployment_status,
     compact_money_text,
     market_capital_allocation_rows,
+    professional_decision_views,
     clean_market,
     data_age_label,
     live_data_status,
@@ -107,6 +108,37 @@ def test_sell_is_actionable_only_for_an_owned_position():
 
     assert [item["symbol"] for item in buckets["sells"]] == ["SOL-USD"]
     assert [item["symbol"] for item in buckets["bearish_watch"]] == ["OP-USD"]
+
+
+def test_professional_decision_views_never_calls_unowned_bearish_signal_sell():
+    decisions = [
+        {
+            "symbol": "AVNT-USD",
+            "action": "SELL",
+            "trade_eligible": True,
+            "quote_verified": True,
+            "quote_age_seconds": 4,
+        },
+        {
+            "symbol": "SOL-USD",
+            "action": "SELL",
+            "trade_eligible": True,
+            "quote_verified": True,
+            "quote_age_seconds": 4,
+        },
+    ]
+    views = professional_decision_views(
+        decisions,
+        [{"symbol": "SOL-USD", "quantity": 1.0, "current_price": 120.0}],
+    )
+
+    by_symbol = {item["symbol"]: item for item in views}
+    assert by_symbol["AVNT-USD"]["action"] == "AVOID"
+    assert by_symbol["AVNT-USD"]["trade_eligible"] is False
+    assert by_symbol["AVNT-USD"]["source_action"] == "SELL"
+    assert "owns no position" in by_symbol["AVNT-USD"]["execution_note"]
+    assert by_symbol["SOL-USD"]["action"] == "SELL"
+    assert by_symbol["SOL-USD"]["trade_eligible"] is True
 
 
 def test_simple_mode_text_hides_technical_terms():

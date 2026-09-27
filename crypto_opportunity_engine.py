@@ -370,7 +370,12 @@ def crypto_page_sections(
     provider_assets: list[dict[str, Any]] | None = None,
     provider_supports_symbol: Callable[[str, str], bool] | None = None,
 ) -> dict[str, Any]:
-    universe = dynamic_crypto_universe(provider_assets or [], provider_supports_symbol)
+    # When the page is built from the live Global Pit queue, those candidate
+    # records are the provider-backed universe evidence. Falling back to an empty
+    # provider list made Dynamic Eligible / liquidity diagnostics read as zero
+    # even while the worker was actively scanning those assets.
+    universe_assets = provider_assets if provider_assets is not None else candidates
+    universe = dynamic_crypto_universe(universe_assets, provider_supports_symbol)
     quote_map = {_crypto_symbol(item.get("symbol")): dict(item) for item in candidates if _is_crypto_record(item)}
     eligible_rows = []
     rejected = []
@@ -442,29 +447,57 @@ def crypto_page_sections(
             }
         )
     profit_sources = []
+    accounting_gaps = []
     for row in ledger_rows or []:
         if not _is_crypto_record(row):
             continue
         symbol = _crypto_symbol(row.get("symbol"))
         if not symbol.endswith("-USD"):
             continue
+
+        entry_price = _finite(row.get("entry_price"))
+        exit_price = _finite(row.get("exit_price"))
+        quantity = _finite(row.get("quantity"))
+        missing: list[str] = []
+        if entry_price <= 0:
+            missing.append("entry price")
+        if exit_price <= 0:
+            missing.append("exit price")
+        if quantity <= 0:
+            missing.append("quantity")
+        if row.get("net_pnl") is None:
+            missing.append("net P/L")
+
+        if missing:
+            accounting_gaps.append(
+                {
+                    "Asset": symbol,
+                    "Strategy": row.get("strategy") or "",
+                    "Bucket": row.get("bucket") or "",
+                    "Entry": money_text(entry_price) if entry_price > 0 else "MISSING ENTRY PRICE",
+                    "Exit": money_text(exit_price) if exit_price > 0 else "MISSING EXIT PRICE",
+                    "Quantity": format_quantity(quantity) if quantity > 0 else "MISSING QUANTITY",
+                    "Issue": ", ".join(missing),
+                    "Status": "ACCOUNTING REVIEW",
+                }
+            )
+            continue
+
         profit_sources.append(
             {
                 "Asset": symbol,
                 "Strategy": row.get("strategy") or "",
                 "Bucket": row.get("bucket") or "",
-                "Entry": money_text(row.get("entry_price")),
-                # trade_ledger is realized/closed-trade evidence. Never render a
-                # missing exit as $0.00 or substitute an unrelated current mark.
-                "Exit": money_text(row.get("exit_price")) if _finite(row.get("exit_price")) > 0 else "MISSING EXIT PRICE",
-                "Quantity": format_quantity(row.get("quantity")),
+                "Entry": money_text(entry_price),
+                "Exit": money_text(exit_price),
+                "Quantity": format_quantity(quantity),
                 "Gross P/L": signed_money_text(row.get("gross_pnl")),
                 "Fees": money_text(row.get("fees")),
                 "Net P/L": signed_money_text(row.get("net_pnl")),
                 "Return %": f"{_finite(row.get('return_pct')):+.1f}%",
                 "Tier": row.get("tier") or "",
                 "Held For": row.get("held_for") or "",
-                "Status": (row.get("status") or "CLOSED") if _finite(row.get("exit_price")) > 0 else "DATA INCOMPLETE",
+                "Status": row.get("status") or "CLOSED",
             }
         )
     rotations = [candidate for candidate in (crypto_rotation_candidate(item, positions) for item in candidates) if candidate]
@@ -486,6 +519,7 @@ def crypto_page_sections(
         "movers": eligible_rows[:15],
         "rotations": rotations,
         "profit_sources": profit_sources,
+        "accounting_gaps": accounting_gaps,
         "core_allocation": [{"Asset": symbol, "Target Weight": f"{weight:.0%}"} for symbol, weight in CRYPTO_CORE_WEIGHTS.items()],
         "core_deployment": crypto_core_rebalance_plan(quote_map, portfolio, positions),
         "waiting": rejected[:20],

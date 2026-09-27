@@ -79,6 +79,65 @@ def test_fee_edge_preserves_exploration_when_edge_missing(monkeypatch):
     assert cost > 0
 
 
+def test_negative_mature_economics_requires_recovery_edge_buffer(monkeypatch):
+    _paper(monkeypatch)
+    monkeypatch.setenv("PAPER_MIN_EDGE_TO_COST_MULTIPLIER", "1.25")
+    monkeypatch.setenv("PAPER_NEGATIVE_ECON_EDGE_TO_COST_MULTIPLIER", "1.50")
+    monkeypatch.setenv("PAPER_KNOWN_NEGATIVE_EDGE_MIN_SAMPLES", "30")
+    monkeypatch.setattr(
+        econ,
+        "strategy_economics",
+        lambda signal: SimpleNamespace(
+            sample_count=46,
+            expectancy=-0.27,
+            profit_factor=0.28,
+        ),
+    )
+    signal = {
+        "forecast_return_pct": 0.30,
+        "expected_slippage_pct": 0.05,
+        "fee_pct": 0.05,
+        "spread_pct": 0.01,
+    }
+
+    allowed, reason, edge, cost = econ.fee_edge_allows_entry(signal)
+
+    assert round(cost, 2) == 0.21
+    assert edge == 0.30
+    assert allowed is False
+    assert "recovery_margin=1.50" in reason
+    assert "samples=46" in reason
+
+
+def test_strong_edge_can_clear_negative_economics_recovery_buffer(monkeypatch):
+    _paper(monkeypatch)
+    monkeypatch.setenv("PAPER_MIN_EDGE_TO_COST_MULTIPLIER", "1.25")
+    monkeypatch.setenv("PAPER_NEGATIVE_ECON_EDGE_TO_COST_MULTIPLIER", "1.50")
+    monkeypatch.setenv("PAPER_KNOWN_NEGATIVE_EDGE_MIN_SAMPLES", "30")
+    monkeypatch.setattr(
+        econ,
+        "strategy_economics",
+        lambda signal: SimpleNamespace(
+            sample_count=46,
+            expectancy=-0.27,
+            profit_factor=0.28,
+        ),
+    )
+    signal = {
+        "forecast_return_pct": 0.40,
+        "expected_slippage_pct": 0.05,
+        "fee_pct": 0.05,
+        "spread_pct": 0.01,
+    }
+
+    allowed, reason, edge, cost = econ.fee_edge_allows_entry(signal)
+
+    assert round(cost, 2) == 0.21
+    assert edge == 0.40
+    assert allowed is True
+    assert reason == "edge_clears_negative_economics_buffer:margin=1.50"
+
+
 def test_negative_expectancy_reduces_size_but_keeps_exploration(monkeypatch):
     _paper(monkeypatch)
     monkeypatch.setenv("PAPER_STRATEGY_ECON_MIN_SAMPLES", "8")

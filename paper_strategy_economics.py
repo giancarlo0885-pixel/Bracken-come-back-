@@ -482,17 +482,21 @@ def estimated_round_trip_cost_pct(signal: Any) -> float:
 
 
 def fee_edge_allows_entry(signal: Any) -> tuple[bool, str, float | None, float]:
-    """Reject when explicit edge misses costs or mature economics are known negative.
+    """Reject entries that do not clear realistic costs with enough evidence margin.
 
-    A missing forecast is exploratory only while strategy evidence is insufficient.
-    Once a strategy has a mature post-cost sample and both expectancy is negative
-    and profit factor is at or below one, missing edge must not bypass that evidence.
+    Missing forecast edge remains exploratory only while post-cost evidence is
+    insufficient. Once a strategy has mature negative economics, missing edge is
+    blocked and explicit edge must clear a stronger cost multiple before another
+    paper entry is allowed. This targets repeat-loss regimes without weakening
+    the normal entry gate or manufacturing trades.
     """
     edge = expected_edge_pct(signal)
     cost = estimated_round_trip_cost_pct(signal)
+    min_samples = max(3, int(os.getenv("PAPER_KNOWN_NEGATIVE_EDGE_MIN_SAMPLES", "30")))
+    economics: StrategyEconomics | None = None
+
     if edge is None:
         economics = strategy_economics(signal)
-        min_samples = max(3, int(os.getenv("PAPER_KNOWN_NEGATIVE_EDGE_MIN_SAMPLES", "30")))
         if (
             economics.sample_count >= min_samples
             and economics.expectancy < 0.0
@@ -506,10 +510,41 @@ def fee_edge_allows_entry(signal: Any) -> tuple[bool, str, float | None, float]:
                 cost,
             )
         return True, "edge_unavailable_insufficient_evidence_exploration", None, cost
-    margin = max(1.0, _number(os.getenv("PAPER_MIN_EDGE_TO_COST_MULTIPLIER", "1.25"), 1.25))
+
+    base_margin = max(1.0, _number(os.getenv("PAPER_MIN_EDGE_TO_COST_MULTIPLIER", "1.25"), 1.25))
+    margin = base_margin
+    negative_economics = False
+    economics = strategy_economics(signal)
+    if (
+        economics.sample_count >= min_samples
+        and economics.expectancy < 0.0
+        and economics.profit_factor <= 1.0
+    ):
+        negative_economics = True
+        recovery_margin = max(
+            base_margin,
+            min(
+                2.0,
+                _number(
+                    os.getenv("PAPER_NEGATIVE_ECON_EDGE_TO_COST_MULTIPLIER", "1.50"),
+                    1.50,
+                ),
+            ),
+        )
+        margin = recovery_margin
+
     required = cost * margin
     if edge + 1e-12 < required:
-        return False, f"edge_below_round_trip_cost:{edge:.4f}<{required:.4f}", edge, cost
+        suffix = (
+            f":recovery_margin={margin:.2f}:samples={economics.sample_count}:"
+            f"expectancy={economics.expectancy:.6f}:pf={economics.profit_factor:.4f}"
+            if negative_economics and economics is not None
+            else ""
+        )
+        return False, f"edge_below_round_trip_cost:{edge:.4f}<{required:.4f}{suffix}", edge, cost
+
+    if negative_economics:
+        return True, f"edge_clears_negative_economics_buffer:margin={margin:.2f}", edge, cost
     return True, "edge_clears_round_trip_cost", edge, cost
 
 

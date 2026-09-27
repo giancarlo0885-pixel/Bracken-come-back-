@@ -239,6 +239,7 @@ def test_oracle_city_snapshot_builds_workers_exposure_agents_and_replay():
     assert {item["kind"] for item in snapshot["replay"]} == {"decision", "trade", "intel"}
     assert any(flow["source"] == "council" and flow["target"] == "risk" for flow in snapshot["flows"])
     assert snapshot["aeve"]["generation"] == 1
+    assert snapshot["aeve"]["observed"] == 180
     assert snapshot["aeve"]["accepted"] == 137
     assert snapshot["aeve"]["target"] == 1000
     assert snapshot["aeve"]["provenance_version"] == 2
@@ -346,6 +347,18 @@ def test_oracle_city_mobile_layout_suppresses_label_collisions_and_resets_camera
     assert "min-height:44px" in rendered
     assert "isMobileDevice?26:68" in rendered
     assert "isMobileDevice?6:16" in rendered
+
+
+def test_oracle_city_renderer_distinguishes_observed_from_accepted_aeve_samples():
+    snapshot = build_oracle_city_snapshot(
+        _fake_rows,
+        now=datetime(2026, 9, 19, 0, 0, tzinfo=timezone.utc),
+    )
+    rendered = render_oracle_city_component(snapshot)
+    assert "OBSERVED" in rendered
+    assert "ACCEPTED" in rendered
+    assert "aeveObserved" in rendered
+    assert "aeveAccepted" in rendered
 
 
 def test_oracle_city_missing_aeve_progress_stays_unavailable():

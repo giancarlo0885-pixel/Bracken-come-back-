@@ -170,6 +170,25 @@ def test_crypto_profit_attribution_reconciles_page_totals():
     assert "AAPL" not in str(page["profit_sources"])
 
 
+def test_crypto_page_uses_live_candidate_rows_for_universe_diagnostics_when_provider_assets_omitted():
+    live_candidate = candidate(
+        "INJ-USD",
+        dollar_volume_24h=80_000_000,
+        spread_pct=0.004,
+        confidence=0.84,
+        reward_risk_ratio=2.0,
+    )
+    page = crypto.crypto_page_sections(
+        [live_candidate],
+        [],
+        [],
+        {"equity": 100_000, "cash": 40_000},
+    )
+
+    assert page["summary"]["Dynamic Eligible Symbols"] >= 1
+    assert "INJ-USD" in page["universe"]["symbols"]
+
+
 def test_crypto_page_summary_reports_wider_universe_diagnostics():
     page = crypto.crypto_page_sections(
         [candidate("SOL-USD")],
@@ -198,15 +217,18 @@ def test_paper_accounting_rejects_malformed_capacity():
     assert "capacity" in sized["reason"]
 
 
-def test_crypto_profit_table_never_renders_missing_exit_as_zero():
+def test_crypto_profit_table_quarantines_missing_exit_from_profit_attribution():
     page = crypto.crypto_page_sections(
         [], [],
         [{"symbol": "DOGE-USD", "market": "crypto", "strategy": "fast", "bucket": "Core", "entry_price": 0.10, "exit_price": None, "current_price": None, "quantity": 220.0, "gross_pnl": None, "fees": 0, "net_pnl": None, "return_pct": None, "status": "CLOSED"}],
         {"equity": 2_000, "cash": 2_000},
     )
-    row = page["profit_sources"][0]
+    assert page["profit_sources"] == []
+    row = page["accounting_gaps"][0]
     assert row["Exit"] == "MISSING EXIT PRICE"
-    assert row["Status"] == "DATA INCOMPLETE"
+    assert row["Status"] == "ACCOUNTING REVIEW"
+    assert "exit price" in row["Issue"]
+    assert "net P/L" in row["Issue"]
     assert "$0.00" not in row["Exit"]
 
 
