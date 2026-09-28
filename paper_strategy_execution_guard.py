@@ -394,6 +394,9 @@ def install_paper_strategy_execution_guard() -> bool:
                 adjusted_target=sized,
                 reason=size_reason,
             )
+            if sized <= 0:
+                _RESEARCH_ENTRY_CONFIRMATIONS.pop(str(symbol or "").upper().strip(), None)
+                return _blocked_buy("strategy_economics_zero_target")
             confirmation_allowed, confirmation_reason = _research_entry_confirmation_allows(
                 symbol,
                 economics_signal,
@@ -416,8 +419,6 @@ def install_paper_strategy_execution_guard() -> bool:
                     getattr(scorecard, "profit_factor", 0.0),
                 )
                 return _blocked_buy(confirmation_reason)
-            if sized <= 0:
-                return _blocked_buy("strategy_economics_zero_target")
             if optimizer_target > 0:
                 adjusted_signal = _with_optimizer_target(signal, sized)
             else:
