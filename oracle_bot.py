@@ -176,10 +176,20 @@ def _ordinary_sell_signal_allowed(
             order_value=(quantity * current_price) if quantity > 0 else None,
         )
         effective_exit_price = safe_float(simulated_fill.fill_price, current_price)
+        fee_pct = max(0.0, safe_float(simulated_fill.fee_pct))
     except (TypeError, ValueError):
         effective_exit_price = current_price
+        fee_pct = 0.0
 
-    if effective_exit_price >= entry_price:
+    # Position entry_price is the fee-exclusive execution fill.  The legacy
+    # simulator embeds the exit fee in fill_price, while the installed paper
+    # accounting simulator charges it separately.  Normalize both contracts,
+    # then include the entry fee so this really is a round-trip post-cost gate.
+    projected_exit_unit = effective_exit_price
+    if globals().get("_paper_execution_accounting_installed", False):
+        projected_exit_unit *= max(0.0, 1.0 - fee_pct)
+    round_trip_entry_unit = entry_price * (1.0 + fee_pct)
+    if projected_exit_unit >= round_trip_entry_unit:
         return True, "ordinary sell is not realizing a post-cost loss"
 
     latest_buy = row(
