@@ -12,6 +12,7 @@ import paper_strategy_economics as economics
 
 log = logging.getLogger("paper-strategy-execution-guard")
 _INSTALLED = False
+_RESEARCH_ENTRY_CONFIRMATIONS: dict[str, dict[str, Any]] = {}
 
 
 def _value(signal: Any, name: str, default: Any = None) -> Any:
@@ -99,6 +100,89 @@ def _open_position_accumulation_allows(symbol: str) -> tuple[bool, str]:
     if age_minutes < interval:
         return False, f"open_position_accumulation_cooldown:{age_minutes:.2f}/{interval:.2f}m"
     return True, f"open_position_accumulation_cooldown_elapsed:{age_minutes:.2f}/{interval:.2f}m"
+
+
+
+def _research_entry_confirmation_allows(
+    symbol: str,
+    signal: Any,
+    verified_quote: dict[str, Any] | None,
+    edge: float | None,
+    cost: float,
+    scorecard: Any,
+) -> tuple[bool, str]:
+    """Require two distinct verified observations for mature losing research tiers.
+
+    This is paper-only. It does not lower any economics threshold. The extra
+    confirmation applies only after a strategy has enough closed samples to show
+    negative post-cost economics while still being classified RESEARCH.
+    """
+    key = str(symbol or "").upper().strip()
+    tier = str(getattr(scorecard, "model_tier", "RESEARCH") or "RESEARCH").upper()
+    sample_count = int(getattr(scorecard, "sample_count", 0) or 0)
+    expectancy = _number(getattr(scorecard, "expectancy", 0.0))
+    profit_factor = _number(getattr(scorecard, "profit_factor", 0.0))
+    min_samples = max(
+        2,
+        int(_number(os.getenv("PAPER_RESEARCH_CONFIRMATION_MIN_SAMPLES", "30"), 30.0)),
+    )
+
+    mature_losing_research = (
+        tier == "RESEARCH"
+        and sample_count >= min_samples
+        and (expectancy < 0.0 or profit_factor < 1.0)
+    )
+    if not mature_losing_research:
+        _RESEARCH_ENTRY_CONFIRMATIONS.pop(key, None)
+        return True, "research_entry_confirmation_not_required"
+
+    action = str(_value(signal, "action", "BUY") or "BUY").upper().strip()
+    if action not in {"BUY", "ACCUMULATE"}:
+        _RESEARCH_ENTRY_CONFIRMATIONS.pop(key, None)
+        return True, "research_entry_confirmation_non_entry_action"
+
+    if edge is None or edge <= cost:
+        _RESEARCH_ENTRY_CONFIRMATIONS.pop(key, None)
+        return False, "research_entry_confirmation_requires_positive_post_cost_edge"
+
+    quote = verified_quote if isinstance(verified_quote, dict) else {}
+    observation_id = str(
+        quote.get("quote_timestamp")
+        or quote.get("timestamp")
+        or quote.get("reference_timestamp")
+        or ""
+    ).strip()
+    if not observation_id:
+        _RESEARCH_ENTRY_CONFIRMATIONS.pop(key, None)
+        return False, "research_entry_confirmation_requires_verified_quote_timestamp"
+
+    previous = _RESEARCH_ENTRY_CONFIRMATIONS.get(key)
+    now = datetime.now(timezone.utc)
+    max_gap_minutes = max(
+        1.0,
+        min(
+            60.0,
+            _number(os.getenv("PAPER_RESEARCH_CONFIRMATION_MAX_GAP_MINUTES", "20"), 20.0),
+        ),
+    )
+    if previous:
+        seen_at = previous.get("seen_at")
+        if isinstance(seen_at, datetime):
+            age_minutes = max(0.0, (now - seen_at).total_seconds() / 60.0)
+        else:
+            age_minutes = max_gap_minutes + 1.0
+        if age_minutes <= max_gap_minutes and previous.get("observation_id") != observation_id:
+            _RESEARCH_ENTRY_CONFIRMATIONS.pop(key, None)
+            return True, "research_entry_confirmation_passed:2/2"
+
+    _RESEARCH_ENTRY_CONFIRMATIONS[key] = {
+        "observation_id": observation_id,
+        "seen_at": now,
+        "action": action,
+        "edge": float(edge),
+        "cost": float(cost),
+    }
+    return False, "research_entry_confirmation_pending:1/2"
 
 
 def _remaining_cumulative_tier_capacity(symbol: str, tier_target: float) -> tuple[float | None, float]:
@@ -310,6 +394,28 @@ def install_paper_strategy_execution_guard() -> bool:
                 adjusted_target=sized,
                 reason=size_reason,
             )
+            confirmation_allowed, confirmation_reason = _research_entry_confirmation_allows(
+                symbol,
+                economics_signal,
+                verified_quote,
+                edge,
+                cost,
+                scorecard,
+            )
+            if not confirmation_allowed:
+                log.info(
+                    "PAPER RESEARCH ENTRY CONFIRMATION | symbol=%s | allowed=False | reason=%s | "
+                    "expected_edge_pct=%s | estimated_round_trip_cost_pct=%.4f | samples=%s | "
+                    "expectancy=%s | profit_factor=%s | mode=paper | broker_submission=NONE | live_trading=DISARMED",
+                    str(symbol or "").upper(),
+                    confirmation_reason,
+                    "unknown" if edge is None else f"{edge:.4f}",
+                    cost,
+                    getattr(scorecard, "sample_count", 0),
+                    getattr(scorecard, "expectancy", 0.0),
+                    getattr(scorecard, "profit_factor", 0.0),
+                )
+                return _blocked_buy(confirmation_reason)
             if sized <= 0:
                 return _blocked_buy("strategy_economics_zero_target")
             if optimizer_target > 0:
@@ -343,7 +449,7 @@ def install_paper_strategy_execution_guard() -> bool:
     )
     log.info(
         "PAPER STRATEGY EXECUTION GUARD | active=True | fee_aware_entry=ENFORCED_WHEN_EDGE_AVAILABLE | "
-        "adaptive_strategy_sizing=ENABLED | model_regime_boost_gate=ENABLED | open_position_accumulation_cooldown=%.2fm | "
+        "adaptive_strategy_sizing=ENABLED | model_regime_boost_gate=ENABLED | mature_losing_research_confirmation=2_SCANS | open_position_accumulation_cooldown=%.2fm | "
         "exploration_floor=PRESERVED | final_churn_and_capacity_guards=DOWNSTREAM | broker_submission=NONE | live_trading=DISARMED",
         accumulation_interval,
     )
