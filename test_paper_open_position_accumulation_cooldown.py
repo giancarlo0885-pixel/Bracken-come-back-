@@ -375,3 +375,81 @@ def test_final_buy_wrapper_waits_for_second_research_scan(monkeypatch):
     finally:
         guard._INSTALLED = previous
         guard._RESEARCH_ENTRY_CONFIRMATIONS.clear()
+
+
+
+def test_zero_tier_capacity_clears_stale_research_confirmation(monkeypatch):
+    monkeypatch.setenv("EXECUTION_MODE", "paper")
+    monkeypatch.setenv("PAPER_AUTONOMOUS_LEARNING", "true")
+    monkeypatch.setenv("ENABLE_BROKER_SUBMISSION", "false")
+    monkeypatch.setenv("LIVE_TRADING_ARMED", "false")
+    guard._RESEARCH_ENTRY_CONFIRMATIONS.clear()
+    guard._RESEARCH_ENTRY_CONFIRMATIONS["SOL-USD"] = {
+        "observation_id": "stale-open-position-scan",
+        "seen_at": datetime.now(timezone.utc),
+        "action": "BUY",
+        "edge": 0.90,
+        "cost": 0.55,
+    }
+
+    calls = []
+
+    def original_buy(*args, **kwargs):
+        calls.append((args, kwargs))
+        return True, "original_buy", None
+
+    fake = SimpleNamespace(_buy=original_buy, row=lambda *args, **kwargs: None)
+    scorecard = SimpleNamespace(
+        size_multiplier=0.35,
+        model_tier="RESEARCH",
+        sample_count=102,
+        expectancy=-0.21,
+        profit_factor=0.19,
+    )
+    monkeypatch.setitem(sys.modules, "oracle_bot", fake)
+    monkeypatch.setattr(guard.economics, "active", lambda: True)
+    monkeypatch.setattr(
+        guard,
+        "_open_position_accumulation_allows",
+        lambda symbol: (True, "open_position_accumulation_cooldown_elapsed:6.00/5.00m"),
+    )
+    monkeypatch.setattr(
+        guard.economics,
+        "fee_edge_allows_entry",
+        lambda signal: (True, "edge_clears_negative_economics_buffer", 0.90, 0.55),
+    )
+    monkeypatch.setattr(
+        guard.economics,
+        "adjusted_optimizer_target",
+        lambda signal, target: (10.0, scorecard, "research_tier_exploration_cap"),
+    )
+    monkeypatch.setattr(
+        guard,
+        "_remaining_cumulative_tier_capacity",
+        lambda symbol, target: (0.0, 10.0),
+    )
+    monkeypatch.setattr(guard.economics, "log_economics", lambda *args, **kwargs: None)
+    monkeypatch.setattr(guard.regime_gate, "regime_validation_ok", lambda signal: (True, "pass"))
+
+    previous = guard._INSTALLED
+    guard._INSTALLED = False
+    try:
+        assert guard.install_paper_strategy_execution_guard() is True
+        result = fake._buy(
+            "crypto",
+            "SOL-USD",
+            118.0,
+            {
+                "symbol": "SOL-USD",
+                "action": "BUY",
+                "v39_optimizer_approved_amount": 20.0,
+            },
+            verified_quote={"quote_timestamp": "2026-09-28T21:00:00Z"},
+        )
+
+        assert result == (False, "strategy_economics_zero_target", None)
+        assert "SOL-USD" not in guard._RESEARCH_ENTRY_CONFIRMATIONS
+        assert calls == []
+    finally:
+        guard._INSTALLED = previous
+        guard._RESEARCH_ENTRY_CONFIRMATIONS.clear()
