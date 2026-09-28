@@ -404,8 +404,11 @@ def install_paper_execution_accounting(market_worker_module: Any | None = None) 
     if getattr(oracle_bot, "_paper_execution_accounting_installed", False):
         return
 
-    # Make the existing realism wrapper use a fee-exclusive price model.
+    # Make both the realism module and oracle_bot's imported alias use the
+    # same fee-exclusive price model.  Otherwise pre-execution gates can price
+    # a different paper fill than the accounting wrapper actually executes.
     reality.simulate_fill = _simulate_fill_explicit_fee
+    oracle_bot.simulate_fill = _simulate_fill_explicit_fee
 
     original_allocate_purchase = oracle_bot.allocate_purchase
     original_allocate_sale = oracle_bot.allocate_sale
