@@ -210,3 +210,168 @@ def test_fee_rejection_preserves_buy_contract(monkeypatch):
         assert calls == []
     finally:
         guard._INSTALLED = previous
+
+
+
+def test_mature_losing_research_requires_two_distinct_verified_scans(monkeypatch):
+    guard._RESEARCH_ENTRY_CONFIRMATIONS.clear()
+    scorecard = SimpleNamespace(
+        model_tier="RESEARCH",
+        sample_count=100,
+        expectancy=-0.21,
+        profit_factor=0.19,
+    )
+    signal = {"symbol": "AAVE-USD", "action": "BUY"}
+
+    first = guard._research_entry_confirmation_allows(
+        "AAVE-USD",
+        signal,
+        {"quote_timestamp": "2026-09-28T16:00:00Z"},
+        0.90,
+        0.55,
+        scorecard,
+    )
+    duplicate = guard._research_entry_confirmation_allows(
+        "AAVE-USD",
+        signal,
+        {"quote_timestamp": "2026-09-28T16:00:00Z"},
+        0.92,
+        0.55,
+        scorecard,
+    )
+    second = guard._research_entry_confirmation_allows(
+        "AAVE-USD",
+        signal,
+        {"quote_timestamp": "2026-09-28T16:05:00Z"},
+        0.88,
+        0.55,
+        scorecard,
+    )
+
+    assert first == (False, "research_entry_confirmation_pending:1/2")
+    assert duplicate == (False, "research_entry_confirmation_pending:1/2")
+    assert second == (True, "research_entry_confirmation_passed:2/2")
+
+
+def test_research_confirmation_requires_positive_post_cost_edge():
+    guard._RESEARCH_ENTRY_CONFIRMATIONS.clear()
+    scorecard = SimpleNamespace(
+        model_tier="RESEARCH",
+        sample_count=100,
+        expectancy=-0.21,
+        profit_factor=0.19,
+    )
+
+    allowed, reason = guard._research_entry_confirmation_allows(
+        "LINK-USD",
+        {"symbol": "LINK-USD", "action": "BUY"},
+        {"quote_timestamp": "2026-09-28T16:00:00Z"},
+        0.50,
+        0.55,
+        scorecard,
+    )
+
+    assert allowed is False
+    assert reason == "research_entry_confirmation_requires_positive_post_cost_edge"
+
+
+def test_positive_or_immature_strategy_bypasses_two_scan_confirmation():
+    guard._RESEARCH_ENTRY_CONFIRMATIONS.clear()
+    positive = SimpleNamespace(
+        model_tier="RESEARCH",
+        sample_count=100,
+        expectancy=0.10,
+        profit_factor=1.20,
+    )
+    immature = SimpleNamespace(
+        model_tier="RESEARCH",
+        sample_count=10,
+        expectancy=-0.10,
+        profit_factor=0.50,
+    )
+
+    assert guard._research_entry_confirmation_allows(
+        "SOL-USD",
+        {"symbol": "SOL-USD", "action": "BUY"},
+        {},
+        0.80,
+        0.55,
+        positive,
+    ) == (True, "research_entry_confirmation_not_required")
+    assert guard._research_entry_confirmation_allows(
+        "SOL-USD",
+        {"symbol": "SOL-USD", "action": "BUY"},
+        {},
+        0.80,
+        0.55,
+        immature,
+    ) == (True, "research_entry_confirmation_not_required")
+
+
+def test_final_buy_wrapper_waits_for_second_research_scan(monkeypatch):
+    monkeypatch.setenv("EXECUTION_MODE", "paper")
+    monkeypatch.setenv("PAPER_AUTONOMOUS_LEARNING", "true")
+    monkeypatch.setenv("ENABLE_BROKER_SUBMISSION", "false")
+    monkeypatch.setenv("LIVE_TRADING_ARMED", "false")
+    guard._RESEARCH_ENTRY_CONFIRMATIONS.clear()
+
+    calls = []
+
+    def original_buy(*args, **kwargs):
+        calls.append((args, kwargs))
+        return True, "original_buy", None
+
+    fake = SimpleNamespace(_buy=original_buy, row=lambda *args, **kwargs: None)
+    scorecard = SimpleNamespace(
+        size_multiplier=0.35,
+        model_tier="RESEARCH",
+        sample_count=100,
+        expectancy=-0.21,
+        profit_factor=0.19,
+    )
+    monkeypatch.setitem(sys.modules, "oracle_bot", fake)
+    monkeypatch.setattr(guard.economics, "active", lambda: True)
+    monkeypatch.setattr(guard, "_open_position_accumulation_allows", lambda symbol: (True, "no_open_position"))
+    monkeypatch.setattr(
+        guard.economics,
+        "fee_edge_allows_entry",
+        lambda signal: (True, "edge_clears_negative_economics_buffer", 0.90, 0.55),
+    )
+    monkeypatch.setattr(
+        guard.economics,
+        "adjusted_optimizer_target",
+        lambda signal, target: (10.0, scorecard, "research_tier_exploration_cap"),
+    )
+    monkeypatch.setattr(guard.economics, "log_economics", lambda *args, **kwargs: None)
+    monkeypatch.setattr(guard.regime_gate, "regime_validation_ok", lambda signal: (True, "pass"))
+
+    previous = guard._INSTALLED
+    guard._INSTALLED = False
+    try:
+        assert guard.install_paper_strategy_execution_guard() is True
+        signal = {
+            "symbol": "AAVE-USD",
+            "action": "BUY",
+            "v39_optimizer_approved_amount": 20.0,
+        }
+        first = fake._buy(
+            "crypto",
+            "AAVE-USD",
+            155.0,
+            signal,
+            verified_quote={"quote_timestamp": "2026-09-28T16:00:00Z"},
+        )
+        second = fake._buy(
+            "crypto",
+            "AAVE-USD",
+            155.1,
+            signal,
+            verified_quote={"quote_timestamp": "2026-09-28T16:05:00Z"},
+        )
+
+        assert first == (False, "research_entry_confirmation_pending:1/2", None)
+        assert second == (True, "original_buy", None)
+        assert len(calls) == 1
+    finally:
+        guard._INSTALLED = previous
+        guard._RESEARCH_ENTRY_CONFIRMATIONS.clear()
