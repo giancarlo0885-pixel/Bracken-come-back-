@@ -154,6 +154,63 @@ def _recent_realized_loss_streak(symbol: str, limit: int = 6) -> int:
     return streak
 
 
+def _recent_completed_round_trips(symbol: str, limit: int = 6) -> list[dict[str, Any]]:
+    """Load recent canonical completed SELL outcomes for anti-recycling evidence."""
+    try:
+        from database import rows
+        return rows(
+            """
+            SELECT created_at, realized_pnl
+            FROM trades
+            WHERE market='crypto' AND symbol=%s AND side='SELL'
+            ORDER BY created_at DESC
+            LIMIT %s
+            """,
+            (symbol, max(1, min(12, int(limit)))),
+        ) or []
+    except Exception:
+        log.exception("PAPER CHURN GUARD | symbol=%s | recycle_history_load=FAIL", symbol)
+        return []
+
+
+def _recycling_quarantine(symbol: str) -> tuple[bool, str]:
+    """Quarantine a repeatedly recycled losing symbol while other symbols keep scanning.
+
+    Requires a mature recent window, predominantly negative exact realized P&L,
+    and a negative aggregate result. Missing accounting evidence fails open.
+    """
+    min_trades = max(3, min(8, int(_safe_float(os.getenv("PAPER_CRYPTO_RECYCLE_MIN_TRADES", "5"), 5))))
+    loss_ratio = max(0.50, min(1.0, _safe_float(os.getenv("PAPER_CRYPTO_RECYCLE_LOSS_RATIO", "0.80"), 0.80)))
+    quarantine_minutes = max(30.0, min(720.0, _safe_float(os.getenv("PAPER_CRYPTO_RECYCLE_QUARANTINE_MINUTES", "180"), 180.0)))
+    records = _recent_completed_round_trips(symbol, min_trades)
+    if len(records) < min_trades:
+        return True, "recycle_evidence_immature"
+
+    pnl: list[float] = []
+    for record in records[:min_trades]:
+        value = record.get("realized_pnl") if isinstance(record, dict) else None
+        if value is None:
+            return True, "recycle_realized_pnl_unavailable"
+        pnl.append(_safe_float(value))
+
+    losses = sum(1 for value in pnl if value < 0)
+    total = sum(pnl)
+    required_losses = max(1, int(min_trades * loss_ratio + 0.999999))
+    if losses < required_losses or total >= 0:
+        return True, "recycle_economics_not_losing"
+
+    latest = _parse_time(records[0].get("created_at") if isinstance(records[0], dict) else None)
+    if latest is None:
+        return True, "recycle_timestamp_unavailable"
+    age_minutes = max(0.0, (datetime.now(timezone.utc) - latest).total_seconds() / 60.0)
+    if age_minutes < quarantine_minutes:
+        return False, (
+            f"recycling_quarantine:losses={losses}/{min_trades}:"
+            f"net_pnl={total:.6f}:{age_minutes:.2f}/{quarantine_minutes:.2f}m"
+        )
+    return True, "recycling_quarantine_elapsed"
+
+
 def _last_trade_time(symbol: str, side: str) -> datetime | None:
     return _parse_time(_last_trade(symbol, side).get("created_at"))
 
@@ -180,6 +237,10 @@ def _allow_generic_buy(signal: Any) -> tuple[bool, str]:
     action = str(_value(signal, "action", "") or "").upper().strip()
     if action not in _ENTRY_ACTIONS or not symbol:
         return True, "not_generic_buy"
+
+    recycle_allowed, recycle_reason = _recycling_quarantine(symbol)
+    if not recycle_allowed:
+        return False, recycle_reason
 
     _, _, _, _, cooldown_minutes, loss_multiplier = _settings()
     if cooldown_minutes <= 0:
