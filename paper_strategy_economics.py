@@ -564,6 +564,25 @@ def adjusted_optimizer_target(signal: Any, target: float) -> tuple[float, Strate
         return target, economics, "inactive"
     adjusted = round(target * economics.size_multiplier, 2)
     tier = str(economics.model_tier or "RESEARCH").upper()
+    # In paper learning, a risk downsize must not turn an otherwise executable,
+    # fee-clearing exploration order into an impossible sub-minimum order.
+    # Preserve the platform minimum only when the original optimizer target was
+    # already executable; never raise an originally tiny/invalid proposal.
+    try:
+        import capital_allocator
+        executable_minimum = max(0.0, _number(getattr(capital_allocator, "MIN_TRADE_NOTIONAL", 0.0)))
+    except Exception:
+        executable_minimum = 0.0
+    if (
+        tier in {"RESEARCH", "PAPER_EXPLORATORY"}
+        and executable_minimum > 0
+        and target >= executable_minimum
+        and 0 < adjusted < executable_minimum
+    ):
+        adjusted = round(executable_minimum, 2)
+        floor_reason = "paper_learning_executable_floor"
+    else:
+        floor_reason = ""
     if economics.size_multiplier > 1.0:
         reason = "validated_positive_expectancy_boost"
     elif tier == "RESEARCH":
@@ -574,7 +593,7 @@ def adjusted_optimizer_target(signal: Any, target: float) -> tuple[float, Strate
         reason = "negative_expectancy_downsize"
     else:
         reason = "paper_qualified_neutral_size"
-    return max(0.0, adjusted), economics, reason
+    if floor_reason:\n        reason = f"{reason}:{floor_reason}"\n    return max(0.0, adjusted), economics, reason
 
 
 def log_economics(economics: StrategyEconomics, *, symbol: str, original_target: float, adjusted_target: float, reason: str) -> None:
