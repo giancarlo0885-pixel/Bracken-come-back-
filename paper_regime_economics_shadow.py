@@ -153,6 +153,7 @@ def ensure_schema() -> None:
                 symbol TEXT NOT NULL,
                 strategy TEXT NOT NULL,
                 regime TEXT NOT NULL,
+                entry_pattern TEXT NOT NULL DEFAULT 'unclassified',
                 entry_time TIMESTAMPTZ,
                 exit_time TIMESTAMPTZ,
                 entry_price DOUBLE PRECISION,
@@ -177,6 +178,8 @@ def ensure_schema() -> None:
             """
         )
         columns = _relation_columns(conn, "paper_regime_trade_metrics")
+        if "entry_pattern" not in columns:
+            conn.execute("ALTER TABLE paper_regime_trade_metrics ADD COLUMN entry_pattern TEXT NOT NULL DEFAULT 'unclassified'")
         if "round_trip_net_pnl" not in columns:
             conn.execute("ALTER TABLE paper_regime_trade_metrics ADD COLUMN round_trip_net_pnl DOUBLE PRECISION")
         if "round_trip_fees" not in columns:
@@ -337,10 +340,16 @@ def finalize_closed_trades(limit: int = 250, market: str = "crypto") -> int:
             exit_time = trade.get("exit_time")
             entry_price = _num(trade.get("entry_price"))
             exit_price = _num(trade.get("exit_price"))
+            feature_snapshot = _json_obj(trade.get("feature_snapshot"))
             regime = classify_regime(
-                feature_snapshot=trade.get("feature_snapshot"),
+                feature_snapshot=feature_snapshot,
                 memory_regime=_memory_regime(conn, normalized_market, symbol, entry_time),
             )
+            entry_pattern = str(
+                feature_snapshot.get("entry_pattern")
+                or feature_snapshot.get("schwager_pattern_tag")
+                or "unclassified"
+            ).strip().lower()[:80] or "unclassified"
 
             prices: list[float] = []
             if entry_time and exit_time:
@@ -372,14 +381,14 @@ def finalize_closed_trades(limit: int = 250, market: str = "crypto") -> int:
             conn.execute(
                 """
                 INSERT INTO paper_regime_trade_metrics(
-                    trade_id,market,symbol,strategy,regime,entry_time,exit_time,
+                    trade_id,market,symbol,strategy,regime,entry_pattern,entry_time,exit_time,
                     entry_price,exit_price,net_pnl,fees,mfe_pct,mae_pct,
                     excursion_sample_count,schema_version,round_trip_net_pnl,round_trip_fees,cost_provenance
-                ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                 ON CONFLICT (trade_id) DO NOTHING
                 """,
                 (
-                    trade_id, normalized_market, symbol, normalize_strategy_identity(trade.get("strategy")), regime,
+                    trade_id, normalized_market, symbol, normalize_strategy_identity(trade.get("strategy")), regime, entry_pattern,
                     entry_time, exit_time, entry_price or None, exit_price or None,
                     _num(trade.get("net_pnl")), max(0.0, _num(trade.get("fees"))),
                     mfe_pct, mae_pct, excursion_count, _SCHEMA_VERSION,
@@ -400,7 +409,7 @@ def emit_summary(market: str | None = None) -> None:
             rows = list(
                 conn.execute(
                     """
-                    SELECT market, strategy, regime, COUNT(*) AS samples,
+                    SELECT market, strategy, regime, entry_pattern, COUNT(*) AS samples,
                            SUM(COALESCE(round_trip_net_pnl,net_pnl)) AS net_pnl,
                            SUM(COALESCE(round_trip_fees,fees)) AS fees,
                            AVG(COALESCE(round_trip_net_pnl,net_pnl)) AS expectancy,
@@ -409,7 +418,7 @@ def emit_summary(market: str | None = None) -> None:
                            SUM(CASE WHEN excursion_sample_count > 0 THEN 1 ELSE 0 END) AS excursion_trades
                     FROM paper_regime_trade_metrics
                     WHERE (%s::text IS NULL OR market=%s::text)
-                    GROUP BY market, strategy, regime
+                    GROUP BY market, strategy, regime, entry_pattern
                     ORDER BY samples DESC
                     LIMIT 20
                     """,
@@ -418,8 +427,8 @@ def emit_summary(market: str | None = None) -> None:
             )
         for row in rows:
             log.info(
-                "PAPER REGIME ECONOMICS | market=%s | strategy=%s | regime=%s | samples=%s | net_pnl=%.4f | fees=%.4f | expectancy=%.6f | avg_mfe_pct=%s | avg_mae_pct=%s | excursion_trades=%s | mode=shadow | execution_impact=NONE | live_trading=DISARMED",
-                row.get("market"), row.get("strategy"), row.get("regime"), row.get("samples"),
+                "PAPER REGIME ECONOMICS | market=%s | strategy=%s | regime=%s | entry_pattern=%s | samples=%s | net_pnl=%.4f | fees=%.4f | expectancy=%.6f | avg_mfe_pct=%s | avg_mae_pct=%s | excursion_trades=%s | mode=shadow | execution_impact=NONE | live_trading=DISARMED",
+                row.get("market"), row.get("strategy"), row.get("regime"), row.get("entry_pattern"), row.get("samples"),
                 _num(row.get("net_pnl")), _num(row.get("fees")), _num(row.get("expectancy")),
                 "NA" if row.get("avg_mfe_pct") is None else f"{_num(row.get('avg_mfe_pct')):.4f}",
                 "NA" if row.get("avg_mae_pct") is None else f"{_num(row.get('avg_mae_pct')):.4f}",

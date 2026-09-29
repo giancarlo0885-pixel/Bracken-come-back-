@@ -11,6 +11,7 @@ from paper_regime_entry_signal_fallback import install_entry_signal_regime_fallb
 
 
 _RAW_REGIME_FIELDS = ("trend_strength", "momentum_20d", "volatility_20d")
+_CATEGORICAL_ENTRY_FIELDS = ("entry_pattern", "schwager_pattern_tag")
 _AEVE_ENTRY_FIELDS = (
     "net_expected_value_pct", "expected_return_pct", "forecast_return_pct",
     "possible_move_pct", "expected_move_pct", "edge_pct",
@@ -92,6 +93,12 @@ def _enrich_persisted_signal_payload(signal: Any, existing: Any) -> dict[str, An
         value = _finite(_runtime_signal_value(signal, key))
         if value is not None:
             payload[key] = value
+    for key in _CATEGORICAL_ENTRY_FIELDS:
+        if str(payload.get(key) or "").strip():
+            continue
+        value = str(_runtime_signal_value(signal, key) or "").strip().lower()
+        if value:
+            payload[key] = value[:80]
 
     # Preserve only values actually observed/derived from the cached provider snapshot.
     # This is immutable entry evidence and does not affect action, sizing, or execution.
@@ -129,6 +136,12 @@ def _enrich_entry_features(oracle_module: Any, signal: Any, existing: Any) -> di
         value = _finite(oracle_module.signal_value(signal, key, None))
         if value is not None:
             features[key] = value
+    for key in _CATEGORICAL_ENTRY_FIELDS:
+        if str(features.get(key) or "").strip():
+            continue
+        value = str(oracle_module.signal_value(signal, key, "") or "").strip().lower()
+        if value:
+            features[key] = value[:80]
 
     for key in _BTC_NETWORK_FEATURE_FIELDS:
         if key in features and _finite(features.get(key)) is not None:
