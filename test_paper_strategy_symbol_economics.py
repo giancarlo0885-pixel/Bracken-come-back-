@@ -66,3 +66,57 @@ def test_negative_symbol_history_does_not_poison_other_symbol_fee_gate(monkeypat
     assert "recovery_margin=1.50" in sol_reason
     assert link_allowed is True
     assert "recovery_margin" not in link_reason
+
+
+def test_research_downsize_preserves_executable_paper_learning_floor(monkeypatch):
+    econ._CACHE.clear()
+    monkeypatch.setattr(econ, "active", lambda: True)
+    scorecard = econ.StrategyEconomics(
+        strategy="oracle_council_v3",
+        sample_count=30,
+        net_pnl=-10.0,
+        gross_pnl=-8.0,
+        fees=2.0,
+        win_rate=0.2,
+        average_win=1.0,
+        average_loss=-1.0,
+        profit_factor=0.25,
+        expectancy=-0.33,
+        average_holding_minutes=10.0,
+        size_multiplier=0.35,
+        model_validated=False,
+        model_tier="RESEARCH",
+    )
+    monkeypatch.setattr(econ, "strategy_economics", lambda signal: scorecard)
+
+    sized, _, reason = econ.adjusted_optimizer_target({"symbol": "LINK-USD"}, 5.28)
+
+    assert sized == 2.0
+    assert "paper_learning_executable_floor" in reason
+
+
+def test_executable_floor_does_not_promote_original_subminimum_proposal(monkeypatch):
+    econ._CACHE.clear()
+    monkeypatch.setattr(econ, "active", lambda: True)
+    scorecard = econ.StrategyEconomics(
+        strategy="oracle_council_v3",
+        sample_count=30,
+        net_pnl=-10.0,
+        gross_pnl=-8.0,
+        fees=2.0,
+        win_rate=0.2,
+        average_win=1.0,
+        average_loss=-1.0,
+        profit_factor=0.25,
+        expectancy=-0.33,
+        average_holding_minutes=10.0,
+        size_multiplier=0.35,
+        model_validated=False,
+        model_tier="RESEARCH",
+    )
+    monkeypatch.setattr(econ, "strategy_economics", lambda signal: scorecard)
+
+    sized, _, reason = econ.adjusted_optimizer_target({"symbol": "LINK-USD"}, 1.50)
+
+    assert sized == 0.53
+    assert "paper_learning_executable_floor" not in reason
