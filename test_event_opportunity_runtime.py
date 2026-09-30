@@ -66,6 +66,9 @@ def test_runtime_attaches_event_evidence_to_signal_and_news(monkeypatch):
             "headlines": ["Verified Brain supply-chain context"],
             "citations": ["https://brain.test/source"],
             "sources": [{"source_key": "intel:1"}],
+            "research_direction": "positive",
+            "directional_strength": 82.0,
+            "directional_source_count": 2,
             "execution_impact": "NONE",
         },
     )
@@ -78,9 +81,13 @@ def test_runtime_attaches_event_evidence_to_signal_and_news(monkeypatch):
     assert signal.event_catalyst_score == 88.0
     assert signal.brain_intelligence_score == 74.0
     assert signal.brain_intelligence_context["execution_impact"] == "NONE"
+    assert signal.research_direction == "positive"
+    assert signal.research_directional_strength == 82.0
+    assert signal.research_directional_sources == 2
     assert "event radar 88/100" in signal.reason
     assert "attributed Brain context 74/100" in signal.reason
-    assert "Council/risk vetoes still apply" in signal.reason
+    assert "sourced research direction positive" in signal.reason
+    assert "must agree with observed market structure" in signal.reason
     assert news.headlines[0] == "Example Energy wins major contract"
     assert "https://event.test/exm" in news.citations
     assert "https://brain.test/source" in news.citations
