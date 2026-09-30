@@ -1308,6 +1308,21 @@ def fast_scan_market(market: str) -> list[Any]:
     _v39_record_actions(market, actions)
     return actions
 
+def _select_deep_candidates(market: str, preliminary: list[tuple[Any, str]], held: set[str]) -> list[tuple[Any, str]]:
+    """Select opportunity leaders plus persistent market-context benchmarks."""
+    deep_candidates = preliminary[:DEEP_ANALYSIS_CANDIDATES]
+    included = {str(getattr(signal, "symbol", "")).upper() for signal, _ in deep_candidates}
+    context_symbols = {"BTC-USD", "ETH-USD"} if market == "crypto" else {"SPY", "QQQ"}
+    required_deep_symbols = held | context_symbols
+    deep_candidates.extend(
+        (signal, name)
+        for signal, name in preliminary
+        if str(getattr(signal, "symbol", "")).upper() in required_deep_symbols
+        and str(getattr(signal, "symbol", "")).upper() not in included
+    )
+    return deep_candidates
+
+
 def scan_market(market: str) -> list[Any]:
     """Run the deeper worldwide research and paper-execution cycle."""
     watchlist = dict(WATCHLISTS[market])
@@ -1361,20 +1376,9 @@ def scan_market(market: str) -> list[Any]:
         for signal, _ in preliminary[:NEWS_PRIORITY_CANDIDATES]
     }
     held = _held_symbols(market)
-    deep_candidates = preliminary[:DEEP_ANALYSIS_CANDIDATES]
-    included = {str(getattr(signal, "symbol", "")).upper() for signal, _ in deep_candidates}
-
-    # Keep market-context benchmarks in the deep cycle even when short-term
-    # opportunity ranking is dominated by faster movers.  They are context,
-    # not forced trades: execution still follows the normal paper path.
-    context_symbols = {"BTC-USD", "ETH-USD"} if market == "crypto" else {"SPY", "QQQ"}
-    required_deep_symbols = held | context_symbols
-    deep_candidates.extend(
-        (signal, name)
-        for signal, name in preliminary
-        if str(getattr(signal, "symbol", "")).upper() in required_deep_symbols
-        and str(getattr(signal, "symbol", "")).upper() not in included
-    )
+    # Market-floor context stays visible while opportunity leadership rotates.
+    # Inclusion here never forces an execution; it only guarantees deep context.
+    deep_candidates = _select_deep_candidates(market, preliminary, held)
     log.info(
         "%s discovery | universe=%s usable=%s deep=%s held=%s",
         market,
