@@ -1363,10 +1363,16 @@ def scan_market(market: str) -> list[Any]:
     held = _held_symbols(market)
     deep_candidates = preliminary[:DEEP_ANALYSIS_CANDIDATES]
     included = {str(getattr(signal, "symbol", "")).upper() for signal, _ in deep_candidates}
+
+    # Keep market-context benchmarks in the deep cycle even when short-term
+    # opportunity ranking is dominated by faster movers.  They are context,
+    # not forced trades: execution still follows the normal paper path.
+    context_symbols = {"BTC-USD", "ETH-USD"} if market == "crypto" else {"SPY", "QQQ"}
+    required_deep_symbols = held | context_symbols
     deep_candidates.extend(
         (signal, name)
         for signal, name in preliminary
-        if str(getattr(signal, "symbol", "")).upper() in held
+        if str(getattr(signal, "symbol", "")).upper() in required_deep_symbols
         and str(getattr(signal, "symbol", "")).upper() not in included
     )
     log.info(
