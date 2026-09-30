@@ -869,6 +869,25 @@ def _candidate_metrics(meta: dict[str, str], now: datetime | None = None) -> Glo
     )
 
 
+def _rotating_universe_slice(
+    universe: list[dict[str, Any]],
+    cursor: int,
+    count: int,
+) -> tuple[list[dict[str, Any]], int]:
+    """Return a deterministic wraparound slice and its next cursor.
+
+    The scanner remains a lightweight funnel: full-market coverage is achieved
+    over successive cycles rather than by running expensive analysis on every
+    listed security simultaneously.
+    """
+    if not universe:
+        return [], 0
+    width = max(1, min(int(count), len(universe)))
+    start = int(cursor) % len(universe)
+    batch = [universe[(start + i) % len(universe)] for i in range(width)]
+    return batch, (start + width) % len(universe)
+
+
 def scan_global_markets() -> list[dict[str, Any]]:
     """Scan the next rotating slice and return the strongest fresh candidates."""
     if not GLOBAL_SCANNER_ENABLED:
@@ -886,7 +905,7 @@ def scan_global_markets() -> list[dict[str, Any]]:
     core_meta = [x for x in universe if x.get("symbol") in CORE_STOCKS][:GLOBAL_CORE_SYMBOLS_PER_CYCLE]
     etf_meta = [x for x in universe if x.get("symbol") in ETF_SEEDS][:GLOBAL_ETF_SYMBOLS_PER_CYCLE]
     rotating_count = max(1, GLOBAL_SCAN_SYMBOLS_PER_CYCLE - len(seed_meta) - len(core_meta) - len(etf_meta))
-    rotating = [universe[(cursor + i) % len(universe)] for i in range(rotating_count)]
+    rotating, next_cursor = _rotating_universe_slice(universe, cursor, rotating_count)
     batch = [
         item for item in merge_candidate_metadata(seed_meta + core_meta + etf_meta + rotating + discovered_meta)
         if supported_common_equity_candidate(
@@ -941,7 +960,6 @@ def scan_global_markets() -> list[dict[str, Any]]:
                  candidate.data_freshness_seconds,
                  candidate.risk_bucket,candidate.tradeable,
                  json.dumps(payload),candidate.scanned_at))
-        next_cursor = (cursor + rotating_count) % len(universe)
         conn.execute("""INSERT INTO global_scanner_status
             (id,cursor,universe_size,scanned_count,active_count,status,message,updated_at)
             VALUES (1,%s,%s,%s,%s,'healthy',%s,%s)
@@ -949,7 +967,8 @@ def scan_global_markets() -> list[dict[str, Any]]:
             scanned_count=EXCLUDED.scanned_count,active_count=EXCLUDED.active_count,
             status=EXCLUDED.status,message=EXCLUDED.message,updated_at=EXCLUDED.updated_at""",
             (next_cursor,len(universe),len(batch),len(found),
-             f"Scanned {len(batch)} U.S./crypto symbols; {len(found)} passed liquidity and data checks.",utc_now()))
+             f"Scanned {len(batch)} U.S. symbols from a {len(universe)}-symbol provider universe; "
+             f"cursor {cursor}->{next_cursor}; {len(found)} passed liquidity and data checks.",utc_now()))
         cutoff = (datetime.now(timezone.utc) - timedelta(seconds=GLOBAL_CANDIDATE_TTL_SECONDS)).isoformat()
         conn.execute("DELETE FROM global_market_candidates WHERE scanned_at < %s", (cutoff,))
         rows = conn.execute("""SELECT symbol,name,exchange,region,sector,price,change_1d_pct,
