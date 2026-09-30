@@ -593,7 +593,9 @@ def adjusted_optimizer_target(signal: Any, target: float) -> tuple[float, Strate
         reason = "negative_expectancy_downsize"
     else:
         reason = "paper_qualified_neutral_size"
-    if floor_reason:\n        reason = f"{reason}:{floor_reason}"\n    return max(0.0, adjusted), economics, reason
+    if floor_reason:
+        reason = f"{reason}:{floor_reason}"
+    return max(0.0, adjusted), economics, reason
 
 
 def log_economics(economics: StrategyEconomics, *, symbol: str, original_target: float, adjusted_target: float, reason: str) -> None:
