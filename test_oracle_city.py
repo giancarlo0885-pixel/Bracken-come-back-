@@ -564,3 +564,6 @@ def test_city_component_exposes_outcome_driven_economics():
     assert "cityEconomics.stress_pct" in rendered
     assert "cityEconomics.recent_net_pnl" in rendered
     assert "cityEconomics.max_drawdown" in rendered
+    assert "protectedFromEconomicDecay" in rendered
+    assert "economicDecay" in rendered
+    assert 'new Set(["brain","data","intel"])' in rendered
