@@ -770,7 +770,7 @@ function brainFieldPoint(index,total){
 let brainMode=false,workersVisible=true,trafficVisible=true;
 function showCityObjects(on){cityObjects.forEach(o=>{if(o!==brainGroup&&!o.isLight)o.visible=on;});workerObjects.forEach(o=>o.visible=on&&workersVisible);vehicleObjects.forEach(o=>o.visible=on&&trafficVisible);}
 
-const CITY_VIEW_STORAGE_KEY="oracle-city-view-v2";
+const CITY_VIEW_STORAGE_KEY="oracle-city-view-v3";
 function saveCityViewState(){
   try{
     // Oracle City should always reopen as the city. Do not persist the transient
@@ -787,6 +787,9 @@ function saveCityViewState(){
 }
 function restoreCityViewState(){
   try{
+    // Mobile layouts change substantially as the Streamlit sidebar opens/closes.
+    // Never restore a desktop/old-aspect camera into a narrow City viewport.
+    if(mobileView())return false;
     const raw=localStorage.getItem(CITY_VIEW_STORAGE_KEY);
     if(!raw)return false;
     const saved=JSON.parse(raw);
@@ -879,8 +882,18 @@ renderer.domElement.addEventListener("click",e=>{
 
 function mobileView(){return window.matchMedia&&window.matchMedia("(max-width:720px)").matches;}
 function resetView(){
-  if(mobileView()){camera.position.set(2.5,31,28);controls.target.set(2.5,2.2,0);}
-  else{camera.position.set(30,22,38);controls.target.set(2.5,2.7,0);}
+  if(mobileView()){
+    // Fit the complete metropolis into portrait/mobile instead of looking
+    // through the middle of the city from a low, clipped perspective.
+    camera.position.set(2.5,46,46);
+    controls.target.set(2.5,1.8,0);
+    camera.fov=62;
+  }else{
+    camera.position.set(30,22,38);
+    controls.target.set(2.5,2.7,0);
+    camera.fov=46;
+  }
+  camera.updateProjectionMatrix();
   controls.update();
   inspector.classList.remove("open");
   hovercard.classList.remove("show");
@@ -901,7 +914,19 @@ timeline.oninput=function(){showReplay(Number(this.value));};
 play.onclick=function(){if(replayTimer){clearInterval(replayTimer);replayTimer=null;play.textContent="PLAY";play.classList.remove("active");return;}play.textContent="PAUSE";play.classList.add("active");replayTimer=setInterval(()=>{replayIndex=(replayIndex+1)%Math.max(1,replay.length);showReplay(replayIndex);},1600);};showReplay(replayIndex);
 
 let lastMobileView=null;
-function resize(){const w=app.clientWidth,h=app.clientHeight;camera.aspect=w/h;camera.updateProjectionMatrix();renderer.setSize(w,h,false);labelRenderer.setSize(w,h);const mobile=mobileView();if(lastMobileView===null||lastMobileView!==mobile){lastMobileView=mobile;if(!brainMode)resetView();}}
+function resize(){
+  const w=Math.max(1,app.clientWidth),h=Math.max(1,app.clientHeight);
+  const mobile=mobileView();
+  camera.aspect=w/h;
+  if(mobile&&!brainMode)camera.fov=62;
+  else if(!mobile&&!brainMode)camera.fov=46;
+  camera.updateProjectionMatrix();
+  renderer.setSize(w,h,false);labelRenderer.setSize(w,h);
+  if(lastMobileView===null||lastMobileView!==mobile){
+    lastMobileView=mobile;
+    if(!brainMode)resetView();
+  }
+}
 new ResizeObserver(resize).observe(app);resize();
 
 let elapsed=0;
