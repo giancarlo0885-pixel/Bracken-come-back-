@@ -40,6 +40,94 @@ def _normalized_regime(value: Any) -> str:
     return str(value or "unknown").strip().lower() or "unknown"
 
 
+def _json_obj(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return dict(value)
+    if isinstance(value, str) and value.strip():
+        try:
+            import json
+            decoded = json.loads(value)
+        except Exception:
+            return {}
+        return dict(decoded) if isinstance(decoded, dict) else {}
+    return {}
+
+
+_GREEN_FEATURES = (
+    "momentum_5d", "momentum_20d", "trend_strength", "rsi_14", "volume_ratio",
+    "news_sentiment", "macd_hist", "atr_pct", "bollinger_position",
+    "volatility_20d", "dip_depth_pct", "rebound_from_low_pct",
+)
+
+
+def green_core_profile(rows: list[dict[str, Any]], signal: Any, *, min_samples: int = 30) -> dict[str, Any]:
+    """Learn bounded green-vs-red feature separation from exact completed episodes.
+
+    Only features present in both positive and negative cohorts can influence ranking.
+    This avoids treating a missing feature or a single winner as a profitable rule.
+    """
+    complete = []
+    for row in rows:
+        snapshot = _json_obj(row.get("feature_snapshot"))
+        pnl = _number(row.get("net_pnl"), float("nan"))
+        if not math.isfinite(pnl) or pnl == 0:
+            continue
+        complete.append((snapshot, pnl > 0))
+    positives = [snap for snap, win in complete if win]
+    negatives = [snap for snap, win in complete if not win]
+    if len(complete) < min_samples or len(positives) < max(5, min_samples // 5) or len(negatives) < max(5, min_samples // 5):
+        return {"status": "insufficient", "samples": len(complete), "green_samples": len(positives), "red_samples": len(negatives), "adjustment": 0.0, "features": []}
+
+    learned = []
+    weighted_match = 0.0
+    total_weight = 0.0
+    for name in _GREEN_FEATURES:
+        pos = [_number(s.get(name), float("nan")) for s in positives if s.get(name) is not None]
+        neg = [_number(s.get(name), float("nan")) for s in negatives if s.get(name) is not None]
+        pos = [v for v in pos if math.isfinite(v)]
+        neg = [v for v in neg if math.isfinite(v)]
+        if len(pos) < 5 or len(neg) < 5:
+            continue
+        pos_mean = sum(pos) / len(pos)
+        neg_mean = sum(neg) / len(neg)
+        combined = pos + neg
+        mean = sum(combined) / len(combined)
+        variance = sum((v - mean) ** 2 for v in combined) / max(1, len(combined) - 1)
+        scale = math.sqrt(variance)
+        if scale <= 1e-12:
+            continue
+        separation = (pos_mean - neg_mean) / scale
+        if abs(separation) < 0.20:
+            continue
+        current = _number(_value(signal, name, float("nan")), float("nan"))
+        if not math.isfinite(current):
+            continue
+        midpoint = (pos_mean + neg_mean) / 2.0
+        direction = 1.0 if separation > 0 else -1.0
+        matches_green = (current - midpoint) * direction >= 0
+        weight = min(1.0, abs(separation))
+        weighted_match += weight * (1.0 if matches_green else -1.0)
+        total_weight += weight
+        learned.append({
+            "feature": name,
+            "green_mean": round(pos_mean, 6),
+            "red_mean": round(neg_mean, 6),
+            "standardized_separation": round(separation, 4),
+            "current": round(current, 6),
+            "matches_green": matches_green,
+        })
+    if not learned or total_weight <= 0:
+        return {"status": "no_separation", "samples": len(complete), "green_samples": len(positives), "red_samples": len(negatives), "adjustment": 0.0, "features": []}
+    depth = min(1.0, len(complete) / float(max(min_samples * 3, 1)))
+    score = weighted_match / total_weight
+    adjustment = max(-2.0, min(2.0, score * (0.75 + 1.25 * depth)))
+    return {
+        "status": "ok", "samples": len(complete), "green_samples": len(positives),
+        "red_samples": len(negatives), "adjustment": round(adjustment, 3),
+        "features": learned[:8],
+    }
+
+
 def _summarize_rows(rows: list[dict[str, Any]], *, min_samples: int) -> dict[str, Any]:
     samples = len(rows)
     returns = [
@@ -195,7 +283,7 @@ def outcome_memory_for_signal(
             for row in fetch_rows(
                 """
                 SELECT market,symbol,strategy,regime,net_pnl,return_pct,
-                       confidence,freshness_score,exit_time
+                       confidence,freshness_score,exit_time,feature_snapshot
                 FROM oracle_brain_episodes
                 WHERE market=%s AND provenance_status='exact'
                 ORDER BY exit_time DESC
@@ -223,6 +311,20 @@ def outcome_memory_for_signal(
         symbol=target_symbol,
         min_samples=max(5, int(min_samples)),
     )
+    target_strategy_norm = normalize_strategy_identity(target_strategy)
+    cohort_rows = [
+        row for row in records
+        if normalize_strategy_identity(row.get("strategy")) == target_strategy_norm
+        and _normalized_regime(row.get("regime")) == target_regime
+    ]
+    symbol_rows = [row for row in cohort_rows if str(row.get("symbol") or "").upper().strip() == target_symbol]
+    green_rows = symbol_rows if len(symbol_rows) >= max(5, int(min_samples)) else cohort_rows
+    green_core = green_core_profile(green_rows, signal, min_samples=max(5, int(min_samples)))
+    base_adjustment = _number(result.get("ranking_adjustment"))
+    green_adjustment = _number(green_core.get("adjustment"))
+    result["base_ranking_adjustment"] = round(base_adjustment, 3)
+    result["green_core"] = green_core
+    result["ranking_adjustment"] = round(max(-4.0, min(3.0, base_adjustment + green_adjustment)), 3)
     result.update({
         "status": "ok",
         "market": normalized_market,
@@ -237,6 +339,7 @@ def outcome_memory_for_signal(
 
 
 __all__ = [
+    "green_core_profile",
     "outcome_memory_for_signal",
     "summarize_outcome_memory",
 ]
