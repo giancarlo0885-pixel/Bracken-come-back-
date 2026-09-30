@@ -29,6 +29,10 @@ class RadarAssessment:
     durability_score: float
     catalyst_score: float
     crowding_risk: float
+    research_direction: str
+    pattern_direction: str
+    pattern_strength: float
+    confluence_score: float
     radar_adjustment: float
     position_multiplier: float
     approved: bool
@@ -75,6 +79,32 @@ def assess_opportunity_radar(signal: Any, *, market: str = "cash") -> RadarAsses
         -4.0,
         3.0,
     )
+    research_direction = str(_value(signal, "research_direction", "neutral") or "neutral").lower()
+    research_strength = _clip(_number(_value(signal, "research_directional_strength", 0.0)))
+    research_sources = max(0, int(_number(_value(signal, "research_directional_sources", 0), 0.0)))
+    action = str(_value(signal, "action", "HOLD") or "HOLD").upper()
+
+    bullish_votes = max(0.0, _number(_value(signal, "ta_bullish_votes", 0.0)))
+    bearish_votes = max(0.0, _number(_value(signal, "ta_bearish_votes", 0.0)))
+    schwager_score = max(-1.0, min(1.0, _number(_value(signal, "schwager_setup_score", 0.0))))
+    dip_side = str(_value(signal, "dip_rebound_side", "") or "").upper()
+    vote_total = bullish_votes + bearish_votes
+    vote_bias = ((bullish_votes - bearish_votes) / vote_total) if vote_total > 0 else 0.0
+    dip_bias = 0.35 if dip_side == "BUY" else -0.35 if dip_side == "SELL" else 0.0
+    pattern_bias = max(-1.0, min(1.0, vote_bias * 0.55 + schwager_score * 0.35 + dip_bias * 0.10))
+    pattern_strength = _clip(abs(pattern_bias) * 100.0)
+    pattern_direction = "positive" if pattern_bias >= 0.15 else "negative" if pattern_bias <= -0.15 else "neutral"
+
+    research_bias = 1.0 if research_direction == "positive" else -1.0 if research_direction == "negative" else 0.0
+    action_bias = 1.0 if action in {"BUY", "STRONG_BUY", "STRONG BUY"} else -1.0 if action in {"SELL", "REDUCE"} else 0.0
+    confluence_score = 0.0
+    if research_bias and pattern_direction != "neutral":
+        pattern_sign = 1.0 if pattern_direction == "positive" else -1.0
+        agreement = 1.0 if research_bias == pattern_sign else -1.0
+        action_alignment = 1.0 if action_bias == 0.0 or action_bias == pattern_sign else -1.0
+        evidence_strength = min(research_strength, pattern_strength) / 100.0
+        source_depth = min(1.0, research_sources / 3.0)
+        confluence_score = max(-4.0, min(4.0, 4.0 * agreement * action_alignment * evidence_strength * (0.7 + 0.3 * source_depth)))
 
     # Independent strategy lenses. Scores are comparable but not probabilities.
     breakout = _clip(
@@ -179,7 +209,8 @@ def assess_opportunity_radar(signal: Any, *, market: str = "cash") -> RadarAsses
         + (durability - 55) * 0.035
         + (urgency - 55) * 0.02
         - crowding * 0.035
-        + brain_outcome_adjustment,
+        + brain_outcome_adjustment
+        + confluence_score,
         -6.0,
         6.0,
     )
@@ -202,6 +233,12 @@ def assess_opportunity_radar(signal: Any, *, market: str = "cash") -> RadarAsses
         reasons.append("mature exact-provenance Brain outcomes support this setup")
     elif brain_outcome_adjustment < 0:
         warnings.append("mature exact-provenance Brain outcomes penalize this setup")
+    if confluence_score > 0.5:
+        reasons.append("sourced market research agrees with the observed technical pattern")
+    elif confluence_score < -0.5:
+        warnings.append("sourced market research conflicts with the observed technical pattern or proposed action")
+    elif research_direction in {"positive", "negative"} and pattern_direction == "neutral":
+        warnings.append("research has direction but technical pattern confirmation is weak")
     if setup_separation < 5:
         warnings.append("setup classification is mixed")
     if crowding >= 65:
@@ -224,6 +261,12 @@ def assess_opportunity_radar(signal: Any, *, market: str = "cash") -> RadarAsses
         summary += f" Independent event catalyst: {external_catalyst:.0f}/100."
     if brain_outcome_adjustment:
         summary += f" Brain outcome ranking adjustment: {brain_outcome_adjustment:+.2f}."
+    if research_direction in {"positive", "negative"}:
+        summary += (
+            f" Sourced research: {research_direction} ({research_strength:.0f}% strength); "
+            f"technical pattern: {pattern_direction} ({pattern_strength:.0f}% strength); "
+            f"confluence adjustment {confluence_score:+.2f}."
+        )
     if warnings:
         summary += " Warnings: " + "; ".join(warnings) + "."
 
@@ -235,6 +278,10 @@ def assess_opportunity_radar(signal: Any, *, market: str = "cash") -> RadarAsses
         durability_score=round(durability, 2),
         catalyst_score=round(catalyst, 2),
         crowding_risk=round(crowding, 2),
+        research_direction=research_direction,
+        pattern_direction=pattern_direction,
+        pattern_strength=round(pattern_strength, 2),
+        confluence_score=round(confluence_score, 2),
         radar_adjustment=round(radar_adjustment, 2),
         position_multiplier=round(multiplier, 3),
         approved=approved,

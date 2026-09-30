@@ -518,6 +518,34 @@ def brain_context_from_sources(
         for item in eligible
         if _clean(item["metadata"].get("direction"), limit=24).lower() in {"positive", "negative"}
     }
+    positive_weight = sum(
+        float(item["ranking_influence"])
+        for item in eligible
+        if _clean(item["metadata"].get("direction"), limit=24).lower() == "positive"
+    )
+    negative_weight = sum(
+        float(item["ranking_influence"])
+        for item in eligible
+        if _clean(item["metadata"].get("direction"), limit=24).lower() == "negative"
+    )
+    directional_total = positive_weight + negative_weight
+    directional_strength = (
+        abs(positive_weight - negative_weight) / directional_total * 100.0
+        if directional_total > 0 else 0.0
+    )
+    if directional_total <= 0:
+        research_direction = "neutral"
+    elif directional_strength < 20.0:
+        research_direction = "mixed"
+    elif positive_weight > negative_weight:
+        research_direction = "positive"
+    else:
+        research_direction = "negative"
+    directional_source_count = sum(
+        1
+        for item in eligible
+        if _clean(item["metadata"].get("direction"), limit=24).lower() in {"positive", "negative"}
+    )
     needs_research = any(item["verification_status"] in {"unverified", "inference"} for item in selected) or len(directions) > 1
     return {
         "symbol": symbol.upper(),
@@ -530,6 +558,11 @@ def brain_context_from_sources(
         "citations": [str(item.get("source_ref") or "") for item in selected if str(item.get("source_ref") or "").startswith("http")],
         "sources": selected,
         "needs_research": needs_research,
+        "research_direction": research_direction,
+        "directional_strength": round(directional_strength, 2),
+        "directional_source_count": directional_source_count,
+        "positive_research_weight": round(positive_weight, 2),
+        "negative_research_weight": round(negative_weight, 2),
         "directional_trade_signal": "NONE",
         "ranking_impact": "BOUNDED_CATALYST_ONLY",
         "execution_impact": "NONE",
