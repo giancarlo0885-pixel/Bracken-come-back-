@@ -133,7 +133,7 @@ html,body{margin:0;background:#03060b;color:#eef8ff;font-family:Inter,ui-sans-se
   <div class="metric"><b id="knowledgeUnits">0</b><span>retained evidence units</span></div>
   <div class="metric"><b id="newCycle">0</b><span>changed this cycle</span></div>
   <div class="metric"><b id="relationships">0</b><span>learned relationships</span></div>
-  <div class="metric"><b id="exactOutcomes">0</b><span>exact outcomes</span></div>
+  <div class="metric"><b id="exactOutcomes">0</b><span>exact outcomes learned</span></div>
 </div>
 <div class="panel legend">
   <span style="color:#ffc25e"><i class="dot"></i>sources</span>

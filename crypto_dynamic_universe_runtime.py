@@ -8,12 +8,21 @@ def _truthy(name: str, default: str = "true") -> bool:
     return str(os.getenv(name, default) or default).strip().lower() == "true"
 
 
-def _max_symbols() -> int:
+def _max_symbols(provider_count: int = 0, static_count: int = 0) -> int:
+    """Return the surveillance ceiling.
+
+    A configured positive ceiling is honored.  Zero/"all"/"auto" means retain
+    the complete provider-reported USD universe instead of silently truncating
+    discovery to a legacy watchlist-sized cap.
+    """
+    raw = str(os.getenv("CRYPTO_MAX_ACTIVE_SCAN_SYMBOLS", "auto") or "auto").strip().lower()
+    if raw in {"auto", "all", "0", "none", "unlimited"}:
+        return max(1, int(provider_count or 0), int(static_count or 0))
     try:
-        value = int(os.getenv("CRYPTO_MAX_ACTIVE_SCAN_SYMBOLS", "50"))
+        value = int(raw)
     except ValueError:
-        value = 50
-    return min(75, max(1, value))
+        return max(1, int(provider_count or 0), int(static_count or 0))
+    return max(1, value)
 
 
 def install_crypto_dynamic_universe_runtime(worker: Any) -> bool:
@@ -56,7 +65,7 @@ def install_crypto_dynamic_universe_runtime(worker: Any) -> bool:
 
     existing = list(watchlist.keys())
     added: list[str] = []
-    limit = _max_symbols()
+    limit = _max_symbols(len(provider_symbols), len(watchlist))
     for symbol in provider_symbols:
         if len(watchlist) >= limit:
             break
@@ -75,12 +84,13 @@ def install_crypto_dynamic_universe_runtime(worker: Any) -> bool:
     worker._crypto_dynamic_universe = {
         "static_seed_count": len(existing),
         "broker_tradable_count": len(provider_symbols),
+        "provider_coverage_count": sum(1 for symbol in provider_symbols if symbol in watchlist),
         "added_count": len(added),
         "active_seed_count": len(watchlist),
         "added_symbols": added,
     }
     worker.log.info(
-        "CRYPTO_DYNAMIC_UNIVERSE | status=ACTIVE | static_seed=%d | broker_tradable=%d | added=%d | active_seed=%d | max=%d | execution_authorization=UNCHANGED",
+        "CRYPTO_DYNAMIC_UNIVERSE | status=ACTIVE | static_seed=%d | broker_tradable=%d | added=%d | active_seed=%d | surveillance_limit=%d | execution_authorization=UNCHANGED",
         len(existing),
         len(provider_symbols),
         len(added),

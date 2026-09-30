@@ -93,6 +93,7 @@ input[type=range]{width:100%;accent-color:#55d4ff}
       <b>GARIBALDI MARKET ORACLE · ORACLE CITY</b>
       <div class="chips">
         <span class="chip" id="cityMood">CITY: --</span>
+        <span class="chip" id="cityEconomics">ECON: --</span>
         <span class="chip" id="aeveProgress">AEVE: -- / 1000</span>
         <span class="chip" id="paperState">PAPER</span>
         <span class="chip" id="brainState">BRAIN: --</span>
@@ -139,6 +140,14 @@ const DETAIL=isMobileDevice?0.78:1.15;
 const colors={online:0x4df49b,waiting:0xffd166,offline:0xff6767};
 const aeveData=DATA.aeve||{};
 document.getElementById("cityMood").textContent="CITY MOOD: "+String(DATA.city_mood||"UNKNOWN");
+const cityEconomics=DATA.city_economics||{};
+const cityStress=Number(cityEconomics.stress_pct||0);
+document.getElementById("cityEconomics").textContent=
+  "ECON: "+String(cityEconomics.condition||"UNKNOWN")+" · STRESS "+cityStress.toFixed(0)+"% · P/L "+
+  Number(cityEconomics.recent_net_pnl||0).toFixed(2);
+document.getElementById("cityEconomics").title=
+  String(cityEconomics.recent_wins||0)+" wins · "+String(cityEconomics.recent_losses||0)+" losses · drawdown "+
+  Number(cityEconomics.max_drawdown||0).toFixed(2);
 const aeveObserved=aeveData.observed==null?null:Number(aeveData.observed);
 const aeveAccepted=aeveData.accepted==null?null:Number(aeveData.accepted);
 const aeveTarget=Number(aeveData.target||1000);
@@ -591,9 +600,42 @@ function buildDistrict(node){
 }
 (DATA.nodes||[]).forEach(buildDistrict);
 
+// City condition is an economic consequence layer. It changes presentation only;
+// it never feeds back into trading, sizing, or execution authorization.
+const protectedFromEconomicDecay=new Set(["brain","data","intel"]);
+const economicDecay=Math.max(0,Math.min(1,cityStress/100));
+for(const [id,g] of nodeObjects.entries()){
+  if(protectedFromEconomicDecay.has(id))continue;
+  const severity=economicDecay;
+  g.scale.y=Math.max(.58,1-severity*.30);
+  g.rotation.z=((String(id).length%3)-1)*severity*.018;
+  g.traverse(obj=>{
+    if(!obj.isMesh||!obj.material)return;
+    const materials=Array.isArray(obj.material)?obj.material:[obj.material];
+    materials.forEach(material=>{
+      if(material.emissive)material.emissiveIntensity=Math.max(.015,Number(material.emissiveIntensity||.08)*(1-severity*.72));
+      if("roughness" in material)material.roughness=Math.min(1,Number(material.roughness||.5)+severity*.28);
+    });
+  });
+}
+if(economicDecay>=.25){
+  const damageCount=Math.round((isMobileDevice?8:22)*economicDecay);
+  for(let i=0;i<damageCount;i++){
+    const rubble=new THREE.Mesh(
+      new THREE.BoxGeometry(.10+Math.random()*.24,.05+Math.random()*.10,.10+Math.random()*.24),
+      mat(0x342d2a,.95,.02)
+    );
+    rubble.position.set(-20+Math.random()*43,.04,-11+Math.random()*22);
+    rubble.rotation.set(Math.random()*.5,Math.random()*Math.PI,Math.random()*.5);
+    scene.add(rubble);
+  }
+}
+
 function createAmbientBuilding(x,z,w,d,h,accent){
   const g=new THREE.Group();
-  box(g,w,h,d,0,h/2,0,mat(0x101c24,.42,.38,accent,.025));
+  const decay=Math.max(0,Math.min(.55,economicDecay*.55));
+  const stressedHeight=h*(1-decay*.22);
+  box(g,w,stressedHeight,d,0,stressedHeight/2,0,mat(0x101c24,.42+decay*.35,.38-decay*.16,accent,.025));
   if(!isMobileDevice)windowGrid(g,w,h,d,accent,Math.max(3,Math.floor(h*1.4)),Math.max(3,Math.floor(w*2.1)));
   if(h>5.5)roofGlow(g,w*1.02,d*1.02,h+.05,accent);
   g.position.set(x,0,z);scene.add(g);return g;
