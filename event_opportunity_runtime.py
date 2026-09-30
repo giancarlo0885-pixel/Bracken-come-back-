@@ -107,6 +107,12 @@ def install_event_opportunity_runtime(market_worker_module: Any) -> None:
 
         event_score = float(event_context.get("score") or 0.0)
         brain_score = float(brain_context.get("catalyst_score") or 0.0)
+        research_direction = str(brain_context.get("research_direction") or "neutral").lower()
+        research_strength = float(brain_context.get("directional_strength") or 0.0)
+        research_sources = int(brain_context.get("directional_source_count") or 0)
+        setattr(signal, "research_direction", research_direction)
+        setattr(signal, "research_directional_strength", research_strength)
+        setattr(signal, "research_directional_sources", research_sources)
         score = max(event_score, brain_score)
         if score > 0:
             setattr(signal, "external_catalyst_score", score)
@@ -121,9 +127,14 @@ def install_event_opportunity_runtime(market_worker_module: Any) -> None:
                 parts.append(f"event radar {event_score:.0f}/100")
             if brain_score > 0:
                 parts.append(f"attributed Brain context {brain_score:.0f}/100")
+            if research_direction in {"positive", "negative"} and research_sources > 0:
+                parts.append(
+                    f"sourced research direction {research_direction} "
+                    f"({research_strength:.0f}% strength across {research_sources} source(s))"
+                )
             suffix = (
-                f"Bounded external catalyst context: {', '.join(parts)}; "
-                "price/volume confirmation and all Council/risk vetoes still apply."
+                f"Bounded external research context: {', '.join(parts)}; "
+                "research does not manufacture a trade and must agree with observed market structure."
             )
             setattr(signal, "reason", f"{reason} {suffix}".strip())
         if brain_outcome_adjustment:
