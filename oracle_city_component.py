@@ -93,6 +93,7 @@ input[type=range]{width:100%;accent-color:#55d4ff}
       <b>GARIBALDI MARKET ORACLE · ORACLE CITY</b>
       <div class="chips">
         <span class="chip" id="cityMood">CITY: --</span>
+        <span class="chip" id="cityEconomics">ECON: --</span>
         <span class="chip" id="aeveProgress">AEVE: -- / 1000</span>
         <span class="chip" id="paperState">PAPER</span>
         <span class="chip" id="brainState">BRAIN: --</span>
@@ -139,6 +140,14 @@ const DETAIL=isMobileDevice?0.78:1.15;
 const colors={online:0x4df49b,waiting:0xffd166,offline:0xff6767};
 const aeveData=DATA.aeve||{};
 document.getElementById("cityMood").textContent="CITY MOOD: "+String(DATA.city_mood||"UNKNOWN");
+const cityEconomics=DATA.city_economics||{};
+const cityStress=Number(cityEconomics.stress_pct||0);
+document.getElementById("cityEconomics").textContent=
+  "ECON: "+String(cityEconomics.condition||"UNKNOWN")+" · STRESS "+cityStress.toFixed(0)+"% · P/L "+
+  Number(cityEconomics.recent_net_pnl||0).toFixed(2);
+document.getElementById("cityEconomics").title=
+  String(cityEconomics.recent_wins||0)+" wins · "+String(cityEconomics.recent_losses||0)+" losses · drawdown "+
+  Number(cityEconomics.max_drawdown||0).toFixed(2);
 const aeveObserved=aeveData.observed==null?null:Number(aeveData.observed);
 const aeveAccepted=aeveData.accepted==null?null:Number(aeveData.accepted);
 const aeveTarget=Number(aeveData.target||1000);
