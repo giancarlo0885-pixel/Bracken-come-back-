@@ -118,5 +118,5 @@ def test_executable_floor_does_not_promote_original_subminimum_proposal(monkeypa
 
     sized, _, reason = econ.adjusted_optimizer_target({"symbol": "LINK-USD"}, 1.50)
 
-    assert sized == 0.53
+    assert sized == round(1.50 * scorecard.size_multiplier, 2)
     assert "paper_learning_executable_floor" not in reason
