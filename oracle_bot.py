@@ -153,6 +153,7 @@ def _ordinary_sell_signal_allowed(
     position: dict[str, Any],
     price: float,
     quote_metadata: dict[str, Any] | None = None,
+    signal: Any | None = None,
 ) -> tuple[bool, str]:
     """Debounce only ordinary losing SELL signals immediately after entry.
 
@@ -209,7 +210,38 @@ def _ordinary_sell_signal_allowed(
             False,
             f"ordinary sell debounce: held={held_minutes:.1f}m < {minimum}m while below entry",
         )
-    return True, f"ordinary sell debounce satisfied: held={held_minutes:.1f}m"
+
+    # Do not realize a paper loss merely because the debounce expired. An
+    # ordinary SELL must be confirmed by the current market state. Dedicated
+    # stop/risk exits bypass this helper and remain available for loss control.
+    evidence = {
+        "momentum_5d": safe_float(signal_value(signal, "momentum_5d", 0.0)),
+        "momentum_20d": safe_float(signal_value(signal, "momentum_20d", 0.0)),
+        "macd_hist": safe_float(signal_value(signal, "macd_hist", 0.0)),
+        "trend_strength": safe_float(signal_value(signal, "trend_strength", 0.0)),
+        "news_sentiment": safe_float(signal_value(signal, "news_sentiment", 0.0)),
+        "expected_move_pct": safe_float(signal_value(signal, "expected_move_pct", 0.0)),
+        "brain_outcome_adjustment": safe_float(signal_value(signal, "brain_outcome_adjustment", 0.0)),
+        "confluence_score": safe_float(signal_value(signal, "confluence_score", 0.0)),
+    }
+    bearish_votes = sum(1 for value in evidence.values() if value < 0)
+    bullish_votes = sum(1 for value in evidence.values() if value > 0)
+    confidence = normalized_confidence(signal)
+    loss_pct = ((effective_exit_price / entry_price) - 1.0) * 100.0
+    thesis_broken = bearish_votes >= 3 and bearish_votes > bullish_votes and confidence >= 0.45
+    if not thesis_broken:
+        return (
+            False,
+            "ordinary losing sell requires market-confirmed thesis break: "
+            f"loss={loss_pct:.3f}% bearish={bearish_votes} bullish={bullish_votes} "
+            f"confidence={confidence:.3f}",
+        )
+    return (
+        True,
+        "market-confirmed thesis break: "
+        f"loss={loss_pct:.3f}% bearish={bearish_votes} bullish={bullish_votes} "
+        f"confidence={confidence:.3f}",
+    )
 
 
 def _entry_forecast_gate(
@@ -3166,6 +3198,7 @@ def process_signals(
                 position,
                 price,
                 quote,
+                signal=signal,
             )
             if not sell_allowed:
                 log.info(

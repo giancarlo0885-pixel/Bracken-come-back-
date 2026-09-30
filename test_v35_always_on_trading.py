@@ -1225,7 +1225,7 @@ def test_ordinary_sell_signal_debounces_reference_gain_that_fills_below_entry(mo
     assert "held=8.0m < 15m" in reason
 
 
-def test_ordinary_sell_signal_allows_losing_exit_after_debounce(monkeypatch):
+def test_ordinary_sell_signal_blocks_unconfirmed_loss_after_debounce(monkeypatch):
     import oracle_bot
 
     now = datetime(2026, 9, 27, 5, 30, tzinfo=timezone.utc)
@@ -1243,5 +1243,35 @@ def test_ordinary_sell_signal_allows_losing_exit_after_debounce(monkeypatch):
         120.80,
     )
 
+    assert allowed is False
+    assert "market-confirmed thesis break" in reason
+
+
+def test_ordinary_sell_signal_allows_market_confirmed_thesis_break(monkeypatch):
+    import oracle_bot
+
+    now = datetime(2026, 9, 30, 16, 30, tzinfo=timezone.utc)
+    monkeypatch.setattr(oracle_bot, "ORDINARY_SELL_MIN_HOLD_MINUTES", 15)
+    monkeypatch.setattr(oracle_bot, "utc_now", lambda: now.isoformat())
+    monkeypatch.setattr(
+        oracle_bot,
+        "row",
+        lambda *args, **kwargs: {"created_at": (now - timedelta(minutes=25)).isoformat()},
+    )
+
+    allowed, reason = oracle_bot._ordinary_sell_signal_allowed(
+        "crypto",
+        {"symbol": "ORCA-USD", "entry_price": 1.62595, "quantity": 30.0},
+        1.61988,
+        signal={
+            "confidence": 0.72,
+            "momentum_5d": -0.02,
+            "momentum_20d": -0.04,
+            "macd_hist": -0.01,
+            "trend_strength": -0.03,
+            "brain_outcome_adjustment": -1.0,
+        },
+    )
+
     assert allowed is True
-    assert "satisfied" in reason
+    assert "market-confirmed thesis break" in reason
