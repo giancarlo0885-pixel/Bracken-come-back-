@@ -115,6 +115,9 @@ def test_brain_context_is_relevant_bounded_and_never_directional():
     assert context["ranking_eligible_sources"] == 1
     assert any(item["verification_status"] == "unverified" for item in context["sources"])
     assert all(item["source_key"] != "intel:unrelated" for item in context["sources"])
+    assert context["research_direction"] == "positive"
+    assert context["directional_strength"] == 100.0
+    assert context["directional_source_count"] == 1
     assert context["directional_trade_signal"] == "NONE"
     assert context["ranking_impact"] == "BOUNDED_CATALYST_ONLY"
     assert context["execution_impact"] == "NONE"
