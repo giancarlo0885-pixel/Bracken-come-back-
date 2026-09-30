@@ -342,7 +342,8 @@ def test_oracle_city_mobile_layout_suppresses_label_collisions_and_resets_camera
     assert "@media(max-width:720px)" in rendered
     assert ".legend,.minimap,.label{display:none}" in rendered
     assert 'window.matchMedia("(max-width:720px)")' in rendered
-    assert "camera.position.set(2.5,31,28)" in rendered
+    assert "camera.position.set(2.5,46,46)" in rendered
+    assert "camera.fov=62" in rendered
     assert "lastMobileView" in rendered
     assert "min-height:44px" in rendered
     assert "isMobileDevice?26:68" in rendered
@@ -432,7 +433,8 @@ def test_oracle_city_defaults_to_city_first_uncluttered_view():
 
 def test_oracle_city_does_not_persist_brain_map_as_default_view():
     rendered = render_oracle_city_component({"nodes": [], "flows": [], "replay": []})
-    assert 'const CITY_VIEW_STORAGE_KEY="oracle-city-view-v2"' in rendered
+    assert 'const CITY_VIEW_STORAGE_KEY="oracle-city-view-v3"' in rendered
+    assert "if(mobileView())return false;" in rendered
     assert "if(brainMode)return;" in rendered
     assert "brainMode=false;" in rendered
     assert "showCityObjects(true);" in rendered
