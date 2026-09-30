@@ -243,7 +243,7 @@ def outcome_memory_for_signal(
     market: str,
     symbol: str | None = None,
     min_samples: int = 30,
-    max_rows: int = 3000,
+    max_rows: int = 0,
 ) -> dict[str, Any]:
     """Return bounded Brain outcome feedback for the current paper opportunity."""
     normalized_market = _normalized_market(market)
@@ -278,20 +278,29 @@ def outcome_memory_for_signal(
     try:
         from database import rows as fetch_rows
 
-        records = [
-            dict(row)
-            for row in fetch_rows(
-                """
+        limit = max(0, int(max_rows))
+        if limit:
+            sql = """
                 SELECT market,symbol,strategy,regime,net_pnl,return_pct,
                        confidence,freshness_score,exit_time,feature_snapshot
                 FROM oracle_brain_episodes
                 WHERE market=%s AND provenance_status='exact'
                 ORDER BY exit_time DESC
                 LIMIT %s
-                """,
-                (normalized_market, max(100, min(10000, int(max_rows)))),
-            )
-        ]
+            """
+            params = (normalized_market, limit)
+        else:
+            # Learning defaults to the full exact-provenance history retained in
+            # durable Brain memory. A caller may still bound this for diagnostics.
+            sql = """
+                SELECT market,symbol,strategy,regime,net_pnl,return_pct,
+                       confidence,freshness_score,exit_time,feature_snapshot
+                FROM oracle_brain_episodes
+                WHERE market=%s AND provenance_status='exact'
+                ORDER BY exit_time DESC
+            """
+            params = (normalized_market,)
+        records = [dict(row) for row in fetch_rows(sql, params)]
     except Exception as exc:
         return {
             "status": "unavailable",
