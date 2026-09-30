@@ -292,7 +292,7 @@ def test_strategy_economics_accumulates_normalized_post_fix_closes(monkeypatch):
             "exit_time": datetime.now(timezone.utc),
         },
     ]
-    monkeypatch.setattr(econ, "_ledger_records", lambda strategy: records if strategy == "oracle_council_v3" else [])
+    monkeypatch.setattr(econ, "_ledger_records", lambda strategy, symbol="": [row for row in records if (not symbol or row.get("symbol") == symbol)] if strategy == "oracle_council_v3" else [])
     monkeypatch.setattr(econ, "model_validation_ok", lambda signal: False)
     monkeypatch.setattr(econ, "paper_model_tier", lambda signal: "PAPER_EXPLORATORY")
 

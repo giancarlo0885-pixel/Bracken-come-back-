@@ -207,9 +207,12 @@ def _strategy_sql_filter(column: str, target: str) -> tuple[str, tuple[str, ...]
     return f"LEFT(BTRIM(COALESCE({column},'')),160) = %s", (target,)
 
 
-def _ledger_records(strategy: str) -> list[dict[str, Any]]:
+def _ledger_records(strategy: str, symbol: str = "") -> list[dict[str, Any]]:
     """Read canonical lot-attributed closes using stable strategy identity."""
     target = normalize_strategy_identity(strategy)
+    symbol_key = str(symbol or "").upper().strip()
+    symbol_clause = " AND UPPER(COALESCE(symbol,'')) = %s" if symbol_key else ""
+    symbol_params: tuple[str, ...] = (symbol_key,) if symbol_key else ()
     try:
         from database import rows
 
@@ -225,11 +228,11 @@ def _ledger_records(strategy: str) -> list[dict[str, Any]]:
                 FROM trade_ledger
                 WHERE market='crypto' AND side='SELL'
                   AND NULLIF(exit_time,'')::timestamptz >= %s
-                  AND {predicate}
+                  AND {predicate}{symbol_clause}
                 ORDER BY NULLIF(exit_time,'')::timestamptz DESC
                 LIMIT 1000
                 """,
-                (start, *strategy_params),
+                (start, *strategy_params, *symbol_params),
             )
         else:
             records = rows(
@@ -240,11 +243,11 @@ def _ledger_records(strategy: str) -> list[dict[str, Any]]:
                        model, model_version
                 FROM trade_ledger
                 WHERE market='crypto' AND side='SELL'
-                  AND {predicate}
+                  AND {predicate}{symbol_clause}
                 ORDER BY NULLIF(exit_time,'')::timestamptz DESC
                 LIMIT 1000
                 """,
-                strategy_params,
+                (*strategy_params, *symbol_params),
             )
         matched = [
             dict(item)
@@ -276,10 +279,10 @@ def _ledger_records(strategy: str) -> list[dict[str, Any]]:
                 FROM trades
                 WHERE market='crypto' AND side='SELL'
                   AND NULLIF(created_at,'')::timestamptz >= %s
-                  AND {predicate}
+                  AND {predicate}{symbol_clause}
                 ORDER BY NULLIF(created_at,'')::timestamptz DESC LIMIT 1000
                 """,
-                (start, *strategy_params),
+                (start, *strategy_params, *symbol_params),
             )
         else:
             records = rows(
@@ -292,10 +295,10 @@ def _ledger_records(strategy: str) -> list[dict[str, Any]]:
                        NULL AS model, NULL AS model_version
                 FROM trades
                 WHERE market='crypto' AND side='SELL'
-                  AND {predicate}
+                  AND {predicate}{symbol_clause}
                 ORDER BY NULLIF(created_at,'')::timestamptz DESC LIMIT 1000
                 """,
-                strategy_params,
+                (*strategy_params, *symbol_params),
             )
         return [
             dict(item)
@@ -391,13 +394,18 @@ def _multiplier(
 
 def strategy_economics(signal: Any) -> StrategyEconomics:
     strategy = strategy_identity(signal)
+    if isinstance(signal, dict):
+        symbol = str(signal.get("symbol") or "").upper().strip()
+    else:
+        symbol = str(getattr(signal, "symbol", "") or "").upper().strip()
+    cache_key = f"{strategy}|{symbol or '*'}"
     ttl = max(15.0, _number(os.getenv("PAPER_STRATEGY_ECON_CACHE_SECONDS", "60"), 60.0))
-    cached = _CACHE.get(strategy)
+    cached = _CACHE.get(cache_key)
     now = time.monotonic()
     if cached and now - cached[0] <= ttl:
         return cached[1]
 
-    records = _ledger_records(strategy)
+    records = _ledger_records(strategy, symbol)
     pnls = [_number(item.get("net_pnl")) for item in records]
     wins = [value for value in pnls if value > 0]
     losses = [value for value in pnls if value <= 0]
@@ -430,7 +438,7 @@ def strategy_economics(signal: Any) -> StrategyEconomics:
         model_validated=validated,
         model_tier=tier,
     )
-    _CACHE[strategy] = (now, result)
+    _CACHE[cache_key] = (now, result)
     return result
 
 
@@ -556,6 +564,25 @@ def adjusted_optimizer_target(signal: Any, target: float) -> tuple[float, Strate
         return target, economics, "inactive"
     adjusted = round(target * economics.size_multiplier, 2)
     tier = str(economics.model_tier or "RESEARCH").upper()
+    # In paper learning, a risk downsize must not turn an otherwise executable,
+    # fee-clearing exploration order into an impossible sub-minimum order.
+    # Preserve the platform minimum only when the original optimizer target was
+    # already executable; never raise an originally tiny/invalid proposal.
+    try:
+        import capital_allocator
+        executable_minimum = max(0.0, _number(getattr(capital_allocator, "MIN_TRADE_NOTIONAL", 0.0)))
+    except Exception:
+        executable_minimum = 0.0
+    if (
+        tier in {"RESEARCH", "PAPER_EXPLORATORY"}
+        and executable_minimum > 0
+        and target >= executable_minimum
+        and 0 < adjusted < executable_minimum
+    ):
+        adjusted = round(executable_minimum, 2)
+        floor_reason = "paper_learning_executable_floor"
+    else:
+        floor_reason = ""
     if economics.size_multiplier > 1.0:
         reason = "validated_positive_expectancy_boost"
     elif tier == "RESEARCH":
@@ -566,6 +593,8 @@ def adjusted_optimizer_target(signal: Any, target: float) -> tuple[float, Strate
         reason = "negative_expectancy_downsize"
     else:
         reason = "paper_qualified_neutral_size"
+    if floor_reason:
+        reason = f"{reason}:{floor_reason}"
     return max(0.0, adjusted), economics, reason
 
 
