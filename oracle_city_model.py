@@ -1216,14 +1216,63 @@ def build_oracle_city_snapshot(
 
     active_work = len(opportunity_views) + len(trades)
     block_count = int(decision_graph.get("summary", {}).get("downstream_blocks") or 0)
-    closed_result_records = sum(
-        1 for item in trades
+    closed_results = [
+        float(item.get("realized_pnl"))
+        for item in trades
         if str(item.get("side") or "").upper() == "SELL"
-        and item.get("realized_pnl") is not None
-    )
+        and _number(item.get("realized_pnl")) is not None
+    ]
+    closed_result_records = len(closed_results)
+    recent_results = closed_results[:20]
+    recent_net_pnl = sum(recent_results)
+    recent_losses = sum(1 for value in recent_results if value < 0)
+    recent_wins = sum(1 for value in recent_results if value > 0)
+    running = 0.0
+    peak = 0.0
+    max_drawdown = 0.0
+    for value in reversed(recent_results):
+        running += value
+        peak = max(peak, running)
+        max_drawdown = min(max_drawdown, running - peak)
+    sample_count = len(recent_results)
+    loss_ratio = (recent_losses / sample_count) if sample_count else 0.0
+    stress = 0.0
+    if sample_count:
+        stress += min(55.0, loss_ratio * 55.0)
+        if recent_net_pnl < 0:
+            stress += min(30.0, abs(recent_net_pnl) / max(1.0, abs(recent_net_pnl) + 5.0) * 30.0)
+        if max_drawdown < 0:
+            stress += min(15.0, abs(max_drawdown) / max(1.0, abs(max_drawdown) + 5.0) * 15.0)
+    city_economics = {
+        "sample_count": sample_count,
+        "recent_wins": recent_wins,
+        "recent_losses": recent_losses,
+        "recent_net_pnl": round(recent_net_pnl, 6),
+        "loss_ratio": round(loss_ratio, 4),
+        "max_drawdown": round(max_drawdown, 6),
+        "stress_pct": round(min(100.0, stress), 1),
+        "condition": (
+            "CRITICAL" if stress >= 75 else
+            "DAMAGED" if stress >= 50 else
+            "STRESSED" if stress >= 25 else
+            "HEALTHY"
+        ),
+    }
     if warnings:
         city_mood = "DEGRADED"
         city_mood_reason = f"{len(warnings)} City data feed warning(s)"
+    elif city_economics["stress_pct"] >= 50:
+        city_mood = "DEGRADED"
+        city_mood_reason = (
+            f"recent paper economics {city_economics['recent_net_pnl']:+.2f} · "
+            f"{city_economics['recent_losses']}/{city_economics['sample_count']} losses"
+        )
+    elif city_economics["stress_pct"] >= 25:
+        city_mood = "STRESSED"
+        city_mood_reason = (
+            f"paper drawdown {city_economics['max_drawdown']:+.2f} · "
+            f"stress {city_economics['stress_pct']:.0f}%"
+        )
     elif block_count >= 3:
         city_mood = "DEFENSIVE"
         city_mood_reason = f"{block_count} downstream safety/capacity blocks"
@@ -1287,6 +1336,7 @@ def build_oracle_city_snapshot(
         "aeve": aeve_summary,
         "world_state": world_state,
         "brain_growth": brain_growth,
+        "city_economics": city_economics,
         "strategy_arena": strategy_arena,
         "resident_agents": resident_agents,
         "rewards": rewards,
@@ -1303,6 +1353,11 @@ def build_oracle_city_snapshot(
             "known_exposure": round(exposure, 2),
             "world_events": int(world_state["current_events"]),
             "brain_knowledge_units": int(brain_growth["knowledge_units"]),
+            "city_condition": city_economics["condition"],
+            "city_stress_pct": city_economics["stress_pct"],
+            "recent_net_pnl": city_economics["recent_net_pnl"],
+            "recent_wins": city_economics["recent_wins"],
+            "recent_losses": city_economics["recent_losses"],
         },
         "nodes": nodes,
         "flows": flows,
