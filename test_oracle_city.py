@@ -567,3 +567,12 @@ def test_city_component_exposes_outcome_driven_economics():
     assert "protectedFromEconomicDecay" in rendered
     assert "economicDecay" in rendered
     assert 'new Set(["brain","data","intel"])' in rendered
+
+
+def test_oracle_city_mobile_camera_fits_portrait_and_ignores_stale_saved_view():
+    rendered = render_oracle_city_component({"nodes": [], "flows": [], "replay": []})
+    assert 'const CITY_VIEW_STORAGE_KEY="oracle-city-view-v3"' in rendered
+    assert "if(mobileView())return false;" in rendered
+    assert "camera.position.set(2.5,46,46)" in rendered
+    assert "camera.fov=62" in rendered
+    assert "camera.updateProjectionMatrix();" in rendered
