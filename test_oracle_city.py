@@ -544,3 +544,23 @@ def test_city_execution_metrics_are_not_confused_with_provenance():
     assert 'Paper fill records' in page
     assert 'Result-linked provenance' in page
     assert 'Trades with results' not in page
+
+
+def test_city_component_exposes_outcome_driven_economics():
+    from oracle_city_component import render_oracle_city_component
+
+    rendered = render_oracle_city_component({
+        "city_mood": "DEGRADED",
+        "city_economics": {
+            "condition": "DAMAGED",
+            "stress_pct": 62.0,
+            "recent_net_pnl": -12.5,
+            "recent_wins": 3,
+            "recent_losses": 7,
+            "max_drawdown": -9.0,
+        },
+    })
+    assert 'id="cityEconomics"' in rendered
+    assert "cityEconomics.stress_pct" in rendered
+    assert "cityEconomics.recent_net_pnl" in rendered
+    assert "cityEconomics.max_drawdown" in rendered
