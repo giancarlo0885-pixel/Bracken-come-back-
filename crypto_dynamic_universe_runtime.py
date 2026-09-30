@@ -9,11 +9,12 @@ def _truthy(name: str, default: str = "true") -> bool:
 
 
 def _max_symbols() -> int:
+    """Return the broker-discovery cap; 0 means use every broker-tradable USD pair."""
     try:
-        value = int(os.getenv("CRYPTO_MAX_ACTIVE_SCAN_SYMBOLS", "50"))
+        value = int(os.getenv("CRYPTO_MAX_ACTIVE_SCAN_SYMBOLS", "0"))
     except ValueError:
-        value = 50
-    return min(75, max(1, value))
+        value = 0
+    return max(0, value)
 
 
 def install_crypto_dynamic_universe_runtime(worker: Any) -> bool:
@@ -58,7 +59,7 @@ def install_crypto_dynamic_universe_runtime(worker: Any) -> bool:
     added: list[str] = []
     limit = _max_symbols()
     for symbol in provider_symbols:
-        if len(watchlist) >= limit:
+        if limit > 0 and len(watchlist) >= limit:
             break
         if symbol in watchlist:
             continue
@@ -80,11 +81,11 @@ def install_crypto_dynamic_universe_runtime(worker: Any) -> bool:
         "added_symbols": added,
     }
     worker.log.info(
-        "CRYPTO_DYNAMIC_UNIVERSE | status=ACTIVE | static_seed=%d | broker_tradable=%d | added=%d | active_seed=%d | max=%d | execution_authorization=UNCHANGED",
+        "CRYPTO_DYNAMIC_UNIVERSE | status=ACTIVE | static_seed=%d | broker_tradable=%d | added=%d | active_seed=%d | max=%s | execution_authorization=UNCHANGED",
         len(existing),
         len(provider_symbols),
         len(added),
         len(watchlist),
-        limit,
+        str(limit) if limit > 0 else "ALL",
     )
     return True
