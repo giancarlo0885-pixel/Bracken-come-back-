@@ -1049,18 +1049,14 @@ def route_history(
                 interval_family=interval_family,
             )
 
-    if asset_class == "crypto":
-        try:
-            frame = _coinbase_public_history(symbol, period, interval)
-            if not frame.empty and verify_frame_symbol(frame, symbol):
-                attempts.append(ProviderAttempt("Coinbase Exchange", True, len(frame), "public_history_fallback"))
-                return RoutedHistory(frame, "Coinbase Exchange", attempts, datetime.now(timezone.utc).isoformat())
-            attempts.append(ProviderAttempt("Coinbase Exchange", False, 0, "pair_or_history_unavailable"))
-        except Exception as exc:
-            attempts.append(ProviderAttempt("Coinbase Exchange", False, 0, "history_fallback_error", exc.__class__.__name__))
-
     try:
         frame = _strict_yahoo_history(yahoo_loader(symbol, period, interval), symbol, period, interval)
+        if frame.empty and asset_class == "crypto":
+            coinbase_frame = _coinbase_public_history(symbol, period, interval)
+            if not coinbase_frame.empty and verify_frame_symbol(coinbase_frame, symbol):
+                attempts.append(ProviderAttempt("Coinbase Exchange", True, len(coinbase_frame), "public_history_fallback"))
+                return RoutedHistory(coinbase_frame, "Coinbase Exchange", attempts, datetime.now(timezone.utc).isoformat())
+            attempts.append(ProviderAttempt("Coinbase Exchange", False, 0, "pair_or_history_unavailable"))
         if not frame.empty and verify_frame_symbol(frame, symbol):
             frame.attrs["source_identity"] = f"Yahoo Finance:{symbol}:{period}:{interval}"
             frame.attrs["period"] = period
