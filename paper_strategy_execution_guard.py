@@ -237,20 +237,69 @@ def _with_entry_economics_provenance(
     """Build an immutable paper-only economics view from entry-time evidence.
 
     QuantTradeAssessment stores percentage fields as decimal ratios (0.01 == 1%),
-    while paper_strategy_economics uses percentage points (1.0 == 1%). Convert
-    only the explicitly typed quant field and preserve any edge already carried
-    by the originating signal. Verified spread provenance remains percentage
-    points in this execution path.
+    while paper_strategy_economics uses percentage points (1.0 == 1%). Keep
+    gross edge and execution cost separate. net_expected_value_pct is already
+    post-cost, so it must never be handed to a later cost gate as gross edge.
+    When the optimizer has already resolved a cost for this exact candidate,
+    preserve that cost through final execution so planning and execution use the
+    same economics.
     """
     updates: dict[str, float] = {}
-    if economics.expected_edge_pct(signal) is None and quant_assessment is not None:
-        raw_quant_edge = getattr(quant_assessment, "net_expected_value_pct", None)
+
+    # Prefer the exact optimizer cost already used to allocate this candidate.
+    allocation = _value(signal, "v39_optimizer_allocation", None)
+    if _value(signal, "estimated_cost_pct", None) is None and isinstance(allocation, dict):
+        raw_optimizer_cost = allocation.get("estimated_round_trip_cost_pct")
         try:
-            quant_edge = float(raw_quant_edge)
+            optimizer_cost = float(raw_optimizer_cost)
         except (TypeError, ValueError):
-            quant_edge = float("nan")
-        if quant_edge == quant_edge and abs(quant_edge) != float("inf"):
-            updates["net_expected_value_pct"] = quant_edge * 100.0
+            optimizer_cost = float("nan")
+        if optimizer_cost == optimizer_cost and optimizer_cost >= 0 and optimizer_cost != float("inf"):
+            updates["estimated_cost_pct"] = optimizer_cost
+
+    if quant_assessment is not None:
+        raw_quant_cost = getattr(quant_assessment, "estimated_cost_pct", None)
+        try:
+            quant_cost = float(raw_quant_cost)
+        except (TypeError, ValueError):
+            quant_cost = float("nan")
+        quant_cost_valid = (
+            quant_cost == quant_cost and quant_cost >= 0 and quant_cost != float("inf")
+        )
+
+        # If no optimizer/signal cost exists, preserve the exact cost that the
+        # quant standard used when computing its net expected value.
+        if (
+            _value(signal, "estimated_cost_pct", None) is None
+            and "estimated_cost_pct" not in updates
+            and quant_cost_valid
+        ):
+            updates["estimated_cost_pct"] = quant_cost * 100.0
+
+        if economics.expected_edge_pct(signal) is None:
+            raw_gross_edge = getattr(quant_assessment, "gross_expected_value_pct", None)
+            try:
+                gross_edge = float(raw_gross_edge)
+            except (TypeError, ValueError):
+                gross_edge = float("nan")
+
+            if gross_edge == gross_edge and abs(gross_edge) != float("inf"):
+                updates["expected_edge_pct"] = gross_edge * 100.0
+            else:
+                # Compatibility for older quant objects that expose only net EV:
+                # reconstruct gross edge only when the exact deducted cost is
+                # also present. Never treat net EV alone as gross edge.
+                raw_net_edge = getattr(quant_assessment, "net_expected_value_pct", None)
+                try:
+                    net_edge = float(raw_net_edge)
+                except (TypeError, ValueError):
+                    net_edge = float("nan")
+                if (
+                    net_edge == net_edge
+                    and abs(net_edge) != float("inf")
+                    and quant_cost_valid
+                ):
+                    updates["expected_edge_pct"] = (net_edge + quant_cost) * 100.0
 
     if isinstance(verified_quote, dict) and _value(signal, "spread_pct", None) is None:
         observed_spread = verified_quote.get("spread_pct")
