@@ -237,18 +237,26 @@ def summarize_outcome_memory(
     }
 
 
-def _counterfactual_memory_for_signal(signal: Any, *, market: str, symbol: str, min_samples: int) -> dict[str, Any]:
+def _counterfactual_memory_for_signal(signal: Any, *, market: str, symbol: str, min_samples: int, max_rows: int = 0) -> dict[str, Any]:
     """Learn softly from rejected decisions whose later market outcome is known."""
     try:
         from database import rows as fetch_rows
-        records = [dict(row) for row in fetch_rows(
-            """SELECT c.outcome_class,c.return_pct,d.payload
-               FROM oracle_counterfactual_outcomes c
-               JOIN oracle_decision_audit d ON d.id=c.decision_id
-               WHERE c.market=%s AND c.symbol=%s
-               ORDER BY c.decision_time DESC LIMIT 500""",
-            (market, symbol),
-        )]
+        limit = max(0, int(max_rows))
+        if limit:
+            sql = """SELECT c.outcome_class,c.return_pct,d.payload
+                     FROM oracle_counterfactual_outcomes c
+                     JOIN oracle_decision_audit d ON d.id=c.decision_id
+                     WHERE c.market=%s AND c.symbol=%s
+                     ORDER BY c.decision_time DESC LIMIT %s"""
+            params = (market, symbol, limit)
+        else:
+            sql = """SELECT c.outcome_class,c.return_pct,d.payload
+                     FROM oracle_counterfactual_outcomes c
+                     JOIN oracle_decision_audit d ON d.id=c.decision_id
+                     WHERE c.market=%s AND c.symbol=%s
+                     ORDER BY c.decision_time DESC"""
+            params = (market, symbol)
+        records = [dict(row) for row in fetch_rows(sql, params)]
     except Exception as exc:
         return {"status": "unavailable", "samples": 0, "adjustment": 0.0, "reason": exc.__class__.__name__}
     if len(records) < max(5, int(min_samples)):
@@ -365,7 +373,7 @@ def outcome_memory_for_signal(
     base_adjustment = _number(result.get("ranking_adjustment"))
     green_adjustment = _number(green_core.get("adjustment"))
     counterfactual_memory = _counterfactual_memory_for_signal(
-        signal, market=normalized_market, symbol=target_symbol, min_samples=max(5, int(min_samples))
+        signal, market=normalized_market, symbol=target_symbol, min_samples=max(5, int(min_samples)), max_rows=max_rows
     )
     counterfactual_adjustment = _number(counterfactual_memory.get("adjustment"))
     result["base_ranking_adjustment"] = round(base_adjustment, 3)
