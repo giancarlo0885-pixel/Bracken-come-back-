@@ -181,7 +181,8 @@ def _ordinary_sell_signal_allowed(
         effective_exit_price = current_price
 
     if effective_exit_price >= entry_price:
-        return True, "ordinary sell is not realizing a post-cost loss"
+        gain_pct = ((effective_exit_price / entry_price) - 1.0) * 100.0
+        return True, f"PROFIT_PROTECT | effective_gain={gain_pct:.3f}%"
 
     latest_buy = row(
         """
@@ -228,19 +229,30 @@ def _ordinary_sell_signal_allowed(
     bullish_votes = sum(1 for value in evidence.values() if value > 0)
     confidence = normalized_confidence(signal)
     loss_pct = ((effective_exit_price / entry_price) - 1.0) * 100.0
-    thesis_broken = bearish_votes >= 3 and bearish_votes > bullish_votes and confidence >= 0.45
+    explicit_confirmation = (
+        evidence["expected_move_pct"] < 0
+        or evidence["news_sentiment"] < 0
+        or evidence["brain_outcome_adjustment"] < 0
+        or evidence["confluence_score"] < 0
+    )
+    thesis_broken = (
+        bearish_votes >= 4
+        and bearish_votes >= bullish_votes + 2
+        and confidence >= 0.55
+        and explicit_confirmation
+    )
     if not thesis_broken:
         return (
             False,
-            "ordinary losing sell requires market-confirmed thesis break: "
+            "ordinary losing sell requires stronger market-confirmed thesis break: "
             f"loss={loss_pct:.3f}% bearish={bearish_votes} bullish={bullish_votes} "
-            f"confidence={confidence:.3f}",
+            f"confidence={confidence:.3f} explicit_confirmation={explicit_confirmation}",
         )
     return (
         True,
-        "market-confirmed thesis break: "
+        "THESIS_BROKEN | "
         f"loss={loss_pct:.3f}% bearish={bearish_votes} bullish={bullish_votes} "
-        f"confidence={confidence:.3f}",
+        f"confidence={confidence:.3f} explicit_confirmation={explicit_confirmation}",
     )
 
 
@@ -3209,14 +3221,15 @@ def process_signals(
                 )
                 continue
 
-            if _close_position(market, position, price, "sell_signal", quote_metadata=quote):
+            exit_reason = sell_reason or "SELL_SIGNAL"
+            if _close_position(market, position, price, exit_reason, quote_metadata=quote):
                 actions.append(
                     {
                         "market": market,
                         "symbol": symbol,
                         "action": "SELL",
                         "price": price,
-                        "reason": "sell_signal",
+                        "reason": exit_reason,
                     }
                 )
             continue
