@@ -1190,7 +1190,7 @@ def test_ordinary_sell_signal_allows_profitable_exit_without_waiting(monkeypatch
     )
 
     assert allowed is True
-    assert "not realizing a post-cost loss" in reason
+    assert "PROFIT_PROTECT" in reason
 
 
 def test_ordinary_sell_signal_debounces_reference_gain_that_fills_below_entry(monkeypatch):
@@ -1244,7 +1244,7 @@ def test_ordinary_sell_signal_blocks_unconfirmed_loss_after_debounce(monkeypatch
     )
 
     assert allowed is False
-    assert "market-confirmed thesis break" in reason
+    assert "stronger market-confirmed thesis break" in reason
 
 
 def test_ordinary_sell_signal_allows_market_confirmed_thesis_break(monkeypatch):
@@ -1270,8 +1270,38 @@ def test_ordinary_sell_signal_allows_market_confirmed_thesis_break(monkeypatch):
             "macd_hist": -0.01,
             "trend_strength": -0.03,
             "brain_outcome_adjustment": -1.0,
+            "confluence_score": -1.0,
         },
     )
 
     assert allowed is True
-    assert "market-confirmed thesis break" in reason
+    assert "THESIS_BROKEN" in reason
+
+
+def test_ordinary_sell_requires_explicit_market_confirmation_for_loss(monkeypatch):
+    import oracle_bot
+
+    now = datetime(2026, 9, 30, 17, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(oracle_bot, "ORDINARY_SELL_MIN_HOLD_MINUTES", 15)
+    monkeypatch.setattr(oracle_bot, "utc_now", lambda: now.isoformat())
+    monkeypatch.setattr(
+        oracle_bot,
+        "row",
+        lambda *args, **kwargs: {"created_at": (now - timedelta(minutes=30)).isoformat()},
+    )
+
+    allowed, reason = oracle_bot._ordinary_sell_signal_allowed(
+        "crypto",
+        {"symbol": "BTC-USD", "entry_price": 100.0, "quantity": 1.0},
+        99.0,
+        signal={
+            "confidence": 0.80,
+            "momentum_5d": -1.0,
+            "momentum_20d": -1.0,
+            "macd_hist": -1.0,
+            "trend_strength": -1.0,
+        },
+    )
+
+    assert allowed is False
+    assert "explicit_confirmation=False" in reason
