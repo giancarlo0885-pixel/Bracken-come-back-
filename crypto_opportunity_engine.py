@@ -87,7 +87,10 @@ def dynamic_crypto_universe(
             unique.append(symbol)
     max_symbols = min(CRYPTO_MAX_ACTIVE_SCAN_SYMBOLS, limit or CRYPTO_MAX_ACTIVE_SCAN_SYMBOLS)
     merged = []
-    for symbol in static_crypto_universe() + unique:
+    # Provider-discovered assets are the live market universe. Add them before
+    # static fallback symbols so a large configured watchlist cannot consume
+    # the active-scan capacity and hide valid provider assets.
+    for symbol in unique + static_crypto_universe():
         if symbol not in merged:
             merged.append(symbol)
         if len(merged) >= max_symbols:
