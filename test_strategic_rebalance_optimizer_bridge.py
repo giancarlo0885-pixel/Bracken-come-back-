@@ -46,6 +46,31 @@ def _worker():
     return SimpleNamespace(adaptive_portfolio_optimizer=adaptive.adaptive_portfolio_optimizer, log=_Log())
 
 
+def test_liquidity_cost_provenance_replaces_generic_slippage_fallback():
+    import paper_strategy_economics as economics
+
+    item = _candidate(spread_pct=0.01, avg_dollar_volume=1_000_000_000.0)
+    enriched = bridge._with_liquidity_cost_provenance(item, 10.0)
+
+    assert enriched is not item
+    assert enriched["cost_provenance"] == "liquidity_capacity"
+    assert enriched["expected_slippage_pct"] == 0.005
+    # 2 * 0.005 slippage + 2 * 0.10 fee + 0.01 spread = 0.22%.
+    assert abs(economics.estimated_round_trip_cost_pct(enriched) - 0.22) < 1e-12
+
+
+def test_explicit_cost_provenance_is_never_overwritten_by_liquidity_model():
+    item = _candidate(
+        estimated_cost_pct=0.18,
+        expected_slippage_pct=0.03,
+    )
+    enriched = bridge._with_liquidity_cost_provenance(item, 10.0)
+
+    assert enriched is item
+    assert enriched["estimated_cost_pct"] == 0.18
+    assert enriched["expected_slippage_pct"] == 0.03
+
+
 def test_explicit_strategic_rebalance_separates_only_tactical_authorization(monkeypatch):
     monkeypatch.setattr(
         adaptive,
