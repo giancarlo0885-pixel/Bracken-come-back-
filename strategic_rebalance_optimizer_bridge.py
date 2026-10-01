@@ -161,6 +161,46 @@ def _adaptive_meaningful_entry_floor(
     return round(min(ceiling, max(minimum_notional, floor)), 2)
 
 
+def _with_liquidity_cost_provenance(
+    item: dict[str, Any],
+    reference_order_value: float,
+) -> dict[str, Any]:
+    """Use the canonical liquidity model before falling back to generic slippage.
+
+    The economics gate historically fell back to 0.165% slippage per side when
+    the opportunity carried only spread and ADV. The optimizer already has a
+    liquidity model that estimates slippage from those same verified inputs.
+    Feed that estimate into economics without changing fees, edge thresholds, or
+    any live-money control.
+    """
+    if (
+        item.get("estimated_cost_pct") is not None
+        or item.get("expected_slippage_pct") is not None
+        or item.get("slippage_pct") is not None
+    ):
+        return item
+    try:
+        capacity = adaptive.liquidity_capacity(
+            item,
+            max(0.0, adaptive._finite(reference_order_value)),
+        )
+    except Exception:
+        return item
+    if not capacity.get("verified"):
+        return item
+    raw_slippage = capacity.get("estimated_slippage_pct")
+    try:
+        slippage = float(raw_slippage)
+    except (TypeError, ValueError):
+        return item
+    if slippage != slippage or slippage < 0 or slippage == float("inf"):
+        return item
+    enriched = dict(item)
+    enriched["expected_slippage_pct"] = slippage
+    enriched["cost_provenance"] = "liquidity_capacity"
+    return enriched
+
+
 def _optimizer_state_key(status: str, reason: str, details: dict[str, Any]) -> tuple[Any, ...]:
     proposed = adaptive._finite(details.get("proposed_amount"))
     floor = adaptive._finite(details.get("meaningful_entry_floor"))
@@ -323,7 +363,15 @@ def install_strategic_rebalance_optimizer_bridge(worker: Any) -> None:
             # Keep optimizer telemetry aligned with the locked paper execution
             # economics gate. Mature known-negative evidence must not be logged as
             # APPROVED merely because the candidate has capital capacity.
-            economics_allowed, economics_reason, expected_edge, estimated_cost = fee_edge_allows_entry(item)
+            economics_item = _with_liquidity_cost_provenance(
+                item,
+                max(
+                    minimum_notional,
+                    base_meaningful_entry_floor,
+                    adaptive._finite(item.get("core_target_amount")),
+                ),
+            )
+            economics_allowed, economics_reason, expected_edge, estimated_cost = fee_edge_allows_entry(economics_item)
             # fee_edge_allows_entry intentionally permits missing-edge paper
             # exploration for the final execution guard. At the optimizer
             # boundary, every missing edge must first leave the ordinary
@@ -334,7 +382,7 @@ def install_strategic_rebalance_optimizer_bridge(worker: Any) -> None:
             economics_observed_only = False
             economics_identity = {
                 "cohort": str(item.get("cohort") or item.get("economic_cohort") or "").strip() or None,
-                "strategy": strategy_identity(item),
+                "strategy": strategy_identity(economics_item),
                 "regime": str(item.get("regime") or item.get("market_regime") or "").strip() or None,
             }
             if not economics_allowed:
@@ -369,6 +417,7 @@ def install_strategic_rebalance_optimizer_bridge(worker: Any) -> None:
                         "economics_reason": economics_reason,
                         "expected_edge_pct": expected_edge,
                         "estimated_round_trip_cost_pct": estimated_cost,
+                        "cost_provenance": economics_item.get("cost_provenance"),
                         "economics_identity": economics_identity,
                         "watch_only": True,
                     })
@@ -589,6 +638,7 @@ def install_strategic_rebalance_optimizer_bridge(worker: Any) -> None:
                     "economics_reason": economics_reason,
                     "expected_edge_pct": expected_edge,
                     "estimated_round_trip_cost_pct": estimated_cost,
+                    "cost_provenance": economics_item.get("cost_provenance"),
                 }
             )
             _log_optimizer_decision(
