@@ -34,7 +34,7 @@ def test_quant_net_plus_exact_cost_reconstructs_gross_edge_without_double_counti
         None,
         quant(cost=0.0025, net=0.0125),
     )
-    assert economics.expected_edge_pct(enriched) == 1.5
+    assert abs(economics.expected_edge_pct(enriched) - 1.5) < 1e-12
     assert economics.estimated_round_trip_cost_pct(enriched) == 0.25
 
 
