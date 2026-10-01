@@ -17,7 +17,9 @@ def test_outcome_memory_defaults_to_full_retained_history(monkeypatch):
         {"symbol": "TEST-USD", "regime": "bull", "strategy": "green-core-full-history-test"},
         market="crypto",
     )
-    sql, params = calls[-1]
+    episode_calls = [(sql, params) for sql, params in calls if "FROM oracle_brain_episodes" in sql]
+    assert episode_calls
+    sql, params = episode_calls[-1]
     assert "LIMIT" not in sql.upper()
     assert params == ("crypto",)
 
@@ -39,6 +41,8 @@ def test_outcome_memory_can_be_bounded_for_diagnostics(monkeypatch):
         market="crypto",
         max_rows=500,
     )
-    sql, params = calls[-1]
+    episode_calls = [(sql, params) for sql, params in calls if "FROM oracle_brain_episodes" in sql]
+    assert episode_calls
+    sql, params = episode_calls[-1]
     assert "LIMIT %s" in sql
     assert params == ("crypto", 500)
