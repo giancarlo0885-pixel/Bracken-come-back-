@@ -185,7 +185,7 @@ try:
     lv = rows("""SELECT
       (SELECT COUNT(*)::int FROM oracle_counterfactual_outcomes) counterfactuals,
       (SELECT COUNT(*)::int FROM oracle_counterfactual_outcomes WHERE outcome_class='avoided_loss') avoided_losses,
-      (SELECT COUNT(*)::int FROM oracle_counterfactual_outcomes WHERE outcome_class='missed_winner') missed_winners,
+      (SELECT COUNT(*)::int FROM oracle_counterfactual_outcomes WHERE outcome_class='missed_winner') counterfactual_missed_opportunities,
       (SELECT COUNT(*)::int FROM oracle_decision_replays) decision_replays,
       (SELECT COUNT(*)::int FROM oracle_setup_validation) setup_cohorts,
       (SELECT COUNT(*)::int FROM oracle_challenger_validation WHERE state='shadow') shadow_challengers,
@@ -203,15 +203,15 @@ if lv:
     st.subheader("Learning & validation")
     c1,c2,c3,c4=st.columns(4)
     c1.metric("Decision replays",int(v.get("decision_replays") or 0))
-    c2.metric("Avoided losses",int(v.get("avoided_losses") or 0))
-    c3.metric("Missed winners",int(v.get("missed_winners") or 0))
+    c2.metric("Counterfactual avoided losses",int(v.get("avoided_losses") or 0))
+    c3.metric("Counterfactual missed opportunities",int(v.get("counterfactual_missed_opportunities") or 0))
     c4.metric("Shadow challengers",int(v.get("shadow_challengers") or 0))
     c5,c6,c7,c8=st.columns(4)
     c5.metric("Counterfactuals",int(v.get("counterfactuals") or 0))
     c6.metric("Setup cohorts",int(v.get("setup_cohorts") or 0))
     c7.metric("Negative cohorts",int(v.get("negative_cohorts") or 0))
     err=v.get("calibration_error"); c8.metric("Calibration error","n/a" if err is None else f"{float(err):.3f}")
-    st.caption("Research-only evidence: replay → attribution → calibration → counterfactuals → walk-forward challenger validation. Execution authority: NONE.")
+    st.caption("Counterfactual metrics are rejected/abstained decisions evaluated against later persisted prices. They are simulated research evidence, not executed trades or verified post-cost profit. Execution authority: NONE.")
     with st.expander("Setup-specific learning"):
         st.dataframe(pd.DataFrame(setup_rows),width="stretch",hide_index=True)
     with st.expander("Failure taxonomy"):
