@@ -1051,12 +1051,10 @@ def route_history(
 
     try:
         frame = _strict_yahoo_history(yahoo_loader(symbol, period, interval), symbol, period, interval)
-        if frame.empty and asset_class == "crypto":
-            coinbase_frame = _coinbase_public_history(symbol, period, interval)
-            if not coinbase_frame.empty and verify_frame_symbol(coinbase_frame, symbol):
-                attempts.append(ProviderAttempt("Coinbase Exchange", True, len(coinbase_frame), "public_history_fallback"))
-                return RoutedHistory(coinbase_frame, "Coinbase Exchange", attempts, datetime.now(timezone.utc).isoformat())
-            attempts.append(ProviderAttempt("Coinbase Exchange", False, 0, "pair_or_history_unavailable"))
+        # Keep the router's fail-closed provider contract unchanged. Public
+        # Coinbase candles are useful only when the caller explicitly opts into
+        # research expansion; route_history itself must not manufacture a
+        # verified-provider substitute after configured routes/Yahoo fail.
         if not frame.empty and verify_frame_symbol(frame, symbol):
             frame.attrs["source_identity"] = f"Yahoo Finance:{symbol}:{period}:{interval}"
             frame.attrs["period"] = period
