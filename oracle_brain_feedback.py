@@ -238,43 +238,76 @@ def summarize_outcome_memory(
 
 
 def _counterfactual_memory_for_signal(signal: Any, *, market: str, symbol: str, min_samples: int, max_rows: int = 0) -> dict[str, Any]:
-    """Learn softly from rejected decisions whose later market outcome is known."""
+    """Learn from rejected decisions only when simulated round-trip economics are known."""
     try:
         from database import rows as fetch_rows
+        from paper_execution_reality import simulate_fill
         limit = max(0, int(max_rows))
+        select = """SELECT c.outcome_class,c.return_pct,c.entry_price,c.horizon_price,d.payload
+                    FROM oracle_counterfactual_outcomes c
+                    JOIN oracle_decision_audit d ON d.id=c.decision_id
+                    WHERE c.market=%s AND c.symbol=%s
+                    ORDER BY c.decision_time DESC"""
         if limit:
-            sql = """SELECT c.outcome_class,c.return_pct,d.payload
-                     FROM oracle_counterfactual_outcomes c
-                     JOIN oracle_decision_audit d ON d.id=c.decision_id
-                     WHERE c.market=%s AND c.symbol=%s
-                     ORDER BY c.decision_time DESC LIMIT %s"""
+            select += " LIMIT %s"
             params = (market, symbol, limit)
         else:
-            sql = """SELECT c.outcome_class,c.return_pct,d.payload
-                     FROM oracle_counterfactual_outcomes c
-                     JOIN oracle_decision_audit d ON d.id=c.decision_id
-                     WHERE c.market=%s AND c.symbol=%s
-                     ORDER BY c.decision_time DESC"""
             params = (market, symbol)
-        records = [dict(row) for row in fetch_rows(sql, params)]
+        records = [dict(row) for row in fetch_rows(select, params)]
     except Exception as exc:
         return {"status": "unavailable", "samples": 0, "adjustment": 0.0, "reason": exc.__class__.__name__}
-    if len(records) < max(5, int(min_samples)):
-        return {"status": "insufficient", "samples": len(records), "adjustment": 0.0}
-    missed = [r for r in records if r.get("outcome_class") == "missed_winner"]
-    avoided = [r for r in records if r.get("outcome_class") == "avoided_loss"]
-    informative = len(missed) + len(avoided)
-    if informative < max(5, int(min_samples)):
-        return {"status": "insufficient", "samples": len(records), "informative": informative, "adjustment": 0.0}
-    # A bounded correction: repeated missed upside raises attention; repeated
-    # avoided losses lowers it. This can rank only; it cannot manufacture a trade.
-    balance = (len(missed) - len(avoided)) / float(informative)
-    depth = min(1.0, informative / float(max(1, int(min_samples) * 3)))
+
+    profitable: list[dict[str, Any]] = []
+    avoided: list[dict[str, Any]] = []
+    unevaluable = 0
+    for record in records:
+        outcome = str(record.get("outcome_class") or "")
+        if outcome == "avoided_loss":
+            avoided.append(record)
+            continue
+        if outcome != "missed_winner":
+            continue
+        try:
+            entry = float(record.get("entry_price"))
+            horizon = float(record.get("horizon_price"))
+            if not math.isfinite(entry) or not math.isfinite(horizon) or entry <= 0 or horizon <= 0:
+                raise ValueError("invalid counterfactual price")
+            payload = record.get("payload") if isinstance(record.get("payload"), dict) else {}
+            order_value = None
+            for key in ("order_value", "notional", "notional_usd", "position_value", "planned_notional"):
+                try:
+                    candidate = float(payload.get(key)) if payload.get(key) not in (None, "") else None
+                except (TypeError, ValueError):
+                    candidate = None
+                if candidate is not None and math.isfinite(candidate) and candidate > 0:
+                    order_value = candidate
+                    break
+            buy = simulate_fill(side="BUY", market=market, reference_price=entry, order_value=order_value)
+            sell = simulate_fill(side="SELL", market=market, reference_price=horizon, order_value=order_value)
+            net_return_pct = ((sell.fill_price / buy.fill_price) - 1.0) * 100.0
+            record["simulated_post_cost_return_pct"] = net_return_pct
+            if net_return_pct > 0:
+                profitable.append(record)
+        except (TypeError, ValueError, OverflowError):
+            unevaluable += 1
+
+    informative = len(profitable) + len(avoided)
+    required = max(5, int(min_samples))
+    if informative < required:
+        return {
+            "status": "insufficient", "samples": len(records), "informative": informative,
+            "simulated_post_cost_profitable_missed": len(profitable), "avoided_losses": len(avoided),
+            "unevaluable": unevaluable, "adjustment": 0.0,
+            "economics": "SIMULATED_POST_COST",
+        }
+    balance = (len(profitable) - len(avoided)) / float(informative)
+    depth = min(1.0, informative / float(max(1, required * 3)))
     adjustment = max(-0.75, min(0.75, balance * depth * 0.75))
     return {
         "status": "ok", "samples": len(records), "informative": informative,
-        "missed_opportunities": len(missed), "avoided_losses": len(avoided),
-        "adjustment": round(adjustment, 3), "execution_impact": "BOUNDED_RANKING_ONLY",
+        "simulated_post_cost_profitable_missed": len(profitable), "avoided_losses": len(avoided),
+        "unevaluable": unevaluable, "adjustment": round(adjustment, 3),
+        "economics": "SIMULATED_POST_COST", "execution_impact": "BOUNDED_RANKING_ONLY",
     }
 
 
