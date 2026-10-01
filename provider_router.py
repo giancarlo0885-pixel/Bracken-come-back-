@@ -4,7 +4,7 @@ import logging
 import re
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from collections import defaultdict
 import time
 from typing import Any, Callable
@@ -294,6 +294,52 @@ def _latest_positive_close(frame: pd.DataFrame) -> float | None:
     if close.empty:
         return None
     return float(close.iloc[-1])
+
+
+def _coinbase_public_history(symbol: str, period: str, interval: str) -> pd.DataFrame:
+    """Return bounded public Coinbase candles for exact USD crypto pairs.
+
+    This is a research-history fallback only. It does not authorize execution or
+    substitute for the broker's current bid/ask. Coinbase limits one candle call
+    to 300 bars, so the fallback intentionally requests the latest bounded window.
+    """
+    requested = canonical_crypto_symbol(symbol)
+    if not requested.endswith("-USD"):
+        return pd.DataFrame()
+    granularities = {"1m": 60, "5m": 300, "15m": 900, "30m": 1800, "1h": 3600, "6h": 21600, "1d": 86400}
+    granularity = granularities.get(str(interval or "").lower().strip())
+    if granularity is None:
+        return pd.DataFrame()
+    end = datetime.now(timezone.utc)
+    start = end - timedelta(seconds=granularity * 299)
+    try:
+        response = requests.get(
+            f"https://api.exchange.coinbase.com/products/{requested}/candles",
+            params={"granularity": granularity, "start": start.isoformat(), "end": end.isoformat()},
+            headers={"cache-control": "no-cache", "user-agent": "GARIBALDI-MARKET-ORACLE/1.0"},
+            timeout=6,
+        )
+        if response.status_code == 404:
+            return pd.DataFrame()
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, list) or not payload:
+            return pd.DataFrame()
+        rows = [row for row in payload if isinstance(row, list) and len(row) >= 6]
+        if not rows:
+            return pd.DataFrame()
+        frame = pd.DataFrame(rows, columns=["time", "Low", "High", "Open", "Close", "Volume"])
+        frame.index = pd.to_datetime(frame.pop("time"), unit="s", utc=True)
+        frame = _normalise(frame, requested, interval)
+        if frame.empty or _latest_positive_close(frame) is None:
+            return pd.DataFrame()
+        frame = _stamp_frame(frame, "Coinbase Exchange", requested, requested, period, interval, True, True, False, requested)
+        frame.attrs["source_mode"] = "public_crypto_history_fallback"
+        frame.attrs["source_identity"] = f"Coinbase Exchange:{requested}:{period}:{interval}:bounded_300"
+        frame.attrs["bounded_history_bars"] = 300
+        return frame
+    except Exception:
+        return pd.DataFrame()
 
 
 def _strict_yahoo_history(frame: pd.DataFrame, symbol: str, period: str, interval: str) -> pd.DataFrame:
@@ -1005,6 +1051,10 @@ def route_history(
 
     try:
         frame = _strict_yahoo_history(yahoo_loader(symbol, period, interval), symbol, period, interval)
+        # Keep the router's fail-closed provider contract unchanged. Public
+        # Coinbase candles are useful only when the caller explicitly opts into
+        # research expansion; route_history itself must not manufacture a
+        # verified-provider substitute after configured routes/Yahoo fail.
         if not frame.empty and verify_frame_symbol(frame, symbol):
             frame.attrs["source_identity"] = f"Yahoo Finance:{symbol}:{period}:{interval}"
             frame.attrs["period"] = period
