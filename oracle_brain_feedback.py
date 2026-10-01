@@ -237,6 +237,39 @@ def summarize_outcome_memory(
     }
 
 
+def _counterfactual_memory_for_signal(signal: Any, *, market: str, symbol: str, min_samples: int) -> dict[str, Any]:
+    """Learn softly from rejected decisions whose later market outcome is known."""
+    try:
+        from database import rows as fetch_rows
+        records = [dict(row) for row in fetch_rows(
+            """SELECT c.outcome_class,c.return_pct,d.payload
+               FROM oracle_counterfactual_outcomes c
+               JOIN oracle_decision_audit d ON d.id=c.decision_id
+               WHERE c.market=%s AND c.symbol=%s
+               ORDER BY c.decision_time DESC LIMIT 500""",
+            (market, symbol),
+        )]
+    except Exception as exc:
+        return {"status": "unavailable", "samples": 0, "adjustment": 0.0, "reason": exc.__class__.__name__}
+    if len(records) < max(5, int(min_samples)):
+        return {"status": "insufficient", "samples": len(records), "adjustment": 0.0}
+    missed = [r for r in records if r.get("outcome_class") == "missed_winner"]
+    avoided = [r for r in records if r.get("outcome_class") == "avoided_loss"]
+    informative = len(missed) + len(avoided)
+    if informative < max(5, int(min_samples)):
+        return {"status": "insufficient", "samples": len(records), "informative": informative, "adjustment": 0.0}
+    # A bounded correction: repeated missed upside raises attention; repeated
+    # avoided losses lowers it. This can rank only; it cannot manufacture a trade.
+    balance = (len(missed) - len(avoided)) / float(informative)
+    depth = min(1.0, informative / float(max(1, int(min_samples) * 3)))
+    adjustment = max(-0.75, min(0.75, balance * depth * 0.75))
+    return {
+        "status": "ok", "samples": len(records), "informative": informative,
+        "missed_opportunities": len(missed), "avoided_losses": len(avoided),
+        "adjustment": round(adjustment, 3), "execution_impact": "BOUNDED_RANKING_ONLY",
+    }
+
+
 def outcome_memory_for_signal(
     signal: Any,
     *,
@@ -331,9 +364,16 @@ def outcome_memory_for_signal(
     green_core = green_core_profile(green_rows, signal, min_samples=max(5, int(min_samples)))
     base_adjustment = _number(result.get("ranking_adjustment"))
     green_adjustment = _number(green_core.get("adjustment"))
+    counterfactual_memory = _counterfactual_memory_for_signal(
+        signal, market=normalized_market, symbol=target_symbol, min_samples=max(5, int(min_samples))
+    )
+    counterfactual_adjustment = _number(counterfactual_memory.get("adjustment"))
     result["base_ranking_adjustment"] = round(base_adjustment, 3)
     result["green_core"] = green_core
-    result["ranking_adjustment"] = round(max(-4.0, min(3.0, base_adjustment + green_adjustment)), 3)
+    result["counterfactual_memory"] = counterfactual_memory
+    result["ranking_adjustment"] = round(
+        max(-4.0, min(3.0, base_adjustment + green_adjustment + counterfactual_adjustment)), 3
+    )
     result.update({
         "status": "ok",
         "market": normalized_market,
