@@ -32,7 +32,7 @@ def test_coinbase_history_rejects_unsupported_interval(monkeypatch):
     assert called is False
 
 
-def test_crypto_route_uses_coinbase_before_yahoo(monkeypatch):
+def test_crypto_route_uses_coinbase_when_yahoo_is_empty(monkeypatch):
     monkeypatch.setattr(router, "get_api_settings", lambda: {})
     monkeypatch.setattr(router, "symbol_is_unavailable", lambda *args, **kwargs: False)
     monkeypatch.setattr(router, "_coinbase_public_history", lambda *args, **kwargs: router._stamp_frame(
@@ -46,5 +46,5 @@ def test_crypto_route_uses_coinbase_before_yahoo(monkeypatch):
         return pd.DataFrame()
     result = router.route_history("TEST-USD", "5d", "5m", yahoo)
     assert result.provider == "Coinbase Exchange"
-    assert yahoo_called is False
+    assert yahoo_called is True
     assert result.frame.attrs["quote_verified"] is False
