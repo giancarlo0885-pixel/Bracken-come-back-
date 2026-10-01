@@ -22,6 +22,10 @@ def test_active_is_fail_closed_for_live(monkeypatch):
     assert econ.active() is False
 
 
+def test_net_expected_value_is_not_reused_as_gross_edge():
+    assert econ.expected_edge_pct({"net_expected_value_pct": 0.40}) is None
+
+
 def test_fee_edge_blocks_explicit_edge_below_cost(monkeypatch):
     _paper(monkeypatch)
     monkeypatch.setenv("PAPER_MIN_EDGE_TO_COST_MULTIPLIER", "1.25")

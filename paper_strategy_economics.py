@@ -455,8 +455,10 @@ def expected_edge_pct(signal: Any) -> float | None:
             return signal.get(name, default)
         return getattr(signal, name, default)
 
+    # This function feeds a gate that compares edge against execution cost.
+    # A field explicitly named net_expected_value_pct has already had cost
+    # deducted and therefore must not be treated as gross edge here.
     for name in (
-        "net_expected_value_pct",
         "expected_edge_pct",
         "calibrated_expected_edge_pct",
         "expected_return_pct",
