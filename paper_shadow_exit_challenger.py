@@ -28,10 +28,10 @@ import pandas as pd
 
 log = logging.getLogger("paper-shadow-exit-challenger")
 
-MODEL_VERSION = "shadow-exit-v1-paired-episode"
+MODEL_VERSION = "shadow-exit-v2-exact-risk"
 COST_MODEL_VERSION = "paper_execution_reality.simulate_fill-v1"
-GENERATION = 1
-_SCHEMA_LOCK = "garibaldi_shadow_exit_schema_v1"
+GENERATION = 2
+_SCHEMA_LOCK = "garibaldi_shadow_exit_schema_v2"
 _THREAD: threading.Thread | None = None
 _STOP = threading.Event()
 _STATE_LOCK = threading.Lock()
@@ -575,7 +575,7 @@ def ensure_schema() -> None:
             (
                 MODEL_VERSION,
                 GENERATION,
-                "Forward-only Layer-2 challenger; champion hard-stop and profit-protection layers unchanged.",
+                "Forward-only Layer-2 challenger with exact entry-risk provenance and restart-safe triggers; champion hard-stop and profit-protection layers unchanged.",
             ),
         )
 
