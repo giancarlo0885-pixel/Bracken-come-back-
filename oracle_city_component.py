@@ -898,17 +898,30 @@ function restoreCityViewState(){
 function fitBrainView(){
   const mobile=mobileView();
   brainGroup.scale.setScalar(mobile?.82:1);
-  brainGroup.position.set(mobile?.25:0,mobile?.10:0,0);
-  if(mobile){
-    camera.position.set(0,4.85,25.8);
-    controls.target.set(.15,2.62,0);
-    camera.fov=60;
-  }else{
-    camera.position.set(0,5.25,20.8);
-    controls.target.set(.15,2.72,0);
-    camera.fov=48;
-  }
+  brainGroup.position.set(0,0,0);
+  brainGroup.updateMatrixWorld(true);
+
+  const bounds=new THREE.Box3().setFromObject(brainGroup);
+  if(bounds.isEmpty())return;
+  const center=bounds.getCenter(new THREE.Vector3());
+  const size=bounds.getSize(new THREE.Vector3());
+
+  camera.fov=mobile?58:46;
   camera.updateProjectionMatrix();
+
+  const verticalFov=THREE.MathUtils.degToRad(camera.fov);
+  const aspect=Math.max(.35,Number(camera.aspect||1));
+  const horizontalFov=2*Math.atan(Math.tan(verticalFov/2)*aspect);
+  const heightDistance=(size.y*.5)/Math.max(.08,Math.tan(verticalFov/2));
+  const widthDistance=(size.x*.5)/Math.max(.08,Math.tan(horizontalFov/2));
+  const padding=mobile?1.30:1.18;
+  const distance=Math.max(heightDistance,widthDistance,7)*padding;
+
+  controls.autoRotate=false;
+  camera.position.set(center.x,center.y,center.z+distance);
+  controls.target.copy(center);
+  camera.lookAt(center);
+  controls.update();
 }
 function setBrainMode(on){
   brainMode=on;showCityObjects(!on);brainGroup.visible=on;
