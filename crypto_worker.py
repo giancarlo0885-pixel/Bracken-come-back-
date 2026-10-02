@@ -35,6 +35,7 @@ from paper_lifecycle_observability import install_paper_lifecycle_observability
 from paper_optimizer_size_handoff import install_paper_optimizer_size_handoff
 from paper_regime_economics_shadow import install_paper_regime_economics_shadow
 from paper_regime_entry_provenance import install_paper_regime_entry_provenance
+from paper_shadow_exit_challenger import install_paper_shadow_exit_challenger
 from paper_sell_db_verification import emit_recent_crypto_sell_db_verification
 from paper_sell_execution_router import install_paper_sell_execution_router
 from paper_sell_lot_atomic_repair import install_atomic_paper_sell_lot_repair
@@ -146,6 +147,9 @@ install_paper_regime_entry_provenance()
 # Shadow-only regime segmentation plus forward price-path sampling for MFE/MAE.
 # This writes telemetry only and has no execution/sizing/cooldown effect.
 install_paper_regime_economics_shadow()
+# Observe the incremental value of a persistent forward-evidence exit without
+# changing Council, risk exits, sizing, cooldowns, or broker submission.
+install_paper_shadow_exit_challenger("crypto")
 install_paper_strategy_execution_guard()
 
 # Keep this entrypoint in the crypto-worker deploy watch set; readiness helpers are imported above.
