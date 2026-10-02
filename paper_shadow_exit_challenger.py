@@ -416,6 +416,10 @@ def _trigger_telemetry(
 def ensure_schema() -> None:
     if not active():
         return
+    # The challenger finalizer consumes exact-cost regime metrics. Establish that
+    # shared research schema first so worker start order cannot race the relation.
+    from paper_regime_economics_shadow import ensure_schema as ensure_regime_schema
+    ensure_regime_schema()
     from database import connect
     with connect() as conn:
         conn.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (_SCHEMA_LOCK,))
@@ -433,7 +437,7 @@ def ensure_schema() -> None:
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS garibaldi_shadow_experiments (
-                experiment_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                experiment_id BIGSERIAL PRIMARY KEY,
                 trade_id TEXT NOT NULL,
                 episode_id UUID NOT NULL,
                 generation INTEGER NOT NULL,
