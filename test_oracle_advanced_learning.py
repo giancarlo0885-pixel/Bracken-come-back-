@@ -1,3 +1,4 @@
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import oracle_advanced_learning as a
 
@@ -27,6 +28,84 @@ def test_walk_forward_is_time_ordered_and_research_only():
     for forbidden in ("submit_order(","place_order(","live_trading_armed=true","enable_broker_submission=true"):
         assert forbidden not in lower
 
+
+
+def _episode_rows(episodes: int, trades_per_episode: int) -> list[dict]:
+    base=datetime(2026,10,1,tzinfo=timezone.utc)
+    out=[]
+    for episode in range(episodes):
+        start=base+timedelta(hours=episode*2)
+        for trade in range(trades_per_episode):
+            out.append({
+                "entry_time":start,
+                "exit_time":start+timedelta(minutes=20+trade),
+                "net_pnl":1.0,
+                "return_pct":0.10,
+            })
+    return out
+
+
+class _RowsResult:
+    def __init__(self, rows):
+        self._rows=rows
+    def fetchall(self):
+        return self._rows
+
+
+class _ChallengerConn:
+    def __init__(self, rows):
+        self.rows=rows
+        self.insert_params=[]
+    def execute(self, query, params=None):
+        if "SELECT DISTINCT strategy,regime" in query:
+            return _RowsResult([{"strategy":"test_strategy","regime":"test_regime"}])
+        if "SELECT entry_time,exit_time,net_pnl,return_pct" in query:
+            return _RowsResult(self.rows)
+        if "INSERT INTO oracle_challenger_validation" in query:
+            self.insert_params.append(params)
+            return _RowsResult([])
+        raise AssertionError(query)
+
+
+def test_cluster_bootstrap_counts_independent_market_episodes():
+    metrics=a._cluster_validation_metrics(
+        _episode_rows(30,2),
+        market="crypto",
+        candidate_key="test:positive",
+        bootstrap_draws=200,
+    )
+    assert metrics["trades"] == 60
+    assert metrics["episodes"] == 30
+    assert metrics["bootstrap_lower_expectancy"] > 0
+    assert metrics["episode_drawdown_pct"] == 0
+    assert metrics["tail_episode_return_pct"] > 0
+    assert metrics["risk_metrics_ready"] is True
+
+
+def test_correlated_trade_burst_cannot_qualify_as_many_independent_confirmations():
+    conn=_ChallengerConn(_episode_rows(34,6))
+    result=a.walk_forward_challengers(conn,"crypto")
+    assert result["shadow_qualified"] == 0
+    assert conn.insert_params
+    params=conn.insert_params[0]
+    assert params[8] == "research"
+    evidence=__import__("json").loads(params[9])
+    assert evidence["test_samples"] >= a.MIN_CLUSTER_TRADES
+    assert evidence["episode_count"] < a.MIN_CLUSTER_EPISODES
+    assert evidence["gates"]["min_trades"] is True
+    assert evidence["gates"]["min_episodes"] is False
+
+
+def test_positive_evidence_across_enough_episodes_can_reach_shadow_only():
+    conn=_ChallengerConn(_episode_rows(100,2))
+    result=a.walk_forward_challengers(conn,"crypto")
+    assert result["shadow_qualified"] == 1
+    params=conn.insert_params[0]
+    assert params[8] == "shadow"
+    evidence=__import__("json").loads(params[9])
+    assert evidence["episode_count"] >= a.MIN_CLUSTER_EPISODES
+    assert all(evidence["gates"].values())
+    assert evidence["split"] == "70/30_time_ordered_clustered"
 
 def test_advanced_schema_has_no_execution_authority():
     migration=Path("migrations/20260922_oracle_advanced_learning.sql").read_text(encoding="utf-8")
