@@ -1875,6 +1875,9 @@ def trim_old_records() -> dict[str, int]:
     return deleted_by_table
 
 
+MANUAL_RETENTION_VACUUM_EXCLUSIONS = frozenset({"signals"})
+
+
 def _vacuum_deleted_retention_tables(deleted_by_table: dict[str, int]) -> dict[str, Any]:
     """Make pages from bounded retention deletes reusable without rewriting tables.
 
@@ -1884,7 +1887,10 @@ def _vacuum_deleted_retention_tables(deleted_by_table: dict[str, int]) -> dict[s
     focused on reusable heap space; autovacuum owns index cleanup and truncation,
     avoiding WAL amplification and stronger end-of-table locking. Only configured
     retention tables with actual deletes qualify; canonical/protected relations
-    can never reach this path.
+    can never reach this path. The large, index-heavy signals relation is left to
+    its aggressive autovacuum settings: production evidence showed its manual
+    vacuum immediately preceding a roughly 527 MB WAL checkpoint even with index
+    cleanup and truncation disabled.
     """
     vacuumed: list[str] = []
     failed: dict[str, str] = {}
@@ -1893,7 +1899,11 @@ def _vacuum_deleted_retention_tables(deleted_by_table: dict[str, int]) -> dict[s
     for table, deleted in deleted_by_table.items():
         if int(deleted or 0) <= 0:
             continue
-        if table not in DATABASE_RETENTION_POLICIES or table in CANONICAL_PROTECTED_TABLES:
+        if (
+            table not in DATABASE_RETENTION_POLICIES
+            or table in CANONICAL_PROTECTED_TABLES
+            or table in MANUAL_RETENTION_VACUUM_EXCLUSIONS
+        ):
             continue
         try:
             with psycopg.connect(
