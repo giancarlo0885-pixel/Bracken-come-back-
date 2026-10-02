@@ -16,6 +16,8 @@ from market_sessions import parse_utc
 
 log = logging.getLogger("crypto-execution-guard")
 
+_ENTRY_ACTIONS = {"BUY", "STRONG_BUY", "STRONG BUY", "ACCUMULATE", "LONG"}
+
 _COINBASE_CACHE_LOCK = threading.Lock()
 _COINBASE_CACHE: dict[str, tuple[float, dict[str, Any] | None, str | None]] = {}
 _QUOTE_VERIFICATION_LOCK = threading.Lock()
@@ -28,6 +30,18 @@ def _symbol(signal: Any) -> str:
     else:
         value = getattr(signal, "symbol", None)
     return str(value or "").upper().strip()
+
+
+def _action(signal: Any) -> str:
+    if isinstance(signal, dict):
+        value = signal.get("action")
+    else:
+        value = getattr(signal, "action", None)
+    return str(value or "").upper().strip()
+
+
+def _paper_grace_quote(quote: dict[str, Any]) -> bool:
+    return str(quote.get("verification_basis") or "").strip().lower().startswith("paper_grace:")
 
 
 def _live_execution_mode() -> bool:
@@ -339,6 +353,14 @@ def install_crypto_execution_quote_guard(worker: Any) -> None:
             quote = oracle_bot._verified_quote_for(symbol, quote_map, "crypto")
             if quote is None:
                 skipped.append(symbol)
+                continue
+            if _action(signal) in _ENTRY_ACTIONS and _paper_grace_quote(quote):
+                worker.log.info(
+                    "CRYPTO | ENTRY QUOTE GRACE BLOCK | symbol=%s | action=%s | "
+                    "reason=FRESH_PROVIDER_QUOTE_REQUIRED | broker_submission=NONE | live_trading=DISARMED",
+                    symbol,
+                    _action(signal),
+                )
                 continue
             verified_pairs.append((signal, symbol, quote))
 
