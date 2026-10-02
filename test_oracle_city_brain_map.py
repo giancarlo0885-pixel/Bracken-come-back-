@@ -162,9 +162,13 @@ def test_brain_map_is_anatomical_and_mobile_fitted():
     assert "controls.target.copy(center)" in html
     assert "controls.autoRotate=false" in html
     assert "function setBrainControlMode(on)" in html
-    assert "controls.enabled=!lock" in html
-    assert "controls.enableRotate=!lock" in html
-    assert "controls.enableZoom=!lock" in html
+    assert "function clearOrbitMomentum()" in html
+    assert "controls.enablePan=false" in html
+    assert "controls.enableRotate=true" in html
+    assert "controls.enableZoom=true" in html
+    assert "controls.zoomToCursor=false" in html
+    assert "controls.maxPolarAngle=Math.PI-.01" in html
+    assert "controls.touches.TWO=THREE.TOUCH.DOLLY_ROTATE" in html
     assert "camera.up.set(0,1,0)" in html
     assert "brainEnvelope" in html
     assert "brainCoreObjects" in html
