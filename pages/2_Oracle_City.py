@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import pandas as pd
 import streamlit as st
-import streamlit.components.v1 as components
 
 from database import database_ready, rows
 from oracle_city_component import render_oracle_city_component
@@ -43,10 +42,9 @@ st.title("Oracle City — Cinematic Metropolis")
 if snapshot["warnings"]:
     st.warning("Partial Oracle City feeds: " + "; ".join(snapshot["warnings"]))
 
-components.html(
+st.iframe(
     render_oracle_city_component(snapshot),
     height=980,
-    scrolling=False,
 )
 
 st.subheader("City status")
