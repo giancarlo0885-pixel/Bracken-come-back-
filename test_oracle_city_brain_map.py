@@ -167,3 +167,12 @@ def test_brain_map_is_anatomical_and_mobile_fitted():
     assert "controls.enableRotate=!lock" in html
     assert "controls.enableZoom=!lock" in html
     assert "camera.up.set(0,1,0)" in html
+    assert "brainEnvelope" in html
+    assert "brainCoreObjects" in html
+    assert "function boundsForObjects(objects)" in html
+    assert "const coreBounds=boundsForObjects(brainCoreObjects)" in html
+    assert "const fullBounds=new THREE.Box3().setFromObject(brainGroup)" in html
+    assert "frameHalfWidth" in html
+    assert "frameHalfHeight" in html
+    assert "function settleBrainView()" in html
+    assert "setTimeout(()=>{if(brainMode)fitBrainView();},140)" in html
