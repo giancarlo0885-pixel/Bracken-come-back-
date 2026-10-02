@@ -165,6 +165,11 @@ def build_explainability(
         f"Market Memory adjusted the evidence by {_number(_value(memory, 'score_adjustment')):+.1f} points",
         f"Global Intelligence contributed {_number(_value(global_intelligence, 'score_adjustment')):+.1f} points",
         f"Opportunity Radar contributed {_number(_value(radar, 'radar_adjustment')):+.1f} points",
+        (
+            "Oracle Brain bounded influence: "
+            f"outcome memory {_number(_value(signal, 'brain_outcome_adjustment')):+.2f}, "
+            f"research confluence {_number(_value(radar, 'confluence_score')):+.2f}"
+        ),
         f"Scenario Engine estimated {_number(_value(scenario, 'probability_of_profit')):.1f}% profitable paths",
         f"Capital Allocator returned {str(_value(capital, 'verdict', 'BUILDING'))}",
         f"Final result: {recommendation} at {final_score:.1f}/100",

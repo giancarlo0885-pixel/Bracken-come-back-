@@ -57,6 +57,7 @@ class OracleDecision:
     capital: dict[str, Any]
     global_intelligence: dict[str, Any]
     radar: dict[str, Any]
+    brain_influence: dict[str, Any]
     explainability: dict[str, Any]
     research: dict[str, Any]
     hybrid: dict[str, Any]
@@ -105,6 +106,48 @@ def evaluate_opportunity(
     base_quality = assessment.trade_quality
     global_intelligence = assess_global_intelligence(signal, global_context, market=market)
     radar = assess_opportunity_radar(signal, market=market)
+    brain_outcome_adjustment = max(
+        -4.0,
+        min(3.0, _number(_value(signal, "brain_outcome_adjustment", 0.0))),
+    )
+    brain_intelligence_score = max(
+        0.0,
+        min(100.0, _number(_value(signal, "brain_intelligence_score", 0.0))),
+    )
+    event_catalyst_score = max(
+        0.0,
+        min(100.0, _number(_value(signal, "event_catalyst_score", 0.0))),
+    )
+    research_direction = str(_value(signal, "research_direction", "neutral") or "neutral").lower()
+    research_strength = max(
+        0.0,
+        min(100.0, _number(_value(signal, "research_directional_strength", 0.0))),
+    )
+    research_sources = max(0, int(_number(_value(signal, "research_directional_sources", 0), 0.0)))
+    direct_brain_adjustment = max(
+        -8.0,
+        min(7.0, brain_outcome_adjustment + _number(radar.confluence_score, 0.0)),
+    )
+    brain_influence = {
+        "outcome_memory_adjustment": round(brain_outcome_adjustment, 3),
+        "research_confluence_adjustment": round(_number(radar.confluence_score, 0.0), 3),
+        "direct_radar_score_component": round(direct_brain_adjustment, 3),
+        "brain_intelligence_score": round(brain_intelligence_score, 2),
+        "event_catalyst_score": round(event_catalyst_score, 2),
+        "brain_is_primary_external_catalyst": bool(
+            brain_intelligence_score > 0.0 and brain_intelligence_score > event_catalyst_score
+        ),
+        "research_direction": research_direction,
+        "research_directional_strength": round(research_strength, 2),
+        "research_directional_sources": research_sources,
+        "influences_decision": bool(
+            abs(direct_brain_adjustment) > 1e-9
+            or (brain_intelligence_score > 0.0 and brain_intelligence_score >= event_catalyst_score)
+        ),
+        "execution_authority": "NONE",
+        "can_bypass_vetoes": False,
+        "live_money_impact": "NONE",
+    }
     pre_hybrid_quality = max(
         0.0,
         min(
@@ -267,6 +310,8 @@ def evaluate_opportunity(
         f"net EV {assessment.net_expected_value_pct:.2%}, execution {assessment.execution_score:.0f}, "
         f"risk {assessment.risk_score:.0f}, relative value {assessment.relative_value_score:.0f}, global {global_intelligence.global_score:.0f}, "
         f"radar {radar.setup_score:.0f} ({radar.primary_setup.title()}), "
+        f"Brain direct {direct_brain_adjustment:+.2f} "
+        f"(outcomes {brain_outcome_adjustment:+.2f}, research {radar.confluence_score:+.2f}), "
         f"hybrid {hybrid_assessment.score:.1f} ({applied_hybrid_adjustment:+.2f} applied). "
         f"{memory.summary} {global_intelligence.summary} {radar.summary} {scenario.summary} "
         f"{hybrid_assessment.summary} {capital.summary} "
@@ -290,6 +335,7 @@ def evaluate_opportunity(
         capital=capital.to_dict(),
         global_intelligence=global_intelligence.to_dict(),
         radar=radar.to_dict(),
+        brain_influence=brain_influence,
         explainability=explainability.to_dict(),
         research=research.to_dict(),
         hybrid=hybrid_payload,
