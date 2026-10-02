@@ -131,3 +131,29 @@ def test_brain_map_component_is_read_only_visualization():
     assert "Decision provenance network" in html
     assert "submit_order(" not in html
     assert "LIVE_TRADING_ARMED=true" not in html
+
+
+
+def test_brain_map_is_anatomical_and_mobile_fitted():
+    html = render_oracle_city_component(
+        {
+            "nodes": [],
+            "flows": [],
+            "portfolio_towers": [],
+            "strategy_agents": [],
+            "replay": [],
+            "decision_graph": {"nodes": [], "edges": [], "summary": {}, "read_only": True},
+        }
+    )
+
+    assert "anatomyLobes" in html
+    assert '"frontal"' in html
+    assert '"parietal"' in html
+    assert '"temporal"' in html
+    assert '"occipital"' in html
+    assert "cerebellum" in html
+    assert "brainStem" in html
+    assert "fitBrainView" in html
+    assert "BRAIN_BACKGROUND" in html
+    assert "camera.position.set(0,4.85,25.8)" in html
+    assert "brainGroup.scale.setScalar(mobile?.82:1)" in html
