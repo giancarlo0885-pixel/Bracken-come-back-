@@ -10,6 +10,8 @@ from paper_shadow_exit_challenger import (
     ShadowExitConstraints,
     _episode_id,
     _latest_signal,
+    _lot_risk_context,
+    _open_position_risk_context,
     evaluate_forward_evidence_layer,
 )
 
@@ -191,3 +193,87 @@ def test_latest_signal_reads_canonical_details_json_not_nonexistent_payload_colu
     assert signal["payload"]["edge_provenance"] == "test"
     assert any("confidence,details" in " ".join(sql.split()) for sql in calls)
     assert all("confidence,payload" not in " ".join(sql.split()) for sql in calls)
+
+
+
+def test_lot_risk_context_prefers_immutable_entry_stop_snapshot():
+    risk_usd, risk_pct, source = _lot_risk_context(
+        {
+            "entry_price": 100.0,
+            "quantity": 2.0,
+            "risk_snapshot": {
+                "quantity": 4.0,
+                "initial_risk_usd": 24.0,
+                "risk_basis_source": "entry_stop_price",
+            },
+        }
+    )
+
+    assert risk_usd == 12.0
+    assert risk_pct == 6.0
+    assert source == "entry_stop_price"
+
+
+def test_open_position_risk_aggregates_exact_and_legacy_lots():
+    class Result:
+        def fetchall(self):
+            return [
+                {
+                    "quantity_opened": 2.0,
+                    "quantity_remaining": 2.0,
+                    "entry_price": 100.0,
+                    "risk_snapshot": {
+                        "quantity": 2.0,
+                        "initial_risk_usd": 8.0,
+                        "risk_basis_source": "entry_stop_price",
+                    },
+                },
+                {
+                    "quantity_opened": 1.0,
+                    "quantity_remaining": 1.0,
+                    "entry_price": 50.0,
+                    "risk_snapshot": {},
+                },
+            ]
+
+    class Conn:
+        def execute(self, sql, params=()):
+            assert "position_lots" in sql
+            return Result()
+
+    risk_usd, source = _open_position_risk_context(
+        Conn(),
+        "crypto",
+        "BTC-USD",
+        {"entry_price": 100.0, "quantity": 3.0},
+    )
+
+    assert risk_usd == 11.0  # $8 exact + $3 legacy 6% fallback
+    assert source == "mixed_entry_stop_and_configured_fallback"
+
+
+def test_risk_provenance_migration_is_restart_safe_without_high_churn_indexing():
+    sql = Path("migrations/20261002_shadow_exit_risk_provenance.sql").read_text(encoding="utf-8")
+
+    assert "garibaldi_shadow_exit_triggers" in sql
+    assert "PRIMARY KEY(position_key, model_version)" in sql
+    assert "initial_risk_usd" in sql
+    assert "risk_basis_source" in sql
+    assert "USING gin" not in sql
+
+
+def test_entry_path_persists_exact_initial_risk_without_changing_execution_rules():
+    source = Path("oracle_bot.py").read_text(encoding="utf-8")
+
+    assert '"initial_risk_usd": stop_distance * quantity' in source
+    assert '"risk_basis_source": (' in source
+    assert "risk_snapshot=entry_risk_snapshot" in source
+
+
+def test_shadow_trigger_state_is_durable_but_deleted_after_final_settlement():
+    source = Path("paper_shadow_exit_challenger.py").read_text(encoding="utf-8")
+
+    assert "INSERT INTO garibaldi_shadow_exit_triggers" in source
+    assert "ON CONFLICT(position_key,model_version) DO NOTHING" in source
+    assert "DELETE FROM garibaldi_shadow_exit_triggers" in source
+    assert '"_pending_position_key": key' in source

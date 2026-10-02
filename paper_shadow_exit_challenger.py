@@ -28,10 +28,10 @@ import pandas as pd
 
 log = logging.getLogger("paper-shadow-exit-challenger")
 
-MODEL_VERSION = "shadow-exit-v1-paired-episode"
+MODEL_VERSION = "shadow-exit-v2-exact-risk"
 COST_MODEL_VERSION = "paper_execution_reality.simulate_fill-v1"
-GENERATION = 1
-_SCHEMA_LOCK = "garibaldi_shadow_exit_schema_v1"
+GENERATION = 2
+_SCHEMA_LOCK = "garibaldi_shadow_exit_schema_v2"
 _THREAD: threading.Thread | None = None
 _STOP = threading.Event()
 _STATE_LOCK = threading.Lock()
@@ -263,8 +263,8 @@ def _position_key(market: str, position: dict[str, Any]) -> str:
     return f"{market}:{symbol}:{opened}"
 
 
-def _episode_id(market: str, exit_time: Any) -> uuid.UUID:
-    observed = _dt(exit_time) or datetime.now(timezone.utc)
+def _episode_id(market: str, event_time: Any) -> uuid.UUID:
+    observed = _dt(event_time) or datetime.now(timezone.utc)
     # Conservative dependence buckets: one trading day for cash, four hours
     # for 24/7 crypto. Multiple trades in the same systemic window remain one
     # bootstrap unit rather than masquerading as independent evidence.
@@ -315,10 +315,79 @@ def _latest_signal(conn: Any, market: str, symbol: str) -> dict[str, Any] | None
     return item
 
 
+def _open_position_risk_context(
+    conn: Any,
+    market: str,
+    symbol: str,
+    position: dict[str, Any],
+) -> tuple[float, str]:
+    """Recover the aggregate immutable entry risk for currently open lots."""
+    lots = list(
+        conn.execute(
+            """
+            SELECT quantity_opened,quantity_remaining,entry_price,risk_snapshot
+            FROM position_lots
+            WHERE market=%s AND symbol=%s AND COALESCE(quantity_remaining,0)>0
+            ORDER BY opened_at ASC,id ASC
+            """,
+            (market, symbol),
+        ).fetchall()
+    )
+    total_risk = 0.0
+    exact = True
+    for raw in lots:
+        lot = dict(raw)
+        remaining = abs(_num(lot.get("quantity_remaining")))
+        opened = abs(_num(lot.get("quantity_opened")))
+        entry = _num(lot.get("entry_price"))
+        if remaining <= 0 or entry <= 0:
+            continue
+        snapshot = _json_obj(lot.get("risk_snapshot"))
+        snapshot_risk = _num(snapshot.get("initial_risk_usd"))
+        snapshot_qty = abs(_num(snapshot.get("quantity"), opened))
+        if snapshot_risk > 0 and snapshot_qty > 0:
+            total_risk += snapshot_risk * min(1.0, remaining / snapshot_qty)
+        else:
+            exact = False
+            total_risk += entry * remaining * _stop_loss_pct()
+
+    if total_risk > 0:
+        return total_risk, "exact_entry_stop_lots" if exact and lots else "mixed_entry_stop_and_configured_fallback"
+
+    entry = _num(position.get("average_price") or position.get("entry_price"))
+    quantity = abs(_num(position.get("quantity")))
+    fallback = entry * quantity * _stop_loss_pct()
+    return fallback, "configured_stop_loss_pct"
+
+
+def _lot_risk_context(item: dict[str, Any]) -> tuple[float, float, str]:
+    """Return lot-scaled initial risk USD, risk percent and provenance."""
+    entry = _num(item.get("entry_price"))
+    quantity = abs(_num(item.get("quantity")))
+    if entry <= 0 or quantity <= 0:
+        return 0.0, 0.0, "invalid"
+
+    snapshot = _json_obj(item.get("risk_snapshot"))
+    snapshot_risk = _num(snapshot.get("initial_risk_usd"))
+    snapshot_qty = abs(_num(snapshot.get("quantity"), quantity))
+    if snapshot_risk > 0 and snapshot_qty > 0:
+        risk_usd = snapshot_risk * min(1.0, quantity / snapshot_qty)
+        source = str(snapshot.get("risk_basis_source") or "entry_risk_snapshot")
+    else:
+        risk_usd = entry * quantity * _stop_loss_pct()
+        source = "configured_stop_loss_pct_legacy_fallback"
+
+    risk_pct = (risk_usd / (entry * quantity)) * 100.0 if entry * quantity > 0 else 0.0
+    return risk_usd, risk_pct, source
+
+
 def _trigger_telemetry(
     market: str,
     position: dict[str, Any],
     signal: dict[str, Any],
+    *,
+    initial_risk_usd: float,
+    risk_basis_source: str,
 ) -> dict[str, Any] | None:
     payload = _json_obj(signal.get("payload"))
     route = _json_obj(payload.get("market_data_route"))
@@ -347,7 +416,6 @@ def _trigger_telemetry(
     ):
         return None
 
-    initial_risk_usd = entry_price * quantity * _stop_loss_pct()
     if initial_risk_usd <= 0:
         return None
 
@@ -395,7 +463,7 @@ def _trigger_telemetry(
         "regime": payload.get("regime") or payload.get("market_regime") or payload.get("crypto_regime") or "unknown",
         "strategy": payload.get("strategy") or payload.get("strategy_name") or payload.get("reason") or "unattributed",
         "initial_risk_usd": initial_risk_usd,
-        "risk_basis_source": "configured_stop_loss_pct",
+        "risk_basis_source": risk_basis_source,
         "stop_loss_pct": _stop_loss_pct(),
         "quote": {
             key: quote.get(key)
@@ -436,6 +504,21 @@ def ensure_schema() -> None:
         )
         conn.execute(
             """
+            CREATE TABLE IF NOT EXISTS garibaldi_shadow_exit_triggers (
+                position_key TEXT NOT NULL,
+                model_version TEXT NOT NULL,
+                market TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                opened_at TIMESTAMPTZ,
+                trigger_at TIMESTAMPTZ NOT NULL,
+                trigger_snapshot JSONB NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                PRIMARY KEY(position_key,model_version)
+            )
+            """
+        )
+        conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS garibaldi_shadow_experiments (
                 experiment_id BIGSERIAL PRIMARY KEY,
                 trade_id TEXT NOT NULL,
@@ -455,7 +538,10 @@ def ensure_schema() -> None:
                 mfe_r NUMERIC(12,6),
                 mae_r NUMERIC(12,6),
                 holding_time BIGINT,
+                entry_time TIMESTAMPTZ,
                 exit_time TIMESTAMPTZ NOT NULL,
+                initial_risk_usd NUMERIC(14,6),
+                risk_basis_source TEXT,
                 model_version TEXT NOT NULL,
                 cost_model_version TEXT NOT NULL,
                 trigger_snapshot JSONB,
@@ -466,6 +552,9 @@ def ensure_schema() -> None:
             )
             """
         )
+        conn.execute("ALTER TABLE garibaldi_shadow_experiments ADD COLUMN IF NOT EXISTS entry_time TIMESTAMPTZ")
+        conn.execute("ALTER TABLE garibaldi_shadow_experiments ADD COLUMN IF NOT EXISTS initial_risk_usd NUMERIC(14,6)")
+        conn.execute("ALTER TABLE garibaldi_shadow_experiments ADD COLUMN IF NOT EXISTS risk_basis_source TEXT")
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_shadow_exit_episode ON garibaldi_shadow_experiments(episode_id)"
         )
@@ -486,7 +575,7 @@ def ensure_schema() -> None:
             (
                 MODEL_VERSION,
                 GENERATION,
-                "Forward-only Layer-2 challenger; champion hard-stop and profit-protection layers unchanged.",
+                "Forward-only Layer-2 challenger with exact entry-risk provenance and restart-safe triggers; champion hard-stop and profit-protection layers unchanged.",
             ),
         )
 
@@ -519,11 +608,32 @@ def sample_open_positions(market: str) -> int:
             signal = _latest_signal(conn, normalized_market, symbol)
             if not signal:
                 continue
-            telemetry = _trigger_telemetry(normalized_market, position, signal)
+            initial_risk_usd, risk_basis_source = _open_position_risk_context(
+                conn,
+                normalized_market,
+                symbol,
+                position,
+            )
+            telemetry = _trigger_telemetry(
+                normalized_market,
+                position,
+                signal,
+                initial_risk_usd=initial_risk_usd,
+                risk_basis_source=risk_basis_source,
+            )
             if not telemetry:
                 continue
 
             key = _position_key(normalized_market, position)
+            pending = conn.execute(
+                """
+                SELECT trigger_snapshot
+                FROM garibaldi_shadow_exit_triggers
+                WHERE position_key=%s AND model_version=%s
+                """,
+                (key, MODEL_VERSION),
+            ).fetchone() or {}
+            pending_snapshot = _json_obj(pending.get("trigger_snapshot"))
             with _STATE_LOCK:
                 state = _POSITION_STATE.setdefault(
                     key,
@@ -532,12 +642,15 @@ def sample_open_positions(market: str) -> int:
                         "symbol": symbol,
                         "opened_at": position.get("opened_at"),
                         "evidence_persistence_counter": 0,
-                        "trigger_snapshot": None,
+                        "trigger_snapshot": pending_snapshot or None,
                     },
                 )
+                if state.get("trigger_snapshot") is None and pending_snapshot:
+                    state["trigger_snapshot"] = pending_snapshot
                 triggered, advantage_r = evaluate_forward_evidence_layer(state, telemetry)
                 if triggered and state.get("trigger_snapshot") is None:
                     snapshot = {
+                        "_pending_position_key": key,
                         "challenger_trigger_at": telemetry["current_timestamp"],
                         "challenger_trigger_price": telemetry["current_price"],
                         "hold_ev_r": telemetry["hold_ev_r"],
@@ -564,6 +677,24 @@ def sample_open_positions(market: str) -> int:
                         "execution_impact": "NONE",
                     }
                     state["trigger_snapshot"] = snapshot
+                    conn.execute(
+                        """
+                        INSERT INTO garibaldi_shadow_exit_triggers(
+                            position_key,model_version,market,symbol,opened_at,
+                            trigger_at,trigger_snapshot
+                        ) VALUES (%s,%s,%s,%s,%s,%s,%s::jsonb)
+                        ON CONFLICT(position_key,model_version) DO NOTHING
+                        """,
+                        (
+                            key,
+                            MODEL_VERSION,
+                            normalized_market,
+                            symbol,
+                            position.get("opened_at"),
+                            snapshot.get("challenger_trigger_at"),
+                            json.dumps(snapshot, default=str, sort_keys=True),
+                        ),
+                    )
                     log.info(
                         "SHADOW EXIT TRIGGER | market=%s | symbol=%s | advantage_r=%.4f | confirmations=%s | "
                         "mode=shadow | execution_impact=NONE | broker_submission=NONE | live_trading=DISARMED",
@@ -576,7 +707,13 @@ def sample_open_positions(market: str) -> int:
     return observed
 
 
-def _matching_trigger(market: str, symbol: str, entry_time: Any, exit_time: Any) -> dict[str, Any] | None:
+def _matching_trigger(
+    conn: Any,
+    market: str,
+    symbol: str,
+    entry_time: Any,
+    exit_time: Any,
+) -> dict[str, Any] | None:
     start = _dt(entry_time)
     end = _dt(exit_time)
     if start is None or end is None:
@@ -592,11 +729,30 @@ def _matching_trigger(market: str, symbol: str, entry_time: Any, exit_time: Any)
             trigger_at = _dt(snapshot.get("challenger_trigger_at"))
             if trigger_at is not None and start <= trigger_at <= end:
                 candidates.append((trigger_at, dict(snapshot)))
+
+    durable = list(
+        conn.execute(
+            """
+            SELECT position_key,trigger_at,trigger_snapshot
+            FROM garibaldi_shadow_exit_triggers
+            WHERE model_version=%s AND market=%s AND symbol=%s
+              AND trigger_at BETWEEN %s AND %s
+            ORDER BY trigger_at ASC
+            """,
+            (MODEL_VERSION, market, symbol, start, end),
+        ).fetchall()
+    )
+    for row in durable:
+        snapshot = _json_obj(row.get("trigger_snapshot"))
+        trigger_at = _dt(row.get("trigger_at") or snapshot.get("challenger_trigger_at"))
+        if trigger_at is not None:
+            snapshot["_pending_position_key"] = str(row.get("position_key") or "")
+            candidates.append((trigger_at, snapshot))
+
     if not candidates:
         return None
     candidates.sort(key=lambda item: item[0])
     return candidates[0][1]
-
 
 def finalize_closed_trades(market: str, limit: int = 250) -> int:
     if not active():
@@ -621,7 +777,7 @@ def finalize_closed_trades(market: str, limit: int = 250) -> int:
                        m.entry_time,m.exit_time,m.entry_price,m.exit_price,
                        m.round_trip_net_pnl,m.round_trip_fees,m.cost_provenance,
                        m.mfe_pct,m.mae_pct,m.excursion_sample_count,
-                       l.quantity,l.order_id,l.feature_snapshot
+                       l.quantity,l.order_id,l.feature_snapshot,l.risk_snapshot
                 FROM paper_regime_trade_metrics m
                 JOIN trade_ledger l ON l.trade_id=m.trade_id
                 WHERE m.market=%s
@@ -643,7 +799,7 @@ def finalize_closed_trades(market: str, limit: int = 250) -> int:
             ).fetchall()
         )
 
-        stop_r_pct = _stop_loss_pct() * 100.0
+        consumed_pending_keys: set[str] = set()
         for raw in rows:
             item = dict(raw)
             trade_id = str(item.get("trade_id") or "").strip()
@@ -652,20 +808,32 @@ def finalize_closed_trades(market: str, limit: int = 250) -> int:
             quantity = abs(_num(item.get("quantity")))
             if not trade_id or not symbol or entry_price <= 0 or quantity <= 0:
                 continue
-            initial_risk_usd = entry_price * quantity * _stop_loss_pct()
-            if initial_risk_usd <= 0:
+            initial_risk_usd, initial_risk_pct, risk_basis_source = _lot_risk_context(item)
+            if initial_risk_usd <= 0 or initial_risk_pct <= 0:
                 continue
 
             actual_r = _num(item.get("round_trip_net_pnl")) / initial_risk_usd
             trigger = _matching_trigger(
+                conn,
                 normalized_market,
                 symbol,
                 item.get("entry_time"),
                 item.get("exit_time"),
             )
             if trigger:
-                challenger_r = _num(trigger.get("counterfactual_exit_r_net"), actual_r)
-                challenger_exit_type = "FORWARD_EVIDENCE_EXIT"
+                fill = _json_obj(trigger.get("counterfactual_fill"))
+                counterfactual_fill_price = _num(fill.get("fill_price"))
+                if counterfactual_fill_price > 0:
+                    challenger_r = (
+                        (counterfactual_fill_price - entry_price) * quantity
+                    ) / initial_risk_usd
+                    challenger_exit_type = "FORWARD_EVIDENCE_EXIT"
+                    pending_key = str(trigger.get("_pending_position_key") or "")
+                    if pending_key:
+                        consumed_pending_keys.add(pending_key)
+                else:
+                    challenger_r = actual_r
+                    challenger_exit_type = "COUNTERFACTUAL_FILL_UNAVAILABLE"
                 confidence_bucket = _confidence_bucket(trigger.get("confidence"))
             else:
                 challenger_r = actual_r
@@ -680,13 +848,13 @@ def finalize_closed_trades(market: str, limit: int = 250) -> int:
                 else None
             )
             mfe_r = (
-                _num(item.get("mfe_pct")) / stop_r_pct
-                if item.get("mfe_pct") is not None and stop_r_pct > 0
+                _num(item.get("mfe_pct")) / initial_risk_pct
+                if item.get("mfe_pct") is not None and initial_risk_pct > 0
                 else None
             )
             mae_r = (
-                _num(item.get("mae_pct")) / stop_r_pct
-                if item.get("mae_pct") is not None and stop_r_pct > 0
+                _num(item.get("mae_pct")) / initial_risk_pct
+                if item.get("mae_pct") is not None and initial_risk_pct > 0
                 else None
             )
             actual_exit_type = str(item.get("order_id") or "ACTUAL_EXIT")[:64]
@@ -698,14 +866,14 @@ def finalize_closed_trades(market: str, limit: int = 250) -> int:
                     trade_id,episode_id,generation,market,symbol,entry_pattern,regime,
                     confidence_bucket,actual_exit_type,challenger_exit_type,
                     actual_realized_r_net,challenger_counterfactual_r_net,mfe_r,mae_r,
-                    holding_time,exit_time,model_version,cost_model_version,
-                    trigger_snapshot,execution_impact
-                ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,'NONE')
+                    holding_time,entry_time,exit_time,initial_risk_usd,risk_basis_source,
+                    model_version,cost_model_version,trigger_snapshot,execution_impact
+                ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,'NONE')
                 ON CONFLICT (trade_id,generation,model_version) DO NOTHING
                 """,
                 (
                     trade_id,
-                    _episode_id(normalized_market, item.get("exit_time")),
+                    _episode_id(normalized_market, item.get("entry_time")),
                     GENERATION,
                     normalized_market,
                     symbol,
@@ -719,13 +887,27 @@ def finalize_closed_trades(market: str, limit: int = 250) -> int:
                     mfe_r,
                     mae_r,
                     holding_seconds,
+                    item.get("entry_time"),
                     item.get("exit_time"),
+                    initial_risk_usd,
+                    risk_basis_source,
                     MODEL_VERSION,
                     COST_MODEL_VERSION,
                     snapshot_json,
                 ),
             )
             created += 1
+
+        for pending_key in consumed_pending_keys:
+            conn.execute(
+                """
+                DELETE FROM garibaldi_shadow_exit_triggers
+                WHERE position_key=%s AND model_version=%s
+                """,
+                (pending_key, MODEL_VERSION),
+            )
+            with _STATE_LOCK:
+                _POSITION_STATE.pop(pending_key, None)
     return created
 
 
@@ -931,7 +1113,8 @@ def shadow_evidence_report(market: str) -> dict[str, Any]:
                 SELECT trade_id,episode_id,generation,market,symbol,entry_pattern,regime,
                        confidence_bucket,actual_exit_type,challenger_exit_type,
                        actual_realized_r_net,challenger_counterfactual_r_net,delta_r,
-                       mfe_r,mae_r,holding_time,exit_time,model_version,cost_model_version
+                       mfe_r,mae_r,holding_time,entry_time,exit_time,initial_risk_usd,
+                       risk_basis_source,model_version,cost_model_version
                 FROM garibaldi_shadow_experiments
                 WHERE market=%s AND model_version=%s
                 ORDER BY exit_time ASC
