@@ -139,7 +139,7 @@ def test_mature_harmed_cohort_vetoes_promotion_evidence():
 def test_shadow_tables_are_protected_from_generic_retention_cleanup():
     assert "garibaldi_shadow_exit_epochs" in database.CANONICAL_PROTECTED_TABLES
     assert "garibaldi_shadow_experiments" in database.CANONICAL_PROTECTED_TABLES
-    assert "garibaldi_shadow_exit_experiments" not in database.DATABASE_RETENTION_POLICIES
+    assert "garibaldi_shadow_experiments" not in database.DATABASE_RETENTION_POLICIES
 
 
 def test_shadow_migration_is_compact_and_privilege_safe():
