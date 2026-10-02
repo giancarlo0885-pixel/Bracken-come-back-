@@ -155,5 +155,10 @@ def test_brain_map_is_anatomical_and_mobile_fitted():
     assert "brainStem" in html
     assert "fitBrainView" in html
     assert "BRAIN_BACKGROUND" in html
-    assert "camera.position.set(0,4.85,25.8)" in html
     assert "brainGroup.scale.setScalar(mobile?.82:1)" in html
+    assert "new THREE.Box3().setFromObject(brainGroup)" in html
+    assert "bounds.getCenter(new THREE.Vector3())" in html
+    assert "bounds.getSize(new THREE.Vector3())" in html
+    assert "horizontalFov=2*Math.atan" in html
+    assert "controls.target.copy(center)" in html
+    assert "controls.autoRotate=false" in html
