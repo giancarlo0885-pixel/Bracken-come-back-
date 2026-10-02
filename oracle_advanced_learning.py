@@ -11,7 +11,8 @@ approve, size, modify, or submit trades.
 import hashlib
 import json
 import math
-from datetime import datetime, timezone
+import random
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 
@@ -221,8 +222,141 @@ def refresh_data_quality(conn: Any) -> dict[str,Any]:
     return {"quality_rows":written}
 
 
+
+MIN_CLUSTER_EPISODES = 25
+MIN_CLUSTER_TRADES = 50
+MAX_EPISODE_DRAWDOWN_PCT = 5.0
+MIN_EPISODE_TAIL_RETURN_PCT = -2.0
+CLUSTER_BOOTSTRAP_DRAWS = 1000
+CLUSTER_GAP_SECONDS = 1800
+
+
+def _dt_utc(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        dt=value
+    elif isinstance(value, str):
+        try:
+            dt=datetime.fromisoformat(value.strip().replace("Z","+00:00"))
+        except ValueError:
+            return None
+    else:
+        return None
+    if dt.tzinfo is None:
+        dt=dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _episode_clusters(rows: list[dict[str,Any]], *, gap_seconds:int=CLUSTER_GAP_SECONDS) -> list[dict[str,Any]]:
+    """Collapse overlapping/nearby trades into market episodes before validation."""
+    intervals=[]
+    for row in rows:
+        end=_dt_utc(row.get("exit_time"))
+        start=_dt_utc(row.get("entry_time")) or end
+        if start is None or end is None:
+            continue
+        if end < start:
+            start,end=end,start
+        ret=row.get("return_pct")
+        try:
+            ret_value=float(ret) if ret is not None else None
+        except (TypeError,ValueError):
+            ret_value=None
+        if ret_value is not None and not math.isfinite(ret_value):
+            ret_value=None
+        intervals.append({
+            "start":start,
+            "end":end,
+            "net_pnl":_f(row.get("net_pnl")),
+            "return_pct":ret_value,
+        })
+    intervals.sort(key=lambda x:(x["start"],x["end"]))
+    clusters=[]
+    gap=timedelta(seconds=max(0,int(gap_seconds)))
+    for item in intervals:
+        if not clusters or item["start"] > clusters[-1]["end"] + gap:
+            clusters.append({
+                "start":item["start"],
+                "end":item["end"],
+                "trades":0,
+                "net_pnl":0.0,
+                "return_pct":0.0,
+                "return_samples":0,
+            })
+        cluster=clusters[-1]
+        cluster["end"]=max(cluster["end"],item["end"])
+        cluster["trades"]+=1
+        cluster["net_pnl"]+=item["net_pnl"]
+        if item["return_pct"] is not None:
+            cluster["return_pct"]+=item["return_pct"]
+            cluster["return_samples"]+=1
+    return clusters
+
+
+def _quantile(values: list[float], q:float) -> float | None:
+    clean=sorted(x for x in values if math.isfinite(x))
+    if not clean:
+        return None
+    idx=max(0,min(len(clean)-1,int(round((len(clean)-1)*max(0.0,min(1.0,q))))))
+    return clean[idx]
+
+
+def _cluster_validation_metrics(
+    rows: list[dict[str,Any]],
+    *,
+    market:str,
+    candidate_key:str,
+    bootstrap_draws:int=CLUSTER_BOOTSTRAP_DRAWS,
+) -> dict[str,Any]:
+    clusters=_episode_clusters(rows)
+    episode_count=len(clusters)
+    trade_count=sum(int(x.get("trades") or 0) for x in clusters)
+    if not clusters:
+        return {
+            "episodes":0,"trades":0,"bootstrap_lower_expectancy":None,
+            "bootstrap_upper_expectancy":None,"episode_drawdown_pct":None,
+            "tail_episode_return_pct":None,"risk_metrics_ready":False,
+        }
+
+    seed=int(hashlib.sha256(f"{market}:{candidate_key}".encode()).hexdigest()[:16],16)
+    rng=random.Random(seed)
+    boot=[]
+    draws=max(100,int(bootstrap_draws))
+    for _ in range(draws):
+        sampled=[clusters[rng.randrange(episode_count)] for _ in range(episode_count)]
+        sampled_trades=sum(int(x["trades"]) for x in sampled)
+        if sampled_trades:
+            boot.append(sum(_f(x["net_pnl"]) for x in sampled)/sampled_trades)
+
+    episode_returns=[
+        _f(x.get("return_pct"))
+        for x in clusters
+        if int(x.get("return_samples") or 0) == int(x.get("trades") or 0)
+    ]
+    risk_metrics_ready=len(episode_returns)==episode_count
+    drawdown_pct=None
+    tail_return_pct=None
+    if risk_metrics_ready:
+        equity=peak=dd=0.0
+        for value in episode_returns:
+            equity+=value
+            peak=max(peak,equity)
+            dd=max(dd,peak-equity)
+        drawdown_pct=dd
+        tail_return_pct=_quantile(episode_returns,0.05)
+
+    return {
+        "episodes":episode_count,
+        "trades":trade_count,
+        "bootstrap_lower_expectancy":_quantile(boot,0.05),
+        "bootstrap_upper_expectancy":_quantile(boot,0.95),
+        "episode_drawdown_pct":drawdown_pct,
+        "tail_episode_return_pct":tail_return_pct,
+        "risk_metrics_ready":risk_metrics_ready,
+    }
+
+
 def walk_forward_challengers(conn: Any, market:str) -> dict[str,Any]:
-    """Evaluate setup/regime cohorts on the newest 30% only; never changes authority."""
+    """Evaluate newest 30% using clustered episodes and multi-gate research qualification."""
     cohorts=list(conn.execute(
         """SELECT DISTINCT strategy,regime FROM oracle_brain_episodes
            WHERE provenance_status='exact' AND market=%s""",(market,)
@@ -230,7 +364,7 @@ def walk_forward_challengers(conn: Any, market:str) -> dict[str,Any]:
     qualified=0
     for cohort in cohorts:
         rows=list(conn.execute(
-            """SELECT exit_time,net_pnl FROM oracle_brain_episodes
+            """SELECT entry_time,exit_time,net_pnl,return_pct FROM oracle_brain_episodes
                WHERE provenance_status='exact' AND market=%s AND strategy=%s AND regime=%s
                ORDER BY exit_time ASC""",(market,cohort.get("strategy"),cohort.get("regime"))
         ).fetchall())
@@ -243,10 +377,51 @@ def walk_forward_challengers(conn: Any, market:str) -> dict[str,Any]:
         equity=peak=dd=0.0
         for x in test:
             equity+=_f(x.get("net_pnl")); peak=max(peak,equity); dd=max(dd,peak-equity)
-        state="shadow" if len(test)>=20 and exp>0 and pf>1.05 else "research"
-        if state=="shadow": qualified+=1
+
         key=f"{cohort.get('strategy')}:{cohort.get('regime')}"
-        evidence={"train_samples":cut,"test_samples":len(test),"split":"70/30_time_ordered"}
+        clustered=_cluster_validation_metrics(test,market=market,candidate_key=key)
+        gates={
+            "min_trades":len(test)>=MIN_CLUSTER_TRADES,
+            "min_episodes":clustered["episodes"]>=MIN_CLUSTER_EPISODES,
+            "positive_expectancy":exp>0,
+            "profit_factor":pf>1.05,
+            "bootstrap_lower_positive":(
+                clustered["bootstrap_lower_expectancy"] is not None
+                and clustered["bootstrap_lower_expectancy"]>0
+            ),
+            "risk_metrics_ready":bool(clustered["risk_metrics_ready"]),
+            "drawdown_within_limit":(
+                clustered["episode_drawdown_pct"] is not None
+                and clustered["episode_drawdown_pct"]<=MAX_EPISODE_DRAWDOWN_PCT
+            ),
+            "tail_loss_within_limit":(
+                clustered["tail_episode_return_pct"] is not None
+                and clustered["tail_episode_return_pct"]>=MIN_EPISODE_TAIL_RETURN_PCT
+            ),
+        }
+        state="shadow" if all(gates.values()) else "research"
+        if state=="shadow": qualified+=1
+        evidence={
+            "train_samples":cut,
+            "test_samples":len(test),
+            "split":"70/30_time_ordered_clustered",
+            "episode_count":clustered["episodes"],
+            "bootstrap_draws":CLUSTER_BOOTSTRAP_DRAWS,
+            "bootstrap_expectancy_90pct":[
+                clustered["bootstrap_lower_expectancy"],
+                clustered["bootstrap_upper_expectancy"],
+            ],
+            "episode_drawdown_pct":clustered["episode_drawdown_pct"],
+            "tail_episode_return_pct":clustered["tail_episode_return_pct"],
+            "thresholds":{
+                "min_trades":MIN_CLUSTER_TRADES,
+                "min_episodes":MIN_CLUSTER_EPISODES,
+                "max_episode_drawdown_pct":MAX_EPISODE_DRAWDOWN_PCT,
+                "min_tail_episode_return_pct":MIN_EPISODE_TAIL_RETURN_PCT,
+                "min_profit_factor":1.05,
+            },
+            "gates":gates,
+        }
         conn.execute(
             """INSERT INTO oracle_challenger_validation(
               candidate_key,market,validation_window,train_end,test_start,samples,expectancy,profit_factor,
