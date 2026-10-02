@@ -212,12 +212,28 @@ def test_oracle_city_page_uses_v2_read_only_architecture():
     source = Path("pages/2_Oracle_City.py").read_text(encoding="utf-8")
     assert "build_oracle_city_snapshot" in source
     assert "render_oracle_city_component" in source
-    assert "components.html" in source
+    assert "st.iframe(" in source
     assert "SELECT queries only" in source
     assert "submit_order(" not in source
     assert "ENABLE_BROKER_SUBMISSION=true" not in source
     assert "LIVE_TRADING_ARMED=true" not in source
 
+
+
+def test_oracle_city_uses_supported_streamlit_iframe_in_both_routes():
+    page = Path("pages/2_Oracle_City.py").read_text(encoding="utf-8")
+    app = Path("app.py").read_text(encoding="utf-8")
+    city_block = app[app.index('if page == "Oracle City":'):app.index('elif page == "Oracle Brain":')]
+
+    assert "streamlit.components.v1" not in page
+    assert "components.html(" not in page
+    assert "st.iframe(" in page
+    assert "scrolling=" not in page[page.index("st.iframe("):page.index('st.subheader("City status")')]
+
+    assert "streamlit.components.v1" not in city_block
+    assert "components.html(" not in city_block
+    assert "st.iframe(" in city_block
+    assert "scrolling=" not in city_block
 
 def test_oracle_city_model_rejects_mutating_sql():
     with pytest.raises(ValueError, match="read-only"):
@@ -408,7 +424,7 @@ def test_oracle_city_cinematic_renderer_remains_data_driven_and_read_only():
 
 def test_oracle_city_page_leads_with_cinematic_city():
     source = Path("pages/2_Oracle_City.py").read_text(encoding="utf-8")
-    city = source.index("components.html")
+    city = source.index("st.iframe")
     status = source.index('st.subheader("City status")')
     assert city < status
     assert "Cinematic Metropolis" in source

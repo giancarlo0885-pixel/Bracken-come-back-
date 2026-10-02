@@ -787,13 +787,12 @@ if show_advanced_chrome:
 if page == "Oracle City":
     from oracle_city_component import render_oracle_city_component
     from oracle_city_model import build_oracle_city_snapshot
-    import streamlit.components.v1 as components
 
     st.subheader("Oracle City — Cinematic Metropolis")
     city_snapshot = build_oracle_city_snapshot(rows)
     if city_snapshot.get("warnings"):
         st.warning("Partial Oracle City feeds: " + "; ".join(city_snapshot["warnings"]))
-    components.html(render_oracle_city_component(city_snapshot), height=980, scrolling=False)
+    st.iframe(render_oracle_city_component(city_snapshot), height=980)
 
 elif page == "Oracle Brain":
     from oracle_brain import build_oracle_brain_snapshot
