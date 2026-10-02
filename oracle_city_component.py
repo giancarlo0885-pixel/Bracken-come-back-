@@ -205,8 +205,11 @@ const initialDaylight=daylightForHour(initialHour);
 const initialTwilight=twilightForHour(initialHour);
 
 const scene=new THREE.Scene();
-scene.background=new THREE.Color(0x050912);
-scene.fog=new THREE.FogExp2(0x050912,isMobileDevice?0.014:0.010);
+const CITY_BACKGROUND=new THREE.Color(0x050912);
+const BRAIN_BACKGROUND=new THREE.Color(0x64a5cf);
+const CITY_FOG_DENSITY=isMobileDevice?0.014:0.010;
+scene.background=CITY_BACKGROUND.clone();
+scene.fog=new THREE.FogExp2(CITY_BACKGROUND.clone(),CITY_FOG_DENSITY);
 
 const camera=new THREE.PerspectiveCamera(isMobileDevice?52:46,1,.1,280);
 camera.position.set(30,22,38);
@@ -279,14 +282,16 @@ function applyTimeOfDay(){
   const skyTwilight=new THREE.Color(hour<12?0xe9a06f:0xf08b5b);
   const sky=skyNight.clone().lerp(skyDay,daylight);
   if(twilight>0.01)sky.lerp(skyTwilight,twilight*.42);
-  scene.background.copy(sky);
+  if(!brainMode)scene.background.copy(sky);
 
   const fogNight=new THREE.Color(0x07111c);
   const fogDay=new THREE.Color(0x7da9b7);
   const fogColor=fogNight.clone().lerp(fogDay,daylight*.88);
   if(twilight>0.01)fogColor.lerp(new THREE.Color(0xd9aa8b),twilight*.22);
-  scene.fog.color.copy(fogColor);
-  scene.fog.density=(isMobileDevice?0.014:0.010)-(daylight*(isMobileDevice?0.007:0.005));
+  if(!brainMode){
+    scene.fog.color.copy(fogColor);
+    scene.fog.density=CITY_FOG_DENSITY-(daylight*(isMobileDevice?0.007:0.005));
+  }
 
   renderer.toneMappingExposure=1.02+daylight*.50+twilight*.10;
   hemisphere.intensity=1.45+daylight*2.25;
@@ -724,37 +729,99 @@ function curveFor(source,target){
 const cityObjects=scene.children.slice();
 const brainGroup=new THREE.Group();brainGroup.visible=false;scene.add(brainGroup);
 const brainData=DATA.decision_graph||{nodes:[],edges:[],summary:{}},brainObjects=new Map(),brainEdges=[],brainShells=[];
-function brainColor(node){if(node.state==="offline")return 0xff6767;if(node.state==="waiting")return 0xffd166;return ({feature:0x59cfff,decision:0xa86dff,gate:0x4df49b,outcome:0x55b8ff,memory:0xf0a6ff,source:0xffc66d,lesson:0x9b7cff,world:0x62e8d5})[node.kind]||0x9ccfe6;}
-function addBrainShell(side){
+const anatomyLobes=[
+  {name:"frontal",x:-2.55,y:3.30,z:.10,sx:2.95,sy:2.15,sz:2.05,phase:.15},
+  {name:"parietal",x:.05,y:3.85,z:-.10,sx:3.00,sy:2.25,sz:2.15,phase:1.05},
+  {name:"temporal",x:-.25,y:2.05,z:.42,sx:2.85,sy:1.42,sz:1.92,phase:2.10},
+  {name:"occipital",x:2.55,y:3.08,z:-.18,sx:1.90,sy:1.82,sz:1.78,phase:2.85}
+];
+function brainColor(node){
+  if(node.state==="offline")return 0xff9caf;
+  if(node.state==="waiting")return 0xffe69a;
+  return ({
+    feature:0x9eeff6,
+    decision:0xd8b7ff,
+    gate:0xb8f4d7,
+    outcome:0xffe8a8,
+    memory:0xf2c6ff,
+    source:0xffe29a,
+    lesson:0xcab3ff,
+    world:0xacf1df
+  })[node.kind]||0xccefff;
+}
+function addBrainLobe(spec){
   const shell=new THREE.Mesh(
-    new THREE.SphereGeometry(1,isMobileDevice?18:30,isMobileDevice?12:20),
-    new THREE.MeshBasicMaterial({color:0x69d7ff,wireframe:true,transparent:true,opacity:.075,depthWrite:false})
+    new THREE.SphereGeometry(1,isMobileDevice?20:34,isMobileDevice?14:22),
+    new THREE.MeshBasicMaterial({
+      color:0xd7f5ff,wireframe:true,transparent:true,
+      opacity:isMobileDevice?.115:.095,depthWrite:false
+    })
   );
-  shell.position.set(side*2.25,2.9,0);shell.scale.set(4.25,2.85,3.55);
-  shell.userData={baseScale:shell.scale.clone(),phase:side<0?0:1.7};
+  shell.position.set(spec.x,spec.y,spec.z);
+  shell.scale.set(spec.sx,spec.sy,spec.sz);
+  shell.userData={name:spec.name,baseScale:shell.scale.clone(),phase:spec.phase};
   brainGroup.add(shell);brainShells.push(shell);
 }
-addBrainShell(-1);addBrainShell(1);
+anatomyLobes.forEach(addBrainLobe);
+
+// A smaller posterior cerebellum and tapered brain stem make the silhouette
+// recognizably anatomical while the decision nodes remain live/interactable.
 const cerebellum=new THREE.Mesh(
-  new THREE.SphereGeometry(1,isMobileDevice?14:22,isMobileDevice?10:16),
-  new THREE.MeshBasicMaterial({color:0xa86dff,wireframe:true,transparent:true,opacity:.055,depthWrite:false})
+  new THREE.SphereGeometry(1,isMobileDevice?18:28,isMobileDevice?12:20),
+  new THREE.MeshBasicMaterial({
+    color:0xcfefff,wireframe:true,transparent:true,
+    opacity:isMobileDevice?.14:.11,depthWrite:false
+  })
 );
-cerebellum.position.set(0,.65,1.05);cerebellum.scale.set(2.7,1.1,1.7);brainGroup.add(cerebellum);brainShells.push(cerebellum);
-const brainStem=new THREE.Mesh(new THREE.CylinderGeometry(.32,.48,2.0,14),new THREE.MeshBasicMaterial({color:0x69d7ff,transparent:true,opacity:.09,wireframe:true}));
-brainStem.position.set(0,-.35,.5);brainGroup.add(brainStem);
+cerebellum.position.set(2.18,1.28,.50);
+cerebellum.scale.set(1.85,1.05,1.42);
+cerebellum.userData={name:"cerebellum",baseScale:cerebellum.scale.clone(),phase:3.7};
+brainGroup.add(cerebellum);brainShells.push(cerebellum);
+
+const brainStem=new THREE.Mesh(
+  new THREE.CylinderGeometry(.26,.46,2.05,18),
+  new THREE.MeshBasicMaterial({color:0xd7f5ff,transparent:true,opacity:.13,wireframe:true,depthWrite:false})
+);
+brainStem.position.set(.88,.18,.28);
+brainStem.rotation.z=-.16;
+brainGroup.add(brainStem);
+
+// Subtle corpus-callosum arc gives the center more anatomical structure.
+const callosumCurve=new THREE.CatmullRomCurve3([
+  new THREE.Vector3(-1.65,3.35,.42),
+  new THREE.Vector3(-.45,3.65,.52),
+  new THREE.Vector3(.75,3.48,.50),
+  new THREE.Vector3(1.62,3.02,.38)
+]);
+const callosum=new THREE.Mesh(
+  new THREE.TubeGeometry(callosumCurve,28,.055,8,false),
+  new THREE.MeshBasicMaterial({color:0xf5fbff,transparent:true,opacity:.30,depthWrite:false})
+);
+brainGroup.add(callosum);
+
 function brainFieldPoint(index,total){
-  const side=index%2===0?-1:1,local=Math.floor(index/2),count=Math.max(1,Math.ceil(total/2));
+  const count=Math.max(1,total);
   const golden=2.399963229728653;
-  const q=(local+.65)/count,radial=Math.sqrt(Math.min(.96,q)),angle=local*golden;
-  const x=side*(.65+3.35*radial*Math.abs(Math.cos(angle)));
-  const z=3.05*radial*Math.sin(angle);
-  const dome=Math.sqrt(Math.max(0,1-Math.min(.98,radial*radial)));
-  const y=1.45+3.65*dome+.38*Math.sin(angle*.73);
+  const q=(index+.55)/count;
+  const lobe=anatomyLobes[index%anatomyLobes.length];
+  const angle=index*golden;
+  const radial=.18+.72*Math.sqrt(Math.min(.98,q));
+  const x=lobe.x+Math.cos(angle)*lobe.sx*.72*radial;
+  const y=lobe.y+Math.sin(angle)*lobe.sy*.58*radial;
+  const z=lobe.z+Math.sin(angle*.63)*lobe.sz*.55*radial;
   return new THREE.Vector3(x,y,z);
 }
+
 (brainData.nodes||[]).forEach(function(node,index){
-  const radius=Math.max(.11,Number(node.size||.28)),color=brainColor(node);
-  const mesh=new THREE.Mesh(new THREE.IcosahedronGeometry(radius,1),mat(color,.25,.32,color,node.kind==="decision"?.75:.42));
+  const radius=Math.max(.10,Number(node.size||.28))*(isMobileDevice?.82:1),color=brainColor(node);
+  const mesh=new THREE.Mesh(
+    new THREE.SphereGeometry(radius,isMobileDevice?12:18,isMobileDevice?9:14),
+    new THREE.MeshStandardMaterial({
+      color,roughness:.20,metalness:.06,emissive:color,
+      emissiveIntensity:node.kind==="decision"?.42:.24,
+      transparent:true,opacity:.92
+    })
+  );
   mesh.position.copy(brainFieldPoint(index,(brainData.nodes||[]).length));mesh.userData={type:"brain",data:node,phase:(index*.73)%6.28};
   brainGroup.add(mesh);brainObjects.set(node.id,mesh);interactables.push(mesh);
   if(node.label&&!isMobileDevice)addLabel(mesh,node.title,node.metric,radius*2.3);
@@ -817,13 +884,35 @@ function restoreCityViewState(){
     return true;
   }catch(e){return false;}
 }
+function fitBrainView(){
+  const mobile=mobileView();
+  brainGroup.scale.setScalar(mobile?.82:1);
+  brainGroup.position.set(mobile?.25:0,mobile?.10:0,0);
+  if(mobile){
+    camera.position.set(0,4.85,25.8);
+    controls.target.set(.15,2.62,0);
+    camera.fov=60;
+  }else{
+    camera.position.set(0,5.25,20.8);
+    controls.target.set(.15,2.72,0);
+    camera.fov=48;
+  }
+  camera.updateProjectionMatrix();
+}
 function setBrainMode(on){
   brainMode=on;showCityObjects(!on);brainGroup.visible=on;
   const b=document.getElementById("brain");b.classList.toggle("active",on);b.textContent=on?"CITY":"BRAIN";
   inspector.classList.remove("open");
   hovercard.classList.remove("show");
-  if(on){camera.position.set(0,6.8,19.5);controls.target.set(0,2.7,0);}
-  else resetView();
+  if(on){
+    scene.background.copy(BRAIN_BACKGROUND);
+    scene.fog.color.copy(BRAIN_BACKGROUND);
+    scene.fog.density=isMobileDevice?.0035:.0025;
+    fitBrainView();
+  }else{
+    applyTimeOfDay();
+    resetView();
+  }
   controls.update();
 }
 
@@ -918,13 +1007,19 @@ function resize(){
   const w=Math.max(1,app.clientWidth),h=Math.max(1,app.clientHeight);
   const mobile=mobileView();
   camera.aspect=w/h;
-  if(mobile&&!brainMode)camera.fov=62;
-  else if(!mobile&&!brainMode)camera.fov=46;
+  if(brainMode){
+    fitBrainView();
+  }else if(mobile){
+    camera.fov=62;
+  }else{
+    camera.fov=46;
+  }
   camera.updateProjectionMatrix();
   renderer.setSize(w,h,false);labelRenderer.setSize(w,h);
   if(lastMobileView===null||lastMobileView!==mobile){
     lastMobileView=mobile;
-    if(!brainMode)resetView();
+    if(brainMode)fitBrainView();
+    else resetView();
   }
 }
 new ResizeObserver(resize).observe(app);resize();
