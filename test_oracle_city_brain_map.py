@@ -162,3 +162,8 @@ def test_brain_map_is_anatomical_and_mobile_fitted():
     assert "horizontalFov=2*Math.atan" in html
     assert "controls.target.copy(center)" in html
     assert "controls.autoRotate=false" in html
+    assert "function setBrainControlMode(on)" in html
+    assert "controls.enabled=!lock" in html
+    assert "controls.enableRotate=!lock" in html
+    assert "controls.enableZoom=!lock" in html
+    assert "camera.up.set(0,1,0)" in html
