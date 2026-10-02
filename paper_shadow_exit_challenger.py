@@ -650,6 +650,7 @@ def sample_open_positions(market: str) -> int:
                 triggered, advantage_r = evaluate_forward_evidence_layer(state, telemetry)
                 if triggered and state.get("trigger_snapshot") is None:
                     snapshot = {
+                        "_pending_position_key": key,
                         "challenger_trigger_at": telemetry["current_timestamp"],
                         "challenger_trigger_price": telemetry["current_price"],
                         "hold_ev_r": telemetry["hold_ev_r"],
