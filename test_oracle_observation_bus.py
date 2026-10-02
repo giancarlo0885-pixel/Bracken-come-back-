@@ -87,3 +87,10 @@ def test_raw_signals_are_not_permanently_duplicated_into_brain():
     assert "signals" not in source_names
     assert "oracle_decision_audit" in source_names
     assert "intelligence_events" in source_names
+
+
+def test_sync_result_excludes_raw_signal_source():
+    conn = FakeConn()
+    result = bus.sync_observations(conn)
+    assert "signals" not in result["by_source"]
+    assert result["by_source"]["oracle_decision_audit"] == 1
