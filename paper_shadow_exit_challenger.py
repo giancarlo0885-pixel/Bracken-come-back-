@@ -278,7 +278,7 @@ def _episode_id(market: str, exit_time: Any) -> uuid.UUID:
 def _latest_signal(conn: Any, market: str, symbol: str) -> dict[str, Any] | None:
     row = conn.execute(
         """
-        SELECT id,market,symbol,price,score,action,confidence,payload,
+        SELECT id,market,symbol,price,score,action,confidence,details,
                NULLIF(created_at,'')::timestamptz AS created_at
         FROM signals
         WHERE market=%s AND symbol=%s
@@ -290,7 +290,7 @@ def _latest_signal(conn: Any, market: str, symbol: str) -> dict[str, Any] | None
     if not row:
         return None
     item = dict(row)
-    payload = _json_obj(item.get("payload"))
+    payload = _json_obj(item.get("details"))
     item["payload"] = payload
 
     from paper_strategy_economics import expected_edge_pct
