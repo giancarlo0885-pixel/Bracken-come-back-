@@ -5,6 +5,8 @@ from types import SimpleNamespace
 
 import crypto_execution_guard as guard
 import oracle_bot
+import robinhood_quote_resilience as resilience
+from market_data import MarketSnapshot
 
 
 def _worker():
@@ -224,3 +226,86 @@ def test_live_mode_fails_closed_when_robinhood_market_data_unavailable(monkeypat
 
     assert captured == []
     assert result == []
+
+
+def test_paper_grace_quote_blocks_new_crypto_entry(monkeypatch):
+    monkeypatch.setenv("EXECUTION_MODE", "paper")
+    monkeypatch.setattr(oracle_bot, "_verified_quote_for", _verified)
+
+    worker, captured = _worker()
+    guard.install_crypto_execution_quote_guard(worker)
+    result = worker.process_signals(
+        "crypto",
+        [{"symbol": "BTC-USD", "action": "BUY"}],
+        {
+            "BTC-USD": {
+                "symbol": "BTC-USD",
+                "price": 100.0,
+                "provider": "Robinhood Crypto",
+                "quote_verified": True,
+                "provider_quote_verified": True,
+                "verification_basis": "paper_grace:provider:robinhood_crypto_best_bid_ask_read_time",
+            }
+        },
+    )
+
+    assert captured == []
+    assert result == []
+
+
+def test_paper_grace_quote_still_allows_protective_sell_path(monkeypatch):
+    monkeypatch.setenv("EXECUTION_MODE", "paper")
+    monkeypatch.setattr(oracle_bot, "_verified_quote_for", _verified)
+
+    worker, captured = _worker()
+    guard.install_crypto_execution_quote_guard(worker)
+    signal = {"symbol": "BTC-USD", "action": "SELL"}
+    result = worker.process_signals(
+        "crypto",
+        [signal],
+        {
+            "BTC-USD": {
+                "symbol": "BTC-USD",
+                "price": 100.0,
+                "provider": "Robinhood Crypto",
+                "quote_verified": True,
+                "provider_quote_verified": True,
+                "verification_basis": "paper_grace:provider:robinhood_crypto_best_bid_ask_read_time",
+            }
+        },
+    )
+
+    assert captured == [signal]
+    assert result == [{"symbol": "BTC-USD"}]
+
+
+def test_paper_grace_marker_preserves_verified_snapshot_and_marks_provenance():
+    original = MarketSnapshot(
+        symbol="BTC-USD",
+        price=100.0,
+        change_pct=0.0,
+        volume=0.0,
+        timestamp="2026-10-02T13:00:00+00:00",
+        bid=99.9,
+        ask=100.1,
+        provider="Robinhood Crypto",
+        interval="1m",
+        fetched_at="2026-10-02T13:00:00+00:00",
+        requested_symbol="BTC-USD",
+        provider_symbol="BTC-USD",
+        provider_native_symbol="BTC-USD",
+        quote_verified=True,
+        stale=False,
+        provider_quote_verified=True,
+        verification_basis="provider:robinhood_crypto_best_bid_ask_read_time",
+    )
+
+    marked = resilience._paper_grace_snapshot(original)
+
+    assert marked is not original
+    assert marked.quote_verified is True
+    assert marked.provider_quote_verified is True
+    assert marked.verification_basis == (
+        "paper_grace:provider:robinhood_crypto_best_bid_ask_read_time"
+    )
+    assert original.verification_basis == "provider:robinhood_crypto_best_bid_ask_read_time"

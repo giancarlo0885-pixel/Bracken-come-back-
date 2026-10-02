@@ -20,7 +20,7 @@ class FakeConn:
         self.inserts = []
         self.source_rows = {
             "signals": [{"id": 1, "market": "crypto", "symbol": "BTC-USD", "created_at": "2026-09-22T10:00:00+00:00", "details": {"price": 1}}],
-            "oracle_decision_audit": [],
+            "oracle_decision_audit": [{"id": 2, "market": "crypto", "symbol": "BTC-USD", "created_at": "2026-09-22T10:01:00+00:00", "details": {"decision": "BUY"}}],
             "global_decision_events": [],
             "intelligence_events": [],
         }
@@ -53,7 +53,7 @@ def test_observation_bus_is_append_only_research_evidence():
     assert result["execution_impact"] == "NONE"
     sql, params = conn.inserts[0]
     assert "ON CONFLICT(event_key) DO NOTHING" in sql
-    assert params[3] == "signal"
+    assert params[3] == "council_decision"
     assert params[4] == "crypto"
     assert params[5] == "BTC-USD"
     assert "NONE" in sql
@@ -78,5 +78,19 @@ def test_high_volume_decision_funnel_is_not_permanently_mirrored():
     source_names = [spec[0] for spec in bus.SOURCE_SPECS]
     assert "global_decision_events" not in source_names
     assert "oracle_decision_audit" in source_names
-    assert "signals" in source_names
+    assert "signals" not in source_names
     assert "intelligence_events" in source_names
+
+
+def test_raw_signals_are_not_permanently_duplicated_into_brain():
+    source_names = [spec[0] for spec in bus.SOURCE_SPECS]
+    assert "signals" not in source_names
+    assert "oracle_decision_audit" in source_names
+    assert "intelligence_events" in source_names
+
+
+def test_sync_result_excludes_raw_signal_source():
+    conn = FakeConn()
+    result = bus.sync_observations(conn)
+    assert "signals" not in result["by_source"]
+    assert result["by_source"]["oracle_decision_audit"] == 1
