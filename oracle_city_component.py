@@ -920,8 +920,17 @@ function fitBrainView(){
   controls.autoRotate=false;
   camera.position.set(center.x,center.y,center.z+distance);
   controls.target.copy(center);
+  camera.up.set(0,1,0);
   camera.lookAt(center);
   controls.update();
+}
+function setBrainControlMode(on){
+  const lock=on&&mobileView();
+  controls.autoRotate=false;
+  controls.enablePan=!lock&&!isMobileDevice;
+  controls.enableRotate=!lock;
+  controls.enableZoom=!lock;
+  controls.enabled=!lock;
 }
 function setBrainMode(on){
   brainMode=on;showCityObjects(!on);brainGroup.visible=on;
@@ -932,8 +941,11 @@ function setBrainMode(on){
     scene.background.copy(BRAIN_BACKGROUND);
     scene.fog.color.copy(BRAIN_BACKGROUND);
     scene.fog.density=isMobileDevice?.0035:.0025;
+    setBrainControlMode(false);
     fitBrainView();
+    setBrainControlMode(true);
   }else{
+    setBrainControlMode(false);
     applyTimeOfDay();
     resetView();
   }
