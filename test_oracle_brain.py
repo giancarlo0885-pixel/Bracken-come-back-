@@ -292,16 +292,20 @@ def test_brain_learning_activity_reports_new_and_revised_evidence(monkeypatch):
     assert activity["execution_authority"] == "NONE"
 
 
-def test_brain_component_has_anatomical_hemispheres_and_truthful_states():
+def test_brain_component_has_anatomical_lateral_profile_and_truthful_states():
     source = Path("oracle_brain_component.py").read_text(encoding="utf-8")
-    assert 'brainPath("left")' not in source  # loop supplies left/right dynamically
-    assert 'for(const side of ["left","right"])' in source
-    assert "central" not in source.lower() or "ctx.bezierCurveTo" in source
+    assert "function brainPath()" in source
+    assert "function cerebellumPath()" in source
+    assert "function brainStemPath()" in source
+    assert "const frontal=" in source
+    assert "const parietal=" in source
+    assert "const temporal=" in source
+    assert "const occipital=" in source
+    assert "ctx.bezierCurveTo" in source
     assert "SYNCED — NO NEW EVIDENCE" in source
     assert "STALE" in source
     assert 'String(A.status||"")==="LEARNING"' in source
     assert "No completed Brain learning sync is recorded yet." in source
-
 
 def test_oracle_brain_component_serializes_database_datetime_values():
     rendered = render_oracle_brain_component({
@@ -348,3 +352,17 @@ def test_app_brain_iframe_uses_supported_streamlit_signature():
     assert "st.iframe(" in brain_iframe
     assert "height=610" in brain_iframe
     assert "scrolling=" not in brain_iframe
+
+
+
+def test_brain_visual_uses_lateral_anatomy_and_mobile_centering():
+    component = Path("oracle_brain_component.py").read_text(encoding="utf-8")
+
+    assert "const frontal=" in component
+    assert "const parietal=" in component
+    assert "const temporal=" in component
+    assert "const occipital=" in component
+    assert "const cerebellum=" in component
+    assert "function cerebellumPath()" in component
+    assert "function brainStemPath()" in component
+    assert "transform:scale(.92)" in component

@@ -115,6 +115,7 @@ html,body{margin:0;background:#03060b;color:#eef8ff;font-family:Inter,ui-sans-se
 #hover.show{display:block}#hover b{display:block;font-size:11px}#hover span{display:block;font-size:9px;color:#a7bdca;margin-top:3px;line-height:1.35}
 @media(max-width:720px){
  #wrap{height:610px;border-radius:16px}
+ #brain{transform:scale(.92);transform-origin:50% 52%}
  .status{left:8px;top:8px;max-width:205px;padding:8px 9px}.status .state{font-size:14px}.status .sub{font-size:9px}
  .metrics{right:8px;top:8px;grid-template-columns:1fr;max-width:145px}.metric{padding:6px 7px}.metric b{font-size:11px}.metric span{font-size:7px}
  .legend{left:8px;right:8px;bottom:8px;font-size:8px}.tip{display:none}
@@ -191,10 +192,16 @@ function hash(str){
 }
 function rand(seed){let x=seed||1;return()=>{x^=x<<13;x^=x>>>17;x^=x<<5;return((x>>>0)%100000)/100000;};}
 function brainMask(nx,ny){
-  const l=((nx-.37)/.27)**2+((ny-.49)/.34)**2<1;
-  const r=((nx-.63)/.27)**2+((ny-.49)/.34)**2<1;
-  const low=((nx-.50)/.31)**2+((ny-.67)/.22)**2<1;
-  return (l||r||low)&&ny>.15&&ny<.88;
+  // Lateral human-brain silhouette: frontal, parietal, temporal, occipital,
+  // cerebellar and upper-stem regions. Evidence nodes are only placed inside
+  // this anatomy-inspired envelope.
+  const frontal=((nx-.30)/.22)**2+((ny-.43)/.25)**2<1;
+  const parietal=((nx-.54)/.27)**2+((ny-.36)/.24)**2<1;
+  const temporal=((nx-.45)/.29)**2+((ny-.60)/.18)**2<1;
+  const occipital=((nx-.75)/.18)**2+((ny-.48)/.22)**2<1;
+  const cerebellum=((nx-.72)/.14)**2+((ny-.70)/.11)**2<1;
+  const stem=nx>.53&&nx<.61&&ny>.68&&ny<.87;
+  return (frontal||parietal||temporal||occipital||cerebellum||stem)&&ny>.14&&ny<.89;
 }
 function pointFor(key,index){
   const R=rand(hash(String(key)+"|"+index));
@@ -247,25 +254,33 @@ function resize(){
 }
 new ResizeObserver(resize).observe(wrap);resize();
 
-function brainPath(side){
-  const cx=W*.5,top=H*.155,bottom=H*.865;
+function brainPath(){
   const p=new Path2D();
-  if(side==="left"){
-    p.moveTo(cx-3,top+H*.04);
-    p.bezierCurveTo(W*.40,H*.13,W*.28,H*.17,W*.21,H*.29);
-    p.bezierCurveTo(W*.12,H*.34,W*.11,H*.49,W*.15,H*.59);
-    p.bezierCurveTo(W*.11,H*.70,W*.19,H*.83,W*.31,H*.84);
-    p.bezierCurveTo(W*.37,H*.91,W*.46,H*.87,cx-4,bottom);
-    p.bezierCurveTo(W*.48,H*.73,W*.48,H*.56,cx-3,top+H*.04);
-  }else{
-    p.moveTo(cx+3,top+H*.04);
-    p.bezierCurveTo(W*.60,H*.13,W*.72,H*.17,W*.79,H*.29);
-    p.bezierCurveTo(W*.88,H*.34,W*.89,H*.49,W*.85,H*.59);
-    p.bezierCurveTo(W*.89,H*.70,W*.81,H*.83,W*.69,H*.84);
-    p.bezierCurveTo(W*.63,H*.91,W*.54,H*.87,cx+4,bottom);
-    p.bezierCurveTo(W*.52,H*.73,W*.52,H*.56,cx+3,top+H*.04);
-  }
-  p.closePath();return p;
+  p.moveTo(W*.14,H*.47);
+  p.bezierCurveTo(W*.11,H*.34,W*.20,H*.22,W*.34,H*.19);
+  p.bezierCurveTo(W*.45,H*.12,W*.64,H*.15,W*.75,H*.25);
+  p.bezierCurveTo(W*.86,H*.27,W*.90,H*.38,W*.87,H*.49);
+  p.bezierCurveTo(W*.90,H*.58,W*.84,H*.66,W*.76,H*.69);
+  p.bezierCurveTo(W*.68,H*.74,W*.62,H*.77,W*.57,H*.76);
+  p.bezierCurveTo(W*.49,H*.82,W*.37,H*.80,W*.31,H*.73);
+  p.bezierCurveTo(W*.20,H*.72,W*.14,H*.63,W*.16,H*.56);
+  p.bezierCurveTo(W*.10,H*.54,W*.10,H*.49,W*.14,H*.47);
+  p.closePath();
+  return p;
+}
+function cerebellumPath(){
+  const p=new Path2D();
+  p.ellipse(W*.72,H*.70,W*.14,H*.10,-.12,0,Math.PI*2);
+  return p;
+}
+function brainStemPath(){
+  const p=new Path2D();
+  p.moveTo(W*.55,H*.70);
+  p.bezierCurveTo(W*.55,H*.76,W*.54,H*.83,W*.56,H*.88);
+  p.lineTo(W*.61,H*.88);
+  p.bezierCurveTo(W*.60,H*.82,W*.61,H*.76,W*.60,H*.69);
+  p.closePath();
+  return p;
 }
 function drawBrainBase(){
   const learning=String(A.status||"").startsWith("LEARNING");
@@ -275,27 +290,41 @@ function drawBrainBase(){
   const glow=Math.min(.34,.08+Math.log1p(units)*.025)+pulse;
   ctx.save();
   ctx.shadowBlur=learning?34:22;ctx.shadowColor="rgba(89,207,255,"+Math.min(.85,glow*1.8)+")";
-  for(const side of ["left","right"]){
-    const p=brainPath(side);
-    const grad=ctx.createRadialGradient(W*.5,H*.48,20,W*.5,H*.48,Math.min(W,H)*.43);
-    grad.addColorStop(0,"rgba(34,72,105,"+(0.60+glow)+")");
-    grad.addColorStop(.65,"rgba(16,39,65,.76)");
-    grad.addColorStop(1,"rgba(6,17,30,.92)");
-    ctx.fillStyle=grad;ctx.fill(p);
-    ctx.strokeStyle="rgba(108,218,255,"+(0.42+glow)+")";ctx.lineWidth=1.5;ctx.stroke(p);
-  }
+  const p=brainPath();
+  const grad=ctx.createRadialGradient(W*.50,H*.44,18,W*.50,H*.47,Math.min(W,H)*.48);
+  grad.addColorStop(0,"rgba(48,102,145,"+(0.55+glow)+")");
+  grad.addColorStop(.62,"rgba(21,55,86,.78)");
+  grad.addColorStop(1,"rgba(7,22,38,.92)");
+  ctx.fillStyle=grad;ctx.fill(p);
+  ctx.strokeStyle="rgba(180,238,255,"+(0.46+glow)+")";ctx.lineWidth=1.6;ctx.stroke(p);
+
+  const cb=cerebellumPath();
+  ctx.fillStyle="rgba(31,72,105,.80)";ctx.fill(cb);
+  ctx.strokeStyle="rgba(188,238,255,.50)";ctx.lineWidth=1.15;ctx.stroke(cb);
+
+  const stem=brainStemPath();
+  const stemGrad=ctx.createLinearGradient(0,H*.68,0,H*.90);
+  stemGrad.addColorStop(0,"rgba(48,89,115,.82)");
+  stemGrad.addColorStop(1,"rgba(15,34,48,.94)");
+  ctx.fillStyle=stemGrad;ctx.fill(stem);
+  ctx.strokeStyle="rgba(168,226,248,.38)";ctx.stroke(stem);
+
   ctx.shadowBlur=0;
-  ctx.strokeStyle="rgba(119,192,226,.28)";ctx.lineWidth=1;
+  ctx.strokeStyle="rgba(151,217,244,.30)";ctx.lineWidth=1;
   const gyri=[
-    [.28,.29,.34,.22,.43,.28,.46,.36],[.20,.42,.29,.35,.41,.39,.47,.47],
-    [.18,.57,.28,.51,.39,.55,.47,.62],[.22,.70,.31,.65,.39,.70,.47,.77],
-    [.72,.29,.66,.22,.57,.28,.54,.36],[.80,.42,.71,.35,.59,.39,.53,.47],
-    [.82,.57,.72,.51,.61,.55,.53,.62],[.78,.70,.69,.65,.61,.70,.53,.77]
+    [.20,.34,.28,.25,.39,.26,.46,.31],
+    [.17,.45,.28,.39,.43,.40,.55,.45],
+    [.18,.56,.30,.50,.44,.53,.56,.58],
+    [.29,.66,.39,.61,.51,.63,.61,.67],
+    [.43,.25,.52,.20,.64,.23,.72,.30],
+    [.53,.36,.63,.31,.76,.35,.81,.43],
+    [.58,.49,.67,.45,.78,.49,.82,.56],
+    [.61,.60,.68,.58,.75,.60,.78,.65]
   ];
   for(const g of gyri){ctx.beginPath();ctx.moveTo(g[0]*W,g[1]*H);ctx.bezierCurveTo(g[2]*W,g[3]*H,g[4]*W,g[5]*H,g[6]*W,g[7]*H);ctx.stroke();}
-  ctx.strokeStyle="rgba(145,215,245,.42)";ctx.lineWidth=1.4;ctx.beginPath();ctx.moveTo(W*.5,H*.20);ctx.bezierCurveTo(W*.485,H*.38,W*.515,H*.61,W*.5,H*.84);ctx.stroke();
-  const stemGrad=ctx.createLinearGradient(0,H*.75,0,H*.96);stemGrad.addColorStop(0,"rgba(45,79,102,.75)");stemGrad.addColorStop(1,"rgba(14,29,41,.92)");
-  ctx.fillStyle=stemGrad;ctx.beginPath();ctx.moveTo(W*.46,H*.79);ctx.bezierCurveTo(W*.47,H*.87,W*.47,H*.92,W*.49,H*.96);ctx.lineTo(W*.51,H*.96);ctx.bezierCurveTo(W*.53,H*.92,W*.53,H*.87,W*.54,H*.79);ctx.closePath();ctx.fill();
+  ctx.strokeStyle="rgba(207,244,255,.34)";ctx.lineWidth=1.2;
+  ctx.beginPath();ctx.moveTo(W*.31,H*.47);ctx.bezierCurveTo(W*.45,H*.40,W*.60,H*.43,W*.70,H*.51);ctx.stroke();
+  ctx.beginPath();ctx.moveTo(W*.65,H*.68);ctx.bezierCurveTo(W*.71,H*.66,W*.77,H*.69,W*.80,H*.73);ctx.stroke();
   ctx.restore();
   return changed;
 }
