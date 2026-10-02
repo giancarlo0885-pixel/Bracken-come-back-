@@ -1,5 +1,3 @@
-CREATE EXTENSION IF NOT EXISTS pgcrypto;
-
 CREATE TABLE IF NOT EXISTS garibaldi_shadow_exit_epochs (
     model_version TEXT PRIMARY KEY,
     generation INTEGER NOT NULL,
@@ -9,7 +7,7 @@ CREATE TABLE IF NOT EXISTS garibaldi_shadow_exit_epochs (
 );
 
 CREATE TABLE IF NOT EXISTS garibaldi_shadow_experiments (
-    experiment_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    experiment_id BIGSERIAL PRIMARY KEY,
     trade_id TEXT NOT NULL,
     episode_id UUID NOT NULL,
     generation INTEGER NOT NULL,
