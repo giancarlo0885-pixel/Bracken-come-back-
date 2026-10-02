@@ -10,6 +10,7 @@ from paper_execution_accounting import install_paper_execution_accounting
 from paper_execution_reality import install_paper_execution_reality
 from paper_fee_policy import install_fee_aware_fifo_policy
 from paper_regime_economics_shadow import install_paper_regime_economics_shadow
+from paper_shadow_exit_challenger import install_paper_shadow_exit_challenger
 from portfolio_valuation import install_closed_market_valuation_pulse
 from runtime_integrity_patch import install_runtime_integrity_patch
 from runtime_provider_reliability import install_yahoo_runtime_reliability
@@ -34,6 +35,9 @@ if os.getenv("EXECUTION_MODE", "paper").strip().lower() == "paper":
     # Research-only cash regime/MFE/MAE telemetry feeds exact closed stock
     # episodes into Oracle Brain. It has no execution authority.
     install_paper_regime_economics_shadow("cash")
+    # Forward-only Layer-2 exit challenger. It observes and measures only; it
+    # cannot close positions, size trades, or submit broker orders.
+    install_paper_shadow_exit_challenger("cash")
 
 # Keep this entrypoint in the stock-worker deploy watch set when paper-learning
 # runtime policy changes. Production source-sync marker: current main, 2026-09-03.
