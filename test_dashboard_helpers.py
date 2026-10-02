@@ -8,6 +8,7 @@ from dashboard_helpers import (
     balanced_opportunity_rows,
     balanced_portfolio_rows,
     capital_allocation_rows,
+    canonical_cash_plan_rows,
     capital_deployment_status,
     compact_money_text,
     market_capital_allocation_rows,
@@ -308,6 +309,57 @@ def test_capital_allocation_rows_explain_position_size():
     assert rows[0]["Position Size $"] != "$0.00"
     assert "final risk budget" in rows[0]["Why This Size"]
     assert compact_money_text(357_000) == "$357K"
+
+
+def test_canonical_cash_plan_uses_only_approved_allocator_sizes():
+    plan = canonical_cash_plan_rows(
+        [
+            {
+                "Portfolio": "Stock",
+                "Symbol": "GLW",
+                "Approved": True,
+                "_position_size_value": 125.0,
+            },
+            {
+                "Portfolio": "Crypto",
+                "Symbol": "AAVE-USD",
+                "Approved": False,
+                "_position_size_value": 210.0,
+            },
+        ],
+        stock_cash=1_000.0,
+        crypto_cash=900.0,
+    )
+
+    assert plan[0]["Portfolio"] == "Stock"
+    assert plan[0]["Symbol"] == "GLW"
+    assert plan[0]["Amount"] == 125.0
+    assert plan[1]["Symbol"] == "CASH"
+    assert plan[1]["Amount"] == 875.0
+    assert plan[2]["Portfolio"] == "Crypto"
+    assert plan[2]["Symbol"] == "CASH"
+    assert plan[2]["Amount"] == 900.0
+    assert "No canonical allocation is approved" in plan[2]["Why"]
+
+
+def test_canonical_cash_plan_never_displays_blocked_hypothetical_deployment():
+    plan = canonical_cash_plan_rows(
+        [
+            {
+                "Portfolio": "Crypto",
+                "Symbol": "PYTH-USD",
+                "Approved": False,
+                "_position_size_value": 0.0,
+            }
+        ],
+        stock_cash=1_700.0,
+        crypto_cash=1_111.0,
+    )
+
+    assert [(row["Portfolio"], row["Symbol"], row["Amount"]) for row in plan] == [
+        ("Stock", "CASH", 1700.0),
+        ("Crypto", "CASH", 1111.0),
+    ]
 
 
 def test_market_capital_allocation_uses_each_portfolios_own_metrics():

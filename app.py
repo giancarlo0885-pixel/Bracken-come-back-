@@ -22,6 +22,7 @@ from dashboard_helpers import (
     balanced_opportunity_rows,
     balanced_portfolio_rows,
     capital_allocation_rows,
+    canonical_cash_plan_rows,
     capital_deployment_status,
     market_capital_allocation_rows,
     professional_decision_views,
@@ -394,18 +395,22 @@ def render_trade_history_section(trades: list[dict[str, Any]], key_prefix: str) 
         trades = [trade for trade in trades if str(trade.get("side") or "").upper() == trade_side_filter.upper()]
     if trade_symbol_filter:
         trades = [trade for trade in trades if trade_symbol_filter in str(trade.get("symbol") or "").upper()]
-    trades = trades[:50]
     if not trades:
         st.info("No trade history has been recorded.")
         return
-    summary = trade_summary(trades)
+    visible_trades = trades[:50]
+    summary = trade_summary(visible_trades)
     s1, s2, s3, s4, s5 = st.columns(5)
-    s1.metric("Total Trades", summary["Total Trades"])
-    s2.metric("Buys", summary["Buys"])
-    s3.metric("Sells", summary["Sells"])
-    s4.metric("Realized P/L", money(summary["Realized P/L"]))
-    s5.metric("Trade Volume", money(summary["Trade Volume"]))
-    readable = pd.DataFrame(readable_trade_rows(trades))
+    s1.metric("Trades Shown", summary["Total Trades"])
+    s2.metric("Shown Buys", summary["Buys"])
+    s3.metric("Shown Sells", summary["Sells"])
+    s4.metric("Shown Realized P/L", money(summary["Realized P/L"]))
+    s5.metric("Shown Trade Volume", money(summary["Trade Volume"]))
+    st.caption(
+        f"Showing the latest {len(visible_trades)} matching trade records. "
+        "These metrics describe only the rows shown, not Oracle's lifetime execution count."
+    )
+    readable = pd.DataFrame(readable_trade_rows(visible_trades))
     simple_columns = ["Date", "Bought / Sold", "Asset", "Price", "Money Used", "Profit / Loss"]
     st.dataframe(readable[simple_columns], width="stretch", hide_index=True)
     with st.expander("Show Trade Details"):
@@ -884,6 +889,19 @@ elif page == "Dashboard":
         "cash": stock_metrics["cash"] + crypto_metrics["cash"],
         "invested": stock_metrics["invested"] + crypto_metrics["invested"],
     }
+    allocation_rows = market_capital_allocation_rows(
+        buy_decisions,
+        stock_metrics,
+        stock_positions,
+        crypto_metrics,
+        crypto_positions,
+        limit_per_market=4,
+    )
+    approved_buy_rows = [
+        row
+        for row in allocation_rows
+        if row.get("Approved") is True and as_float(row.get("_position_size_value")) > 0
+    ]
 
     render_money_bar(balanced_money_bar(combined_metrics, recent_trades))
 
@@ -892,8 +910,10 @@ elif page == "Dashboard":
         summary = simple_opportunity_summary(top)
         freshness = live_data_status(top)
         blocked_buy_setups = [d for d in decisions if d.get("action") == "BUY" and live_data_status(d)["blocks_execution"]]
-        oracle_state = "BUYING OPPORTUNITIES READY" if buy_decisions else "WATCHING THE BEST SETUP"
-        status_class = "green-text" if buy_decisions else "yellow-text"
+        oracle_state = "BUYING OPPORTUNITIES READY" if approved_buy_rows else "WATCHING THE BEST SETUP"
+        status_class = "green-text" if approved_buy_rows else "yellow-text"
+        if buy_decisions and not approved_buy_rows:
+            oracle_state = "QUALIFIED SETUPS - CAPITAL NOT YET APPROVED"
         if blocked_buy_setups and not buy_decisions:
             oracle_state = "SETUPS FOUND - WAITING FOR FRESH QUOTES"
         if sell_decisions and not buy_decisions:
@@ -993,27 +1013,31 @@ elif page == "Dashboard":
         st.caption("Scores are supporting diagnostics. The main dashboard uses plain status labels.")
 
     st.markdown("<div class='section-title'>HOW ORACLE WOULD USE AVAILABLE CASH</div>", unsafe_allow_html=True)
-    stock_plan = simple_portfolio_builder_plan(stock_metrics["cash"], stock_metrics["equity"], [d for d in buy_decisions if d.get("market") == "cash"], stock_positions)
-    crypto_plan = simple_portfolio_builder_plan(crypto_metrics["cash"], crypto_metrics["equity"], [d for d in buy_decisions if d.get("market") == "crypto"], crypto_positions)
-    plan_rows = []
-    for market_name, plan in (("Stock", stock_plan), ("Crypto", crypto_plan)):
-        for item in plan:
-            plan_rows.append({"Portfolio": market_name, "Symbol": item["symbol"], "Amount": money_text(item["amount"], whole=True), "Why": item["reason"]})
-    st.dataframe(pd.DataFrame(plan_rows), width="stretch", hide_index=True)
+    plan_rows = canonical_cash_plan_rows(
+        allocation_rows,
+        stock_cash=stock_metrics["cash"],
+        crypto_cash=crypto_metrics["cash"],
+    )
+    display_plan_rows = [
+        {
+            "Portfolio": item["Portfolio"],
+            "Symbol": item["Symbol"],
+            "Amount": money_text(item["Amount"], whole=True),
+            "Why": item["Why"],
+        }
+        for item in plan_rows
+    ]
+    st.dataframe(pd.DataFrame(display_plan_rows), width="stretch", hide_index=True)
     with st.expander("Details"):
-        st.caption("This is a planning view only. It does not place trades. Stale or unverified opportunities are excluded before allocation.")
-        st.write("The planner considers opportunity score, confidence, expected return, risk, current exposure, cash reserve, duplicate exposure, concentration, and data freshness. The paper execution path still rechecks every hard safeguard before any simulated order.")
+        st.caption("This is a planning view only. It does not place trades. Its dollar sizes now come from the same canonical capital allocator shown below.")
+        st.write("If the canonical allocator approves zero dollars, this planning view keeps the capital in cash instead of displaying a contradictory hypothetical deployment.")
 
     st.markdown("<div class='section-title'>CAPITAL ALLOCATION</div>", unsafe_allow_html=True)
-    allocation_rows = market_capital_allocation_rows(
-        buy_decisions,
-        stock_metrics,
-        stock_positions,
-        crypto_metrics,
-        crypto_positions,
-        limit_per_market=4,
-    )
-    st.dataframe(pd.DataFrame(allocation_rows), width="stretch", hide_index=True)
+    visible_allocation_rows = [
+        {key: value for key, value in row.items() if not str(key).startswith("_")}
+        for row in allocation_rows
+    ]
+    st.dataframe(pd.DataFrame(visible_allocation_rows), width="stretch", hide_index=True)
 
     st.markdown("<div class='section-title'>TRADE HISTORY</div>", unsafe_allow_html=True)
     dashboard_trades = safe_rows("SELECT * FROM trades ORDER BY id DESC LIMIT 500")

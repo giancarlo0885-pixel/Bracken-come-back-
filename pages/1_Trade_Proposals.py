@@ -30,7 +30,7 @@ except Exception as exc:
     st.stop()
 
 c1, c2, c3 = st.columns(3)
-c1.metric("Recent autonomous paper trades", len(proposals))
+c1.metric("Paper executions shown", len(proposals))
 if proposals:
     newest = proposals[0]
     c2.metric("Newest symbol", str(newest.get("symbol") or "—"))
@@ -39,6 +39,11 @@ if proposals:
 else:
     c2.metric("Newest symbol", "—")
     c3.metric("Newest size", "—")
+
+st.caption(
+    f"Showing up to the latest 200 broker-verified paper execution records ({len(proposals)} loaded). "
+    "This page count is a display window, not Oracle's lifetime trade count."
+)
 
 if not proposals:
     st.info("No broker-verified paper executions yet.")

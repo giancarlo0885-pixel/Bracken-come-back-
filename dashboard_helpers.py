@@ -863,6 +863,7 @@ def capital_allocation_rows(
                 "Portfolio Weight": f"{(decision.calculated_notional / equity * 100 if equity else 0):.1f}%",
                 "Why This Size": decision.reason,
                 "Approved": decision.approved,
+                "_position_size_value": decision.calculated_notional,
             }
         )
     if not rows:
@@ -878,9 +879,55 @@ def capital_allocation_rows(
                 "Portfolio Weight": "0.0%",
                 "Why This Size": f"Waiting for qualified opportunities. Max open positions for this equity: {max_positions_for_equity(equity)}.",
                 "Approved": False,
+                "_position_size_value": 0.0,
             }
         )
     return rows
+
+
+def canonical_cash_plan_rows(
+    allocation_rows: list[dict[str, Any]],
+    *,
+    stock_cash: Any,
+    crypto_cash: Any,
+) -> list[dict[str, Any]]:
+    """Build the planning view from the canonical allocator so display sizing cannot contradict it."""
+    output: list[dict[str, Any]] = []
+    for portfolio, cash_value in (("Stock", stock_cash), ("Crypto", crypto_cash)):
+        cash_amount = max(0.0, as_float(cash_value))
+        approved = [
+            row
+            for row in allocation_rows
+            if str(row.get("Portfolio") or "") == portfolio
+            and row.get("Approved") is True
+            and as_float(row.get("_position_size_value")) > 0
+        ]
+        deployed = 0.0
+        for row in approved:
+            amount = max(0.0, as_float(row.get("_position_size_value")))
+            deployed += amount
+            output.append(
+                {
+                    "Portfolio": portfolio,
+                    "Symbol": str(row.get("Symbol") or "").upper(),
+                    "Amount": round(amount, 2),
+                    "Why": "Same size approved by the canonical capital allocator after current cash, exposure, liquidity, and risk limits.",
+                }
+            )
+
+        output.append(
+            {
+                "Portfolio": portfolio,
+                "Symbol": "CASH",
+                "Amount": round(max(0.0, cash_amount - deployed), 2),
+                "Why": (
+                    "No canonical allocation is approved right now; keep cash."
+                    if not approved
+                    else "Cash remaining after canonical approved sizes and reserves."
+                ),
+            }
+        )
+    return output
 
 
 def market_capital_allocation_rows(
