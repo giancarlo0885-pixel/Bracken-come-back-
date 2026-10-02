@@ -767,12 +767,19 @@ class BrainCohortAnalyzerV4:
         )
 
     def _max_drawdown_r(self, column: str) -> float:
-        episodes = self._episode_returns(column)
-        if episodes.empty:
+        if self.df.empty or column not in self.df:
             return 0.0
-        values = episodes[column].astype(float)
+        frame = self.df[["exit_time", column]].copy()
+        frame[column] = pd.to_numeric(frame[column], errors="coerce")
+        frame["exit_time"] = pd.to_datetime(frame["exit_time"], utc=True, errors="coerce")
+        frame = frame.dropna(subset=["exit_time", column]).sort_values("exit_time", kind="stable")
+        if frame.empty:
+            return 0.0
+        values = frame[column].astype(float)
         cumulative = values.cumsum()
-        running_max = cumulative.cummax()
+        # Include a zero starting-equity anchor so an initial losing sequence is
+        # counted as drawdown rather than incorrectly becoming the first peak.
+        running_max = cumulative.cummax().clip(lower=0.0)
         drawdown = cumulative - running_max
         return abs(float(drawdown.min())) if not drawdown.empty else 0.0
 
