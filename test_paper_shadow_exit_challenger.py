@@ -9,6 +9,7 @@ from paper_shadow_exit_challenger import (
     CounterfactualSettlement,
     ShadowExitConstraints,
     _episode_id,
+    _latest_signal,
     evaluate_forward_evidence_layer,
 )
 
@@ -159,3 +160,34 @@ def test_shadow_module_has_no_execution_authority():
     assert "process_signals(" not in source
     assert "risk_exits(" not in source
     assert 'promotion_action": "NONE"' in source
+
+
+def test_latest_signal_reads_canonical_details_json_not_nonexistent_payload_column():
+    calls = []
+
+    class Result:
+        def fetchone(self):
+            return {
+                "id": 101,
+                "market": "crypto",
+                "symbol": "BTC-USD",
+                "price": 100.0,
+                "score": 80.0,
+                "action": "HOLD",
+                "confidence": 0.7,
+                "details": '{"expected_edge_pct": -0.25, "edge_provenance": "test"}',
+                "created_at": datetime(2026, 10, 2, tzinfo=timezone.utc),
+            }
+
+    class Conn:
+        def execute(self, sql, params=()):
+            calls.append(sql)
+            return Result()
+
+    signal = _latest_signal(Conn(), "crypto", "BTC-USD")
+
+    assert signal is not None
+    assert signal["expected_edge_pct"] == -0.25
+    assert signal["payload"]["edge_provenance"] == "test"
+    assert any("confidence,details" in " ".join(sql.split()) for sql in calls)
+    assert all("confidence,payload" not in " ".join(sql.split()) for sql in calls)
