@@ -1741,11 +1741,17 @@ def _record_buy_attribution(
     signal: Any | None,
     quote_metadata: dict[str, Any] | None,
     now: str,
+    risk_snapshot: dict[str, Any] | None = None,
 ) -> None:
     bucket = _lot_bucket_from_signal(signal, market)
     strategy = safe_text(signal_value(signal, "strategy", signal_value(signal, "scan_type", "")))
     decision_id = signal_value(signal, "signal_id", signal_value(signal, "id", None))
-    provenance = _entry_provenance(signal=signal, quote_metadata=quote_metadata, now=now)
+    provenance = _entry_provenance(
+        signal=signal,
+        quote_metadata=quote_metadata,
+        now=now,
+        risk_snapshot=risk_snapshot,
+    )
     confidence = safe_float(signal_value(signal, "confidence", None), None) if signal is not None else None
     score = safe_float(signal_value(signal, "score", None), None) if signal is not None else None
     trade_id = f"ledger-buy:{uuid.uuid4()}"
@@ -3041,6 +3047,23 @@ def _buy(
                 """,
                 (market, symbol, quantity, price, trade_value, score, reason_text, now),
             )
+            stop_distance = (
+                price - stop_price
+                if stop_price > 0 and stop_price < price
+                else price * DEFAULT_STOP_LOSS_PCT
+            )
+            entry_risk_snapshot = {
+                "stop_price": stop_price if stop_price > 0 else None,
+                "entry_price": price,
+                "quantity": quantity,
+                "initial_risk_usd": stop_distance * quantity,
+                "initial_risk_pct": (stop_distance / price) if price > 0 else None,
+                "risk_basis_source": (
+                    "entry_stop_price"
+                    if stop_price > 0 and stop_price < price
+                    else "configured_stop_loss_pct"
+                ),
+            }
             _record_buy_attribution(
                 conn,
                 market=market,
@@ -3051,6 +3074,7 @@ def _buy(
                 signal=signal,
                 quote_metadata=verified_quote,
                 now=now,
+                risk_snapshot=entry_risk_snapshot,
             )
             _complete_execution_claim(conn, execution_key)
 
