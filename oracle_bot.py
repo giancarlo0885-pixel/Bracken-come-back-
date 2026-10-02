@@ -177,12 +177,23 @@ def _ordinary_sell_signal_allowed(
             order_value=(quantity * current_price) if quantity > 0 else None,
         )
         effective_exit_price = safe_float(simulated_fill.fill_price, current_price)
+        fee_pct = max(0.0, safe_float(simulated_fill.fee_pct))
     except (TypeError, ValueError):
         effective_exit_price = current_price
+        fee_pct = 0.0
 
-    if effective_exit_price >= entry_price:
-        gain_pct = ((effective_exit_price / entry_price) - 1.0) * 100.0
-        return True, f"PROFIT_PROTECT | effective_gain={gain_pct:.3f}%"
+    # entry_price is the fee-exclusive execution fill. The legacy simulator
+    # embeds the exit fee in fill_price, while the installed paper-accounting
+    # simulator charges it separately. Normalize both contracts, then include
+    # the entry fee so profitability is measured on the full round trip.
+    projected_exit_unit = effective_exit_price
+    if globals().get("_paper_execution_accounting_installed", False):
+        projected_exit_unit *= max(0.0, 1.0 - fee_pct)
+    round_trip_entry_unit = entry_price * (1.0 + fee_pct)
+
+    if projected_exit_unit >= round_trip_entry_unit:
+        gain_pct = ((projected_exit_unit / round_trip_entry_unit) - 1.0) * 100.0
+        return True, f"PROFIT_PROTECT | post_cost_gain={gain_pct:.3f}%"
 
     latest_buy = row(
         """
@@ -228,7 +239,7 @@ def _ordinary_sell_signal_allowed(
     bearish_votes = sum(1 for value in evidence.values() if value < 0)
     bullish_votes = sum(1 for value in evidence.values() if value > 0)
     confidence = normalized_confidence(signal)
-    loss_pct = ((effective_exit_price / entry_price) - 1.0) * 100.0
+    loss_pct = ((projected_exit_unit / round_trip_entry_unit) - 1.0) * 100.0
     explicit_confirmation = (
         evidence["expected_move_pct"] < 0
         or evidence["news_sentiment"] < 0

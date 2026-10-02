@@ -29,6 +29,11 @@ def test_fee_is_separate_from_fill_price():
     assert fill.fee_pct == 0.01
 
 
+def test_explicit_fee_installer_updates_oracle_fill_alias():
+    source = (Path(__file__).parent / "paper_execution_accounting.py").read_text()
+    assert "oracle_bot.simulate_fill = _simulate_fill_explicit_fee" in source
+
+
 def test_fill_capacity_creates_conservative_ioc_partial_cap(monkeypatch):
     monkeypatch.setenv("PAPER_FILL_MAX_PARTICIPATION_PCT", "0.0025")
     capacity, liquidity = _fill_capacity(10.0, {"volume": 10_000.0})
