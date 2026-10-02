@@ -134,6 +134,18 @@ const status=document.getElementById("status");
 const inspector=document.getElementById("inspector");
 const hovercard=document.getElementById("hovercard");
 const replayPanel=document.getElementById("replayPanel");
+const fallbackCity=document.getElementById("fallbackCity");
+let brainMode=false,workersVisible=true,trafficVisible=true;
+window.__oracleCityReady=false;
+function activateCityFallback(reason){
+  if(window.__oracleCityReady)return;
+  if(fallbackCity)fallbackCity.classList.add("show");
+  if(status)status.style.display="none";
+  const note=fallbackCity&&fallbackCity.querySelector(".fallbackTitle span");
+  if(note)note.textContent="Live data shell · 3D renderer unavailable"+(reason?" · "+String(reason).slice(0,80):"");
+}
+window.addEventListener("error",event=>activateCityFallback(event&&event.message?event.message:"renderer error"));
+window.addEventListener("unhandledrejection",event=>activateCityFallback(event&&event.reason?String(event.reason):"renderer rejection"));
 const isMobileDevice=window.matchMedia("(max-width:720px)").matches;
 const prefersReduced=window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 const DETAIL=isMobileDevice?0.78:1.15;
@@ -834,7 +846,6 @@ function brainFieldPoint(index,total){
   const p=new THREE.Mesh(new THREE.SphereGeometry(.045,7,7),new THREE.MeshBasicMaterial({color}));p.userData={phase:index/Math.max(1,(brainData.edges||[]).length),curve};brainGroup.add(p);brainEdges.push({line,particle:p,curve});
 });
 
-let brainMode=false,workersVisible=true,trafficVisible=true;
 function showCityObjects(on){cityObjects.forEach(o=>{if(o!==brainGroup&&!o.isLight)o.visible=on;});workerObjects.forEach(o=>o.visible=on&&workersVisible);vehicleObjects.forEach(o=>o.visible=on&&trafficVisible);}
 
 const CITY_VIEW_STORAGE_KEY="oracle-city-view-v3";
@@ -1041,7 +1052,7 @@ function animate(){
   vehicleObjects.forEach((v,i)=>{if(v.userData.path==="east"){v.position.x=-31+((elapsed*v.userData.speed*45+v.userData.offset)%62);v.rotation.y=Math.PI/2;}else{v.position.x=31-((elapsed*v.userData.speed*45+v.userData.offset)%62);v.rotation.y=-Math.PI/2;}});
   renderer.render(scene,camera);labelRenderer.render(scene,camera);
 }
-status.style.display="none";if(!restoreCityViewState())resetView();setInterval(saveCityViewState,1000);animate();
+window.__oracleCityReady=true;fallbackCity.classList.remove("show");status.style.display="none";if(!restoreCityViewState())resetView();setInterval(saveCityViewState,1000);animate();
 </script>
 </body>
 </html>"""
