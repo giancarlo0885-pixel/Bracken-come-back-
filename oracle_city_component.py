@@ -740,13 +740,29 @@ function curveFor(source,target){
 
 const cityObjects=scene.children.slice();
 const brainGroup=new THREE.Group();brainGroup.visible=false;scene.add(brainGroup);
-const brainData=DATA.decision_graph||{nodes:[],edges:[],summary:{}},brainObjects=new Map(),brainEdges=[],brainShells=[];
+const brainData=DATA.decision_graph||{nodes:[],edges:[],summary:{}},brainObjects=new Map(),brainEdges=[],brainShells=[],brainCoreObjects=[];
+// Anatomical silhouette only: the regions create a coherent brain profile and
+// are not claims that Oracle evidence types map to biological brain functions.
 const anatomyLobes=[
-  {name:"frontal",x:-2.55,y:3.30,z:.10,sx:2.95,sy:2.15,sz:2.05,phase:.15},
-  {name:"parietal",x:.05,y:3.85,z:-.10,sx:3.00,sy:2.25,sz:2.15,phase:1.05},
-  {name:"temporal",x:-.25,y:2.05,z:.42,sx:2.85,sy:1.42,sz:1.92,phase:2.10},
-  {name:"occipital",x:2.55,y:3.08,z:-.18,sx:1.90,sy:1.82,sz:1.78,phase:2.85}
+  {name:"frontal",x:-2.42,y:3.18,z:.08,sx:2.72,sy:2.05,sz:1.98,phase:.15},
+  {name:"parietal",x:.10,y:3.72,z:-.08,sx:2.82,sy:2.08,sz:2.02,phase:1.05},
+  {name:"temporal",x:-.08,y:2.00,z:.38,sx:2.66,sy:1.34,sz:1.78,phase:2.10},
+  {name:"occipital",x:2.42,y:3.02,z:-.14,sx:1.74,sy:1.66,sz:1.64,phase:2.85}
 ];
+
+const brainEnvelope=new THREE.Mesh(
+  new THREE.SphereGeometry(1,isMobileDevice?24:40,isMobileDevice?16:26),
+  new THREE.MeshBasicMaterial({
+    color:0xe4f8ff,wireframe:true,transparent:true,
+    opacity:isMobileDevice?.16:.12,depthWrite:false
+  })
+);
+brainEnvelope.position.set(0,3.02,0);
+brainEnvelope.scale.set(5.12,3.02,2.48);
+brainEnvelope.userData={name:"cerebrum",baseScale:brainEnvelope.scale.clone(),phase:.4};
+brainGroup.add(brainEnvelope);
+brainCoreObjects.push(brainEnvelope);
+brainShells.push(brainEnvelope);
 function brainColor(node){
   if(node.state==="offline")return 0xff9caf;
   if(node.state==="waiting")return 0xffe69a;
@@ -766,13 +782,13 @@ function addBrainLobe(spec){
     new THREE.SphereGeometry(1,isMobileDevice?20:34,isMobileDevice?14:22),
     new THREE.MeshBasicMaterial({
       color:0xd7f5ff,wireframe:true,transparent:true,
-      opacity:isMobileDevice?.115:.095,depthWrite:false
+      opacity:isMobileDevice?.055:.045,depthWrite:false
     })
   );
   shell.position.set(spec.x,spec.y,spec.z);
   shell.scale.set(spec.sx,spec.sy,spec.sz);
   shell.userData={name:spec.name,baseScale:shell.scale.clone(),phase:spec.phase};
-  brainGroup.add(shell);brainShells.push(shell);
+  brainGroup.add(shell);brainShells.push(shell);brainCoreObjects.push(shell);
 }
 anatomyLobes.forEach(addBrainLobe);
 
@@ -785,18 +801,19 @@ const cerebellum=new THREE.Mesh(
     opacity:isMobileDevice?.14:.11,depthWrite:false
   })
 );
-cerebellum.position.set(2.18,1.28,.50);
-cerebellum.scale.set(1.85,1.05,1.42);
+cerebellum.position.set(2.22,1.24,.42);
+cerebellum.scale.set(1.72,1.00,1.34);
 cerebellum.userData={name:"cerebellum",baseScale:cerebellum.scale.clone(),phase:3.7};
-brainGroup.add(cerebellum);brainShells.push(cerebellum);
+brainGroup.add(cerebellum);brainShells.push(cerebellum);brainCoreObjects.push(cerebellum);
 
 const brainStem=new THREE.Mesh(
   new THREE.CylinderGeometry(.26,.46,2.05,18),
   new THREE.MeshBasicMaterial({color:0xd7f5ff,transparent:true,opacity:.13,wireframe:true,depthWrite:false})
 );
-brainStem.position.set(.88,.18,.28);
-brainStem.rotation.z=-.16;
+brainStem.position.set(.92,.18,.24);
+brainStem.rotation.z=-.14;
 brainGroup.add(brainStem);
+brainCoreObjects.push(brainStem);
 
 // Subtle corpus-callosum arc gives the center more anatomical structure.
 const callosumCurve=new THREE.CatmullRomCurve3([
@@ -810,6 +827,7 @@ const callosum=new THREE.Mesh(
   new THREE.MeshBasicMaterial({color:0xf5fbff,transparent:true,opacity:.30,depthWrite:false})
 );
 brainGroup.add(callosum);
+brainCoreObjects.push(callosum);
 
 function brainFieldPoint(index,total){
   const count=Math.max(1,total);
@@ -817,15 +835,17 @@ function brainFieldPoint(index,total){
   const q=(index+.55)/count;
   const lobe=anatomyLobes[index%anatomyLobes.length];
   const angle=index*golden;
-  const radial=.18+.72*Math.sqrt(Math.min(.98,q));
-  const x=lobe.x+Math.cos(angle)*lobe.sx*.72*radial;
-  const y=lobe.y+Math.sin(angle)*lobe.sy*.58*radial;
-  const z=lobe.z+Math.sin(angle*.63)*lobe.sz*.55*radial;
+  // Keep evidence nodes inside the anatomical envelope so the graph reads as
+  // activity within a brain instead of a cloud surrounding it.
+  const radial=.14+.58*Math.sqrt(Math.min(.98,q));
+  const x=lobe.x+Math.cos(angle)*lobe.sx*.60*radial;
+  const y=lobe.y+Math.sin(angle)*lobe.sy*.50*radial;
+  const z=lobe.z+Math.sin(angle*.63)*lobe.sz*.48*radial;
   return new THREE.Vector3(x,y,z);
 }
 
 (brainData.nodes||[]).forEach(function(node,index){
-  const radius=Math.max(.10,Number(node.size||.28))*(isMobileDevice?.82:1),color=brainColor(node);
+  const radius=Math.max(.09,Math.min(.34,Number(node.size||.28)))*(isMobileDevice?.74:.92),color=brainColor(node);
   const mesh=new THREE.Mesh(
     new THREE.SphereGeometry(radius,isMobileDevice?12:18,isMobileDevice?9:14),
     new THREE.MeshStandardMaterial({
@@ -895,27 +915,56 @@ function restoreCityViewState(){
     return true;
   }catch(e){return false;}
 }
+function boundsForObjects(objects){
+  const bounds=new THREE.Box3();
+  let found=false;
+  objects.forEach(object=>{
+    if(!object)return;
+    object.updateWorldMatrix(true,false);
+    const itemBounds=new THREE.Box3().setFromObject(object);
+    if(itemBounds.isEmpty())return;
+    bounds.union(itemBounds);
+    found=true;
+  });
+  return found?bounds:null;
+}
 function fitBrainView(){
   const mobile=mobileView();
-  brainGroup.scale.setScalar(mobile?.82:1);
+  brainGroup.scale.setScalar(mobile?.78:1);
   brainGroup.position.set(0,0,0);
   brainGroup.updateMatrixWorld(true);
 
-  const bounds=new THREE.Box3().setFromObject(brainGroup);
-  if(bounds.isEmpty())return;
-  const center=bounds.getCenter(new THREE.Vector3());
-  const size=bounds.getSize(new THREE.Vector3());
+  const coreBounds=boundsForObjects(brainCoreObjects);
+  const fullBounds=new THREE.Box3().setFromObject(brainGroup);
+  if(!coreBounds||fullBounds.isEmpty())return;
 
-  camera.fov=mobile?58:46;
+  // The anatomical shell determines what the eye sees as the center. The full
+  // graph only determines camera distance, so edge particles/outliers cannot
+  // drag the brain away from the middle of the viewport.
+  const center=coreBounds.getCenter(new THREE.Vector3());
+  const frameHalfWidth=Math.max(
+    Math.abs(fullBounds.min.x-center.x),
+    Math.abs(fullBounds.max.x-center.x)
+  );
+  const frameHalfHeight=Math.max(
+    Math.abs(fullBounds.min.y-center.y),
+    Math.abs(fullBounds.max.y-center.y)
+  );
+  const frameHalfDepth=Math.max(
+    Math.abs(fullBounds.min.z-center.z),
+    Math.abs(fullBounds.max.z-center.z)
+  );
+
+  camera.fov=mobile?56:46;
   camera.updateProjectionMatrix();
 
   const verticalFov=THREE.MathUtils.degToRad(camera.fov);
   const aspect=Math.max(.35,Number(camera.aspect||1));
   const horizontalFov=2*Math.atan(Math.tan(verticalFov/2)*aspect);
-  const heightDistance=(size.y*.5)/Math.max(.08,Math.tan(verticalFov/2));
-  const widthDistance=(size.x*.5)/Math.max(.08,Math.tan(horizontalFov/2));
-  const padding=mobile?1.30:1.18;
-  const distance=Math.max(heightDistance,widthDistance,7)*padding;
+  const heightDistance=frameHalfHeight/Math.max(.08,Math.tan(verticalFov/2));
+  const widthDistance=frameHalfWidth/Math.max(.08,Math.tan(horizontalFov/2));
+  const padding=mobile?1.22:1.16;
+  const distance=Math.max(heightDistance,widthDistance,7)*padding+frameHalfDepth*.30;
 
   controls.autoRotate=false;
   camera.position.set(center.x,center.y,center.z+distance);
@@ -923,6 +972,11 @@ function fitBrainView(){
   camera.up.set(0,1,0);
   camera.lookAt(center);
   controls.update();
+}
+function settleBrainView(){
+  fitBrainView();
+  requestAnimationFrame(()=>{if(brainMode)fitBrainView();});
+  setTimeout(()=>{if(brainMode)fitBrainView();},140);
 }
 function setBrainControlMode(on){
   const lock=on&&mobileView();
@@ -942,7 +996,7 @@ function setBrainMode(on){
     scene.fog.color.copy(BRAIN_BACKGROUND);
     scene.fog.density=isMobileDevice?.0035:.0025;
     setBrainControlMode(false);
-    fitBrainView();
+    settleBrainView();
     setBrainControlMode(true);
   }else{
     setBrainControlMode(false);

@@ -155,10 +155,9 @@ def test_brain_map_is_anatomical_and_mobile_fitted():
     assert "brainStem" in html
     assert "fitBrainView" in html
     assert "BRAIN_BACKGROUND" in html
-    assert "brainGroup.scale.setScalar(mobile?.82:1)" in html
+    assert "brainGroup.scale.setScalar(mobile?.78:1)" in html
     assert "new THREE.Box3().setFromObject(brainGroup)" in html
-    assert "bounds.getCenter(new THREE.Vector3())" in html
-    assert "bounds.getSize(new THREE.Vector3())" in html
+    assert "coreBounds.getCenter(new THREE.Vector3())" in html
     assert "horizontalFov=2*Math.atan" in html
     assert "controls.target.copy(center)" in html
     assert "controls.autoRotate=false" in html
@@ -167,3 +166,12 @@ def test_brain_map_is_anatomical_and_mobile_fitted():
     assert "controls.enableRotate=!lock" in html
     assert "controls.enableZoom=!lock" in html
     assert "camera.up.set(0,1,0)" in html
+    assert "brainEnvelope" in html
+    assert "brainCoreObjects" in html
+    assert "function boundsForObjects(objects)" in html
+    assert "const coreBounds=boundsForObjects(brainCoreObjects)" in html
+    assert "const fullBounds=new THREE.Box3().setFromObject(brainGroup)" in html
+    assert "frameHalfWidth" in html
+    assert "frameHalfHeight" in html
+    assert "function settleBrainView()" in html
+    assert "setTimeout(()=>{if(brainMode)fitBrainView();},140)" in html
