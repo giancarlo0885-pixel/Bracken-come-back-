@@ -118,6 +118,8 @@ CANONICAL_PROTECTED_TABLES = {
     "oracle_validation_weaknesses",
     "oracle_paper_promotion_evidence",
     "oracle_decision_replays",
+    "garibaldi_shadow_exit_epochs",
+    "garibaldi_shadow_experiments",
 }
 DATABASE_RETENTION_POLICIES = {
     "signals": {"keep_rows": 6000, "batch_size": DATABASE_RETENTION_BATCH_SIZE, "classification": "append-only analytical/ephemeral"},
@@ -188,6 +190,8 @@ DATABASE_TABLE_GROWTH_AUDIT = {
     "oracle_validation_weaknesses": {"class": "research weakness evidence", "inserted_by": "Oracle validation layer", "frequency": "learning sync", "retention": "never auto-delete"},
     "oracle_paper_promotion_evidence": {"class": "research promotion evidence", "inserted_by": "Oracle validation layer", "frequency": "learning sync", "retention": "never auto-delete"},
     "oracle_decision_replays": {"class": "advanced research evidence", "inserted_by": "Oracle advanced learning", "frequency": "learning sync", "retention": "never auto-delete (canonical protected table); autovacuum tuned aggressively to control dead-tuple bloat under high churn"},
+    "garibaldi_shadow_exit_epochs": {"class": "research experiment epoch metadata", "inserted_by": "paper shadow exit challenger", "frequency": "one row per challenger model version", "retention": "never auto-delete"},
+    "garibaldi_shadow_experiments": {"class": "durable paired research evidence", "inserted_by": "paper shadow exit challenger", "frequency": "one row per exact-provenance completed trade", "retention": "never auto-delete"},
 }
 
 
