@@ -27,3 +27,37 @@ def test_bad_execution_is_not_promoted():
     }
     d = evaluate_opportunity(signal)
     assert d.recommendation != "BUY"
+
+
+def test_oracle_decision_persists_bounded_brain_influence():
+    signal = {
+        "symbol": "BRAIN", "score": 0.78, "confidence": 0.86, "action": "BUY",
+        "momentum_5d": 0.03, "momentum_20d": 0.06,
+        "trend_strength": 0.05, "volume_ratio": 1.5,
+        "volatility_20d": 0.24, "atr_pct": 0.02,
+        "news_sentiment": 0.4, "relative_strength": 0.08,
+        "spread_pct": 0.0008, "estimated_slippage_pct": 0.0006,
+        "event_risk_score": 10,
+        "brain_outcome_adjustment": 2.25,
+        "brain_intelligence_score": 76.0,
+        "event_catalyst_score": 52.0,
+        "research_direction": "positive",
+        "research_directional_strength": 82.0,
+        "research_directional_sources": 3,
+        "ta_bullish_votes": 4,
+        "ta_bearish_votes": 1,
+        "schwager_setup_score": 0.6,
+    }
+    d = evaluate_opportunity(signal, use_market_memory=False)
+    influence = d.brain_influence
+
+    assert influence["outcome_memory_adjustment"] == 2.25
+    assert influence["research_confluence_adjustment"] > 0
+    assert influence["direct_radar_score_component"] > 2.25
+    assert influence["brain_is_primary_external_catalyst"] is True
+    assert influence["influences_decision"] is True
+    assert influence["execution_authority"] == "NONE"
+    assert influence["can_bypass_vetoes"] is False
+    assert influence["live_money_impact"] == "NONE"
+    assert any("Oracle Brain bounded influence" in step for step in d.explainability["decision_path"])
+    assert "brain_influence" in d.to_dict()
