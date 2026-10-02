@@ -1193,6 +1193,60 @@ def test_ordinary_sell_signal_allows_profitable_exit_without_waiting(monkeypatch
     assert "PROFIT_PROTECT" in reason
 
 
+def test_ordinary_sell_debounces_fill_gain_negative_after_round_trip_fees(monkeypatch):
+    import oracle_bot
+
+    now = datetime(2026, 9, 28, 9, 15, 41, tzinfo=timezone.utc)
+    monkeypatch.setattr(oracle_bot, "ORDINARY_SELL_MIN_HOLD_MINUTES", 15)
+    monkeypatch.setattr(oracle_bot, "utc_now", lambda: now.isoformat())
+    monkeypatch.setattr(oracle_bot, "_paper_execution_accounting_installed", True, raising=False)
+    monkeypatch.setattr(
+        oracle_bot,
+        "simulate_fill",
+        lambda **kwargs: SimpleNamespace(fill_price=118.26833216, fee_pct=0.001),
+    )
+    monkeypatch.setattr(
+        oracle_bot,
+        "row",
+        lambda *args, **kwargs: {"created_at": (now - timedelta(minutes=7.2)).isoformat()},
+    )
+
+    allowed, reason = oracle_bot._ordinary_sell_signal_allowed(
+        "crypto",
+        {"symbol": "SOL-USD", "entry_price": 118.05848340, "quantity": 0.422},
+        118.4645,
+    )
+
+    assert allowed is False
+    assert "held=7.2m < 15m" in reason
+
+
+def test_ordinary_sell_allows_true_post_fee_gain_without_waiting(monkeypatch):
+    import oracle_bot
+
+    monkeypatch.setattr(oracle_bot, "_paper_execution_accounting_installed", True, raising=False)
+    monkeypatch.setattr(
+        oracle_bot,
+        "simulate_fill",
+        lambda **kwargs: SimpleNamespace(fill_price=100.30, fee_pct=0.001),
+    )
+    monkeypatch.setattr(
+        oracle_bot,
+        "row",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("database should not be queried")),
+    )
+
+    allowed, reason = oracle_bot._ordinary_sell_signal_allowed(
+        "crypto",
+        {"symbol": "SOL-USD", "entry_price": 100.00, "quantity": 1.0},
+        100.40,
+    )
+
+    assert allowed is True
+    assert "PROFIT_PROTECT" in reason
+    assert "post_cost_gain" in reason
+
+
 def test_ordinary_sell_signal_debounces_reference_gain_that_fills_below_entry(monkeypatch):
     import oracle_bot
 
