@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from dataclasses import replace
 from decimal import Decimal
 import os
 import time
@@ -88,6 +89,16 @@ def _invalid_book_reason(quote: dict[str, Any]) -> str:
     if ask < bid:
         return "CROSSED_BOOK"
     return "UNKNOWN"
+
+
+def _paper_grace_snapshot(snapshot: Any) -> Any:
+    basis = str(getattr(snapshot, "verification_basis", "") or "")
+    if basis.startswith("paper_grace:"):
+        return snapshot
+    return replace(
+        snapshot,
+        verification_basis=f"paper_grace:{basis or 'provider:robinhood_crypto_cached'}",
+    )
 
 
 def _public_quote_keys(quote: dict[str, Any]) -> str:
@@ -289,9 +300,9 @@ def install_robinhood_quote_resilience(worker: Any) -> bool:
                     inserted_at, snapshot = cached
                     age = now - inserted_at
                     if age <= grace:
-                        results[symbol] = snapshot
+                        results[symbol] = _paper_grace_snapshot(snapshot)
                         worker.log.info(
-                            "CRYPTO | ROBINHOOD PAPER QUOTE GRACE | symbol=%s | age_seconds=%.2f | max_seconds=%.2f",
+                            "CRYPTO | ROBINHOOD PAPER QUOTE GRACE | symbol=%s | age_seconds=%.2f | max_seconds=%.2f | entry_eligible=false",
                             symbol,
                             age,
                             grace,
