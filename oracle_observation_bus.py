@@ -15,7 +15,9 @@ from datetime import datetime, timezone
 from typing import Any
 
 SOURCE_SPECS = (
-    ("signals", "signal", "created_at", "market", "symbol"),
+    # Raw scan signals are intentionally excluded. They are high-frequency,
+    # reproducible telemetry already bounded by database retention and should
+    # not be copied permanently into Brain memory.
     ("oracle_decision_audit", "council_decision", "created_at", "market", "symbol"),
     ("intelligence_events", "market_intelligence", "event_time", None, "symbol"),
 )
@@ -123,7 +125,12 @@ def _sync_source(
 
 
 def sync_observations(conn: Any, *, limit_per_source: int = DEFAULT_BATCH) -> dict[str, Any]:
-    """Mirror canonical persisted evidence into the append-only observation bus."""
+    """Mirror durable decision/intelligence evidence into the observation bus.
+
+    High-frequency raw signals remain in their bounded source table. Brain keeps
+    Council decisions, market intelligence, exact-provenance episodes and other
+    durable learning products instead of duplicating every scan row forever.
+    """
     counts: dict[str, int] = {}
     for source_table, observation_type, event_time, market, symbol in SOURCE_SPECS:
         counts[source_table] = _sync_source(
