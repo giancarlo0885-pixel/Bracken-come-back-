@@ -978,13 +978,38 @@ function settleBrainView(){
   requestAnimationFrame(()=>{if(brainMode)fitBrainView();});
   setTimeout(()=>{if(brainMode)fitBrainView();},140);
 }
+function clearOrbitMomentum(){
+  const damping=controls.enableDamping;
+  controls.enableDamping=false;
+  controls.update();
+  controls.enableDamping=damping;
+}
 function setBrainControlMode(on){
-  const lock=on&&mobileView();
   controls.autoRotate=false;
-  controls.enablePan=!lock&&!isMobileDevice;
-  controls.enableRotate=!lock;
-  controls.enableZoom=!lock;
-  controls.enabled=!lock;
+  controls.enabled=true;
+  controls.enableRotate=true;
+  controls.enableZoom=true;
+  controls.zoomToCursor=false;
+  controls.touches.ONE=THREE.TOUCH.ROTATE;
+
+  if(on){
+    // Brain mode keeps one immutable visual target. Users can orbit and pinch
+    // zoom around it, but cannot pan the anatomy away from screen center.
+    clearOrbitMomentum();
+    controls.enablePan=false;
+    controls.minDistance=4.5;
+    controls.maxDistance=52;
+    controls.minPolarAngle=.01;
+    controls.maxPolarAngle=Math.PI-.01;
+    controls.touches.TWO=THREE.TOUCH.DOLLY_ROTATE;
+  }else{
+    controls.enablePan=!isMobileDevice;
+    controls.minDistance=9;
+    controls.maxDistance=88;
+    controls.minPolarAngle=.12;
+    controls.maxPolarAngle=Math.PI*.49;
+    controls.touches.TWO=THREE.TOUCH.DOLLY_PAN;
+  }
 }
 function setBrainMode(on){
   brainMode=on;showCityObjects(!on);brainGroup.visible=on;
@@ -995,9 +1020,10 @@ function setBrainMode(on){
     scene.background.copy(BRAIN_BACKGROUND);
     scene.fog.color.copy(BRAIN_BACKGROUND);
     scene.fog.density=isMobileDevice?.0035:.0025;
-    setBrainControlMode(false);
-    settleBrainView();
+    // Apply Brain-specific orbit limits BEFORE fitting so OrbitControls cannot
+    // clamp the centered camera back to the City's low-angle view.
     setBrainControlMode(true);
+    settleBrainView();
   }else{
     setBrainControlMode(false);
     applyTimeOfDay();
