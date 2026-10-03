@@ -3,14 +3,26 @@ from datetime import datetime, timedelta, timezone
 import paper_crypto_churn_guard as guard
 
 
-def _patch_history(monkeypatch, *, sell_age_minutes=40, sell_price=99.0, buy_price=100.0, streak=1):
+def _patch_history(
+    monkeypatch,
+    *,
+    sell_age_minutes=40,
+    sell_price=99.0,
+    buy_price=100.0,
+    streak=1,
+    sell_realized_pnl=None,
+):
     now = datetime.now(timezone.utc)
     sell_time = now - timedelta(minutes=sell_age_minutes)
     buy_time = sell_time - timedelta(minutes=15)
 
     def fake_last_trade(symbol, side):
         if side == "SELL":
-            return {"created_at": sell_time, "price": sell_price}
+            return {
+                "created_at": sell_time,
+                "price": sell_price,
+                "realized_pnl": sell_realized_pnl,
+            }
         return {"created_at": buy_time, "price": buy_price}
 
     monkeypatch.setattr(guard, "_last_trade", fake_last_trade)
@@ -50,6 +62,26 @@ def test_third_consecutive_loss_extends_to_sixty_minutes(monkeypatch):
     _patch_history(monkeypatch, sell_age_minutes=50, streak=3)
 
     allowed, reason = guard._allow_generic_buy({"symbol": "NEAR-USD", "action": "BUY"})
+
+    assert allowed is False
+    assert "streak=3" in reason
+    assert reason.endswith("/60.00m")
+
+
+def test_post_cost_loss_overrides_gross_price_gain(monkeypatch):
+    monkeypatch.setenv("PAPER_CRYPTO_REENTRY_COOLDOWN_MINUTES", "10")
+    monkeypatch.setenv("PAPER_CRYPTO_LOSS_REENTRY_COOLDOWN_MULTIPLIER", "3")
+    monkeypatch.setenv("PAPER_CRYPTO_CONSECUTIVE_LOSS_COOLDOWN_STEP", "0.5")
+    _patch_history(
+        monkeypatch,
+        sell_age_minutes=15,
+        sell_price=101.0,
+        buy_price=100.0,
+        streak=3,
+        sell_realized_pnl=-0.01,
+    )
+
+    allowed, reason = guard._allow_generic_buy({"symbol": "SUI-USD", "action": "BUY"})
 
     assert allowed is False
     assert "streak=3" in reason

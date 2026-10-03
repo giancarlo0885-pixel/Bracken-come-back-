@@ -105,7 +105,7 @@ def _last_trade(symbol: str, side: str) -> dict[str, Any]:
 
         return oracle_bot.row(
             """
-            SELECT created_at, price
+            SELECT created_at, price, realized_pnl
             FROM trades
             WHERE market='crypto' AND symbol=%s AND side=%s
             ORDER BY created_at DESC
@@ -258,7 +258,15 @@ def _allow_generic_buy(signal: Any) -> tuple[bool, str]:
 
     sell_price = _safe_float(sell_trade.get("price"))
     buy_price = _safe_float(buy_trade.get("price"))
-    losing_exit = bool(sell_price > 0 and buy_price > 0 and sell_price < buy_price)
+    realized_pnl = sell_trade.get("realized_pnl")
+    if realized_pnl is not None:
+        # Canonical post-cost accounting is authoritative. A SELL fill can be
+        # above the entry fill yet still lose after round-trip fees and impact.
+        losing_exit = _safe_float(realized_pnl) < 0
+    else:
+        # Preserve the historical gross-price fallback for legacy/incomplete
+        # rows that predate canonical realized-P&L persistence.
+        losing_exit = bool(sell_price > 0 and buy_price > 0 and sell_price < buy_price)
     effective_cooldown = cooldown_minutes
     loss_streak = 0
     if losing_exit:
