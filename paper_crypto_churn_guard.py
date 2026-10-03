@@ -85,7 +85,7 @@ def _position_and_last_buy(symbol: str) -> tuple[dict[str, Any] | None, datetime
         )
         buy = oracle_bot.row(
             """
-            SELECT created_at, price, realized_pnl
+            SELECT created_at, price
             FROM trades
             WHERE market='crypto' AND symbol=%s AND side='BUY'
             ORDER BY created_at DESC
@@ -105,7 +105,7 @@ def _last_trade(symbol: str, side: str) -> dict[str, Any]:
 
         return oracle_bot.row(
             """
-            SELECT created_at, price
+            SELECT created_at, price, realized_pnl
             FROM trades
             WHERE market='crypto' AND symbol=%s AND side=%s
             ORDER BY created_at DESC
