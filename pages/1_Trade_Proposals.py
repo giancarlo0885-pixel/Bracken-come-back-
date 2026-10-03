@@ -20,7 +20,7 @@ except Exception as exc:
     st.error(f"Database preparation unavailable: {exc.__class__.__name__}")
     st.stop()
 
-if st.button("Refresh executions", use_container_width=False):
+if st.button("Refresh executions", width="content"):
     st.rerun()
 
 try:
@@ -85,7 +85,7 @@ for item in proposals:
 frame = pd.DataFrame(summary_rows)
 st.dataframe(
     frame,
-    use_container_width=True,
+    width="stretch",
     hide_index=True,
     column_config={
         "Notional": st.column_config.NumberColumn(format="$%.2f"),
