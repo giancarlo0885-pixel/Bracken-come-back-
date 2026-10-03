@@ -20,7 +20,7 @@ log = logging.getLogger("paper-aeve-generation-controller")
 _THREAD: threading.Thread | None = None
 _STOP = threading.Event()
 BATCH_SIZE = 1000
-PROVENANCE_VERSION = 4
+PROVENANCE_VERSION = 5
 _REQUIRED_RESEARCH_RELATIONS = ("paper_aeve_generation_outcomes",)
 
 
@@ -181,7 +181,7 @@ def ensure_schema() -> None:
     with connect() as conn:
         conn.execute(
             "SELECT pg_advisory_xact_lock(hashtext(%s))",
-            ("paper_aeve_generation_schema_v4",),
+            ("paper_aeve_generation_schema_v5",),
         )
         conn.execute("""
             CREATE TABLE IF NOT EXISTS paper_aeve_generations (
@@ -213,6 +213,7 @@ def ensure_schema() -> None:
                 config_hash TEXT,
                 provenance_version SMALLINT NOT NULL DEFAULT 1,
                 cost_provenance TEXT NOT NULL DEFAULT 'legacy_unknown',
+                entry_evidence_complete BOOLEAN NOT NULL DEFAULT FALSE,
                 UNIQUE(generation, trade_id)
             )
         """)
@@ -227,7 +228,7 @@ def ensure_schema() -> None:
         conn.execute(
             """INSERT INTO paper_aeve_provenance_epochs(
                    provenance_version,input_schema,cost_semantics
-               ) VALUES (%s,'dip_depth_rebound_round_trip_v2','exact_lot_round_trip')
+               ) VALUES (%s,'dip_depth_rebound_round_trip_v3_valid_entry_only','exact_lot_round_trip')
                ON CONFLICT (provenance_version) DO NOTHING""",
             (PROVENANCE_VERSION,),
         )
@@ -244,6 +245,11 @@ def ensure_schema() -> None:
         if "cost_provenance" not in outcome_columns:
             conn.execute(
                 "ALTER TABLE paper_aeve_generation_outcomes ADD COLUMN cost_provenance TEXT NOT NULL DEFAULT 'legacy_unknown'"
+            )
+        if "entry_evidence_complete" not in outcome_columns:
+            conn.execute(
+                "ALTER TABLE paper_aeve_generation_outcomes "
+                "ADD COLUMN entry_evidence_complete BOOLEAN NOT NULL DEFAULT FALSE"
             )
         generation_rows = list(conn.execute(
             "SELECT generation,config_json,config_hash FROM paper_aeve_generations"
@@ -326,7 +332,7 @@ def record_generation_outcomes(limit: int = 250) -> int:
         if provenance_started_at is None:
             return 0
         log.info(
-            "AEVE EVALUATOR HANDSHAKE | generation=%s | config_hash=%s | provenance_version=%s | input_schema=dip_depth_rebound_round_trip_v2 | config=%s | mode=shadow | execution_impact=NONE | broker_submission=NONE | live_trading=DISARMED",
+            "AEVE EVALUATOR HANDSHAKE | generation=%s | config_hash=%s | provenance_version=%s | input_schema=dip_depth_rebound_round_trip_v3_valid_entry_only | config=%s | mode=shadow | execution_impact=NONE | broker_submission=NONE | live_trading=DISARMED",
             active_cfg.generation,
             active_generation_row.get("config_hash"),
             PROVENANCE_VERSION,
@@ -437,17 +443,18 @@ def record_generation_outcomes(limit: int = 250) -> int:
                 INSERT INTO paper_aeve_generation_outcomes(
                     generation,trade_id,observed_at,net_pnl,mfe_pct,mae_pct,
                     excursion_sample_count,cost_pct,would_trade,score,config_json,config_hash,
-                    provenance_version,cost_provenance
-                ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s,%s)
+                    provenance_version,cost_provenance,entry_evidence_complete
+                ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s,%s,%s)
                 ON CONFLICT (generation,trade_id) DO NOTHING
             """, (
                 cfg.generation,row.get("trade_id"),row.get("exit_time"),_f(row.get("net_pnl")),
                 row.get("mfe_pct"),row.get("mae_pct"),int(row.get("excursion_sample_count") or 0),
                 cost_pct,(decision.would_trade if entry_evidence_complete else False),decision.score,
                 json.dumps(config_snapshot),config_hash,PROVENANCE_VERSION,"exact_lot",
+                entry_evidence_complete,
             ))
             log.info(
-                "AEVE SHADOW RESULT | trade_id=%s | generation=%s | config_hash=%s | provenance_version=%s | would_trade=%s | score=%.6f | input_schema=dip_depth_rebound_round_trip_v2 | dip_depth_pct=%s | rebound_from_low_pct=%s | entry_evidence_complete=%s | mode=shadow | execution_impact=NONE | broker_submission=NONE | live_trading=DISARMED",
+                "AEVE SHADOW RESULT | trade_id=%s | generation=%s | config_hash=%s | provenance_version=%s | would_trade=%s | score=%.6f | input_schema=dip_depth_rebound_round_trip_v3_valid_entry_only | dip_depth_pct=%s | rebound_from_low_pct=%s | entry_evidence_complete=%s | mode=shadow | execution_impact=NONE | broker_submission=NONE | live_trading=DISARMED",
                 row.get("trade_id"), cfg.generation, config_hash, PROVENANCE_VERSION,
                 bool(decision.would_trade if entry_evidence_complete else False), decision.score,
                 max(0.0, _f(dip_depth)) * 100.0 if entry_evidence_complete else None,
@@ -461,18 +468,19 @@ def record_generation_outcomes(limit: int = 250) -> int:
 def generation_research_report(conn: Any, generation: int, config_hash: str) -> dict[str, Any]:
     """Freeze auditable post-cost evidence for a completed AEVE research generation."""
     row = conn.execute("""
-        SELECT COUNT(*)::int AS window_trades,
-               COUNT(*) FILTER (WHERE would_trade)::int AS accepted_trades,
-               AVG(net_pnl) FILTER (WHERE would_trade) AS expectancy,
-               SUM(net_pnl) FILTER (WHERE would_trade) AS net_pnl,
-               SUM(CASE WHEN would_trade AND net_pnl>0 THEN net_pnl ELSE 0 END) AS gross_win,
-               ABS(SUM(CASE WHEN would_trade AND net_pnl<0 THEN net_pnl ELSE 0 END)) AS gross_loss,
-               AVG(mfe_pct) FILTER (WHERE would_trade AND excursion_sample_count>0) AS avg_mfe_pct,
-               AVG(mae_pct) FILTER (WHERE would_trade AND excursion_sample_count>0) AS avg_mae_pct,
-               AVG(cost_pct) FILTER (WHERE would_trade) AS avg_cost_pct,
-               COUNT(*) FILTER (WHERE NOT would_trade)::int AS rejected_candidates,
-               COUNT(*) FILTER (WHERE NOT would_trade AND net_pnl<0)::int AS avoided_losses,
-               COUNT(*) FILTER (WHERE NOT would_trade AND net_pnl>0)::int AS missed_winners
+        SELECT COUNT(*) FILTER (WHERE entry_evidence_complete)::int AS window_trades,
+               COUNT(*) FILTER (WHERE entry_evidence_complete AND would_trade)::int AS accepted_trades,
+               AVG(net_pnl) FILTER (WHERE entry_evidence_complete AND would_trade) AS expectancy,
+               SUM(net_pnl) FILTER (WHERE entry_evidence_complete AND would_trade) AS net_pnl,
+               SUM(CASE WHEN entry_evidence_complete AND would_trade AND net_pnl>0 THEN net_pnl ELSE 0 END) AS gross_win,
+               ABS(SUM(CASE WHEN entry_evidence_complete AND would_trade AND net_pnl<0 THEN net_pnl ELSE 0 END)) AS gross_loss,
+               AVG(mfe_pct) FILTER (WHERE entry_evidence_complete AND would_trade AND excursion_sample_count>0) AS avg_mfe_pct,
+               AVG(mae_pct) FILTER (WHERE entry_evidence_complete AND would_trade AND excursion_sample_count>0) AS avg_mae_pct,
+               AVG(cost_pct) FILTER (WHERE entry_evidence_complete AND would_trade) AS avg_cost_pct,
+               COUNT(*) FILTER (WHERE entry_evidence_complete AND NOT would_trade)::int AS rejected_candidates,
+               COUNT(*) FILTER (WHERE entry_evidence_complete AND NOT would_trade AND net_pnl<0)::int AS avoided_losses,
+               COUNT(*) FILTER (WHERE entry_evidence_complete AND NOT would_trade AND net_pnl>0)::int AS missed_winners,
+               COUNT(*) FILTER (WHERE NOT entry_evidence_complete)::int AS incomplete_entry_evidence
         FROM paper_aeve_generation_outcomes
         WHERE generation=%s AND config_hash=%s AND provenance_version=%s
     """, (generation, config_hash, PROVENANCE_VERSION)).fetchone() or {}
@@ -493,6 +501,7 @@ def generation_research_report(conn: Any, generation: int, config_hash: str) -> 
         "rejected_candidates": int(row.get("rejected_candidates") or 0),
         "avoided_losses": int(row.get("avoided_losses") or 0),
         "missed_winners": int(row.get("missed_winners") or 0),
+        "incomplete_entry_evidence": int(row.get("incomplete_entry_evidence") or 0),
         "execution_impact": "NONE",
     }
 
@@ -521,6 +530,7 @@ def maybe_advance_generation() -> bool:
                 SELECT net_pnl,mfe_pct,mae_pct,excursion_sample_count,cost_pct,would_trade
                 FROM paper_aeve_generation_outcomes
                 WHERE generation=%s AND config_hash=%s AND provenance_version=%s
+                  AND entry_evidence_complete=TRUE
                 ORDER BY observed_at ASC
                 LIMIT %s
             )
