@@ -127,11 +127,12 @@ def test_generation_window_counts_all_valid_outcomes_and_tracks_acceptance_separ
     assert "COUNT(*) FILTER (WHERE would_trade) AS samples" in source
     assert "AND would_trade=TRUE" not in source
     assert "if window_samples < BATCH_SIZE" in source
+    assert "AND entry_evidence_complete=TRUE" in source
     assert "accepted_samples=%s" in source
     assert "WHERE generation=%s" in source
     assert "config_hash=%s" in source
     assert "provenance_version=%s" in source
-    assert PROVENANCE_VERSION == 4
+    assert PROVENANCE_VERSION == 5
 
 
 def test_completed_window_with_insufficient_acceptance_advances_identity_without_tuning():
@@ -148,8 +149,9 @@ def test_generation_report_exposes_window_and_accepted_sample_depth():
     import inspect
     import paper_aeve_generation_controller as controller
     source = inspect.getsource(controller.generation_research_report)
-    assert "COUNT(*)::int AS window_trades" in source
-    assert "COUNT(*) FILTER (WHERE would_trade)::int AS accepted_trades" in source
+    assert "COUNT(*) FILTER (WHERE entry_evidence_complete)::int AS window_trades" in source
+    assert "COUNT(*) FILTER (WHERE entry_evidence_complete AND would_trade)::int AS accepted_trades" in source
+    assert "incomplete_entry_evidence" in source
 
 
 def test_legacy_outcomes_are_not_retroactively_certified_for_advancement():
@@ -326,14 +328,16 @@ def test_evaluator_passes_independent_entry_inputs_and_persists_version(monkeypa
     assert rebound_changed[0]['rebound_from_low_pct'] == pytest.approx(0.20)
     assert rebound_changed[1].dip_quality == dip_changed[1].dip_quality
     assert rebound_changed[1].rebound_quality != dip_changed[1].rebound_quality
-    assert all(row[-2] == 4 for row in inserted)
-    assert all(row[-1] == "exact_lot" for row in inserted)
+    assert all(row[-3] == 5 for row in inserted)
+    assert all(row[-2] == "exact_lot" for row in inserted)
+    assert all(row[-1] is True for row in inserted)
     assert all(item[0]['config'] == cfg.__dict__ for item in captured)
-    assert 'input_schema=dip_depth_rebound_round_trip_v2' in caplog.text
+    assert 'input_schema=dip_depth_rebound_round_trip_v3_valid_entry_only' in caplog.text
     assert 'dip_depth_pct=1.25 | rebound_from_low_pct=0.2' in caplog.text
     features.pop('dip_depth_pct')
     assert controller.record_generation_outcomes() == 1
     assert inserted[-1][8] is False
+    assert inserted[-1][-1] is False
 
 
 def test_aeve_v4_uses_durable_forward_epoch_and_exact_round_trip_costs():
@@ -349,7 +353,7 @@ def test_aeve_v4_uses_durable_forward_epoch_and_exact_round_trip_costs():
     assert "m.round_trip_fees" in producer
     assert "_f(row.get(\"round_trip_fees\"))" in producer
     assert "l.fees" not in producer
-    assert PROVENANCE_VERSION == 4
+    assert PROVENANCE_VERSION == 5
 
 
 def test_aeve_v4_prior_economics_are_exact_round_trip_only():
@@ -365,12 +369,25 @@ def test_aeve_schema_repairs_use_catalog_guards_instead_of_repeat_alter():
     import inspect
     import paper_aeve_generation_controller as controller
     source = inspect.getsource(controller.ensure_schema)
-    assert "paper_aeve_generation_schema_v4" in source
+    assert "paper_aeve_generation_schema_v5" in source
     assert "_relation_columns" in source
     assert 'if "config_hash" not in generation_columns' in source
     assert 'if "config_hash" not in outcome_columns' in source
     assert 'if "provenance_version" not in outcome_columns' in source
     assert 'if "cost_provenance" not in outcome_columns' in source
+    assert 'if "entry_evidence_complete" not in outcome_columns' in source
     assert 'if not generation_columns.get("config_hash", False)' in source
     assert 'if not outcome_columns.get("config_hash", False)' in source
     assert "ADD COLUMN IF NOT EXISTS config_hash" not in source
+
+
+def test_incomplete_entry_evidence_is_auditable_but_not_generation_evidence():
+    import inspect
+    import paper_aeve_generation_controller as controller
+    producer = inspect.getsource(controller.record_generation_outcomes)
+    advancement = inspect.getsource(controller.maybe_advance_generation)
+    report = inspect.getsource(controller.generation_research_report)
+    assert "entry_evidence_complete" in producer
+    assert "AND entry_evidence_complete=TRUE" in advancement
+    assert "incomplete_entry_evidence" in report
+    assert "entry_evidence_complete AND NOT would_trade AND net_pnl<0" in report
