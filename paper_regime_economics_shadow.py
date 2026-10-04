@@ -11,7 +11,7 @@ from typing import Any
 
 
 log = logging.getLogger("paper-regime-economics")
-_SCHEMA_VERSION = "regime-economics-v2-round-trip-cost"
+_SCHEMA_VERSION = "regime-economics-v3-temporal-excursion"
 _THREAD: threading.Thread | None = None
 _STOP = threading.Event()
 
@@ -101,6 +101,47 @@ def _excursion_percentages(entry_price: Any, prices: list[float]) -> tuple[float
     return max(0.0, max(returns)), min(0.0, min(returns))
 
 
+def _excursion_temporal_metrics(
+    entry_price: Any,
+    entry_time: datetime | None,
+    samples: list[dict[str, Any]],
+) -> tuple[float | None, float | None, datetime | None, datetime | None, int | None, int | None]:
+    """Reduce observed forward samples into anchored excursion magnitude and timing.
+
+    The factual entry is the 0% anchor. If no forward sample crosses above (below)
+    entry, MFE (MAE) is 0% at entry time. Missing valid forward observations remain
+    unavailable rather than being fabricated as zero-second evidence.
+    """
+    entry = _num(entry_price)
+    if entry <= 0 or entry_time is None:
+        return None, None, None, None, None, None
+    valid: list[tuple[datetime, float]] = []
+    for sample in samples:
+        observed_at = sample.get("observed_at")
+        price = _num(sample.get("price"))
+        if observed_at is not None and price > 0:
+            valid.append((observed_at, ((price / entry) - 1.0) * 100.0))
+    if not valid:
+        return None, None, None, None, None, None
+
+    positive = [(ts, ret) for ts, ret in valid if ret > 0.0]
+    negative = [(ts, ret) for ts, ret in valid if ret < 0.0]
+    if positive:
+        mfe_pct = max(ret for _, ret in positive)
+        mfe_time = next(ts for ts, ret in positive if ret == mfe_pct)
+    else:
+        mfe_pct, mfe_time = 0.0, entry_time
+    if negative:
+        mae_pct = min(ret for _, ret in negative)
+        mae_time = next(ts for ts, ret in negative if ret == mae_pct)
+    else:
+        mae_pct, mae_time = 0.0, entry_time
+
+    time_to_mfe = max(0, int((mfe_time - entry_time).total_seconds()))
+    time_to_mae = max(0, int((mae_time - entry_time).total_seconds()))
+    return mfe_pct, mae_pct, mfe_time, mae_time, time_to_mfe, time_to_mae
+
+
 def _relation_columns(conn: Any, relation: str) -> dict[str, bool]:
     rows = list(conn.execute(
         """
@@ -167,6 +208,10 @@ def ensure_schema() -> None:
                 round_trip_net_pnl DOUBLE PRECISION,
                 round_trip_fees DOUBLE PRECISION,
                 cost_provenance TEXT NOT NULL DEFAULT 'legacy_unknown',
+                time_to_mfe_sec INTEGER,
+                time_to_mae_sec INTEGER,
+                mfe_observed_at TIMESTAMPTZ,
+                mae_observed_at TIMESTAMPTZ,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             )
             """
@@ -188,6 +233,14 @@ def ensure_schema() -> None:
             conn.execute(
                 "ALTER TABLE paper_regime_trade_metrics ADD COLUMN cost_provenance TEXT NOT NULL DEFAULT 'legacy_unknown'"
             )
+        if "time_to_mfe_sec" not in columns:
+            conn.execute("ALTER TABLE paper_regime_trade_metrics ADD COLUMN time_to_mfe_sec INTEGER")
+        if "time_to_mae_sec" not in columns:
+            conn.execute("ALTER TABLE paper_regime_trade_metrics ADD COLUMN time_to_mae_sec INTEGER")
+        if "mfe_observed_at" not in columns:
+            conn.execute("ALTER TABLE paper_regime_trade_metrics ADD COLUMN mfe_observed_at TIMESTAMPTZ")
+        if "mae_observed_at" not in columns:
+            conn.execute("ALTER TABLE paper_regime_trade_metrics ADD COLUMN mae_observed_at TIMESTAMPTZ")
 
 
 def repair_excursion_anchors() -> int:
@@ -331,7 +384,7 @@ def finalize_closed_trades(limit: int = 250, market: str = "crypto") -> int:
             if not trade_id:
                 continue
             existing = conn.execute(
-                "SELECT trade_id,cost_provenance FROM paper_regime_trade_metrics WHERE trade_id=%s LIMIT 1",
+                "SELECT trade_id,cost_provenance,time_to_mfe_sec,time_to_mae_sec,mfe_observed_at,mae_observed_at FROM paper_regime_trade_metrics WHERE trade_id=%s LIMIT 1",
                 (trade_id,),
             ).fetchone() or {}
 
@@ -351,29 +404,39 @@ def finalize_closed_trades(limit: int = 250, market: str = "crypto") -> int:
                 or "unclassified"
             ).strip().lower()[:80] or "unclassified"
 
-            prices: list[float] = []
+            sampled: list[dict[str, Any]] = []
             if entry_time and exit_time:
-                sampled = conn.execute(
+                sampled = list(conn.execute(
                     """
-                    SELECT price FROM paper_regime_price_samples
+                    SELECT observed_at,price FROM paper_regime_price_samples
                     WHERE market=%s AND symbol=%s AND observed_at BETWEEN %s AND %s
                     ORDER BY observed_at ASC
                     """,
                     (normalized_market, symbol, entry_time, exit_time),
-                ).fetchall()
-                prices = [_num(item.get("price")) for item in sampled if _num(item.get("price")) > 0]
+                ).fetchall())
 
             # Entry is the factual 0% excursion anchor; forward samples supply the path.
-            excursion_count = len(prices)
-            mfe_pct, mae_pct = _excursion_percentages(entry_price, prices)
+            valid_samples = [item for item in sampled if item.get("observed_at") is not None and _num(item.get("price")) > 0]
+            excursion_count = len(valid_samples)
+            mfe_pct, mae_pct, mfe_observed_at, mae_observed_at, time_to_mfe_sec, time_to_mae_sec = _excursion_temporal_metrics(
+                entry_price, entry_time, valid_samples
+            )
             round_trip_net,round_trip_fees,cost_provenance=_round_trip_accounting(conn,dict(trade))
             if existing:
+                updates: list[str] = []
+                params: list[Any] = []
                 if cost_provenance == "exact_lot" and str(existing.get("cost_provenance") or "") != "exact_lot":
+                    updates.extend(["round_trip_net_pnl=%s", "round_trip_fees=%s", "cost_provenance=%s"])
+                    params.extend([round_trip_net, round_trip_fees, cost_provenance])
+                if excursion_count > 0 and existing.get("mfe_observed_at") is None and existing.get("mae_observed_at") is None:
+                    updates.extend(["time_to_mfe_sec=%s", "time_to_mae_sec=%s", "mfe_observed_at=%s", "mae_observed_at=%s"])
+                    params.extend([time_to_mfe_sec, time_to_mae_sec, mfe_observed_at, mae_observed_at])
+                if updates:
+                    updates.append("schema_version=%s")
+                    params.extend([_SCHEMA_VERSION, trade_id])
                     conn.execute(
-                        """UPDATE paper_regime_trade_metrics
-                           SET round_trip_net_pnl=%s,round_trip_fees=%s,cost_provenance=%s,schema_version=%s
-                           WHERE trade_id=%s""",
-                        (round_trip_net,round_trip_fees,cost_provenance,_SCHEMA_VERSION,trade_id),
+                        "UPDATE paper_regime_trade_metrics SET " + ",".join(updates) + " WHERE trade_id=%s",
+                        tuple(params),
                     )
                     created += 1
                 continue
@@ -383,8 +446,9 @@ def finalize_closed_trades(limit: int = 250, market: str = "crypto") -> int:
                 INSERT INTO paper_regime_trade_metrics(
                     trade_id,market,symbol,strategy,regime,entry_pattern,entry_time,exit_time,
                     entry_price,exit_price,net_pnl,fees,mfe_pct,mae_pct,
-                    excursion_sample_count,schema_version,round_trip_net_pnl,round_trip_fees,cost_provenance
-                ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    excursion_sample_count,schema_version,round_trip_net_pnl,round_trip_fees,cost_provenance,
+                    time_to_mfe_sec,time_to_mae_sec,mfe_observed_at,mae_observed_at
+                ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                 ON CONFLICT (trade_id) DO NOTHING
                 """,
                 (
@@ -393,6 +457,7 @@ def finalize_closed_trades(limit: int = 250, market: str = "crypto") -> int:
                     _num(trade.get("net_pnl")), max(0.0, _num(trade.get("fees"))),
                     mfe_pct, mae_pct, excursion_count, _SCHEMA_VERSION,
                     round_trip_net,round_trip_fees,cost_provenance,
+                    time_to_mfe_sec,time_to_mae_sec,mfe_observed_at,mae_observed_at,
                 ),
             )
             created += 1
