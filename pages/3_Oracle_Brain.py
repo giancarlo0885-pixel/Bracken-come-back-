@@ -33,21 +33,21 @@ try:
     aeve_rows = rows("""
         SELECT g.generation,g.started_at,g.config_hash,g.status,
                COUNT(o.id)::int AS observed_outcomes,
-               COUNT(o.id) FILTER (WHERE o.would_trade)::int AS accepted_trades,
+               COUNT(o.id) FILTER (WHERE o.entry_evidence_complete AND o.would_trade AND o.provenance_version = 6)::int AS accepted_trades,
                COUNT(o.id) FILTER (
-                   WHERE o.would_trade AND o.provenance_version >= 2
+                   WHERE o.entry_evidence_complete AND o.provenance_version = 6
                      AND o.config_hash = g.config_hash
                )::int AS verified_trades,
                COUNT(o.id) FILTER (
-                   WHERE o.would_trade AND o.net_pnl > 0
-                     AND o.provenance_version >= 2 AND o.config_hash = g.config_hash
+                   WHERE o.entry_evidence_complete AND o.would_trade AND o.net_pnl > 0
+                     AND o.provenance_version = 6 AND o.config_hash = g.config_hash
                )::int AS winners,
                COUNT(o.id) FILTER (
-                   WHERE o.would_trade AND o.net_pnl <= 0
-                     AND o.provenance_version >= 2 AND o.config_hash = g.config_hash
+                   WHERE o.entry_evidence_complete AND o.would_trade AND o.net_pnl <= 0
+                     AND o.provenance_version = 6 AND o.config_hash = g.config_hash
                )::int AS non_winners,
                COALESCE(SUM(o.net_pnl) FILTER (
-                   WHERE o.would_trade AND o.provenance_version >= 2
+                   WHERE o.entry_evidence_complete AND o.would_trade AND o.provenance_version = 6
                      AND o.config_hash = g.config_hash
                ),0)::double precision AS net_pnl
         FROM paper_aeve_generations g
@@ -63,19 +63,20 @@ except Exception:
 if aeve_rows:
     aeve = aeve_rows[0]
     completed = int(aeve.get("verified_trades") or 0)
+    accepted = int(aeve.get("accepted_trades") or 0)
     target = 1000
     st.subheader("AEVE Generation Progress")
     p1, p2, p3, p4 = st.columns(4)
     p1.metric("Generation", int(aeve.get("generation") or 1))
-    p2.metric("Verified trades", f"{completed:,} / {target:,}")
+    p2.metric("Verified outcomes", f"{completed:,} / {target:,}")
     p3.metric("Remaining", f"{max(0, target-completed):,}")
-    p4.metric("Net post-cost P&L", f"${float(aeve.get('net_pnl') or 0.0):,.2f}")
+    p4.metric("Accepted shadow P&L", f"${float(aeve.get('net_pnl') or 0.0):,.2f}")
     st.progress(min(1.0, completed / target))
     st.caption(
-        f"Accepted AEVE outcomes only · provenance v2+ · active config hash matched · "
+        f"Forward outcomes only · provenance v6 · active config hash matched · complete entry evidence {completed:,} · accepted by AEVE {accepted:,} · "
         f"winners {int(aeve.get('winners') or 0):,} · "
         f"non-winners {int(aeve.get('non_winners') or 0):,}. "
-        "Council approvals, scans, quote handoffs, and rejected shadow candidates do not increment this counter."
+        "Incomplete, legacy, or incompatible outcomes remain auditable but do not increment the 1,000-outcome window."
     )
 else:
     st.warning("AEVE generation progress is unavailable; no active generation-isolated outcome row was returned.")
@@ -95,14 +96,14 @@ try:
         FROM paper_aeve_generation_outcomes o
         JOIN paper_aeve_generations g
           ON g.generation=o.generation AND g.config_hash=o.config_hash
-        WHERE g.status='ACTIVE' AND o.provenance_version>=2
+        WHERE g.status='ACTIVE' AND o.provenance_version=6 AND o.entry_evidence_complete
     """)
 except Exception:
     aeve_diag = []
 if aeve_diag:
     d = aeve_diag[0]
     st.caption(
-        "Generation economics · "
+        "Accepted-shadow economics · "
         f"expectancy {float(d.get('expectancy') or 0):.6f} · "
         f"PF {float(d.get('profit_factor') or 0):.3f} · "
         f"avg MFE {float(d.get('avg_mfe_pct') or 0):.3f}% · "
@@ -140,9 +141,9 @@ try:
         )
         SELECT
           a.generation,a.config_hash,a.started_at,
-          COUNT(o.id) FILTER (WHERE o.would_trade AND o.provenance_version>=2)::int AS aeve_trades,
-          COUNT(o.id) FILTER (WHERE o.would_trade AND o.provenance_version>=2)::int AS provenance_v2,
-          COUNT(o.id) FILTER (WHERE o.would_trade AND o.provenance_version<2)::int AS legacy_provenance
+          COUNT(o.id) FILTER (WHERE o.entry_evidence_complete AND o.provenance_version=6)::int AS aeve_trades,
+          COUNT(o.id) FILTER (WHERE o.entry_evidence_complete AND o.would_trade AND o.provenance_version=6)::int AS accepted_outcomes,
+          COUNT(o.id) FILTER (WHERE o.provenance_version<6)::int AS legacy_provenance
         FROM active a LEFT JOIN paper_aeve_generation_outcomes o
           ON o.generation=a.generation AND o.config_hash=a.config_hash
         GROUP BY a.generation,a.config_hash,a.started_at
@@ -158,9 +159,9 @@ if cockpit:
     c1,c2,c3,c4=st.columns(4)
     c1.metric("Verified AEVE", f"{completed:,} / 1,000")
     c2.metric("Learning velocity", f"{tph:.2f}/hr")
-    c3.metric("Provenance v2", int(cp.get("provenance_v2") or 0))
-    c4.metric("Legacy provenance", int(cp.get("legacy_provenance") or 0))
-    st.caption("The authoritative generation table stores immutable config/provenance identity. Entry-time knowledge snapshots remain in canonical Council lifecycle evidence; they are not duplicated into AEVE outcomes.")
+    c3.metric("Provenance v6", completed)
+    c4.metric("Accepted by AEVE", int(cp.get("accepted_outcomes") or 0))
+    st.caption("The authoritative generation counter uses complete forward entry evidence under provenance v6 and the active config hash. Shadow acceptance is separate; rejected valid outcomes still teach the next generation.")
 
 try:
     source_health=rows("""
