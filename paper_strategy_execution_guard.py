@@ -419,7 +419,11 @@ def install_paper_strategy_execution_guard() -> bool:
 
         optimizer_target = float(_value(signal, "v39_optimizer_approved_amount", 0.0) or 0.0)
         base_target = optimizer_target if optimizer_target > 0 else float(target_trade_value or 0.0)
-        adjusted_signal = signal
+        # Carry the exact economics view used by the final fee gate into the
+        # immutable entry snapshot. This changes provenance only: sizing below
+        # still evaluates the original signal, and broker/live controls are
+        # unchanged.
+        adjusted_signal = economics_signal
         adjusted_target = target_trade_value
         if base_target > 0:
             sized, scorecard, size_reason = economics.adjusted_optimizer_target(signal, base_target)
@@ -469,7 +473,7 @@ def install_paper_strategy_execution_guard() -> bool:
                 )
                 return _blocked_buy(confirmation_reason)
             if optimizer_target > 0:
-                adjusted_signal = _with_optimizer_target(signal, sized)
+                adjusted_signal = _with_optimizer_target(economics_signal, sized)
             else:
                 adjusted_target = sized
 
