@@ -20,7 +20,7 @@ log = logging.getLogger("paper-aeve-generation-controller")
 _THREAD: threading.Thread | None = None
 _STOP = threading.Event()
 BATCH_SIZE = 1000
-PROVENANCE_VERSION = 5
+PROVENANCE_VERSION = 6
 _REQUIRED_RESEARCH_RELATIONS = ("paper_aeve_generation_outcomes",)
 
 
@@ -228,7 +228,7 @@ def ensure_schema() -> None:
         conn.execute(
             """INSERT INTO paper_aeve_provenance_epochs(
                    provenance_version,input_schema,cost_semantics
-               ) VALUES (%s,'dip_depth_rebound_round_trip_v3_valid_entry_only','exact_lot_round_trip')
+               ) VALUES (%s,'dip_depth_rebound_expected_edge_round_trip_v4_valid_entry_only','exact_lot_round_trip')
                ON CONFLICT (provenance_version) DO NOTHING""",
             (PROVENANCE_VERSION,),
         )
@@ -413,7 +413,7 @@ def record_generation_outcomes(limit: int = 250) -> int:
                 cost_pct = max(0.0, (_f(row.get("round_trip_fees")) / (qty * price)) * 100.0)
             features = row.get("feature_snapshot") if isinstance(row.get("feature_snapshot"), dict) else {}
             edge = None
-            for key in ("net_expected_value_pct","expected_return_pct","forecast_return_pct","possible_move_pct","expected_move_pct","edge_pct"):
+            for key in ("net_expected_value_pct","expected_edge_pct","expected_return_pct","forecast_return_pct","possible_move_pct","expected_move_pct","edge_pct"):
                 if key in features and features.get(key) is not None:
                     edge = _f(features.get(key))
                     break
