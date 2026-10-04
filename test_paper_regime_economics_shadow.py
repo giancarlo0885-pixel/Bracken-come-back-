@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from datetime import datetime, timedelta, timezone
 
 import paper_regime_economics_shadow as regime
 
@@ -65,6 +66,37 @@ def test_excursions_remain_unavailable_without_forward_samples():
     assert regime._excursion_percentages(0.0, [100.0]) == (None, None)
 
 
+def test_temporal_excursion_records_earliest_extrema_and_offsets():
+    entry = datetime(2026, 10, 4, 12, 0, tzinfo=timezone.utc)
+    samples = [
+        {"observed_at": entry + timedelta(seconds=30), "price": 101.0},
+        {"observed_at": entry + timedelta(seconds=60), "price": 103.0},
+        {"observed_at": entry + timedelta(seconds=90), "price": 103.0},
+        {"observed_at": entry + timedelta(seconds=120), "price": 97.0},
+    ]
+    mfe, mae, t_mfe, t_mae, dt_mfe, dt_mae = regime._excursion_temporal_metrics(100.0, entry, samples)
+    assert round(mfe, 8) == 3.0
+    assert round(mae, 8) == -3.0
+    assert t_mfe == entry + timedelta(seconds=60)
+    assert t_mae == entry + timedelta(seconds=120)
+    assert dt_mfe == 60
+    assert dt_mae == 120
+
+
+def test_temporal_excursion_uses_entry_anchor_when_path_is_one_sided():
+    entry = datetime(2026, 10, 4, 12, 0, tzinfo=timezone.utc)
+    below = [{"observed_at": entry + timedelta(seconds=30), "price": 99.0}]
+    mfe, mae, t_mfe, t_mae, dt_mfe, dt_mae = regime._excursion_temporal_metrics(100.0, entry, below)
+    assert mfe == 0.0 and round(mae, 8) == -1.0
+    assert t_mfe == entry and dt_mfe == 0
+    assert t_mae == entry + timedelta(seconds=30) and dt_mae == 30
+
+
+def test_temporal_excursion_does_not_fabricate_missing_observations():
+    entry = datetime(2026, 10, 4, 12, 0, tzinfo=timezone.utc)
+    assert regime._excursion_temporal_metrics(100.0, entry, []) == (None, None, None, None, None, None)
+
+
 def test_market_normalization_supports_cash_and_stock_alias():
     assert regime._normalize_market("crypto") == "crypto"
     assert regime._normalize_market("cash") == "cash"
@@ -77,7 +109,9 @@ def test_regime_shadow_queries_are_market_scoped_not_crypto_hardcoded():
     assert "WHERE market=%s AND side='SELL'" in source
     assert "WHERE market=%s AND symbol=%s" in source
     assert "VALUES (%s,%s,%s,%s,'canonical_position',%s)" in source
-    assert "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)" in source
+    assert "SELECT observed_at,price FROM paper_regime_price_samples" in source
+    assert "time_to_mfe_sec" in source
+    assert "time_to_mae_sec" in source
 
 
 def test_stock_worker_installs_cash_regime_learning():
