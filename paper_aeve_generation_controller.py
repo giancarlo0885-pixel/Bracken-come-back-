@@ -332,7 +332,7 @@ def record_generation_outcomes(limit: int = 250) -> int:
         if provenance_started_at is None:
             return 0
         log.info(
-            "AEVE EVALUATOR HANDSHAKE | generation=%s | config_hash=%s | provenance_version=%s | input_schema=dip_depth_rebound_round_trip_v3_valid_entry_only | config=%s | mode=shadow | execution_impact=NONE | broker_submission=NONE | live_trading=DISARMED",
+            "AEVE EVALUATOR HANDSHAKE | generation=%s | config_hash=%s | provenance_version=%s | input_schema=dip_depth_rebound_expected_edge_round_trip_v4_valid_entry_only | config=%s | mode=shadow | execution_impact=NONE | broker_submission=NONE | live_trading=DISARMED",
             active_cfg.generation,
             active_generation_row.get("config_hash"),
             PROVENANCE_VERSION,
