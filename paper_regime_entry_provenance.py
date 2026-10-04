@@ -13,7 +13,7 @@ from paper_regime_entry_signal_fallback import install_entry_signal_regime_fallb
 _RAW_REGIME_FIELDS = ("trend_strength", "momentum_20d", "volatility_20d")
 _CATEGORICAL_ENTRY_FIELDS = ("entry_pattern", "schwager_pattern_tag")
 _AEVE_ENTRY_FIELDS = (
-    "net_expected_value_pct", "expected_return_pct", "forecast_return_pct",
+    "net_expected_value_pct", "expected_edge_pct", "expected_return_pct", "forecast_return_pct",
     "possible_move_pct", "expected_move_pct", "edge_pct",
     "dip_depth_pct", "rebound_pct", "drawdown_from_recent_high_pct",
     "rsi_14", "rsi_change", "reclaim_strength",
