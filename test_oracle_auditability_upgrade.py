@@ -10,7 +10,7 @@ def test_brain_exposes_authoritative_trade_lifecycle_and_generation_economics():
     assert "Complete entry → exit" in source
     assert "Exact entry provenance" in source
     assert "Generation economics" in source
-    assert "provenance_version>=2" in source
+    assert "provenance_version=6" in source
     assert "g.config_hash=o.config_hash" in source
 
 def test_generation_report_is_isolated_and_research_only():
