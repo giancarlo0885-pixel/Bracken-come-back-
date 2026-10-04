@@ -103,7 +103,7 @@ except Exception:
 if aeve_diag:
     d = aeve_diag[0]
     st.caption(
-        "Accepted-shadow economics · "
+        "Generation economics · accepted shadow · "
         f"expectancy {float(d.get('expectancy') or 0):.6f} · "
         f"PF {float(d.get('profit_factor') or 0):.3f} · "
         f"avg MFE {float(d.get('avg_mfe_pct') or 0):.3f}% · "
