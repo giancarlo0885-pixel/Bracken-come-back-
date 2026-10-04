@@ -341,7 +341,7 @@ def test_evaluator_passes_independent_entry_inputs_and_persists_version(monkeypa
     assert rebound_changed[0]['rebound_from_low_pct'] == pytest.approx(0.20)
     assert rebound_changed[1].dip_quality == dip_changed[1].dip_quality
     assert rebound_changed[1].rebound_quality != dip_changed[1].rebound_quality
-    assert all(row[-3] == 5 for row in inserted)
+    assert all(row[-3] == 6 for row in inserted)
     assert all(row[-2] == "exact_lot" for row in inserted)
     assert all(row[-1] is True for row in inserted)
     assert all(item[0]['config'] == cfg.__dict__ for item in captured)
