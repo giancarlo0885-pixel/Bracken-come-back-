@@ -132,7 +132,7 @@ def test_generation_window_counts_all_valid_outcomes_and_tracks_acceptance_separ
     assert "WHERE generation=%s" in source
     assert "config_hash=%s" in source
     assert "provenance_version=%s" in source
-    assert PROVENANCE_VERSION == 5
+    assert PROVENANCE_VERSION == 6
 
 
 def test_completed_window_with_insufficient_acceptance_advances_identity_without_tuning():
@@ -163,6 +163,19 @@ def test_legacy_outcomes_are_not_retroactively_certified_for_advancement():
     assert "config_hash=%s AND provenance_version=%s" in inspect.getsource(controller.maybe_advance_generation)
     assert "json.dumps(config_snapshot),config_hash,PROVENANCE_VERSION" in producer_source
 
+
+
+
+def test_aeve_v6_accepts_resolved_expected_edge_from_immutable_entry_snapshot():
+    import inspect
+    import paper_aeve_generation_controller as controller
+    import paper_regime_entry_provenance as provenance
+    producer = inspect.getsource(controller.record_generation_outcomes)
+    assert '"expected_edge_pct"' in producer
+    assert "expected_edge_pct" in provenance._AEVE_ENTRY_FIELDS
+    assert controller.PROVENANCE_VERSION == 6
+    schema = inspect.getsource(controller.ensure_schema)
+    assert "dip_depth_rebound_expected_edge_round_trip_v4_valid_entry_only" in schema
 
 def test_aeve_entry_features_fail_closed_when_provenance_missing():
     import inspect
@@ -353,7 +366,7 @@ def test_aeve_v4_uses_durable_forward_epoch_and_exact_round_trip_costs():
     assert "m.round_trip_fees" in producer
     assert "_f(row.get(\"round_trip_fees\"))" in producer
     assert "l.fees" not in producer
-    assert PROVENANCE_VERSION == 5
+    assert PROVENANCE_VERSION == 6
 
 
 def test_aeve_v4_prior_economics_are_exact_round_trip_only():
