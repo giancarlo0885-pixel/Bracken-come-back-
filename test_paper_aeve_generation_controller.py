@@ -345,7 +345,7 @@ def test_evaluator_passes_independent_entry_inputs_and_persists_version(monkeypa
     assert all(row[-2] == "exact_lot" for row in inserted)
     assert all(row[-1] is True for row in inserted)
     assert all(item[0]['config'] == cfg.__dict__ for item in captured)
-    assert 'input_schema=dip_depth_rebound_round_trip_v3_valid_entry_only' in caplog.text
+    assert 'input_schema=dip_depth_rebound_expected_edge_round_trip_v4_valid_entry_only' in caplog.text
     assert 'dip_depth_pct=1.25 | rebound_from_low_pct=0.2' in caplog.text
     features.pop('dip_depth_pct')
     assert controller.record_generation_outcomes() == 1
