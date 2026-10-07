@@ -1029,6 +1029,16 @@ class BrainCohortAnalyzerV4:
             }
 
         self.df = self.df.copy()
+        observed_trade_count = int(len(self.df))
+        # Only rows where the challenger actually fired are paired treatment
+        # evidence. ACTUAL_EXIT_FALLBACK rows are useful audit/control records,
+        # but challenger_r == actual_r by construction; counting them would
+        # manufacture zero-delta samples and inflate episode/trade gates.
+        if "challenger_exit_type" in self.df.columns:
+            self.df = self.df[
+                self.df["challenger_exit_type"] == "FORWARD_EVIDENCE_EXIT"
+            ].copy()
+
         self.df["actual_realized_r_net"] = pd.to_numeric(
             self.df["actual_realized_r_net"], errors="coerce"
         )
@@ -1086,6 +1096,7 @@ class BrainCohortAnalyzerV4:
             "promotion_evidence_ready": ready,
             "conditions": conditions,
             "trade_count": trade_count,
+            "observed_trade_count": observed_trade_count,
             "episode_count": episode_count,
             "paired_mean_delta_r": float(self.df["delta_r"].mean()) if trade_count else 0.0,
             "bootstrap_delta_ci": (boot_low, boot_high),
