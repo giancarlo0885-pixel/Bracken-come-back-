@@ -277,3 +277,30 @@ def test_shadow_trigger_state_is_durable_but_deleted_after_final_settlement():
     assert "ON CONFLICT(position_key,model_version) DO NOTHING" in source
     assert "DELETE FROM garibaldi_shadow_exit_triggers" in source
     assert '"_pending_position_key": key' in source
+
+
+def test_fallback_rows_do_not_inflate_challenger_promotion_evidence():
+    records = _positive_experiments()
+    for record in records:
+        record["challenger_exit_type"] = "ACTUAL_EXIT_FALLBACK"
+        record["challenger_counterfactual_r_net"] = record["actual_realized_r_net"]
+
+    report = BrainCohortAnalyzerV4(records).evaluate_portfolio_safety_gate()
+
+    assert report["observed_trade_count"] == 60
+    assert report["trade_count"] == 0
+    assert report["episode_count"] == 0
+    assert report["promotion_evidence_ready"] is False
+
+
+def test_triggered_rows_remain_eligible_for_promotion_evidence():
+    records = _positive_experiments()
+    for record in records:
+        record["challenger_exit_type"] = "FORWARD_EVIDENCE_EXIT"
+
+    report = BrainCohortAnalyzerV4(records).evaluate_portfolio_safety_gate()
+
+    assert report["observed_trade_count"] == 60
+    assert report["trade_count"] == 60
+    assert report["episode_count"] == 30
+    assert report["promotion_evidence_ready"] is True
