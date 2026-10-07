@@ -94,3 +94,29 @@ def test_sync_result_excludes_raw_signal_source():
     result = bus.sync_observations(conn)
     assert "signals" not in result["by_source"]
     assert result["by_source"]["oracle_decision_audit"] == 1
+
+
+def test_oversized_observation_payload_is_compacted_with_provenance_digest():
+    payload = {
+        "id": 77,
+        "market": "crypto",
+        "symbol": "BTC-USD",
+        "recommendation": "WAIT",
+        "payload": {"blob": "x" * (bus.MAX_PAYLOAD_BYTES + 2048)},
+    }
+    compact = bus._safe_payload(payload)
+    assert compact["payload_compacted"] is True
+    assert compact["id"] == 77
+    assert compact["market"] == "crypto"
+    assert compact["symbol"] == "BTC-USD"
+    assert len(compact["source_payload_sha256"]) == 64
+    assert compact["source_payload_bytes"] > bus.MAX_PAYLOAD_BYTES
+    assert "payload" in compact["source_fields"]
+    assert "payload" not in compact
+
+
+def test_memory_compaction_does_not_delete_historical_brain_rows():
+    source = Path("oracle_observation_bus.py").read_text(encoding="utf-8").lower()
+    assert "delete from oracle_brain_observations" not in source
+    assert "truncate oracle_brain_observations" not in source
+    assert "execution_impact" in source
