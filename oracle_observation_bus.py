@@ -22,7 +22,7 @@ SOURCE_SPECS = (
     ("intelligence_events", "market_intelligence", "event_time", None, "symbol"),
 )
 DEFAULT_BATCH = 500
-MAX_PAYLOAD_BYTES = 24000
+MAX_PAYLOAD_BYTES = 8000
 
 
 def _json_obj(value: Any) -> Any:
@@ -49,13 +49,27 @@ def _safe_payload(row: dict[str, Any]) -> dict[str, Any]:
         else:
             payload[key] = value
     encoded = json.dumps(payload, default=str, sort_keys=True, separators=(",", ":"))
-    if len(encoded.encode("utf-8")) <= MAX_PAYLOAD_BYTES:
+    encoded_bytes = encoded.encode("utf-8")
+    if len(encoded_bytes) <= MAX_PAYLOAD_BYTES:
         return payload
-    return {
-        "truncated": True,
-        "source_fields": sorted(payload),
-        "sha256": hashlib.sha256(encoded.encode("utf-8")).hexdigest(),
+
+    # Durable timeline: keep provenance, not a second permanent copy of every
+    # oversized analytical payload. Source tables and consolidated Brain
+    # products remain the detailed learning authorities.
+    durable_keys = {
+        "id", "market", "symbol", "recommendation", "grade", "approved",
+        "reason", "event_key", "category", "provider", "title",
+        "verification_status", "confidence", "source_url", "execution_impact",
+        "created_at", "event_time",
     }
+    compact = {key: payload[key] for key in durable_keys if key in payload}
+    compact.update({
+        "payload_compacted": True,
+        "source_fields": sorted(payload),
+        "source_payload_bytes": len(encoded_bytes),
+        "source_payload_sha256": hashlib.sha256(encoded_bytes).hexdigest(),
+    })
+    return compact
 
 
 def _event_key(source_table: str, row: dict[str, Any]) -> str:
@@ -146,6 +160,11 @@ def sync_observations(conn: Any, *, limit_per_source: int = DEFAULT_BATCH) -> di
         "status": "ok",
         "inserted": sum(counts.values()),
         "by_source": counts,
+        "payload_policy": {
+            "max_payload_bytes": MAX_PAYLOAD_BYTES,
+            "oversized_payloads": "compact provenance + sha256",
+            "historical_rows_deleted": False,
+        },
         "execution_impact": "NONE",
     }
 
