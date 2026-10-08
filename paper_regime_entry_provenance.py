@@ -158,6 +158,12 @@ def _enrich_entry_features(oracle_module: Any, signal: Any, existing: Any) -> di
         if isinstance(fallback, dict):
             for key, value in fallback.items():
                 features.setdefault(key, value)
+    # Capture only an explicit estimate carried by the entry signal. No defaults,
+    # provider guesses, or later realized fees are permitted as cost evidence.
+    cost = _finite(_runtime_signal_value(signal, "estimated_cost_pct"))
+    if cost is not None and cost >= 0:
+        features["aeve_estimated_round_trip_cost_pct"] = cost
+        features["aeve_cost_provenance"] = "entry_signal_estimate"
     return features
 
 
@@ -207,6 +213,9 @@ def install_paper_regime_entry_provenance(
             signal,
             provenance.get("feature_snapshot"),
         )
+        features = provenance["feature_snapshot"]
+        if features.get("aeve_cost_provenance") == "entry_signal_estimate":
+            features["aeve_cost_estimated_at"] = now
         return provenance
 
     wrapped._paper_regime_entry_provenance_v1 = True  # type: ignore[attr-defined]

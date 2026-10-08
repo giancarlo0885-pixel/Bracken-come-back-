@@ -111,3 +111,4 @@ jobs:
           test_paper_regime_entry_provenance.py
           test_paper_regime_entry_signal_fallback.py
           test_paper_regime_fifo_provenance.py
+          test_paper_aeve_generation_controller.py::test_postgres_generation_report_freezes_exact_membership

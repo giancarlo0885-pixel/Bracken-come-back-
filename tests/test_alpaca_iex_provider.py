@@ -64,3 +64,18 @@ class AlpacaIEXProviderTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_router_reports_read_only_failure_without_credentials(monkeypatch, caplog):
+    import logging
+    import pytest
+    import provider_router
+    def failing(*args):
+        raise AlpacaDataError("Alpaca market-data HTTP 401")
+    monkeypatch.setattr(provider_router, "iex_stock_history", failing)
+    caplog.set_level(logging.WARNING, logger=provider_router.log.name)
+    with pytest.raises(AlpacaDataError):
+        provider_router._alpaca_iex("AMD", "5d", "5m", "secret-key")
+    assert "symbol=AMD | period=5d | interval=5m" in caplog.text
+    assert "HTTP 401" in caplog.text
+    assert "secret-key" not in caplog.text
