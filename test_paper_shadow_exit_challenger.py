@@ -6,6 +6,7 @@ from pathlib import Path
 import database
 from paper_shadow_exit_challenger import (
     BrainCohortAnalyzerV4,
+    COST_MODEL_VERSION,
     CounterfactualSettlement,
     ShadowExitConstraints,
     _episode_id,
@@ -21,9 +22,10 @@ def test_counterfactual_net_r_attributes_partial_entry_fee_once():
     # A partial lot close: $0.40 entry fee plus $0.20 actual exit fee.
     item = {"entry_price": 100, "quantity": 2,
             "round_trip_fees": 0.60, "actual_exit_fees": 0.20}
-    # Simulated fill already includes every exit friction component.
-    result = _counterfactual_net_r(item, {"fill_price": 101}, 10)
-    assert abs(result - 0.16) < 1e-12
+    # Simulated execution price excludes its separately persisted exit fee.
+    result = _counterfactual_net_r(item, {"fill_price": 101,
+        "fee_contract": COST_MODEL_VERSION, "fee_pct": 0.20 / 202}, 10)
+    assert abs(result - 0.14) < 1e-12
 
 
 def test_counterfactual_missing_or_inconsistent_costs_remain_unqualified():
@@ -344,3 +346,29 @@ def test_replayed_observation_cannot_complete_three_confirmations():
             hold_ev_r=0, exit_ev_r=0.2, thesis_decay_confirmed=True), constraints)
         assert triggered is False
     assert state["evidence_persistence_counter"] == 2
+
+
+def test_research_fill_contract_is_independent_of_runtime_monkeypatch(monkeypatch):
+    import paper_execution_reality
+    def unexpected(**kwargs):
+        raise AssertionError("research must use its frozen explicit-fee contract")
+    monkeypatch.setattr(paper_execution_reality, "simulate_fill", unexpected)
+    result, fill = CounterfactualSettlement.calculate_immutable_challenger_r(
+        {"entry_price": 100, "quantity": 2}, market="crypto",
+        trigger_price=101, quote={"paper_fee_pct": 0.001}, initial_risk_usd=10,
+    )
+    assert fill["fee_contract"] == COST_MODEL_VERSION
+    assert fill["exit_fee_usd"] == fill["fill_price"] * 2 * fill["fee_pct"]
+    assert abs(result - ((fill["fill_price"] - 100) * 2 - fill["exit_fee_usd"]) / 10) < 1e-12
+    item = {"entry_price": 100, "quantity": 2,
+            "round_trip_fees": 0.60, "actual_exit_fees": 0.20}
+    assert abs(_counterfactual_net_r(item, fill, 10) - (result - 0.04)) < 1e-12
+    assert _counterfactual_net_r(item, {"fill_price": 101}, 10) is None
+
+
+def test_simulated_exit_fee_is_attributed_to_partial_quantity():
+    item = {"entry_price": 100, "quantity": 1,
+            "round_trip_fees": 0.30, "actual_exit_fees": 0.10}
+    fill = {"fill_price": 101, "fee_pct": 0.001,
+            "fee_contract": COST_MODEL_VERSION, "exit_fee_usd": 0.202}
+    assert abs(_counterfactual_net_r(item, fill, 10) - 0.0699) < 1e-12
