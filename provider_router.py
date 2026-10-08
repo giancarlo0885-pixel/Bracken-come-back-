@@ -968,6 +968,9 @@ def route_history(
             ("Alpha Vantage", "ALPHA_VANTAGE_API_KEY", _alpha),
         ]
 
+    if asset_class == "international_equity":
+        routes = [route for route in routes if route[0] != "Alpaca IEX"]
+
     for provider, key_name, function in _ranked_history_routes(routes, capability):
         if not capability_available(provider, capability):
             attempts.append(ProviderAttempt(provider, False, 0, "capability_cooldown_or_unsupported"))
