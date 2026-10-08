@@ -365,4 +365,4 @@ def test_brain_visual_uses_lateral_anatomy_and_mobile_centering():
     assert "const cerebellum=" in component
     assert "function cerebellumPath()" in component
     assert "function brainStemPath()" in component
-    assert "transform:scale(.92)" in component
+    assert "#brain{transform:none}" in component

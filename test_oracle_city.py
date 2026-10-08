@@ -358,7 +358,8 @@ def test_oracle_city_mobile_layout_suppresses_label_collisions_and_resets_camera
     assert "@media(max-width:720px)" in rendered
     assert ".legend,.minimap,.label{display:none}" in rendered
     assert 'window.matchMedia("(max-width:720px)")' in rendered
-    assert "camera.position.set(2.5,46,46)" in rendered
+    assert "const hFov=2*Math.atan(Math.tan(THREE.MathUtils.degToRad(62)/2)*aspect);" in rendered
+    assert "camera.position.set(2.5,Math.max(36,distance*.65),distance)" in rendered
     assert "camera.fov=62" in rendered
     assert "lastMobileView" in rendered
     assert "min-height:44px" in rendered
@@ -591,6 +592,7 @@ def test_oracle_city_mobile_camera_fits_portrait_and_ignores_stale_saved_view():
     rendered = render_oracle_city_component({"nodes": [], "flows": [], "replay": []})
     assert 'const CITY_VIEW_STORAGE_KEY="oracle-city-view-v3"' in rendered
     assert "if(mobileView())return false;" in rendered
-    assert "camera.position.set(2.5,46,46)" in rendered
+    assert "const hFov=2*Math.atan(Math.tan(THREE.MathUtils.degToRad(62)/2)*aspect);" in rendered
+    assert "camera.position.set(2.5,Math.max(36,distance*.65),distance)" in rendered
     assert "camera.fov=62" in rendered
     assert "camera.updateProjectionMatrix();" in rendered

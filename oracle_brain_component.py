@@ -115,7 +115,7 @@ html,body{margin:0;background:#03060b;color:#eef8ff;font-family:Inter,ui-sans-se
 #hover.show{display:block}#hover b{display:block;font-size:11px}#hover span{display:block;font-size:9px;color:#a7bdca;margin-top:3px;line-height:1.35}
 @media(max-width:720px){
  #wrap{height:610px;border-radius:16px}
- #brain{transform:scale(.92);transform-origin:50% 52%}
+ #brain{transform:none}
  .status{left:8px;top:8px;max-width:205px;padding:8px 9px}.status .state{font-size:14px}.status .sub{font-size:9px}
  .metrics{right:8px;top:8px;grid-template-columns:1fr;max-width:145px}.metric{padding:6px 7px}.metric b{font-size:11px}.metric span{font-size:7px}
  .legend{left:8px;right:8px;bottom:8px;font-size:8px}.tip{display:none}
