@@ -92,6 +92,8 @@ def iex_stock_history(symbol: str, period: str, interval: str) -> pd.DataFrame:
     frame = frame[~frame.index.duplicated(keep="last")].sort_index()
     if frame.empty or (frame[["Open", "High", "Low", "Close"]] <= 0).any().any():
         raise AlpacaDataError("Alpaca returned invalid candle values")
+    if (frame["High"] < frame[["Open", "Close", "Low"]].max(axis=1)).any() or (frame["Low"] > frame[["Open", "Close", "High"]].min(axis=1)).any() or (frame["Volume"] < 0).any():
+        raise AlpacaDataError("Alpaca returned inconsistent OHLCV candles")
     frame.attrs["provider"] = "Alpaca IEX"
     frame.attrs["requested_symbol"] = symbol
     frame.attrs["provider_symbol"] = symbol
