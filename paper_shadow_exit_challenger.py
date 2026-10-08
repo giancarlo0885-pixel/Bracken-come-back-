@@ -28,7 +28,7 @@ import pandas as pd
 
 log = logging.getLogger("paper-shadow-exit-challenger")
 
-MODEL_VERSION = "shadow-exit-v5-explicit-fee-evidence"
+MODEL_VERSION = "shadow-exit-v6-decision-time-evidence"
 COST_MODEL_VERSION = "explicit-paper-fill-fees-v2"
 GENERATION = 3
 _SCHEMA_LOCK = "garibaldi_shadow_exit_schema_v2"
@@ -307,15 +307,17 @@ def _latest_signal(conn: Any, market: str, symbol: str) -> dict[str, Any] | None
     from paper_strategy_economics import expected_edge_pct
     edge = expected_edge_pct(payload)
     if edge is None:
+        # Only evidence available at the signal decision time is admissible.
+        # A forecast attached later cannot retroactively qualify the signal.
         forecast = conn.execute(
             """
             SELECT expected_move_pct,created_at
             FROM forecasts
             WHERE market=%s AND symbol=%s AND signal_id=%s
               AND NULLIF(created_at,'')::timestamptz <= %s
-            ORDER BY id DESC LIMIT 1
+            ORDER BY NULLIF(created_at,'')::timestamptz DESC, id DESC LIMIT 1
             """,
-            (market, symbol, item.get("id"), datetime.now(timezone.utc)),
+            (market, symbol, item.get("id"), item["created_at"]),
         ).fetchone()
         if forecast and forecast.get("expected_move_pct") is not None:
             edge = _num(forecast.get("expected_move_pct"), float("nan"))

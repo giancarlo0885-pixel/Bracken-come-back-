@@ -348,6 +348,66 @@ def test_replayed_observation_cannot_complete_three_confirmations():
     assert state["evidence_persistence_counter"] == 2
 
 
+def test_latest_signal_forecast_cannot_use_post_signal_information():
+    decision_time = datetime(2026, 10, 2, 12, 0, tzinfo=timezone.utc)
+    queries = []
+
+    class Result:
+        def __init__(self, row):
+            self.row = row
+
+        def fetchone(self):
+            return self.row
+
+    class Conn:
+        def execute(self, sql, params=()):
+            queries.append((sql, params))
+            if "FROM signals" in sql:
+                return Result({
+                    "id": 101, "market": "crypto", "symbol": "BTC-USD",
+                    "price": 100.0, "score": 80.0, "action": "HOLD",
+                    "confidence": 0.7, "details": "{}",
+                    "created_at": decision_time,
+                })
+            assert "FROM forecasts" in sql
+            assert params[-1] == decision_time
+            assert "ORDER BY NULLIF(created_at,'')::timestamptz DESC" in sql
+            # No qualifying forecast existed as of the signal decision.
+            return Result(None)
+
+    signal = _latest_signal(Conn(), "crypto", "BTC-USD")
+    assert signal is not None
+    assert signal["expected_edge_pct"] is None
+    assert len(queries) == 2
+
+
+def test_latest_signal_uses_only_preexisting_linked_forecast():
+    decision_time = datetime(2026, 10, 2, 12, 0, tzinfo=timezone.utc)
+
+    class Result:
+        def __init__(self, row):
+            self.row = row
+
+        def fetchone(self):
+            return self.row
+
+    class Conn:
+        def execute(self, sql, params=()):
+            if "FROM signals" in sql:
+                return Result({
+                    "id": 101, "market": "crypto", "symbol": "BTC-USD",
+                    "price": 100.0, "score": 80.0, "action": "HOLD",
+                    "confidence": 0.7, "details": "{}",
+                    "created_at": decision_time,
+                })
+            assert params[-1] == decision_time
+            return Result({"expected_move_pct": -0.3, "created_at": decision_time - timedelta(seconds=1)})
+
+    signal = _latest_signal(Conn(), "crypto", "BTC-USD")
+    assert signal["expected_edge_pct"] == -0.3
+    assert signal["payload"]["edge_provenance"] == "exact_signal_forecast_expected_move_pct"
+
+
 def test_research_fill_contract_is_independent_of_runtime_monkeypatch(monkeypatch):
     import paper_execution_reality
     def unexpected(**kwargs):
@@ -372,3 +432,23 @@ def test_simulated_exit_fee_is_attributed_to_partial_quantity():
     fill = {"fill_price": 101, "fee_pct": 0.001,
             "fee_contract": COST_MODEL_VERSION, "exit_fee_usd": 0.202}
     assert abs(_counterfactual_net_r(item, fill, 10) - 0.0699) < 1e-12
+
+
+def test_postgres_forecast_cutoff_and_timestamp_order():
+    import os
+    import pytest
+    import psycopg
+    from psycopg.rows import dict_row
+    url = os.getenv("DATABASE_URL", "")
+    if not url:
+        pytest.skip("PostgreSQL integration only")
+    decision = datetime(2026, 10, 2, 12, 0, tzinfo=timezone.utc)
+    with psycopg.connect(url, row_factory=dict_row) as conn:
+        conn.execute("CREATE TEMP TABLE signals(id bigint,market text,symbol text,price float8,score float8,action text,confidence float8,details text,created_at text)")
+        conn.execute("CREATE TEMP TABLE forecasts(id bigint,market text,symbol text,signal_id bigint,expected_move_pct float8,created_at text)")
+        conn.execute("INSERT INTO signals VALUES (101,'crypto','BTC-USD',100,80,'HOLD',0.7,'{}',%s)", (decision.isoformat(),))
+        conn.execute("INSERT INTO forecasts VALUES (999,'crypto','BTC-USD',101,9,%s)", ((decision + timedelta(seconds=1)).isoformat(),))
+        assert _latest_signal(conn, "crypto", "BTC-USD")["expected_edge_pct"] is None
+        conn.execute("INSERT INTO forecasts VALUES (50,'crypto','BTC-USD',101,-0.3,%s),(100,'crypto','BTC-USD',101,5,%s),(1000,'crypto','OTHER-USD',101,8,%s),(1001,'crypto','BTC-USD',102,7,%s)",
+                     ((decision - timedelta(seconds=1)).isoformat(), (decision - timedelta(seconds=2)).isoformat(), decision.isoformat(), decision.isoformat()))
+        assert _latest_signal(conn, "crypto", "BTC-USD")["expected_edge_pct"] == -0.3
