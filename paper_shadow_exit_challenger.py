@@ -293,7 +293,7 @@ def _latest_signal(conn: Any, market: str, symbol: str) -> dict[str, Any] | None
         FROM signals
         WHERE market=%s AND symbol=%s
           AND NULLIF(created_at,'')::timestamptz <= %s
-        ORDER BY id DESC
+        ORDER BY NULLIF(created_at,'')::timestamptz DESC, id DESC
         LIMIT 1
         """,
         (market, symbol, datetime.now(timezone.utc)),
