@@ -109,3 +109,15 @@ def test_tiny_unmatched_fill_cannot_pass_dollar_tolerance():
     report = reconcile_fifo([sell("tiny", 0.00000001, 100, 101, 0, 0.00000001)])
     assert report["qualified_fifo_closes"] == 0
     assert report["closes"][0]["net_pnl"] is None
+
+
+def test_post_exit_signal_samples_require_observed_identity_and_time():
+    from paper_exit_research import signal_price_samples
+    base = dict(market="crypto", symbol="TEST-USD", price=110,
+                details={"quote_verified": True, "symbol": "TEST-USD", "quote_timestamp": START.isoformat()})
+    rows = [base, {**base, "details": {**base["details"], "symbol": "OTHER-USD"}},
+            {**base, "details": {**base["details"], "quote_timestamp": (START + timedelta(days=2)).isoformat()}},
+            {**base, "details": {"quote_verified": True, "symbol": "TEST-USD"}}]
+    samples = signal_price_samples(rows, START + timedelta(days=1))
+    assert len(samples[("crypto", "TEST-USD")]) == 1
+    assert samples[("crypto", "TEST-USD")][0]["price"] == 110

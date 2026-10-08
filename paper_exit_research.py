@@ -56,6 +56,32 @@ def observed_path(samples: list[dict[str, Any]], start: datetime, end: datetime,
             "mfe_pct": max(0.0, max(returns)), "mae_pct": min(0.0, min(returns))}
 
 
+def signal_price_samples(rows: list[dict[str, Any]], as_of: datetime) -> dict[tuple[str, str], list[dict[str, Any]]]:
+    """Recover observed post-exit prices from independently continuing scans."""
+    result = defaultdict(list)
+    for row in rows:
+        payload = row.get("details") or {}
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except ValueError:
+                continue
+        if not isinstance(payload, dict):
+            continue
+        route = payload.get("market_data_route") or {}
+        quote = {**(route if isinstance(route, dict) else {}), **payload}
+        observed = timestamp(quote.get("quote_timestamp") or quote.get("source_quote_timestamp"))
+        symbol = str(row.get("symbol") or "").upper()
+        requested = str(quote.get("requested_symbol") or quote.get("symbol") or "").upper()
+        price = number(row.get("price"))
+        if (quote.get("quote_verified") is not True or not symbol or requested != symbol
+                or observed is None or observed > as_of or price is None or price <= 0):
+            continue
+        result[(row["market"], symbol)].append({"observed_at": observed, "price": float(price),
+                                               "source": "persisted_verified_signal_quote"})
+    return result
+
+
 def clustered_expectancy_ci(rows: list[dict[str, Any]]) -> list[float | None]:
     """Resample whole dependence windows, keeping the trade-weighted estimand."""
     import numpy as np
@@ -294,6 +320,13 @@ def emit_reconciliation(market: str) -> dict[str, Any]:
                 (market, min(timestamp(r["entry_time"]) for r in sells), datetime.now(timezone.utc))).fetchall())
             for sample in samples[:50000]:
                 prices[(market, sample["symbol"])].append(dict(sample))
+            signals = list(conn.execute("""SELECT market,symbol,price,details FROM signals
+                WHERE market=%s AND NULLIF(created_at,'')::timestamptz >= %s
+                  AND NULLIF(created_at,'')::timestamptz <= %s
+                ORDER BY id DESC LIMIT 6000""", (market, min(timestamp(r["entry_time"]) for r in sells),
+                                                   datetime.now(timezone.utc))).fetchall())
+            for key, observations in signal_price_samples([dict(r) for r in signals], datetime.now(timezone.utc)).items():
+                prices[key].extend(observations)
         else:
             samples = []
         report = reconcile_fifo([dict(r) for r in fills], metrics, prices)
