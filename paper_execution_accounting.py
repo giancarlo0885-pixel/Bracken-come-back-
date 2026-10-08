@@ -486,12 +486,14 @@ def install_paper_execution_accounting(market_worker_module: Any | None = None) 
         price = max(0.0, _finite(kwargs.get("price")))
         kwargs["fees"] = quantity * price * fee_pct
         rows = original_record_sell(conn, **kwargs)
-        context.setdefault("closed_outcomes", {})[(str(kwargs.get("market")), str(kwargs.get("symbol")))] = _closed_lot_memory_outcome(rows)
+        position = kwargs.get("position") or {}
+        symbol = str(position.get("symbol") or kwargs.get("symbol") or "").upper().strip()
+        context.setdefault("closed_outcomes", {})[(str(kwargs.get("market")), symbol)] = _closed_lot_memory_outcome(rows)
         return rows
 
     def fee_aware_memory(**kwargs: Any):
         context = _fee_context.get()
-        outcome = context.get("closed_outcomes", {}).get((str(kwargs.get("market")), str(kwargs.get("symbol"))))
+        outcome = context.get("closed_outcomes", {}).get((str(kwargs.get("market")), str(kwargs.get("symbol") or "").upper().strip()))
         quantity = _finite(kwargs.get("quantity"), float("nan"))
         if (outcome is None or not math.isfinite(quantity)
                 or abs(quantity - outcome["quantity"]) > max(1e-9, abs(quantity) * 1e-9)):
