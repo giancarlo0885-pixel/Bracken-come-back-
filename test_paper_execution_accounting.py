@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pytest
+
 import paper_broker
 from paper_execution_accounting import (
     _fill_capacity,
@@ -99,3 +101,41 @@ def test_live_worker_does_not_install_paper_fill_layer():
     for filename in ("stock_worker.py", "crypto_worker.py", "worker.py"):
         source = (Path(__file__).parent / filename).read_text()
         assert 'os.getenv("EXECUTION_MODE", "paper").strip().lower() == "paper"' in source
+
+
+@pytest.mark.parametrize("side", ["BUY", "SELL"])
+def test_persisted_fill_audit_uses_completed_trade_price(monkeypatch, side):
+    import database
+    from paper_execution_accounting import _record_order_and_fill
+    statements = []
+    class Conn:
+        def __enter__(self): return self
+        def __exit__(self, *args): return False
+        def execute(self, sql, params): statements.append((sql, params))
+    monkeypatch.setattr(database, "connect", lambda: Conn())
+    fill = _simulate_fill_explicit_fee(side=side, market="crypto", reference_price=100,
+                                      order_value=500, fee_pct=0.001)
+    actual_price = fill.fill_price + 0.05
+    trade = {"price": actual_price, "quantity": 2, "value": actual_price * 2}
+    _record_order_and_fill(market="crypto", symbol="TEST-USD", side=side,
+                          requested_notional=500, trade=trade, fill=fill,
+                          fee_amount=trade["value"] * 0.001, quote={}, reason="entry")
+    order, persisted = statements
+    assert "INSERT INTO paper_orders" in order[0]
+    assert order[1][12] == actual_price
+    assert "INSERT INTO paper_fills" in persisted[0]
+    assert persisted[1][7] == actual_price
+    assert persisted[1][8] == actual_price * persisted[1][5]
+    assert persisted[1][9] == trade["value"] * 0.001
+
+
+def test_missing_completed_trade_price_cannot_invent_fill_audit(monkeypatch):
+    import database
+    from paper_execution_accounting import _record_order_and_fill
+    def forbidden(): raise AssertionError("missing execution price must not be simulated")
+    monkeypatch.setattr(database, "connect", forbidden)
+    fill = _simulate_fill_explicit_fee(side="SELL", market="crypto", reference_price=100)
+    for price in (None, 0, float("nan")):
+        _record_order_and_fill(market="crypto", symbol="TEST-USD", side="SELL",
+                              requested_notional=100, trade={"price": price, "quantity": 1, "value": 100},
+                              fill=fill, fee_amount=0.1, quote={}, reason="exit")

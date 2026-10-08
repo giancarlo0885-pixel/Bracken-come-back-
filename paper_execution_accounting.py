@@ -334,6 +334,13 @@ def _record_order_and_fill(
     filled_quantity = max(0.0, _finite(trade.get("quantity")))
     if filled_notional <= 0 or filled_quantity <= 0:
         return
+    # This is an audit of a completed execution, not a second execution.
+    # The caller's reconstructed simulation can differ because its notional
+    # is the filled size rather than the originally requested size.
+    executed_price = _positive(trade.get("price"))
+    if executed_price is None:
+        log.warning("Paper fill audit unavailable: completed trade has no valid execution price")
+        return
     requested = max(filled_notional, _finite(requested_notional, filled_notional))
     requested_qty = requested / fill.reference_price if fill.reference_price > 0 else filled_quantity
     remaining_notional = max(0.0, requested - filled_notional)
@@ -361,7 +368,7 @@ def _record_order_and_fill(
                     order_id, market, symbol, side, status,
                     requested_qty, requested, filled_quantity, filled_notional,
                     remaining_quantity, remaining_notional, fill.reference_price,
-                    fill.fill_price, fee_amount, fill.fee_pct, fill.liquidity_value,
+                    executed_price, fee_amount, fill.fee_pct, fill.liquidity_value,
                     fill.participation_rate, data.get("provider"),
                     data.get("quote_timestamp") or data.get("timestamp"), reason, now, now,
                 ),
@@ -376,7 +383,7 @@ def _record_order_and_fill(
                 """,
                 (
                     fill_id, order_id, market, symbol, side, filled_quantity,
-                    fill.reference_price, fill.fill_price, filled_notional, fee_amount,
+                    fill.reference_price, executed_price, filled_notional, fee_amount,
                     fill.fee_pct, fill.slippage_pct, fill.spread_pct,
                     fill.market_impact_pct, fill.latency_pct, data.get("provider"),
                     data.get("quote_timestamp") or data.get("timestamp"), now,
