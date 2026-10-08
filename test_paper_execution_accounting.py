@@ -169,17 +169,18 @@ def test_runtime_brain_handoff_charges_entry_and_exit_fees_once(monkeypatch):
     lot = PositionLot(lot_id="lot", symbol="TEST-USD", market="crypto", bucket="Tactical", strategy="test",
                       opened_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
                       quantity_opened=2, quantity_remaining=2, entry_price=100, entry_fees=2)
-    def attribution(conn, **kwargs):
+    def attribution(conn, *, market, position, quantity, price, fees, **kwargs):
+        assert position["symbol"] == "TEST-USD"
         return [row.to_dict() for row in fee_aware_fifo_close_lots(
-            [lot], quantity=kwargs["quantity"], exit_price=kwargs["price"],
-            exit_time=datetime(2026, 1, 2, tzinfo=timezone.utc), fees=kwargs["fees"])]
+            [lot], quantity=quantity, exit_price=price,
+            exit_time=datetime(2026, 1, 2, tzinfo=timezone.utc), fees=fees)]
     fake = SimpleNamespace(allocate_purchase=lambda **kwargs: None, allocate_sale=lambda **kwargs: None,
                            _record_buy_attribution=lambda *args, **kwargs: None,
                            _record_sell_attribution=attribution,
                            record_closed_trade_memory=lambda **kwargs: saved.append(kwargs),
                            _buy=lambda *args, **kwargs: None)
     def close(market, position, price, reason, **kwargs):
-        fake._record_sell_attribution(None, market=market, symbol=position["symbol"], quantity=1, price=price)
+        fake._record_sell_attribution(None, market=market, position=position, quantity=1, price=price)
         fake.record_closed_trade_memory(market=market, symbol=position["symbol"], quantity=1,
                                        exit_price=price, pnl=1, position=position, exit_reason=reason)
         return True
