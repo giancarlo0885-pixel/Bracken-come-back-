@@ -240,6 +240,8 @@ def fee_aware_fifo_close_lots(
                 fees=round(exit_fee_allocated, 10),
                 net_pnl=round(sell_net, 10),
                 return_pct=round(return_pct, 10),
+                round_trip_net_pnl=round(round_trip_net, 10),
+                entry_cost_basis=entry_cost_basis,
                 tier=tier,
                 confidence_score=confidence_score,
                 weighted_signal_score=weighted_signal_score,

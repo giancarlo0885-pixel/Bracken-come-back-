@@ -255,6 +255,8 @@ def _fee_aware_fifo_close_lots(
                 fees=round(total_fees, 10),
                 net_pnl=round(net, 10),
                 return_pct=round(return_pct, 10),
+                round_trip_net_pnl=round(net, 10),
+                entry_cost_basis=entry_cost_basis,
                 tier=tier,
                 confidence_score=confidence_score,
                 weighted_signal_score=weighted_signal_score,
@@ -393,6 +395,25 @@ def _record_order_and_fill(
         log.warning("Paper order/fill audit persistence failed: %s", exc)
 
 
+def _closed_lot_memory_outcome(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Use full-cost FIFO outcomes, keeping SELL ledger net semantics separate."""
+    if not rows:
+        return None
+    totals = {"quantity": 0.0, "net_pnl": 0.0, "entry_cost_basis": 0.0}
+    for row in rows:
+        qty = _finite(row.get("quantity"), float("nan"))
+        net = _finite(row.get("round_trip_net_pnl"), float("nan"))
+        basis = _finite(row.get("entry_cost_basis"), float("nan"))
+        if (row.get("side") != "SELL" or row.get("broker_mode") != "PAPER"
+                or row.get("account_environment") != "PAPER"
+                or not all(math.isfinite(v) for v in (qty, net, basis)) or qty <= 0 or basis <= 0):
+            return None
+        totals["quantity"] += qty
+        totals["net_pnl"] += net
+        totals["entry_cost_basis"] += basis
+    return {**totals, "cost_provenance": "exact_fifo_round_trip_v1"}
+
+
 def install_paper_execution_accounting(market_worker_module: Any | None = None) -> None:
     """Install explicit fee accounting and conservative IOC partial-fill caps.
 
@@ -464,15 +485,24 @@ def install_paper_execution_accounting(market_worker_module: Any | None = None) 
         quantity = max(0.0, _finite(kwargs.get("quantity")))
         price = max(0.0, _finite(kwargs.get("price")))
         kwargs["fees"] = quantity * price * fee_pct
-        return original_record_sell(conn, **kwargs)
+        rows = original_record_sell(conn, **kwargs)
+        context.setdefault("closed_outcomes", {})[(str(kwargs.get("market")), str(kwargs.get("symbol")))] = _closed_lot_memory_outcome(rows)
+        return rows
 
     def fee_aware_memory(**kwargs: Any):
         context = _fee_context.get()
-        fee_pct = max(0.0, _finite(context.get("sell_fee_pct")))
-        quantity = max(0.0, _finite(kwargs.get("quantity")))
-        exit_price = max(0.0, _finite(kwargs.get("exit_price")))
-        kwargs["pnl"] = _finite(kwargs.get("pnl")) - quantity * exit_price * fee_pct
-        return original_memory(**kwargs)
+        outcome = context.get("closed_outcomes", {}).get((str(kwargs.get("market")), str(kwargs.get("symbol"))))
+        quantity = _finite(kwargs.get("quantity"), float("nan"))
+        if (outcome is None or not math.isfinite(quantity)
+                or abs(quantity - outcome["quantity"]) > max(1e-9, abs(quantity) * 1e-9)):
+            log.warning("Paper Brain outcome unavailable: missing exact full-cost FIFO close")
+            return False
+        kwargs["pnl"] = outcome["net_pnl"]
+        kwargs["canonical_outcome"] = outcome
+        recorded = original_memory(**kwargs)
+        log.info("PAPER BRAIN COST OUTCOME | market=%s | symbol=%s | net_pnl=%.10f | entry_cost_basis=%.10f | recorded=%s | cost_provenance=exact_fifo_round_trip_v1",
+                 kwargs.get("market"), kwargs.get("symbol"), outcome["net_pnl"], outcome["entry_cost_basis"], bool(recorded))
+        return recorded
 
     oracle_bot.allocate_purchase = fee_aware_purchase
     oracle_bot.allocate_sale = fee_aware_sale
@@ -627,6 +657,6 @@ def install_paper_execution_accounting(market_worker_module: Any | None = None) 
     oracle_bot._execute_close_position = accounting_close
     oracle_bot._paper_execution_accounting_installed = True
     log.info(
-        "Installed explicit paper fee accounting and IOC partial-fill cap | max_participation=%.4f%%",
+        "Installed explicit paper fee accounting and IOC partial-fill cap | brain_cost_provenance=exact_fifo_round_trip_v1 | max_participation=%.4f%%",
         min(0.01, max(0.0001, _env_float("PAPER_FILL_MAX_PARTICIPATION_PCT", 0.0025))) * 100.0,
     )

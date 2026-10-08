@@ -1,4 +1,5 @@
 import json
+import pytest
 from datetime import datetime, timezone
 
 from market_memory import assess_market_memory, feature_vector, record_closed_trade_memory, setup_similarity
@@ -53,7 +54,8 @@ def test_oracle_exposes_market_memory_adjustment():
     assert "memory" in decision.to_dict()
 
 
-def test_closed_trade_memory_uses_immutable_entry_decision_not_later_symbol_decision(monkeypatch):
+@pytest.mark.parametrize("canonical", [False, True])
+def test_closed_trade_memory_uses_immutable_entry_decision_not_later_symbol_decision(monkeypatch, canonical):
     inserted = {}
 
     class Result:
@@ -109,6 +111,8 @@ def test_closed_trade_memory_uses_immutable_entry_decision_not_later_symbol_deci
         pnl=10,
         exit_reason="unit close",
         quantity=1,
+        canonical_outcome={"quantity": 1, "entry_cost_basis": 101, "net_pnl": -0.5,
+                           "cost_provenance": "exact_fifo_round_trip_v1"} if canonical else None,
         entry_provenance={
             "entry_decision_id": "decision-A",
             "entry_signal_id": "signal-A",
@@ -125,3 +129,9 @@ def test_closed_trade_memory_uses_immutable_entry_decision_not_later_symbol_deci
     assert payload["features"] == {"alpha": 0.20, "momentum_20d": 0.10}
     assert "decision-B" not in json.dumps(payload)
     assert params[-5:] == ("decision-A", "signal-A", "forecast-A", "quote-A", "corr-A")
+
+    if canonical:
+        assert params[17] == -0.5
+        assert payload["entry_value"] == 101
+        assert payload["return_pct"] == -0.5 / 101
+        assert payload["cost_provenance"] == "exact_fifo_round_trip_v1"
