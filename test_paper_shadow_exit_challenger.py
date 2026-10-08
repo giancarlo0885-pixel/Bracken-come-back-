@@ -9,11 +9,32 @@ from paper_shadow_exit_challenger import (
     CounterfactualSettlement,
     ShadowExitConstraints,
     _episode_id,
+    _counterfactual_net_r,
     _latest_signal,
     _lot_risk_context,
     _open_position_risk_context,
     evaluate_forward_evidence_layer,
 )
+
+
+def test_counterfactual_net_r_attributes_partial_entry_fee_once():
+    # A partial lot close: $0.40 entry fee plus $0.20 actual exit fee.
+    item = {"entry_price": 100, "quantity": 2,
+            "round_trip_fees": 0.60, "actual_exit_fees": 0.20}
+    # Simulated fill already includes every exit friction component.
+    result = _counterfactual_net_r(item, {"fill_price": 101}, 10)
+    assert abs(result - 0.16) < 1e-12
+
+
+def test_counterfactual_missing_or_inconsistent_costs_remain_unqualified():
+    item = {"entry_price": 100, "quantity": 2,
+            "round_trip_fees": 0.60, "actual_exit_fees": 0.20}
+    for invalid in (None, float("nan"), -1, 0.1):
+        assert _counterfactual_net_r(
+            {**item, "round_trip_fees": invalid}, {"fill_price": 101}, 10
+        ) is None
+    assert _counterfactual_net_r(item, {}, 10) is None
+    assert _counterfactual_net_r(item, {"fill_price": 101}, 0) is None
 
 
 def test_forward_evidence_requires_distinct_market_observations():

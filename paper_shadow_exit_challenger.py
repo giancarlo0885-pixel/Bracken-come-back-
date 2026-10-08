@@ -28,7 +28,7 @@ import pandas as pd
 
 log = logging.getLogger("paper-shadow-exit-challenger")
 
-MODEL_VERSION = "shadow-exit-v2-exact-risk"
+MODEL_VERSION = "shadow-exit-v3-entry-cost"
 COST_MODEL_VERSION = "paper_execution_reality.simulate_fill-v1"
 GENERATION = 2
 _SCHEMA_LOCK = "garibaldi_shadow_exit_schema_v2"
@@ -754,6 +754,24 @@ def _matching_trigger(
     candidates.sort(key=lambda item: item[0])
     return candidates[0][1]
 
+def _counterfactual_net_r(item: dict[str, Any], fill: dict[str, Any], risk: float) -> float | None:
+    """The simulated SELL price already includes exit fees and slippage.
+
+    Subtract only the canonical, quantity-attributed entry fee. Never reuse
+    the actual exit fee for an alternative exit, or subtract simulated fees twice.
+    """
+    total = _num(item.get("round_trip_fees"), float("nan"))
+    exit_fee = _num(item.get("actual_exit_fees"), float("nan"))
+    price = _num(fill.get("fill_price"))
+    entry = _num(item.get("entry_price"))
+    quantity = abs(_num(item.get("quantity")))
+    if (not math.isfinite(total) or not math.isfinite(exit_fee)
+            or exit_fee < 0 or total < exit_fee or price <= 0
+            or entry <= 0 or quantity <= 0 or risk <= 0):
+        return None
+    return ((price - entry) * quantity - (total - exit_fee)) / risk
+
+
 def finalize_closed_trades(market: str, limit: int = 250) -> int:
     if not active():
         return 0
@@ -761,6 +779,8 @@ def finalize_closed_trades(market: str, limit: int = 250) -> int:
     from database import connect
 
     created = 0
+    exclusions = {"invalid_identity_or_quantity": 0, "invalid_risk": 0,
+                  "no_matched_trigger": 0, "unavailable_fill_or_costs": 0}
     with connect() as conn:
         epoch = conn.execute(
             "SELECT started_at FROM garibaldi_shadow_exit_epochs WHERE model_version=%s",
@@ -777,7 +797,8 @@ def finalize_closed_trades(market: str, limit: int = 250) -> int:
                        m.entry_time,m.exit_time,m.entry_price,m.exit_price,
                        m.round_trip_net_pnl,m.round_trip_fees,m.cost_provenance,
                        m.mfe_pct,m.mae_pct,m.excursion_sample_count,
-                       l.quantity,l.order_id,l.feature_snapshot,l.risk_snapshot
+                       l.quantity,l.order_id,l.feature_snapshot,l.risk_snapshot,
+                       l.fees AS actual_exit_fees
                 FROM paper_regime_trade_metrics m
                 JOIN trade_ledger l ON l.trade_id=m.trade_id
                 WHERE m.market=%s
@@ -807,9 +828,11 @@ def finalize_closed_trades(market: str, limit: int = 250) -> int:
             entry_price = _num(item.get("entry_price"))
             quantity = abs(_num(item.get("quantity")))
             if not trade_id or not symbol or entry_price <= 0 or quantity <= 0:
+                exclusions["invalid_identity_or_quantity"] += 1
                 continue
             initial_risk_usd, initial_risk_pct, risk_basis_source = _lot_risk_context(item)
             if initial_risk_usd <= 0 or initial_risk_pct <= 0:
+                exclusions["invalid_risk"] += 1
                 continue
 
             actual_r = _num(item.get("round_trip_net_pnl")) / initial_risk_usd
@@ -822,20 +845,20 @@ def finalize_closed_trades(market: str, limit: int = 250) -> int:
             )
             if trigger:
                 fill = _json_obj(trigger.get("counterfactual_fill"))
-                counterfactual_fill_price = _num(fill.get("fill_price"))
-                if counterfactual_fill_price > 0:
-                    challenger_r = (
-                        (counterfactual_fill_price - entry_price) * quantity
-                    ) / initial_risk_usd
+                counterfactual_r = _counterfactual_net_r(item, fill, initial_risk_usd)
+                if counterfactual_r is not None:
+                    challenger_r = counterfactual_r
                     challenger_exit_type = "FORWARD_EVIDENCE_EXIT"
                     pending_key = str(trigger.get("_pending_position_key") or "")
                     if pending_key:
                         consumed_pending_keys.add(pending_key)
                 else:
+                    exclusions["unavailable_fill_or_costs"] += 1
                     challenger_r = actual_r
                     challenger_exit_type = "COUNTERFACTUAL_FILL_UNAVAILABLE"
                 confidence_bucket = _confidence_bucket(trigger.get("confidence"))
             else:
+                exclusions["no_matched_trigger"] += 1
                 challenger_r = actual_r
                 challenger_exit_type = "ACTUAL_EXIT_FALLBACK"
                 confidence_bucket = _confidence_bucket(_json_obj(item.get("feature_snapshot")).get("confidence"))
@@ -908,6 +931,11 @@ def finalize_closed_trades(market: str, limit: int = 250) -> int:
             )
             with _STATE_LOCK:
                 _POSITION_STATE.pop(pending_key, None)
+    log.info(
+        "SHADOW EXIT FINALIZATION | market=%s | exact_cost_candidates=%s | "
+        "processed=%s | exclusions=%s | execution_impact=NONE",
+        normalized_market, len(rows), created, json.dumps(exclusions, sort_keys=True),
+    )
     return created
 
 
@@ -1149,12 +1177,13 @@ def emit_summary(market: str) -> None:
             return
         low, high = report.get("bootstrap_delta_ci", (float("nan"), float("nan")))
         log.info(
-            "SHADOW EXIT EVIDENCE | market=%s | trades=%s | episodes=%s | mean_delta_r=%s | "
+            "SHADOW EXIT EVIDENCE | market=%s | trades=%s | episodes=%s | observed_trades=%s | mean_delta_r=%s | "
             "ci_low=%s | ci_high=%s | promotion_evidence_ready=%s | execution_impact=NONE | "
             "promotion_action=NONE | live_trading=DISARMED",
             report.get("market"),
             report.get("trade_count", 0),
             report.get("episode_count", 0),
+            report.get("observed_trade_count", 0),
             report.get("paired_mean_delta_r", 0.0),
             low,
             high,
