@@ -12,6 +12,7 @@ PLAN_LIMIT_COOLDOWN_SECONDS = 24 * 60 * 60
 
 
 CAPABILITY_MATRIX: dict[str, dict[str, bool]] = {
+    "Alpaca IEX": {"intraday_history": True, "daily_history": True, "us_history": True, "crypto": False},
     "Polygon": {
         "live_quotes": True,
         "intraday_history": True,
