@@ -344,3 +344,63 @@ def test_replayed_observation_cannot_complete_three_confirmations():
             hold_ev_r=0, exit_ev_r=0.2, thesis_decay_confirmed=True), constraints)
         assert triggered is False
     assert state["evidence_persistence_counter"] == 2
+
+
+def test_latest_signal_forecast_cannot_use_post_signal_information():
+    decision_time = datetime(2026, 10, 2, 12, 0, tzinfo=timezone.utc)
+    queries = []
+
+    class Result:
+        def __init__(self, row):
+            self.row = row
+
+        def fetchone(self):
+            return self.row
+
+    class Conn:
+        def execute(self, sql, params=()):
+            queries.append((sql, params))
+            if "FROM signals" in sql:
+                return Result({
+                    "id": 101, "market": "crypto", "symbol": "BTC-USD",
+                    "price": 100.0, "score": 80.0, "action": "HOLD",
+                    "confidence": 0.7, "details": "{}",
+                    "created_at": decision_time,
+                })
+            assert "FROM forecasts" in sql
+            assert params[-1] == decision_time
+            assert "ORDER BY NULLIF(created_at,'')::timestamptz DESC" in sql
+            # No qualifying forecast existed as of the signal decision.
+            return Result(None)
+
+    signal = _latest_signal(Conn(), "crypto", "BTC-USD")
+    assert signal is not None
+    assert signal["expected_edge_pct"] is None
+    assert len(queries) == 2
+
+
+def test_latest_signal_uses_only_preexisting_linked_forecast():
+    decision_time = datetime(2026, 10, 2, 12, 0, tzinfo=timezone.utc)
+
+    class Result:
+        def __init__(self, row):
+            self.row = row
+
+        def fetchone(self):
+            return self.row
+
+    class Conn:
+        def execute(self, sql, params=()):
+            if "FROM signals" in sql:
+                return Result({
+                    "id": 101, "market": "crypto", "symbol": "BTC-USD",
+                    "price": 100.0, "score": 80.0, "action": "HOLD",
+                    "confidence": 0.7, "details": "{}",
+                    "created_at": decision_time,
+                })
+            assert params[-1] == decision_time
+            return Result({"expected_move_pct": -0.3, "created_at": decision_time - timedelta(seconds=1)})
+
+    signal = _latest_signal(Conn(), "crypto", "BTC-USD")
+    assert signal["expected_edge_pct"] == -0.3
+    assert signal["payload"]["edge_provenance"] == "exact_signal_forecast_expected_move_pct"
