@@ -27,6 +27,32 @@ if st.button("Refresh Brain", type="primary"):
 
 snapshot = build_oracle_brain_snapshot(rows)
 
+with st.expander("Paper fill reconciliation"):
+    try:
+        reconciliation_rows = rows("SELECT market,updated_at,report FROM paper_exit_research_reports ORDER BY market")
+    except Exception:
+        reconciliation_rows = []
+    if not reconciliation_rows:
+        st.caption("Reconciliation evidence is not available yet.")
+    for item in reconciliation_rows:
+        report = item.get("report")
+        if not isinstance(report, dict):
+            continue
+        st.write(f"**{str(item.get('market') or '').upper()}** · updated {item.get('updated_at')}")
+        left, center, right = st.columns(3)
+        left.metric("Reconciled FIFO closes", report.get("qualified_fifo_closes", 0))
+        center.metric("Reconciled net P&L", f"${float(report.get('net_pnl') or 0):,.2f}")
+        right.metric("Cost-metric discrepancies", report.get("metric_discrepancies", 0))
+        st.caption("Persisted paper prices and explicit fees. Missing observations remain unavailable. These totals do not certify a profitable model or premature exits.")
+        if report.get("cohorts"):
+            st.dataframe(pd.DataFrame(report["cohorts"]), use_container_width=True, hide_index=True)
+        st.json({"source_coverage": report.get("source_query_diagnostics"),
+                 "fifo_exclusions": report.get("diagnostics"),
+                 "post_exit_path_coverage": report.get("path_coverage"),
+                 "since_previous_report": report.get("since_previous_report"),
+                 "chronological_validation": report.get("chronological_oos"),
+                 "premature_exit_verdict": report.get("premature_exit_verdict")})
+
 # Authoritative AEVE research-generation progress. Count only generation-isolated
 # outcomes produced by the AEVE evaluator; Council approvals/signals are not trades.
 try:

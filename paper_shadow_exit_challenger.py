@@ -28,9 +28,9 @@ import pandas as pd
 
 log = logging.getLogger("paper-shadow-exit-challenger")
 
-MODEL_VERSION = "shadow-exit-v3-entry-cost"
+MODEL_VERSION = "shadow-exit-v4-temporal-evidence"
 COST_MODEL_VERSION = "paper_execution_reality.simulate_fill-v1"
-GENERATION = 2
+GENERATION = 3
 _SCHEMA_LOCK = "garibaldi_shadow_exit_schema_v2"
 _THREAD: threading.Thread | None = None
 _STOP = threading.Event()
@@ -138,8 +138,10 @@ def evidence_confirmation_is_new(current_state: dict[str, Any], observation_id: 
     observation = str(observation_id or "").strip()
     if not observation:
         return False
-    if observation == str(current_state.get("last_confirmation_observation") or ""):
+    seen = current_state.setdefault("confirmation_observations", set())
+    if observation in seen or observation == str(current_state.get("last_confirmation_observation") or ""):
         return False
+    seen.add(observation)
     current_state["last_confirmation_observation"] = observation
     return True
 
@@ -169,6 +171,7 @@ def evaluate_forward_evidence_layer(
         ) + 1
     elif not condition:
         current_state["evidence_persistence_counter"] = 0
+        current_state["confirmation_observations"] = set()
 
     triggered = bool(
         condition
@@ -282,10 +285,11 @@ def _latest_signal(conn: Any, market: str, symbol: str) -> dict[str, Any] | None
                NULLIF(created_at,'')::timestamptz AS created_at
         FROM signals
         WHERE market=%s AND symbol=%s
+          AND NULLIF(created_at,'')::timestamptz <= %s
         ORDER BY id DESC
         LIMIT 1
         """,
-        (market, symbol),
+        (market, symbol, datetime.now(timezone.utc)),
     ).fetchone()
     if not row:
         return None
@@ -301,9 +305,10 @@ def _latest_signal(conn: Any, market: str, symbol: str) -> dict[str, Any] | None
             SELECT expected_move_pct,created_at
             FROM forecasts
             WHERE market=%s AND symbol=%s AND signal_id=%s
+              AND NULLIF(created_at,'')::timestamptz <= %s
             ORDER BY id DESC LIMIT 1
             """,
-            (market, symbol, item.get("id")),
+            (market, symbol, item.get("id"), datetime.now(timezone.utc)),
         ).fetchone()
         if forecast and forecast.get("expected_move_pct") is not None:
             edge = _num(forecast.get("expected_move_pct"), float("nan"))
@@ -388,25 +393,33 @@ def _trigger_telemetry(
     *,
     initial_risk_usd: float,
     risk_basis_source: str,
+    exclusions: dict[str, int] | None = None,
 ) -> dict[str, Any] | None:
+    def reject(reason: str) -> None:
+        if exclusions is not None:
+            exclusions[reason] = exclusions.get(reason, 0) + 1
+        return None
     payload = _json_obj(signal.get("payload"))
     route = _json_obj(payload.get("market_data_route"))
     quote = {**route, **payload}
     quote_verified = quote.get("quote_verified") is True
     quote_time = quote.get("quote_timestamp") or quote.get("source_quote_timestamp") or signal.get("created_at")
-    observed_at = _dt(quote_time)
+    from paper_exit_research import timestamp
+    observed_at = timestamp(quote_time)
     now = datetime.now(timezone.utc)
     if not quote_verified or observed_at is None:
-        return None
+        return reject("unverified_quote_or_timestamp")
+    if observed_at > now:
+        return reject("future_quote")
     if (now - observed_at).total_seconds() > _signal_max_age_seconds(market):
-        return None
+        return reject("stale_quote")
 
     current_price = _num(quote.get("price") or signal.get("price"))
     entry_price = _num(position.get("average_price") or position.get("entry_price"))
     quantity = abs(_num(position.get("quantity")))
     expected_edge_pct = signal.get("expected_edge_pct")
     if expected_edge_pct is None:
-        return None
+        return reject("missing_expected_edge")
     expected_edge_pct = _num(expected_edge_pct, float("nan"))
     if (
         current_price <= 0
@@ -414,10 +427,10 @@ def _trigger_telemetry(
         or quantity <= 0
         or not math.isfinite(expected_edge_pct)
     ):
-        return None
+        return reject("invalid_price_quantity_or_edge")
 
     if initial_risk_usd <= 0:
-        return None
+        return reject("unavailable_initial_risk")
 
     exit_r, exit_fill = CounterfactualSettlement.calculate_immutable_challenger_r(
         {
@@ -442,7 +455,7 @@ def _trigger_telemetry(
             initial_risk_usd=initial_risk_usd,
         )
     except ValueError:
-        return None
+        return reject("unavailable_projected_hold")
 
     action = str(signal.get("action") or payload.get("action") or "HOLD").upper()
     buy_actions = {"BUY", "STRONG_BUY", "STRONG BUY", "ACCUMULATE", "LONG"}
@@ -491,6 +504,8 @@ def ensure_schema() -> None:
     from database import connect
     with connect() as conn:
         conn.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (_SCHEMA_LOCK,))
+        from paper_exit_research import ensure_reconciliation_schema
+        ensure_reconciliation_schema(conn)
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS garibaldi_shadow_exit_epochs (
@@ -588,6 +603,7 @@ def sample_open_positions(market: str) -> int:
     from database import connect
 
     observed = 0
+    exclusions = {"missing_symbol": 0, "missing_signal": 0, "ineligible_telemetry": 0}
     with connect() as conn:
         positions = list(
             conn.execute(
@@ -604,9 +620,11 @@ def sample_open_positions(market: str) -> int:
             position = dict(raw)
             symbol = str(position.get("symbol") or "").upper()
             if not symbol:
+                exclusions["missing_symbol"] += 1
                 continue
             signal = _latest_signal(conn, normalized_market, symbol)
             if not signal:
+                exclusions["missing_signal"] += 1
                 continue
             initial_risk_usd, risk_basis_source = _open_position_risk_context(
                 conn,
@@ -620,8 +638,10 @@ def sample_open_positions(market: str) -> int:
                 signal,
                 initial_risk_usd=initial_risk_usd,
                 risk_basis_source=risk_basis_source,
+                exclusions=exclusions,
             )
             if not telemetry:
+                exclusions["ineligible_telemetry"] += 1
                 continue
 
             key = _position_key(normalized_market, position)
@@ -647,7 +667,8 @@ def sample_open_positions(market: str) -> int:
                 )
                 if state.get("trigger_snapshot") is None and pending_snapshot:
                     state["trigger_snapshot"] = pending_snapshot
-                triggered, advantage_r = evaluate_forward_evidence_layer(state, telemetry)
+                triggered, advantage_r = (evaluate_forward_evidence_layer(state, telemetry)
+                                         if state.get("trigger_snapshot") is None else (False, 0.0))
                 if triggered and state.get("trigger_snapshot") is None:
                     snapshot = {
                         "_pending_position_key": key,
@@ -704,6 +725,8 @@ def sample_open_positions(market: str) -> int:
                         state.get("evidence_persistence_counter"),
                     )
             observed += 1
+    log.info("SHADOW EXIT SAMPLING | market=%s | open_positions=%s | eligible_observations=%s | exclusions=%s | execution_impact=NONE",
+             normalized_market, len(positions), observed, json.dumps(exclusions, sort_keys=True))
     return observed
 
 
@@ -802,6 +825,7 @@ def finalize_closed_trades(market: str, limit: int = 250) -> int:
                 FROM paper_regime_trade_metrics m
                 JOIN trade_ledger l ON l.trade_id=m.trade_id
                 WHERE m.market=%s
+                  AND l.broker_mode='PAPER' AND l.account_environment='PAPER'
                   AND m.exit_time >= %s
                   AND m.cost_provenance='exact_lot'
                   AND m.round_trip_net_pnl IS NOT NULL
@@ -1175,6 +1199,12 @@ def emit_summary(market: str) -> None:
         report = shadow_evidence_report(market)
         if not report.get("active"):
             return
+        from paper_exit_research import emit_reconciliation
+        try:
+            emit_reconciliation(market)
+        except Exception as exc:
+            log.warning("PAPER FIFO RECONCILIATION | market=%s | status=UNAVAILABLE | reason=%s | execution_impact=NONE",
+                        market, exc.__class__.__name__)
         low, high = report.get("bootstrap_delta_ci", (float("nan"), float("nan")))
         log.info(
             "SHADOW EXIT EVIDENCE | market=%s | trades=%s | episodes=%s | observed_trades=%s | mean_delta_r=%s | "
