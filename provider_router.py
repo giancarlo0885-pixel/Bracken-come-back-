@@ -1072,23 +1072,35 @@ def route_history(
                 interval_family=interval_family,
             )
 
-    try:
-        frame = _strict_yahoo_history(yahoo_loader(symbol, period, interval), symbol, period, interval)
-        # Keep the router's fail-closed provider contract unchanged. Public
-        # Coinbase candles are useful only when the caller explicitly opts into
-        # research expansion; route_history itself must not manufacture a
-        # verified-provider substitute after configured routes/Yahoo fail.
-        if not frame.empty and verify_frame_symbol(frame, symbol):
-            frame.attrs["source_identity"] = f"Yahoo Finance:{symbol}:{period}:{interval}"
-            frame.attrs["period"] = period
-            frame.attrs["interval"] = interval
-            record_capability_result("Yahoo Finance", capability, True)
-            attempts.append(ProviderAttempt("Yahoo Finance", True, len(frame), "strict_research_fallback"))
-            return RoutedHistory(frame, "Yahoo Finance", attempts, datetime.now(timezone.utc).isoformat())
-    except Exception as exc:
-        attempts.append(ProviderAttempt("Yahoo Finance", False, 0, "degraded", _redact_url(str(exc))[:220]))
-        record_capability_result("Yahoo Finance", capability, False, "degraded")
-        _record_failure("Yahoo Finance", "degraded", symbol)
+    yahoo_provider = "Yahoo Finance"
+    if _cooldown_active(_provider_cooldowns, yahoo_provider):
+        attempts.append(ProviderAttempt(yahoo_provider, False, 0, "provider_cooldown"))
+    elif provider_cooldown_active_live(yahoo_provider).get("active"):
+        attempts.append(ProviderAttempt(yahoo_provider, False, 0, "provider_shared_cooldown"))
+    else:
+        try:
+            frame = _strict_yahoo_history(yahoo_loader(symbol, period, interval), symbol, period, interval)
+            # Yahoo is research-only; never upgrade its bars to verified broker execution data.
+            if not frame.empty and verify_frame_symbol(frame, symbol):
+                frame.attrs["source_identity"] = f"Yahoo Finance:{symbol}:{period}:{interval}"
+                frame.attrs["period"] = period
+                frame.attrs["interval"] = interval
+                record_capability_result(yahoo_provider, capability, True)
+                attempts.append(ProviderAttempt(yahoo_provider, True, len(frame), "strict_research_fallback"))
+                return RoutedHistory(frame, yahoo_provider, attempts, datetime.now(timezone.utc).isoformat())
+        except Exception as exc:
+            status = classify_provider_failure(exc)
+            detail = _redact_url(str(exc))[:220]
+            attempts.append(ProviderAttempt(yahoo_provider, False, 0, status, detail))
+            record_capability_result(yahoo_provider, capability, False, status)
+            _record_failure(yahoo_provider, status, symbol)
+            if status == "rate_limited":
+                _mark_provider_limited(yahoo_provider)
+                mark_provider_cooldown_live(
+                    yahoo_provider,
+                    seconds=PROVIDER_RATE_LIMIT_COOLDOWN_SECONDS,
+                    reason="Yahoo Finance rate limited",
+                )
 
     mark_symbol_unavailable(symbol, provider="all", capability=capability, interval_family=interval_family)
     return RoutedHistory(pd.DataFrame(), "none", attempts, datetime.now(timezone.utc).isoformat())
