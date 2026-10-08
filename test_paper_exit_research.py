@@ -121,3 +121,24 @@ def test_post_exit_signal_samples_require_observed_identity_and_time():
     samples = signal_price_samples(rows, START + timedelta(days=1))
     assert len(samples[("crypto", "TEST-USD")]) == 1
     assert samples[("crypto", "TEST-USD")][0]["price"] == 110
+
+
+def test_fill_fee_evidence_is_required_and_ambiguous_matches_fail_closed():
+    from paper_exit_research import attach_fill_fee_evidence
+    ledger = [buy("buy", 2, 100, 0.2), sell("sell", 2, 100, 101, 0.1, 2)]
+    assert reconcile_fifo(ledger, require_fill_fee_evidence=True)["qualified_fifo_closes"] == 0
+    factual = [dict(fill_id="buy-fill", market="crypto", symbol="TEST-USD", side="BUY", quantity=2,
+                    fill_price=100, fee_amount=0.2, created_at=START + timedelta(seconds=1)),
+               dict(fill_id="sell-fill", market="crypto", symbol="TEST-USD", side="SELL", quantity=2,
+                    fill_price=101, fee_amount=0.1, created_at=START + timedelta(minutes=20, seconds=1))]
+    backed = attach_fill_fee_evidence(ledger, factual)
+    assert reconcile_fifo(backed, require_fill_fee_evidence=True)["qualified_fifo_closes"] == 1
+    ambiguous = attach_fill_fee_evidence(ledger, factual + [{**factual[-1], "fill_id": "duplicate-candidate"}])
+    assert reconcile_fifo(ambiguous, require_fill_fee_evidence=True)["qualified_fifo_closes"] == 0
+    # Older SELL rows store total fees. Use the independently observed exit fee,
+    # rather than subtracting entry fees twice.
+    old = [{**ledger[0]}, {**ledger[1], "fees": 0.3, "net_pnl": 1.7}]
+    report = reconcile_fifo(attach_fill_fee_evidence(old, factual), require_fill_fee_evidence=True)
+    assert report["qualified_fifo_closes"] == 1
+    assert report["net_pnl"] == pytest.approx(1.7)
+    assert report["closes"][0]["ledger_fee_semantics"] == "round_trip"

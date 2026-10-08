@@ -28,8 +28,8 @@ import pandas as pd
 
 log = logging.getLogger("paper-shadow-exit-challenger")
 
-MODEL_VERSION = "shadow-exit-v4-temporal-evidence"
-COST_MODEL_VERSION = "paper_execution_reality.simulate_fill-v1"
+MODEL_VERSION = "shadow-exit-v6-decision-time-evidence"
+COST_MODEL_VERSION = "explicit-paper-fill-fees-v2"
 GENERATION = 3
 _SCHEMA_LOCK = "garibaldi_shadow_exit_schema_v2"
 _THREAD: threading.Thread | None = None
@@ -191,7 +191,7 @@ class CounterfactualSettlement:
         initial_risk_usd: float,
     ) -> tuple[float, dict[str, Any]]:
         """Freeze an adverse paper SELL using only trigger-time quote inputs."""
-        from paper_execution_reality import simulate_fill
+        from paper_execution_accounting import _simulate_fill_explicit_fee as simulate_fill
 
         entry_price = _num(position.get("entry_price") or position.get("average_price"))
         quantity = abs(_num(position.get("quantity")))
@@ -206,9 +206,12 @@ class CounterfactualSettlement:
             quote=quote,
             order_value=quantity * trigger_price,
         )
-        gross_return_usd = (fill.fill_price - entry_price) * quantity
-        result_r = gross_return_usd / risk
-        return result_r, fill.to_dict()
+        exit_fee = fill.fill_price * quantity * fill.fee_pct
+        result_r = ((fill.fill_price - entry_price) * quantity - exit_fee) / risk
+        payload = fill.to_dict()
+        payload["fee_contract"] = COST_MODEL_VERSION
+        payload["exit_fee_usd"] = exit_fee
+        return result_r, payload
 
 
 def _projected_hold_r(
@@ -221,7 +224,7 @@ def _projected_hold_r(
     initial_risk_usd: float,
 ) -> tuple[float, dict[str, Any]]:
     """Estimate expected terminal R from trigger-time directional edge only."""
-    from paper_execution_reality import simulate_fill
+    from paper_execution_accounting import _simulate_fill_explicit_fee as simulate_fill
 
     entry = _num(position.get("entry_price") or position.get("average_price"))
     quantity = abs(_num(position.get("quantity")))
@@ -243,8 +246,12 @@ def _projected_hold_r(
         quote=future_quote,
         order_value=quantity * projected_reference,
     )
-    hold_r = ((fill.fill_price - entry) * quantity) / initial_risk_usd
-    return hold_r, fill.to_dict()
+    exit_fee = fill.fill_price * quantity * fill.fee_pct
+    hold_r = ((fill.fill_price - entry) * quantity - exit_fee) / initial_risk_usd
+    payload = fill.to_dict()
+    payload["fee_contract"] = COST_MODEL_VERSION
+    payload["exit_fee_usd"] = exit_fee
+    return hold_r, payload
 
 
 def _confidence_bucket(value: Any) -> str:
@@ -780,11 +787,14 @@ def _matching_trigger(
     return candidates[0][1]
 
 def _counterfactual_net_r(item: dict[str, Any], fill: dict[str, Any], risk: float) -> float | None:
-    """The simulated SELL price already includes exit fees and slippage.
+    """Charge explicit simulated exit fees and attributed entry fees once.
 
-    Subtract only the canonical, quantity-attributed entry fee. Never reuse
-    the actual exit fee for an alternative exit, or subtract simulated fees twice.
+    Frozen fills without this model's explicit fee contract are unqualified.
     """
+    simulated_fee_pct = _num(fill.get("fee_pct"), float("nan"))
+    if (fill.get("fee_contract") != COST_MODEL_VERSION
+            or not math.isfinite(simulated_fee_pct) or simulated_fee_pct < 0):
+        return None
     total = _num(item.get("round_trip_fees"), float("nan"))
     exit_fee = _num(item.get("actual_exit_fees"), float("nan"))
     price = _num(fill.get("fill_price"))
@@ -794,7 +804,7 @@ def _counterfactual_net_r(item: dict[str, Any], fill: dict[str, Any], risk: floa
             or exit_fee < 0 or total < exit_fee or price <= 0
             or entry <= 0 or quantity <= 0 or risk <= 0):
         return None
-    return ((price - entry) * quantity - (total - exit_fee)) / risk
+    return ((price - entry) * quantity - price * quantity * simulated_fee_pct - (total - exit_fee)) / risk
 
 
 def finalize_closed_trades(market: str, limit: int = 250) -> int:

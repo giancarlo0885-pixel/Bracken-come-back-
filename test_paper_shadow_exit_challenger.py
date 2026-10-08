@@ -6,6 +6,7 @@ from pathlib import Path
 import database
 from paper_shadow_exit_challenger import (
     BrainCohortAnalyzerV4,
+    COST_MODEL_VERSION,
     CounterfactualSettlement,
     ShadowExitConstraints,
     _episode_id,
@@ -21,9 +22,10 @@ def test_counterfactual_net_r_attributes_partial_entry_fee_once():
     # A partial lot close: $0.40 entry fee plus $0.20 actual exit fee.
     item = {"entry_price": 100, "quantity": 2,
             "round_trip_fees": 0.60, "actual_exit_fees": 0.20}
-    # Simulated fill already includes every exit friction component.
-    result = _counterfactual_net_r(item, {"fill_price": 101}, 10)
-    assert abs(result - 0.16) < 1e-12
+    # Simulated execution price excludes its separately persisted exit fee.
+    result = _counterfactual_net_r(item, {"fill_price": 101,
+        "fee_contract": COST_MODEL_VERSION, "fee_pct": 0.20 / 202}, 10)
+    assert abs(result - 0.14) < 1e-12
 
 
 def test_counterfactual_missing_or_inconsistent_costs_remain_unqualified():
@@ -404,3 +406,49 @@ def test_latest_signal_uses_only_preexisting_linked_forecast():
     signal = _latest_signal(Conn(), "crypto", "BTC-USD")
     assert signal["expected_edge_pct"] == -0.3
     assert signal["payload"]["edge_provenance"] == "exact_signal_forecast_expected_move_pct"
+
+
+def test_research_fill_contract_is_independent_of_runtime_monkeypatch(monkeypatch):
+    import paper_execution_reality
+    def unexpected(**kwargs):
+        raise AssertionError("research must use its frozen explicit-fee contract")
+    monkeypatch.setattr(paper_execution_reality, "simulate_fill", unexpected)
+    result, fill = CounterfactualSettlement.calculate_immutable_challenger_r(
+        {"entry_price": 100, "quantity": 2}, market="crypto",
+        trigger_price=101, quote={"paper_fee_pct": 0.001}, initial_risk_usd=10,
+    )
+    assert fill["fee_contract"] == COST_MODEL_VERSION
+    assert fill["exit_fee_usd"] == fill["fill_price"] * 2 * fill["fee_pct"]
+    assert abs(result - ((fill["fill_price"] - 100) * 2 - fill["exit_fee_usd"]) / 10) < 1e-12
+    item = {"entry_price": 100, "quantity": 2,
+            "round_trip_fees": 0.60, "actual_exit_fees": 0.20}
+    assert abs(_counterfactual_net_r(item, fill, 10) - (result - 0.04)) < 1e-12
+    assert _counterfactual_net_r(item, {"fill_price": 101}, 10) is None
+
+
+def test_simulated_exit_fee_is_attributed_to_partial_quantity():
+    item = {"entry_price": 100, "quantity": 1,
+            "round_trip_fees": 0.30, "actual_exit_fees": 0.10}
+    fill = {"fill_price": 101, "fee_pct": 0.001,
+            "fee_contract": COST_MODEL_VERSION, "exit_fee_usd": 0.202}
+    assert abs(_counterfactual_net_r(item, fill, 10) - 0.0699) < 1e-12
+
+
+def test_postgres_forecast_cutoff_and_timestamp_order():
+    import os
+    import pytest
+    import psycopg
+    from psycopg.rows import dict_row
+    url = os.getenv("DATABASE_URL", "")
+    if not url:
+        pytest.skip("PostgreSQL integration only")
+    decision = datetime(2026, 10, 2, 12, 0, tzinfo=timezone.utc)
+    with psycopg.connect(url, row_factory=dict_row) as conn:
+        conn.execute("CREATE TEMP TABLE signals(id bigint,market text,symbol text,price float8,score float8,action text,confidence float8,details text,created_at text)")
+        conn.execute("CREATE TEMP TABLE forecasts(id bigint,market text,symbol text,signal_id bigint,expected_move_pct float8,created_at text)")
+        conn.execute("INSERT INTO signals VALUES (101,'crypto','BTC-USD',100,80,'HOLD',0.7,'{}',%s)", (decision.isoformat(),))
+        conn.execute("INSERT INTO forecasts VALUES (999,'crypto','BTC-USD',101,9,%s)", ((decision + timedelta(seconds=1)).isoformat(),))
+        assert _latest_signal(conn, "crypto", "BTC-USD")["expected_edge_pct"] is None
+        conn.execute("INSERT INTO forecasts VALUES (50,'crypto','BTC-USD',101,-0.3,%s),(100,'crypto','BTC-USD',101,5,%s),(1000,'crypto','OTHER-USD',101,8,%s),(1001,'crypto','BTC-USD',102,7,%s)",
+                     ((decision - timedelta(seconds=1)).isoformat(), (decision - timedelta(seconds=2)).isoformat(), decision.isoformat(), decision.isoformat()))
+        assert _latest_signal(conn, "crypto", "BTC-USD")["expected_edge_pct"] == -0.3

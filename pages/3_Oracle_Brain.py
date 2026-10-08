@@ -8,6 +8,7 @@ import streamlit as st
 from database import database_ready, rows
 from oracle_brain import build_oracle_brain_snapshot
 from oracle_brain_component import render_oracle_brain_component
+from paper_exit_research import REPORT_VERSION
 
 
 st.set_page_config(
@@ -29,7 +30,7 @@ snapshot = build_oracle_brain_snapshot(rows)
 
 with st.expander("Paper fill reconciliation"):
     try:
-        reconciliation_rows = rows("SELECT market,updated_at,report FROM paper_exit_research_reports ORDER BY market")
+        reconciliation_rows = rows("SELECT market,updated_at,report FROM paper_exit_research_reports WHERE version=%s ORDER BY market", (REPORT_VERSION,))
     except Exception:
         reconciliation_rows = []
     if not reconciliation_rows:
