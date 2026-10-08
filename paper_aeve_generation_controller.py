@@ -511,10 +511,11 @@ def generation_research_report(conn: Any, generation: int, config_hash: str) -> 
     if isinstance(report, dict):
         return report
     row = conn.execute("""
-        WITH cohort AS (
+        WITH candidates AS (
             SELECT * FROM paper_aeve_generation_outcomes
             WHERE generation=%s AND config_hash=%s AND provenance_version=%s
-              AND entry_evidence_complete=TRUE
+        ), cohort AS (
+            SELECT * FROM candidates WHERE entry_evidence_complete=TRUE
             ORDER BY observed_at ASC,id ASC LIMIT %s
         )
         SELECT COUNT(*) FILTER (WHERE entry_evidence_complete)::int AS window_trades,
@@ -530,7 +531,7 @@ def generation_research_report(conn: Any, generation: int, config_hash: str) -> 
                COUNT(*) FILTER (WHERE entry_evidence_complete AND NOT would_trade)::int AS rejected_candidates,
                COUNT(*) FILTER (WHERE entry_evidence_complete AND NOT would_trade AND net_pnl<0)::int AS avoided_losses,
                COUNT(*) FILTER (WHERE entry_evidence_complete AND NOT would_trade AND net_pnl>0)::int AS missed_winners,
-               COUNT(*) FILTER (WHERE NOT entry_evidence_complete)::int AS incomplete_entry_evidence
+               (SELECT COUNT(*)::int FROM candidates WHERE NOT entry_evidence_complete) AS incomplete_entry_evidence
         FROM cohort
     """, (generation, config_hash, PROVENANCE_VERSION, BATCH_SIZE)).fetchone() or {}
     gross_loss = _f(row.get("gross_loss"))
