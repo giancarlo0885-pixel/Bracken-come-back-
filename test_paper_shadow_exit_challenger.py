@@ -325,3 +325,22 @@ def test_triggered_rows_remain_eligible_for_promotion_evidence():
     assert report["trade_count"] == 60
     assert report["episode_count"] == 30
     assert report["promotion_evidence_ready"] is True
+
+
+def test_future_quote_is_not_forward_evidence():
+    from paper_shadow_exit_challenger import _trigger_telemetry
+    future = datetime.now(timezone.utc) + timedelta(days=1)
+    signal = dict(price=101, expected_edge_pct=0.5, created_at=future,
+                  payload={"quote_verified": True, "quote_timestamp": future.isoformat(), "price": 101})
+    assert _trigger_telemetry("crypto", {"entry_price": 100, "quantity": 1}, signal,
+                              initial_risk_usd=6, risk_basis_source="test") is None
+
+
+def test_replayed_observation_cannot_complete_three_confirmations():
+    state = {"evidence_persistence_counter": 0}
+    constraints = ShadowExitConstraints(min_confirmations=3)
+    for observation in ["a", "b", "a"]:
+        triggered, _ = evaluate_forward_evidence_layer(state, dict(observation_id=observation,
+            hold_ev_r=0, exit_ev_r=0.2, thesis_decay_confirmed=True), constraints)
+        assert triggered is False
+    assert state["evidence_persistence_counter"] == 2
