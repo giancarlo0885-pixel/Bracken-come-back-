@@ -216,6 +216,7 @@ def test_latest_signal_reads_canonical_details_json_not_nonexistent_payload_colu
     assert signal["payload"]["edge_provenance"] == "test"
     assert any("confidence,details" in " ".join(sql.split()) for sql in calls)
     assert all("confidence,payload" not in " ".join(sql.split()) for sql in calls)
+    assert any("ORDER BY NULLIF(created_at," in " ".join(sql.split()) and "DESC, id DESC" in " ".join(sql.split()) for sql in calls)
 
 
 
