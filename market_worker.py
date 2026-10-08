@@ -1167,6 +1167,58 @@ def _fast_candidate_batch(market: str) -> list[tuple[str, str]]:
     return list(candidates.items())[: max(FAST_SCAN_BATCH_SIZE, FAST_SCAN_TOP_RANKED)]
 
 
+def _log_fast_history_provider_diagnostics(symbol: str, period: str, interval: str, history: Any) -> None:
+    """Bounded, non-secret provider outcome summary for empty stock history.
+
+    Only provider and enumerated status are logged. Never log provider errors,
+    URLs, tokens, request headers, or credentials.
+    """
+    import time
+
+    route = dict(getattr(history, "attrs", {}).get("provider_route") or {})
+    attempts = route.get("attempts") or []
+    if not attempts:
+        return
+    statuses = []
+    for attempt in attempts[:12]:
+        if not isinstance(attempt, dict):
+            continue
+        provider = str(attempt.get("provider") or "")
+        status = str(attempt.get("status") or "")
+        allowed_providers = {"Polygon", "Finnhub", "EODHD", "Alpha Vantage", "Yahoo Finance", "all", "scope"}
+        allowed_statuses = {
+            "healthy", "not_configured", "provider_budget_unknown",
+            "provider_budget_blocked", "provider_shared_cooldown",
+            "provider_cooldown", "symbol_capability_cooldown",
+            "capability_cooldown_or_unsupported", "symbol_cooldown",
+            "symbol_mismatch_or_no_data", "scope_rejected",
+            "rate_limited", "payment_required", "plan_limited",
+            "capability_plan_limited", "degraded", "strict_research_fallback",
+        }
+        statuses.append(
+            (provider if provider in allowed_providers else "other")
+            + ":" + (status if status in allowed_statuses else "other")
+        )
+    if not statuses:
+        return
+    if not hasattr(_log_fast_history_provider_diagnostics, "_last_logged"):
+        _log_fast_history_provider_diagnostics._last_logged = {}
+    last_logged = _log_fast_history_provider_diagnostics._last_logged
+    key = (str(symbol).upper(), str(period), str(interval), tuple(statuses))
+    now = time.monotonic()
+    if now - last_logged.get(key, float("-inf")) < 300:
+        return
+    last_logged[key] = now
+    if len(last_logged) > 512:
+        for old_key, when in list(last_logged.items()):
+            if now - when > 300:
+                del last_logged[old_key]
+    log.warning(
+        "STOCK HISTORY PROVIDER DIAGNOSTIC | symbol=%s | period=%s | interval=%s | outcomes=%s | execution_authority=NONE",
+        symbol, period, interval, ",".join(statuses),
+    )
+
+
 def _fast_discover_symbol(market: str, symbol: str, name: str) -> tuple[Any, Any] | None:
     """Build a low-latency intraday signal without the expensive news pass."""
     if stop_event.is_set():
@@ -1178,6 +1230,7 @@ def _fast_discover_symbol(market: str, symbol: str, name: str) -> tuple[Any, Any
             if history is None or history.empty or len(history) < 60:
                 if history is None or history.empty:
                     _v39_quarantine_symbol(symbol, "market_data", "empty_fast_history")
+                    _log_fast_history_provider_diagnostics(symbol, period, interval, history)
                 continue
             signal = analyze_market(symbol, history, 0.0)
             if signal is None:
