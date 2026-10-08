@@ -126,3 +126,17 @@ def test_persisted_signal_payload_never_overwrites_existing_exact_values(monkeyp
     assert payload["volatility_20d"] == 0.22
     assert payload["trend_strength"] == 0.03
     assert payload["momentum_20d"] == 0.11
+
+
+def test_explicit_entry_cost_is_stamped_without_inventing_defaults(monkeypatch):
+    _paper(monkeypatch)
+    oracle = _oracle({})
+    provenance.install_paper_regime_entry_provenance(oracle)
+    when = "2026-10-08T10:00:00+00:00"
+    result = oracle._entry_provenance(signal={"estimated_cost_pct": 0.25}, quote_metadata={}, now=when)
+    features = result["feature_snapshot"]
+    assert features["aeve_estimated_round_trip_cost_pct"] == 0.25
+    assert features["aeve_cost_estimated_at"] == when
+    assert features["aeve_cost_provenance"] == "entry_signal_estimate"
+    missing = oracle._entry_provenance(signal={}, quote_metadata={}, now=when)["feature_snapshot"]
+    assert "aeve_estimated_round_trip_cost_pct" not in missing

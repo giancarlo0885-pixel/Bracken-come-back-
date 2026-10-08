@@ -132,7 +132,7 @@ def test_generation_window_counts_all_valid_outcomes_and_tracks_acceptance_separ
     assert "WHERE generation=%s" in source
     assert "config_hash=%s" in source
     assert "provenance_version=%s" in source
-    assert PROVENANCE_VERSION == 6
+    assert PROVENANCE_VERSION == 7
 
 
 def test_completed_window_with_insufficient_acceptance_advances_identity_without_tuning():
@@ -171,11 +171,11 @@ def test_aeve_v6_accepts_resolved_expected_edge_from_immutable_entry_snapshot():
     import paper_aeve_generation_controller as controller
     import paper_regime_entry_provenance as provenance
     producer = inspect.getsource(controller.record_generation_outcomes)
-    assert '"expected_edge_pct"' in producer
+    assert 'entry_scoring_evidence(features, entry_time)' in producer
     assert "expected_edge_pct" in provenance._AEVE_ENTRY_FIELDS
-    assert controller.PROVENANCE_VERSION == 6
+    assert controller.PROVENANCE_VERSION == 7
     schema = inspect.getsource(controller.ensure_schema)
-    assert "dip_depth_rebound_expected_edge_round_trip_v4_valid_entry_only" in schema
+    assert "dip_depth_rebound_net_edge_entry_cost_v7" in schema
 
 def test_aeve_entry_features_fail_closed_when_provenance_missing():
     import inspect
@@ -285,7 +285,8 @@ def test_evaluator_passes_independent_entry_inputs_and_persists_version(monkeypa
 
     cfg = AEVEGenerationConfig()
     identity = generation_config_hash(cfg)
-    features = {'edge_pct': 0.24, 'dip_depth_pct': 0.0025, 'rebound_pct': 0.0005}
+    features = {'edge_pct': 0.24, 'dip_depth_pct': 0.0025, 'rebound_pct': 0.0005, 'aeve_estimated_round_trip_cost_pct': 0.15, 'aeve_cost_estimated_at': '2026-09-22T00:00:00Z', 'aeve_cost_provenance': 'entry_signal_estimate'}
+    realized_fees = [0.15]
     captured, inserted = [], []
     real_score = formula.score_entry
 
@@ -299,11 +300,13 @@ def test_evaluator_passes_independent_entry_inputs_and_persists_version(monkeypa
 
     class Conn:
         def execute(self, sql, params=None):
+            if 'pg_advisory_xact_lock' in sql:
+                return Result([])
             if 'SELECT started_at FROM paper_aeve_provenance_epochs' in sql:
                 return Result([dict(started_at='2026-09-22')])
             if 'JOIN trade_ledger' in sql:
-                return Result([dict(trade_id='entry-1', regime='range', entry_time='2026-09-23',
-                    exit_time='2026-09-24', net_pnl=0.85, round_trip_fees=0.15,
+                return Result([dict(trade_id='entry-1', regime='range', entry_time='2026-09-23T00:00:00Z',
+                    exit_time='2026-09-24', net_pnl=0.85, round_trip_fees=realized_fees[0],
                     cost_provenance='exact_lot', quantity=1, entry_price=100,
                     feature_snapshot=dict(features), aeve_generation=cfg.generation,
                     aeve_config_json=cfg.__dict__, aeve_config_hash=identity)])
@@ -341,12 +344,17 @@ def test_evaluator_passes_independent_entry_inputs_and_persists_version(monkeypa
     assert rebound_changed[0]['rebound_from_low_pct'] == pytest.approx(0.20)
     assert rebound_changed[1].dip_quality == dip_changed[1].dip_quality
     assert rebound_changed[1].rebound_quality != dip_changed[1].rebound_quality
-    assert all(row[-3] == 6 for row in inserted)
+    assert all(row[-3] == 7 for row in inserted)
     assert all(row[-2] == "exact_lot" for row in inserted)
     assert all(row[-1] is True for row in inserted)
     assert all(item[0]['config'] == cfg.__dict__ for item in captured)
-    assert 'input_schema=dip_depth_rebound_expected_edge_round_trip_v4_valid_entry_only' in caplog.text
+    assert 'input_schema=dip_depth_rebound_net_edge_entry_cost_v7' in caplog.text
     assert 'dip_depth_pct=1.25 | rebound_from_low_pct=0.2' in caplog.text
+    previous_inputs, previous_decision = captured[-1]
+    realized_fees[0] = 50.0
+    assert controller.record_generation_outcomes() == 1
+    assert captured[-1] == (previous_inputs, previous_decision)
+    assert inserted[-1][7] == 50.0  # Realized cost still belongs to outcome accounting.
     features.pop('dip_depth_pct')
     assert controller.record_generation_outcomes() == 1
     assert inserted[-1][8] is False
@@ -359,14 +367,14 @@ def test_aeve_v4_uses_durable_forward_epoch_and_exact_round_trip_costs():
     schema = inspect.getsource(controller.ensure_schema)
     producer = inspect.getsource(controller.record_generation_outcomes)
     assert "paper_aeve_provenance_epochs" in schema
-    assert "exact_lot_round_trip" in schema
+    assert "pre_entry_estimate_scoring_exact_lot_outcomes" in schema
     assert "m.entry_time >= %s" in producer
     assert "m.cost_provenance='exact_lot'" in producer
     assert "m.round_trip_net_pnl AS net_pnl" in producer
     assert "m.round_trip_fees" in producer
     assert "_f(row.get(\"round_trip_fees\"))" in producer
     assert "l.fees" not in producer
-    assert PROVENANCE_VERSION == 6
+    assert PROVENANCE_VERSION == 7
 
 
 def test_aeve_v4_prior_economics_are_exact_round_trip_only():
@@ -404,3 +412,85 @@ def test_incomplete_entry_evidence_is_auditable_but_not_generation_evidence():
     assert "AND entry_evidence_complete=TRUE" in advancement
     assert "incomplete_entry_evidence" in report
     assert "entry_evidence_complete AND NOT would_trade AND net_pnl<0" in report
+
+
+def test_entry_units_and_gross_net_cost_semantics():
+    import pytest
+    from paper_aeve_generation_controller import entry_scoring_evidence
+    evidence = dict(aeve_estimated_round_trip_cost_pct=0.25,
+                    aeve_cost_estimated_at="2026-10-08T10:00:00Z",
+                    aeve_cost_provenance="entry_signal_estimate")
+    when = "2026-10-08T10:01:00Z"
+    assert entry_scoring_evidence({**evidence, "net_expected_value_pct": 0.02}, when) == (2.0, 0.25)
+    assert entry_scoring_evidence({**evidence, "expected_edge_pct": 2.0}, when) == (1.75, 0.25)
+    assert entry_scoring_evidence({**evidence, "expected_edge_pct": -0.5}, when)[0] == pytest.approx(-0.75)
+    assert entry_scoring_evidence({**evidence, "net_expected_value_pct": float("nan")}, when)[0] is None
+
+
+def test_future_or_unverified_costs_never_qualify():
+    from paper_aeve_generation_controller import entry_scoring_evidence
+    evidence = dict(expected_edge_pct=2.0, aeve_estimated_round_trip_cost_pct=0.25,
+                    aeve_cost_estimated_at="2026-10-08T10:00:00Z",
+                    aeve_cost_provenance="entry_signal_estimate")
+    when = "2026-10-08T10:01:00Z"
+    for key, value in [("aeve_cost_estimated_at", "2026-10-08T10:02:00Z"),
+                       ("aeve_cost_estimated_at", "2026-10-08T10:00:00"),
+                       ("aeve_cost_provenance", "realized_fees"),
+                       ("aeve_estimated_round_trip_cost_pct", -1),
+                       ("aeve_estimated_round_trip_cost_pct", float("inf"))]:
+        assert entry_scoring_evidence({**evidence, key: value}, when) == (None, None)
+    assert entry_scoring_evidence({"expected_edge_pct": 2, "round_trip_fees": 0.1}, when) == (None, None)
+    baseline = entry_scoring_evidence(evidence, when)
+    for future_fees in [0, 10, 10000]:
+        assert entry_scoring_evidence({**evidence, "round_trip_fees": future_fees}, when) == baseline
+
+
+def test_completed_report_is_returned_without_reading_late_outcomes():
+    import paper_aeve_generation_controller as controller
+    frozen = dict(generation=1, provenance_version=7, outcome_ids=[1, 2], net_pnl=4.2)
+    class Result:
+        def fetchone(self):
+            return {"research_report": frozen}
+    class Conn:
+        def execute(self, sql, params):
+            assert "SELECT research_report FROM paper_aeve_generations" in sql
+            return Result()
+    assert controller.generation_research_report(Conn(), 1, "hash") == frozen
+
+
+def test_postgres_generation_report_freezes_exact_membership():
+    import json
+    import os
+    import pytest
+    import psycopg
+    from psycopg.rows import dict_row
+    import paper_aeve_generation_controller as controller
+    url = os.getenv("DATABASE_URL", "")
+    if not url.startswith(("postgresql://", "postgres://")):
+        pytest.skip("PostgreSQL integration test runs in CI service container")
+    # Temporary tables shadow production names and disappear on connection close.
+    with psycopg.connect(url, row_factory=dict_row) as conn:
+        conn.execute("CREATE TEMP TABLE paper_aeve_generations(generation int, config_hash text, research_report jsonb)")
+        conn.execute("INSERT INTO paper_aeve_generations VALUES (1,'test-hash',NULL)")
+        conn.execute("""CREATE TEMP TABLE paper_aeve_generation_outcomes(
+            id bigserial, generation int, config_hash text, provenance_version int,
+            observed_at timestamptz, entry_evidence_complete boolean, would_trade boolean,
+            net_pnl float8, mfe_pct float8, mae_pct float8, excursion_sample_count int, cost_pct float8)
+        """)
+        conn.execute("""INSERT INTO paper_aeve_generation_outcomes(
+            generation,config_hash,provenance_version,observed_at,entry_evidence_complete,
+            would_trade,net_pnl,mfe_pct,mae_pct,excursion_sample_count,cost_pct)
+            SELECT 1,'test-hash',%s,'2026-10-08T10:00:00Z',TRUE,i%%2=0,1.0,2.0,-1.0,1,0.1
+            FROM generate_series(1,1002) AS i""", (controller.PROVENANCE_VERSION,))
+        report = controller.generation_research_report(conn, 1, "test-hash")
+        assert report["window_trades"] == 1000
+        assert report["accepted_trades"] == 500
+        assert report["outcome_ids"] == list(range(1, 1001))
+        assert report["net_pnl"] == 500
+        conn.execute("UPDATE paper_aeve_generations SET research_report=%s::jsonb", (json.dumps(report),))
+        conn.execute("""INSERT INTO paper_aeve_generation_outcomes(
+            generation,config_hash,provenance_version,observed_at,entry_evidence_complete,
+            would_trade,net_pnl,mfe_pct,mae_pct,excursion_sample_count,cost_pct)
+            VALUES (1,'test-hash',%s,'2026-10-08T09:00:00Z',TRUE,TRUE,-9999,2,-1,1,0.1)
+        """, (controller.PROVENANCE_VERSION,))
+        assert controller.generation_research_report(conn, 1, "test-hash") == report

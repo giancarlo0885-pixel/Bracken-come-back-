@@ -30,9 +30,9 @@ def test_challenger_cannot_self_promote():
 def test_cockpit_query_keeps_generation_config_and_provenance_isolation():
     src = open("pages/3_Oracle_Brain.py", encoding="utf-8").read()
     assert "o.generation=a.generation AND o.config_hash=a.config_hash" in src
-    assert "o.provenance_version=6" in src
+    assert "o.provenance_version=7" in src
     assert "Intelligence Data Lineage & Health" in src
-    assert "Provenance v6" in src
+    assert "Provenance v7" in src
     assert "o.entry_evidence_complete" in src
     assert "Accepted by AEVE" in src
     cockpit = src.split("# Unified research cockpit:", 1)[1].split("summary = snapshot", 1)[0]

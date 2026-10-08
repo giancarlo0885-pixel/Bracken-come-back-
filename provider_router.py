@@ -14,7 +14,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import pandas as pd
 import requests
 
-from alpaca_iex_provider import iex_stock_history
+from alpaca_iex_provider import AlpacaDataError, iex_stock_history
 from alpha_vantage_provider import daily_history as alpha_daily_history
 from api_manager import get_api_settings
 from cache import cached_call, get as cache_get, make_key as cache_make_key, set_value as cache_set_value
@@ -907,7 +907,16 @@ def _alpaca_iex(symbol: str, period: str, interval: str, key: str) -> pd.DataFra
     """Read-only IEX stock history; route identity remains explicit."""
     if infer_asset_class(symbol) == "crypto":
         return pd.DataFrame()
-    frame = iex_stock_history(symbol, period, interval)
+    try:
+        frame = iex_stock_history(symbol, period, interval)
+    except AlpacaDataError as exc:
+        # This provider raises fixed credential-free messages. Expose the actual
+        # request failure before existing cooldown/fallback handling takes over.
+        log.warning(
+            "ALPACA IEX HISTORY FAILURE | symbol=%s | period=%s | interval=%s | reason=%s",
+            normalize_symbol(symbol), period, interval, str(exc),
+        )
+        raise
     if frame.empty:
         return frame
     return _verified_history(

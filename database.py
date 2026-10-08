@@ -120,6 +120,9 @@ CANONICAL_PROTECTED_TABLES = {
     "oracle_decision_replays",
     "garibaldi_shadow_exit_epochs",
     "garibaldi_shadow_experiments",
+    "paper_aeve_generations",
+    "paper_aeve_generation_outcomes",
+    "paper_aeve_provenance_epochs",
 }
 DATABASE_RETENTION_POLICIES = {
     "signals": {"keep_rows": 6000, "batch_size": DATABASE_RETENTION_BATCH_SIZE, "classification": "append-only analytical/ephemeral"},

@@ -8,6 +8,7 @@ position sizing, cooldowns, broker submission, or live-trading state.
 """
 
 from dataclasses import dataclass, asdict, replace
+from datetime import datetime, timezone
 import hashlib
 import json
 import logging
@@ -20,7 +21,7 @@ log = logging.getLogger("paper-aeve-generation-controller")
 _THREAD: threading.Thread | None = None
 _STOP = threading.Event()
 BATCH_SIZE = 1000
-PROVENANCE_VERSION = 6
+PROVENANCE_VERSION = 7
 _REQUIRED_RESEARCH_RELATIONS = ("paper_aeve_generation_outcomes",)
 
 
@@ -43,6 +44,39 @@ def _f(value: Any, default: float = 0.0) -> float:
     except (TypeError, ValueError):
         return default
     return value if math.isfinite(value) else default
+
+
+def _timestamp(value: Any) -> datetime | None:
+    try:
+        parsed = value if isinstance(value, datetime) else datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        return parsed.astimezone(timezone.utc) if parsed.tzinfo is not None else None
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def entry_scoring_evidence(features: dict[str, Any], entry_time: Any) -> tuple[float | None, float | None]:
+    """Return net edge and estimated costs in percentage points, as of entry.
+
+    Never infer units from magnitude or substitute realized fees for estimates.
+    Gross percentage-point fields deduct the estimate exactly once; the quant
+    net-EV field is fractional and has already deducted execution costs.
+    """
+    observed = _timestamp(features.get("aeve_cost_estimated_at"))
+    entry = _timestamp(entry_time)
+    cost = _f(features.get("aeve_estimated_round_trip_cost_pct"), float("nan"))
+    if (observed is None or entry is None or observed > entry
+            or not math.isfinite(cost) or cost < 0
+            or features.get("aeve_cost_provenance") != "entry_signal_estimate"):
+        return None, None
+    if features.get("net_expected_value_pct") is not None:
+        net = _f(features["net_expected_value_pct"], float("nan"))
+        return (net * 100.0 if math.isfinite(net) else None), cost
+    for key in ("expected_edge_pct", "expected_return_pct", "forecast_return_pct",
+                "possible_move_pct", "expected_move_pct", "edge_pct"):
+        if features.get(key) is not None:
+            gross = _f(features[key], float("nan"))
+            return (gross - cost if math.isfinite(gross) else None), cost
+    return None, cost
 
 
 @dataclass(frozen=True)
@@ -217,6 +251,7 @@ def ensure_schema() -> None:
                 UNIQUE(generation, trade_id)
             )
         """)
+        conn.execute("ALTER TABLE paper_aeve_generations ADD COLUMN IF NOT EXISTS research_report JSONB")
         conn.execute("""
             CREATE TABLE IF NOT EXISTS paper_aeve_provenance_epochs (
                 provenance_version SMALLINT PRIMARY KEY,
@@ -228,7 +263,7 @@ def ensure_schema() -> None:
         conn.execute(
             """INSERT INTO paper_aeve_provenance_epochs(
                    provenance_version,input_schema,cost_semantics
-               ) VALUES (%s,'dip_depth_rebound_expected_edge_round_trip_v4_valid_entry_only','exact_lot_round_trip')
+               ) VALUES (%s,'dip_depth_rebound_net_edge_entry_cost_v7','pre_entry_estimate_scoring_exact_lot_outcomes')
                ON CONFLICT (provenance_version) DO NOTHING""",
             (PROVENANCE_VERSION,),
         )
@@ -321,6 +356,7 @@ def record_generation_outcomes(limit: int = 250) -> int:
 
     created = 0
     with connect() as conn:
+        conn.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", ("paper_aeve_generation_advance",))
         active_cfg, active_generation_row = _load_active(conn)
         if not active_generation_row:
             return 0
@@ -332,7 +368,7 @@ def record_generation_outcomes(limit: int = 250) -> int:
         if provenance_started_at is None:
             return 0
         log.info(
-            "AEVE EVALUATOR HANDSHAKE | generation=%s | config_hash=%s | provenance_version=%s | input_schema=dip_depth_rebound_expected_edge_round_trip_v4_valid_entry_only | config=%s | mode=shadow | execution_impact=NONE | broker_submission=NONE | live_trading=DISARMED",
+            "AEVE EVALUATOR HANDSHAKE | generation=%s | config_hash=%s | provenance_version=%s | input_schema=dip_depth_rebound_net_edge_entry_cost_v7 | config=%s | mode=shadow | execution_impact=NONE | broker_submission=NONE | live_trading=DISARMED",
             active_cfg.generation,
             active_generation_row.get("config_hash"),
             PROVENANCE_VERSION,
@@ -412,23 +448,21 @@ def record_generation_outcomes(limit: int = 250) -> int:
             if qty > 0 and price > 0:
                 cost_pct = max(0.0, (_f(row.get("round_trip_fees")) / (qty * price)) * 100.0)
             features = row.get("feature_snapshot") if isinstance(row.get("feature_snapshot"), dict) else {}
-            edge = None
-            for key in ("net_expected_value_pct","expected_edge_pct","expected_return_pct","forecast_return_pct","possible_move_pct","expected_move_pct","edge_pct"):
-                if key in features and features.get(key) is not None:
-                    edge = _f(features.get(key))
-                    break
-            # Entry snapshots store fractional returns; scoring uses percentage points.
+            edge, entry_cost_pct = entry_scoring_evidence(features, entry_time)
+            # Dip and rebound snapshots are fractional; scoring uses percentage points.
             # High-to-low dip depth and low-to-entry recovery are distinct measurements.
             dip_depth = features.get("dip_depth_pct")
             rebound = features.get("rebound_pct")
             # Fail closed when immutable entry-time AEVE evidence is absent. Never
             # substitute post-entry excursion or realized P&L for candidate inputs.
-            entry_evidence_complete = edge is not None and dip_depth is not None and rebound is not None
+            entry_evidence_complete = (edge is not None and entry_cost_pct is not None
+                and math.isfinite(_f(dip_depth, float("nan")))
+                and math.isfinite(_f(rebound, float("nan"))))
             decision = score_entry(
                 expected_net_edge_pct=edge if entry_evidence_complete else 0.0,
                 mfe_pct=max(0.0, _f(prior.get("mfe"))),
                 mae_pct=min(0.0, _f(prior.get("mae"))),
-                round_trip_cost_pct=cost_pct,
+                round_trip_cost_pct=entry_cost_pct if entry_cost_pct is not None else 0.0,
                 loss_streak=loss_streak,
                 dip_depth_pct=(max(0.0, _f(dip_depth)) * 100.0) if entry_evidence_complete else 0.0,
                 rebound_from_low_pct=(max(0.0, _f(rebound)) * 100.0) if entry_evidence_complete else 0.0,
@@ -454,7 +488,7 @@ def record_generation_outcomes(limit: int = 250) -> int:
                 entry_evidence_complete,
             ))
             log.info(
-                "AEVE SHADOW RESULT | trade_id=%s | generation=%s | config_hash=%s | provenance_version=%s | would_trade=%s | score=%.6f | input_schema=dip_depth_rebound_expected_edge_round_trip_v4_valid_entry_only | dip_depth_pct=%s | rebound_from_low_pct=%s | entry_evidence_complete=%s | mode=shadow | execution_impact=NONE | broker_submission=NONE | live_trading=DISARMED",
+                "AEVE SHADOW RESULT | trade_id=%s | generation=%s | config_hash=%s | provenance_version=%s | would_trade=%s | score=%.6f | input_schema=dip_depth_rebound_net_edge_entry_cost_v7 | dip_depth_pct=%s | rebound_from_low_pct=%s | entry_evidence_complete=%s | mode=shadow | execution_impact=NONE | broker_submission=NONE | live_trading=DISARMED",
                 row.get("trade_id"), cfg.generation, config_hash, PROVENANCE_VERSION,
                 bool(decision.would_trade if entry_evidence_complete else False), decision.score,
                 max(0.0, _f(dip_depth)) * 100.0 if entry_evidence_complete else None,
@@ -467,8 +501,25 @@ def record_generation_outcomes(limit: int = 250) -> int:
 
 def generation_research_report(conn: Any, generation: int, config_hash: str) -> dict[str, Any]:
     """Freeze auditable post-cost evidence for a completed AEVE research generation."""
+    frozen = conn.execute(
+        "SELECT research_report FROM paper_aeve_generations WHERE generation=%s AND config_hash=%s",
+        (generation, config_hash),
+    ).fetchone() or {}
+    report = frozen.get("research_report")
+    if isinstance(report, str):
+        report = json.loads(report)
+    if isinstance(report, dict):
+        return report
     row = conn.execute("""
+        WITH candidates AS (
+            SELECT * FROM paper_aeve_generation_outcomes
+            WHERE generation=%s AND config_hash=%s AND provenance_version=%s
+        ), cohort AS (
+            SELECT * FROM candidates WHERE entry_evidence_complete=TRUE
+            ORDER BY observed_at ASC,id ASC LIMIT %s
+        )
         SELECT COUNT(*) FILTER (WHERE entry_evidence_complete)::int AS window_trades,
+               ARRAY_AGG(id ORDER BY observed_at ASC,id ASC) AS outcome_ids,
                COUNT(*) FILTER (WHERE entry_evidence_complete AND would_trade)::int AS accepted_trades,
                AVG(net_pnl) FILTER (WHERE entry_evidence_complete AND would_trade) AS expectancy,
                SUM(net_pnl) FILTER (WHERE entry_evidence_complete AND would_trade) AS net_pnl,
@@ -480,16 +531,16 @@ def generation_research_report(conn: Any, generation: int, config_hash: str) -> 
                COUNT(*) FILTER (WHERE entry_evidence_complete AND NOT would_trade)::int AS rejected_candidates,
                COUNT(*) FILTER (WHERE entry_evidence_complete AND NOT would_trade AND net_pnl<0)::int AS avoided_losses,
                COUNT(*) FILTER (WHERE entry_evidence_complete AND NOT would_trade AND net_pnl>0)::int AS missed_winners,
-               COUNT(*) FILTER (WHERE NOT entry_evidence_complete)::int AS incomplete_entry_evidence
-        FROM paper_aeve_generation_outcomes
-        WHERE generation=%s AND config_hash=%s AND provenance_version=%s
-    """, (generation, config_hash, PROVENANCE_VERSION)).fetchone() or {}
+               (SELECT COUNT(*)::int FROM candidates WHERE NOT entry_evidence_complete) AS incomplete_entry_evidence
+        FROM cohort
+    """, (generation, config_hash, PROVENANCE_VERSION, BATCH_SIZE)).fetchone() or {}
     gross_loss = _f(row.get("gross_loss"))
     gross_win = _f(row.get("gross_win"))
     return {
         "generation": generation,
         "config_hash": config_hash,
         "provenance_version": PROVENANCE_VERSION,
+        "outcome_ids": list(row.get("outcome_ids") or []),
         "window_trades": int(row.get("window_trades") or 0),
         "accepted_trades": int(row.get("accepted_trades") or 0),
         "expectancy": _f(row.get("expectancy")),
@@ -521,6 +572,9 @@ def maybe_advance_generation() -> bool:
             return False
 
         record_generation_outcomes()
+        # Serialize both workers' generation transitions. The report and next
+        # generation commit atomically under the same transaction lock.
+        conn.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", ("paper_aeve_generation_advance",))
         cfg, row = _load_active(conn)
         if not row:
             return False
@@ -531,7 +585,7 @@ def maybe_advance_generation() -> bool:
                 FROM paper_aeve_generation_outcomes
                 WHERE generation=%s AND config_hash=%s AND provenance_version=%s
                   AND entry_evidence_complete=TRUE
-                ORDER BY observed_at ASC
+                ORDER BY observed_at ASC,id ASC
                 LIMIT %s
             )
             SELECT COUNT(*) AS window_samples,
@@ -566,7 +620,11 @@ def maybe_advance_generation() -> bool:
             # without relaxing any gate or manufacturing challenger acceptance.
             nxt = replace(cfg, generation=cfg.generation + 1)
             diagnosis = f"{diagnosis}_hold_formula"
-        conn.execute("UPDATE paper_aeve_generations SET status='SUPERSEDED' WHERE generation=%s", (cfg.generation,))
+        report = generation_research_report(conn, cfg.generation, config_hash)
+        conn.execute(
+            "UPDATE paper_aeve_generations SET status='SUPERSEDED',research_report=%s::jsonb WHERE generation=%s AND research_report IS NULL",
+            (json.dumps(report, allow_nan=False), cfg.generation),
+        )
         conn.execute("""
             INSERT INTO paper_aeve_generations(
                 generation,config_json,config_hash,diagnosis,source_samples,source_expectancy,source_profit_factor,status
