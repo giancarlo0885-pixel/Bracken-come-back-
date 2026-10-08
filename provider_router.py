@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from dataclasses import asdict, dataclass
@@ -13,6 +14,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import pandas as pd
 import requests
 
+from alpaca_iex_provider import iex_stock_history
 from alpha_vantage_provider import daily_history as alpha_daily_history
 from api_manager import get_api_settings
 from cache import cached_call, get as cache_get, make_key as cache_make_key, set_value as cache_set_value
@@ -54,6 +56,7 @@ EODHD_ETF_TYPES = {"etf", "fund", "mutual fund"}
 EODHD_EQUITY_TYPES = EODHD_STOCK_TYPES | EODHD_ETF_TYPES
 CRYPTO_QUOTES = ("USD", "USDT", "USDC")
 HISTORY_ROUTE_STRENGTH = {
+    ("Alpaca IEX", "us_history"): 5,
     ("Polygon", "crypto"): 10,
     ("EODHD", "crypto"): 25,
     ("Finnhub", "crypto"): 35,
@@ -900,6 +903,20 @@ def _finnhub(symbol: str, period: str, interval: str, key: str) -> pd.DataFrame:
     )
 
 
+def _alpaca_iex(symbol: str, period: str, interval: str, key: str) -> pd.DataFrame:
+    """Read-only IEX stock history; route identity remains explicit."""
+    if infer_asset_class(symbol) == "crypto":
+        return pd.DataFrame()
+    frame = iex_stock_history(symbol, period, interval)
+    if frame.empty:
+        return frame
+    return _verified_history(
+        frame, "Alpaca IEX", normalize_symbol(symbol), normalize_symbol(symbol),
+        period, interval, adjusted=False, extended_hours=False,
+        identity_verified=True, provider_native_symbol=normalize_symbol(symbol),
+    )
+
+
 def route_history(
     symbol: str,
     period: str,
@@ -938,6 +955,7 @@ def route_history(
         routes = [route for route in routes if provider_supports_capability(route[0], "crypto")]
     elif intraday:
         routes = [
+            ("Alpaca IEX", "APCA_API_KEY_ID", _alpaca_iex),
             ("Polygon", "POLYGON_API_KEY", _polygon),
             ("Finnhub", "FINNHUB_API_KEY", _finnhub),
             ("Alpha Vantage", "ALPHA_VANTAGE_API_KEY", _alpha),
@@ -949,6 +967,9 @@ def route_history(
             ("Finnhub", "FINNHUB_API_KEY", _finnhub),
             ("Alpha Vantage", "ALPHA_VANTAGE_API_KEY", _alpha),
         ]
+
+    if asset_class == "international_equity":
+        routes = [route for route in routes if route[0] != "Alpaca IEX"]
 
     for provider, key_name, function in _ranked_history_routes(routes, capability):
         if not capability_available(provider, capability):
@@ -964,7 +985,9 @@ def route_history(
         if symbol_is_unavailable(symbol, provider, capability, interval_family):
             attempts.append(ProviderAttempt(provider, False, 0, "symbol_capability_cooldown", "temporarily skipped after scoped provider/capability failure"))
             continue
-        key = settings.get(key_name)
+        key = os.getenv("APCA_API_KEY_ID", "").strip() if provider == "Alpaca IEX" else settings.get(key_name)
+        if provider == "Alpaca IEX" and not os.getenv("APCA_API_SECRET_KEY", "").strip():
+            key = None
         if not key:
             attempts.append(ProviderAttempt(provider, False, status="not_configured"))
             continue
