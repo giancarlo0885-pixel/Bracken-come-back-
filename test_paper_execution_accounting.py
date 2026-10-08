@@ -139,3 +139,60 @@ def test_missing_completed_trade_price_cannot_invent_fill_audit(monkeypatch):
         _record_order_and_fill(market="crypto", symbol="TEST-USD", side="SELL",
                               requested_notional=100, trade={"price": price, "quantity": 1, "value": 100},
                               fill=fill, fee_amount=0.1, quote={}, reason="exit")
+
+
+def test_brain_outcome_uses_round_trip_fifo_not_sell_ledger_net():
+    from paper_execution_accounting import _closed_lot_memory_outcome
+    lot = PositionLot(lot_id="lot", symbol="TEST-USD", market="crypto", bucket="Tactical", strategy="test",
+                      opened_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+                      quantity_opened=2, quantity_remaining=2, entry_price=100, entry_fees=2)
+    rows = fee_aware_fifo_close_lots([lot], quantity=1, exit_price=101,
+                                    exit_time=datetime(2026, 1, 2, tzinfo=timezone.utc), fees=0.5)
+    row = rows[0].to_dict()
+    assert row["net_pnl"] == 0.5  # SELL ledger excludes the already recorded entry fee.
+    outcome = _closed_lot_memory_outcome([row])
+    assert outcome["net_pnl"] == -0.5  # Brain must classify this as a loss.
+    assert outcome["entry_cost_basis"] == 101
+    assert outcome["quantity"] == 1
+    assert _closed_lot_memory_outcome([{**row, "round_trip_net_pnl": None}]) is None
+    assert _closed_lot_memory_outcome([{**row, "broker_mode": "LIVE"}]) is None
+    assert _closed_lot_memory_outcome([]) is None
+
+
+def test_runtime_brain_handoff_charges_entry_and_exit_fees_once(monkeypatch):
+    import sys
+    from types import SimpleNamespace
+    import paper_execution_accounting as accounting
+    import paper_execution_reality as reality
+    import profit_attribution
+    saved = []
+    lot = PositionLot(lot_id="lot", symbol="TEST-USD", market="crypto", bucket="Tactical", strategy="test",
+                      opened_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+                      quantity_opened=2, quantity_remaining=2, entry_price=100, entry_fees=2)
+    def attribution(conn, **kwargs):
+        return [row.to_dict() for row in fee_aware_fifo_close_lots(
+            [lot], quantity=kwargs["quantity"], exit_price=kwargs["price"],
+            exit_time=datetime(2026, 1, 2, tzinfo=timezone.utc), fees=kwargs["fees"])]
+    fake = SimpleNamespace(allocate_purchase=lambda **kwargs: None, allocate_sale=lambda **kwargs: None,
+                           _record_buy_attribution=lambda *args, **kwargs: None,
+                           _record_sell_attribution=attribution,
+                           record_closed_trade_memory=lambda **kwargs: saved.append(kwargs),
+                           _buy=lambda *args, **kwargs: None)
+    def close(market, position, price, reason, **kwargs):
+        fake._record_sell_attribution(None, market=market, symbol=position["symbol"], quantity=1, price=price)
+        fake.record_closed_trade_memory(market=market, symbol=position["symbol"], quantity=1,
+                                       exit_price=price, pnl=1, position=position, exit_reason=reason)
+        return True
+    fake._execute_close_position = close
+    monkeypatch.setitem(sys.modules, "oracle_bot", fake)
+    monkeypatch.setenv("EXECUTION_MODE", "paper")
+    monkeypatch.setattr(reality, "simulate_fill", reality.simulate_fill)
+    monkeypatch.setattr(profit_attribution, "fifo_close_lots", profit_attribution.fifo_close_lots)
+    monkeypatch.setattr(accounting, "_latest_trade", lambda *args: None)
+    accounting.install_paper_execution_accounting()
+    assert fake._execute_close_position("crypto", {"symbol": "TEST-USD"}, 101, "exit",
+                                        quote_metadata={"paper_fee_pct": 0.001}) is True
+    assert len(saved) == 1
+    assert saved[0]["pnl"] == -0.101
+    assert saved[0]["canonical_outcome"]["entry_cost_basis"] == 101
+    assert accounting._fee_context.get().get("closed_outcomes") is None

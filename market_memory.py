@@ -426,6 +426,7 @@ def record_closed_trade_memory(
     *, market: str, symbol: str, position: dict[str, Any], exit_price: float,
     pnl: float, exit_reason: str, quantity: float,
     entry_provenance: dict[str, Any] | None = None,
+    canonical_outcome: dict[str, Any] | None = None,
 ) -> bool:
     """Persist completed Trade DNA only when exact entry provenance is provable."""
     try:
@@ -508,6 +509,15 @@ def record_closed_trade_memory(
             quant = summary.get("quant") or {}
             entry_price = _num(position.get("average_price") or position.get("entry_price"), exit_price)
             entry_value = abs(entry_price * quantity)
+            if canonical_outcome is not None:
+                basis = _num(canonical_outcome.get("entry_cost_basis"), float("nan"))
+                net = _num(canonical_outcome.get("net_pnl"), float("nan"))
+                closed_quantity = _num(canonical_outcome.get("quantity"), float("nan"))
+                if (canonical_outcome.get("cost_provenance") != "exact_fifo_round_trip_v1"
+                        or not all(math.isfinite(v) for v in (basis, net, closed_quantity))
+                        or basis <= 0 or abs(closed_quantity - quantity) > max(1e-9, abs(quantity) * 1e-9)):
+                    return False
+                entry_value, pnl = basis, net
             return_pct = pnl / entry_value if entry_value > 0 else 0.0
             provenance = [
                 {
@@ -529,6 +539,7 @@ def record_closed_trade_memory(
             primary = provenance[0] if provenance else {}
             dna_payload = {
                 "provenance_status": EXACT_PROVENANCE_STATUS,
+                "cost_provenance": canonical_outcome.get("cost_provenance") if canonical_outcome else "legacy_unverified_costs",
                 "entry_value": entry_value,
                 "return_pct": return_pct,
                 "features": features,

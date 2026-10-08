@@ -57,6 +57,9 @@ class TradeLedgerRow:
     risk_snapshot: dict[str, Any] | None = None
     portfolio_snapshot: dict[str, Any] | None = None
 
+    round_trip_net_pnl: float | None = None
+    entry_cost_basis: float | None = None
+
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
         for key in ("entry_time", "exit_time"):
