@@ -59,7 +59,7 @@ def iex_stock_history(symbol: str, period: str, interval: str) -> pd.DataFrame:
     bars = []
     token = None
     try:
-        for _ in range(20):
+        for _ in range(5):
             if token:
                 params["page_token"] = token
             response = requests.get(
