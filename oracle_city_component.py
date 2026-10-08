@@ -1090,7 +1090,12 @@ function resetView(){
   if(mobileView()){
     // Fit the complete metropolis into portrait/mobile instead of looking
     // through the middle of the city from a low, clipped perspective.
-    camera.position.set(2.5,46,46);
+    // A narrow portrait viewport needs distance based on horizontal FOV,
+    // otherwise the city is clipped off-screen despite a high camera.
+    const aspect=Math.max(.28,app.clientWidth/Math.max(1,app.clientHeight));
+    const hFov=2*Math.atan(Math.tan(THREE.MathUtils.degToRad(62)/2)*aspect);
+    const distance=Math.max(48,24/Math.max(.08,Math.tan(hFov/2)));
+    camera.position.set(2.5,Math.max(36,distance*.65),distance);
     controls.target.set(2.5,1.8,0);
     camera.fov=62;
   }else{
@@ -1136,6 +1141,9 @@ function resize(){
     lastMobileView=mobile;
     if(brainMode)fitBrainView();
     else resetView();
+  }else if(mobile&&!brainMode){
+    // Reframe when the embedded canvas changes width (e.g. mobile rotation).
+    resetView();
   }
 }
 new ResizeObserver(resize).observe(app);resize();
