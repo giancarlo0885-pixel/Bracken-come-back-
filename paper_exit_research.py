@@ -15,7 +15,7 @@ import math
 from typing import Any
 
 log = logging.getLogger("paper-exit-research")
-REPORT_VERSION = "canonical-fifo-exit-research-v1"
+REPORT_VERSION = "canonical-fifo-exit-research-v2-fill-fees"
 POST_EXIT_MINUTES = (15, 60, 240)
 REPORT_DETAIL_LIMIT = 250
 TOLERANCE = Decimal("0.000001")
@@ -104,7 +104,7 @@ def clustered_expectancy_ci(rows: list[dict[str, Any]]) -> list[float | None]:
 
 def reconcile_fifo(fills: list[dict[str, Any]], metrics: dict[str, dict[str, Any]] | None = None,
                    prices: dict[tuple[str, str], list[dict[str, Any]]] | None = None,
-                   *, as_of: datetime | None = None) -> dict[str, Any]:
+                   *, as_of: datetime | None = None, require_fill_fee_evidence: bool = False) -> dict[str, Any]:
     """Rebuild BUY -> SELL matches in persisted event/id order without mutation."""
     metrics, prices = metrics or {}, prices or {}
     as_of = as_of or datetime.now(timezone.utc)
@@ -143,20 +143,25 @@ def reconcile_fifo(fills: list[dict[str, Any]], metrics: dict[str, dict[str, Any
             diagnostics["tainted_symbol_fill"] += 1
             continue
         if side == "BUY":
+            confirmed_fee = number(row.get("_canonical_fill_fee"))
             lots[key].append(dict(identity=identity, time=when, price=price, opened=qty,
-                                  remaining=qty, fee=fee, row=row))
+                                  remaining=qty, fee=confirmed_fee if confirmed_fee is not None else fee,
+                                  fee_verified=confirmed_fee is not None and abs(confirmed_fee-fee) <= TOLERANCE, row=row))
             continue
         remaining, gross, entry_fees, members = qty, Decimal(0), Decimal(0), []
         identity_matches = True
+        entry_fees_verified = True
         while remaining > 0 and lots[key]:
             lot = lots[key][0]
             matched = min(remaining, lot["remaining"])
             gross += (price - lot["price"]) * matched
             entry_fees += lot["fee"] * matched / lot["opened"]
+            entry_fees_verified &= lot["fee_verified"]
             declared_price = number(row.get("entry_price"))
             declared_time = timestamp(row.get("entry_time"))
             identity_matches &= declared_price == lot["price"] and declared_time == lot["time"]
             members.append({"buy_trade_id": lot["identity"], "sell_trade_id": identity,
+                            "buy_fill_id": lot["row"].get("_canonical_fill_id"),
                             "quantity": float(matched), "entry_time": lot["time"].isoformat()})
             lot["remaining"] -= matched
             remaining -= matched
@@ -165,28 +170,48 @@ def reconcile_fifo(fills: list[dict[str, Any]], metrics: dict[str, dict[str, Any
         if remaining > 0:
             diagnostics["unmatched_sell"] += 1
             tainted.add(key)  # Do not qualify later trades after an unknown inventory gap.
-        net = gross - entry_fees - fee if remaining == 0 else None
+        confirmed_exit_fee = number(row.get("_canonical_fill_fee"))
+        exit_fee = confirmed_exit_fee if confirmed_exit_fee is not None else fee
+        fee_evidence_verified = entry_fees_verified and confirmed_exit_fee is not None
+        fee_semantics = ("exit_only" if abs(fee-exit_fee) <= TOLERANCE else
+                         "round_trip" if abs(fee-entry_fees-exit_fee) <= TOLERANCE else "unreconciled")
+        net = gross - entry_fees - exit_fee if remaining == 0 else None
         declared_gross, declared_net = number(row.get("gross_pnl")), number(row.get("net_pnl"))
         gross_delta = gross - declared_gross if declared_gross is not None and net is not None else None
-        # Canonical SELL ledger net excludes BUY fees, already debited at entry.
+        # Reconcile the ledger's own declared fee convention separately. Older
+        # SELL rows store total fees; verified fills determine actual exit fees.
         exit_net_delta = gross - fee - declared_net if declared_net is not None and net is not None else None
         metric = metrics.get(identity, {})
         metric_net = number(metric.get("round_trip_net_pnl"))
         metric_delta = net - metric_net if net is not None and metric_net is not None else None
         complete = bool(net is not None and identity_matches and gross_delta is not None
                         and abs(gross_delta) <= TOLERANCE and exit_net_delta is not None
-                        and abs(exit_net_delta) <= TOLERANCE)
+                        and abs(exit_net_delta) <= TOLERANCE
+                        and (not require_fill_fee_evidence or (fee_evidence_verified and fee_semantics != "unreconciled")))
+        if not identity_matches:
+            diagnostics["fifo_entry_identity_mismatch"] += 1
+        if gross_delta is None or abs(gross_delta) > TOLERANCE:
+            diagnostics["gross_accounting_unreconciled"] += 1
+        if exit_net_delta is None or abs(exit_net_delta) > TOLERANCE:
+            diagnostics["sell_net_accounting_unreconciled"] += 1
+        if require_fill_fee_evidence and not fee_evidence_verified:
+            diagnostics["unverified_canonical_fill_fees"] += 1
+        if fee_evidence_verified and fee_semantics == "unreconciled":
+            diagnostics["unreconciled_ledger_fee_semantics"] += 1
         entry = min((timestamp(m["entry_time"]) for m in members), default=None)
         observed = prices.get(key, [])
         closes.append({"trade_id": identity, "ledger_id": int(row.get("id") or 0), "market": key[0], "symbol": key[1],
                        "fifo_complete": complete, "entry_identity_matches": bool(identity_matches),
+                       "fill_fee_evidence_verified": bool(fee_evidence_verified),
+                       "exit_fill_id": row.get("_canonical_fill_id"),
+                       "ledger_fee_semantics": fee_semantics,
                        "unmatched_quantity": float(remaining), "members": members,
                        "entry_time": entry.isoformat() if entry else None, "exit_time": when.isoformat(),
                        "hold_minutes": (when - entry).total_seconds() / 60 if entry else None,
                        "strategy": row.get("strategy") or "unknown", "regime": metric.get("regime") or "unknown",
                        "exit_reason": row.get("order_id") or "unknown",
                        "net_pnl": float(net) if net is not None else None,
-                       "entry_fees": float(entry_fees), "exit_fees": float(fee),
+                       "entry_fees": float(entry_fees), "exit_fees": float(exit_fee),
                        "gross_difference": float(gross_delta) if gross_delta is not None else None,
                        "exit_net_difference": float(exit_net_delta) if exit_net_delta is not None else None,
                        "round_trip_metric_difference": float(metric_delta) if metric_delta is not None else None,
@@ -213,11 +238,59 @@ def reconcile_fifo(fills: list[dict[str, Any]], metrics: dict[str, dict[str, Any
     return {"version": REPORT_VERSION, "as_of": as_of.isoformat(),
             "source": "persisted PAPER trade_ledger execution prices; no extra slippage deduction",
             "observed_closes": len(closes), "qualified_fifo_closes": len(eligible),
+            "fill_fee_validation_required": require_fill_fee_evidence,
             "net_pnl": sum(r["net_pnl"] for r in eligible),
             "sell_signal_losses": sum(r["exit_reason"] == "sell_signal" and r["net_pnl"] < 0 for r in eligible),
             "metric_discrepancies": sum(r["round_trip_metric_difference"] is not None and abs(r["round_trip_metric_difference"]) > float(TOLERANCE) for r in eligible),
             "diagnostics": dict(diagnostics), "cohorts": summaries, "closes": closes,
             "premature_exit_verdict": "insufficient_data", "execution_impact": "NONE"}
+
+
+def attach_fill_fee_evidence(ledger: list[dict[str, Any]], paper_fills: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Require a unique persisted fill matching an entire execution's split closes.
+
+    The legacy ledger lacks a paper fill ID. Ambiguous time/price/quantity matches
+    remain unverified; a fill may never be reused across separate executions.
+    """
+    groups = defaultdict(list)
+    for raw in ledger:
+        row = dict(raw)
+        row.pop("_canonical_fill_fee", None)
+        event = timestamp(row.get("entry_time") if row["side"] == "BUY" else row.get("exit_time"))
+        price = number(row.get("entry_price") if row["side"] == "BUY" else row.get("exit_price"))
+        groups[(row["market"], row["symbol"], row["side"], event, price)].append(row)
+    fill_index = defaultdict(list)
+    for fill in paper_fills:
+        price = number(fill.get("fill_price"))
+        if price is not None:
+            fill_index[(fill.get("market"), fill.get("symbol"), fill.get("side"), price)].append(fill)
+    assignments, usage = {}, defaultdict(int)
+    for key, rows in groups.items():
+        market, symbol, side, event, price = key
+        quantities = [number(r.get("quantity")) for r in rows]
+        if event is None or price is None or any(q is None or q <= 0 for q in quantities):
+            continue
+        total = sum(quantities)
+        candidates = []
+        for fill in fill_index[(market, symbol, side, price)]:
+            observed = timestamp(fill.get("created_at"))
+            qty, fee = number(fill.get("quantity")), number(fill.get("fee_amount"))
+            if (fill.get("fill_id") and observed is not None and 0 <= (observed-event).total_seconds() <= 60
+                    and number(fill.get("fill_price")) == price and qty is not None
+                    and abs(qty-total) <= max(Decimal("1e-18"), total*Decimal("1e-9"))
+                    and fee is not None and fee >= 0):
+                candidates.append(fill)
+        if len(candidates) == 1:
+            assignments[key] = candidates[0]
+            usage[candidates[0]["fill_id"]] += 1
+    for key, fill in assignments.items():
+        if usage[fill["fill_id"]] != 1:
+            continue
+        total = sum(number(r["quantity"]) for r in groups[key])
+        for row in groups[key]:
+            row["_canonical_fill_fee"] = str(number(fill["fee_amount"]) * number(row["quantity"]) / total)
+            row["_canonical_fill_id"] = fill["fill_id"]
+    return [row for group in groups.values() for row in group]
 
 
 def chronological_oos_report(experiments: list[dict[str, Any]], cutoff: datetime) -> dict[str, Any]:
@@ -329,7 +402,9 @@ def emit_reconciliation(market: str) -> dict[str, Any]:
                 prices[key].extend(observations)
         else:
             samples = []
-        report = reconcile_fifo([dict(r) for r in fills], metrics, prices)
+        factual_fills = list(conn.execute("SELECT fill_id,market,symbol,side,quantity,fill_price,fee_amount,created_at FROM paper_fills WHERE market=%s", (market,)).fetchall())
+        fee_verified_ledger = attach_fill_fee_evidence([dict(r) for r in fills], [dict(r) for r in factual_fills])
+        report = reconcile_fifo(fee_verified_ledger, metrics, prices, require_fill_fee_evidence=True)
         report["snapshot_semantics"] = "repeatable_read"
         watermark = max((int(r["id"]) for r in fills), default=0)
         previous_watermark = previous_report.get("ledger_watermark")
