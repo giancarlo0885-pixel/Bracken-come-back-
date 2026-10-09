@@ -448,3 +448,36 @@ def test_paper_estimate_is_counted_as_quality_degradation(monkeypatch):
     assert health["last_resolved"] == 1
     assert health["last_paper_estimate_only"] == ["BTC-USD"]
     assert health["data_quality_score"] == 0.0
+
+
+def test_eth_paper_estimated_price_provides_independent_bid_ask(monkeypatch):
+    from datetime import datetime, timezone
+
+    worker, provider, _, _ = _paper_estimate_fixture(monkeypatch)
+    quote = {
+        "symbol": "ETH-USD",
+        "side": "both",
+        "quantity": "0.01",
+        "bid": "1999.8",
+        "ask": "2000.2",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+    provider.client.estimated_price = lambda symbol, side, quantity: [quote]
+    snapshot = resilience._paper_estimated_snapshot(
+        provider, "ETH-USD", {"bid": "2001", "ask": "1999"}, worker,
+    )
+    assert snapshot is not None
+    assert snapshot.price == 2000.0
+    assert snapshot.verification_basis.startswith("paper_estimate:")
+
+
+def test_cached_paper_estimate_cannot_be_reused_in_live_mode(monkeypatch):
+    worker, provider, _, _ = _paper_estimate_fixture(monkeypatch)
+    snapshot = resilience._paper_estimated_snapshot(
+        provider, "BTC-USD", {"bid": "101", "ask": "100"}, worker,
+    )
+    assert snapshot is not None
+    provider.snapshots = lambda symbols: {"BTC-USD": snapshot}
+    monkeypatch.setenv("EXECUTION_MODE", "live")
+    assert resilience.install_robinhood_quote_resilience(worker)
+    assert provider.snapshots(["BTC-USD"]) == {}
