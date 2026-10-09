@@ -148,8 +148,8 @@ def _paper_estimated_snapshot(
             return None
         bid = Decimal(str(_first_present(quote, "bid", "bid_price")))
         ask = Decimal(str(_first_present(quote, "ask", "ask_price")))
-        crossed_bid = Decimal(str(_first_present(crossed_quote, "bid", "bid_price")))
-        crossed_ask = Decimal(str(_first_present(crossed_quote, "ask", "ask_price")))
+        crossed_bid = Decimal(str(_first_present(crossed_quote, "bid_price", "bid", "bid_inclusive_of_sell_spread")))
+        crossed_ask = Decimal(str(_first_present(crossed_quote, "ask_price", "ask", "ask_inclusive_of_buy_spread")))
         if not all(v.is_finite() and v > 0 for v in (bid, ask, crossed_bid, crossed_ask)):
             return None
         if ask < bid or crossed_ask >= crossed_bid:
@@ -281,6 +281,13 @@ def install_robinhood_quote_resilience(worker: Any) -> bool:
             )
 
         results = dict(original_snapshots(eligible) or {})
+        # A cached paper estimate must never become an execution quote if mode
+        # changes without a process restart. Treat it as absent outside paper.
+        if not _paper_only():
+            results = {
+                symbol: snapshot for symbol, snapshot in results.items()
+                if not str(getattr(snapshot, "verification_basis", "") or "").startswith("paper_estimate:")
+            }
         for symbol in results:
             crossed_cycles.pop(symbol, None)
             quality_until.pop(symbol, None)
