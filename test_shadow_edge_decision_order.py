@@ -13,12 +13,11 @@ def test_forecasts_precede_signal_persistence_in_both_scans():
     # Each scan must compute the forecast before assigning its decision timestamp
     # and before persisting the signal; never repair missing edges with hindsight.
     for horizon in ('3 if market == "cash" else 1', '5'):
-        forecast = f'forecast_price(\\n'  # inspected through AST below
         calls = [
             node for node in ast.walk(TREE)
             if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
             and node.func.id == "forecast_price"
-            and len(node.args) > 1 and ast.unparse(node.args[1]) == horizon
+            and len(node.args) > 1 and ast.dump(node.args[1]) == ast.dump(ast.parse(horizon, mode="eval").body)
         ]
         assert len(calls) == 1
         call = calls[0]
