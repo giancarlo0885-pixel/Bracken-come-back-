@@ -111,11 +111,18 @@ def _paper_estimated_snapshot(
     and never authorizes entries. Reject wrong identity, size, timestamp,
     non-positive/crossed books, wide spreads and price divergence.
     """
-    if not _paper_only():
+    def reject(reason: str) -> None:
+        worker.log.info(
+            "CRYPTO | ROBINHOOD PAPER ESTIMATE | symbol=%s | status=REJECTED | reason=%s | entry_eligible=false",
+            symbol, reason,
+        )
         return None
+
+    if not _paper_only():
+        return reject("PAPER_ONLY_CONTRACT_UNMET")
     quantity = _PAPER_ESTIMATE_QUANTITIES.get(symbol)
     if not quantity:
-        return None
+        return reject("REFERENCE_SIZE_UNAVAILABLE")
     try:
         records = provider.client.estimated_price(symbol, "both", quantity)
     except Exception as exc:
@@ -125,51 +132,63 @@ def _paper_estimated_snapshot(
         )
         return None
 
+    # Report response shape, never prices, account data, or credentials.
+    first = records[0] if isinstance(records, list) and records and isinstance(records[0], dict) else {}
+    worker.log.info(
+        "CRYPTO | ROBINHOOD PAPER ESTIMATE SHAPE | symbol=%s | rows=%s | match=%s | side=%s | two_sided=%s | has_qty=%s | has_ts=%s",
+        symbol, len(records) if isinstance(records, list) else "not_list",
+        str(first.get("symbol") or "").upper().strip() == symbol,
+        str(first.get("side") or "").lower().strip() or "none",
+        _first_present(first, "bid", "bid_price") is not None and _first_present(first, "ask", "ask_price") is not None,
+        first.get("quantity") not in (None, ""),
+        first.get("timestamp") not in (None, ""),
+    )
+
     # One atomic row with two sides: never join non-synchronous responses.
     if not isinstance(records, list) or len(records) != 1 or not isinstance(records[0], dict):
-        return None
+        return reject("NON_ATOMIC_OR_MISSING_ESTIMATE_ROW")
     quote = records[0]
     if str(quote.get("symbol") or "").upper().strip() != symbol:
-        return None
+        return reject("ESTIMATE_SYMBOL_MISMATCH")
     if str(quote.get("side") or "").lower().strip() not in {"bid", "ask", "both"}:
-        return None
+        return reject("ESTIMATE_SIDE_INVALID")
     try:
         if Decimal(str(quote.get("quantity"))) != Decimal(quantity):
-            return None
+            return reject("ESTIMATE_SIZE_MISMATCH")
         observed = datetime.fromisoformat(str(quote.get("timestamp") or "").replace("Z", "+00:00"))
         if observed.tzinfo is None:
-            return None
+            return reject("ESTIMATE_TIMESTAMP_NAIVE")
         age = (datetime.now(timezone.utc) - observed.astimezone(timezone.utc)).total_seconds()
         if age > _MAX_ESTIMATE_AGE_SECONDS or age < -_MAX_ESTIMATE_FUTURE_SECONDS:
-            return None
+            return reject("ESTIMATE_TIMESTAMP_OUT_OF_WINDOW")
         limit = Decimal(str(os.getenv("ROBINHOOD_BROKER_MAX_SPREAD_PCT", "1.50")))
         divergence_limit = Decimal(str(os.getenv("ROBINHOOD_BROKER_PRICE_TOLERANCE_PCT", "0.75")))
         if not limit.is_finite() or limit < 0 or not divergence_limit.is_finite() or divergence_limit < 0:
-            return None
+            return reject("INVALID_EXISTING_QUOTE_LIMITS")
         bid = Decimal(str(_first_present(quote, "bid", "bid_price")))
         ask = Decimal(str(_first_present(quote, "ask", "ask_price")))
         crossed_bid = Decimal(str(_first_present(crossed_quote, "bid_price", "bid", "bid_inclusive_of_sell_spread")))
         crossed_ask = Decimal(str(_first_present(crossed_quote, "ask_price", "ask", "ask_inclusive_of_buy_spread")))
         if not all(v.is_finite() and v > 0 for v in (bid, ask, crossed_bid, crossed_ask)):
-            return None
+            return reject("NON_POSITIVE_OR_NON_FINITE_ESTIMATE")
         if ask < bid or crossed_ask >= crossed_bid:
-            return None
+            return reject("INCONSISTENT_ESTIMATE_OR_PRIMARY_BOOK")
         mid = (bid + ask) / Decimal("2")
         crossed_mid = (crossed_bid + crossed_ask) / Decimal("2")
         spread_pct = (ask - bid) / mid * Decimal("100")
         # Crossed book is used only as an independent sanity bound, never a price.
         difference_pct = abs(mid - crossed_mid) / mid * Decimal("100")
         if spread_pct > limit or difference_pct > divergence_limit:
-            return None
+            return reject("ESTIMATE_SPREAD_OR_DIVERGENCE_LIMIT")
     except (ValueError, TypeError, InvalidOperation, OverflowError):
-        return None
+        return reject("ESTIMATE_PARSE_INVALID")
 
     from robinhood_current_marketdata_runtime import snapshot_from_robinhood_quote
 
     fetched_at = datetime.now(timezone.utc).isoformat()
     snapshot = snapshot_from_robinhood_quote(symbol, quote, fetched_at=fetched_at)
     if snapshot is None:
-        return None
+        return reject("ESTIMATE_SNAPSHOT_INVALID")
     return replace(
         snapshot,
         timestamp=observed.astimezone(timezone.utc).isoformat(),

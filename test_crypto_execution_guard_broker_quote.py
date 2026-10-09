@@ -486,3 +486,22 @@ def test_cached_paper_estimate_cannot_be_reused_in_live_mode(monkeypatch):
     monkeypatch.setenv("EXECUTION_MODE", "live")
     assert resilience.install_robinhood_quote_resilience(worker)
     assert provider.snapshots(["BTC-USD"]) == {}
+
+def test_crossed_estimated_price_logs_rejection_shape_without_raw_quotes(monkeypatch, caplog):
+    worker, provider, _, _ = _paper_estimate_fixture(
+        monkeypatch, records_override=[{
+            "symbol": "ETH-USD", "side": "both", "quantity": "0.001",
+            "bid": "SENSITIVE_BID", "ask": "SENSITIVE_ASK",
+        }],
+    )
+    with caplog.at_level(logging.INFO, logger="test-robinhood-paper-estimate"):
+        result = resilience._paper_estimated_snapshot(
+            provider, "BTC-USD", {"bid": "101", "ask": "100"}, worker,
+        )
+    assert result is None
+    assert "ROBINHOOD PAPER ESTIMATE SHAPE" in caplog.text
+    assert "match=False" in caplog.text
+    assert "has_ts=False" in caplog.text
+    assert "ESTIMATE_SYMBOL_MISMATCH" in caplog.text
+    assert "SENSITIVE_BID" not in caplog.text
+    assert "SENSITIVE_ASK" not in caplog.text
