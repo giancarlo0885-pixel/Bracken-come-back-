@@ -667,14 +667,25 @@ def sample_open_positions(market: str) -> int:
                     normalized_market, symbol,
                     [dict(lot) for lot in entry_lots],
                 )
-                # Read-only diagnostic; never infer missing edge.
+                # Entry-time provenance is attribution only; it must never
+                # replace the edge required at the current exit decision.
+                entry_forecast_ids = [
+                    str(lot["entry_forecast_id"])
+                    for lot in entry_lots if lot.get("entry_forecast_id")
+                ]
                 payload = _json_obj(signal.get("payload"))
                 log.warning(
-                    "SHADOW_SIGNAL_PROVENANCE_EXCLUSION | market=%s | symbol=%s | opened_at=%s | signal_id=%s | signal_at=%s | forecast_id=%s | edge_source=%s | edge_present=%s | quote_at=%s | quote_verified=%s",
+                    "SHADOW_SIGNAL_PROVENANCE_EXCLUSION | market=%s | symbol=%s | "
+                    "opened_at=%s | entry_forecast_ids=%s | current_signal_id=%s | "
+                    "current_signal_at=%s | current_forecast_id=%s | "
+                    "current_edge_source=%s | current_edge_present=%s | "
+                    "current_forecast_unavailable_reason=%s | current_quote_at=%s | "
+                    "current_quote_verified=%s",
                     normalized_market, symbol, position.get("opened_at"),
-                    signal.get("id"), signal.get("created_at"),
+                    entry_forecast_ids, signal.get("id"), signal.get("created_at"),
                     payload.get("forecast_id"), payload.get("edge_provenance"),
                     signal.get("expected_edge_pct") is not None,
+                    payload.get("forecast_unavailable_reason"),
                     payload.get("quote_timestamp"), payload.get("quote_verified"),
                 )
                 exclusions["ineligible_telemetry"] += 1
