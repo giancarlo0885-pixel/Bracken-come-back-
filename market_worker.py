@@ -1290,8 +1290,7 @@ def fast_scan_market(market: str) -> list[Any]:
                 continue
             signals.append(signal)
             prices[symbol] = quote_payload
-            try:
-                stage = "forecast_calculation"
+            stage = "forecast_calculation"
             try:
                 forecast = forecast_price(
                     history,
