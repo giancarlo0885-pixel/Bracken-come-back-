@@ -1290,6 +1290,7 @@ def fast_scan_market(market: str) -> list[Any]:
                 continue
             signals.append(signal)
             prices[symbol] = quote_payload
+            stage = "forecast_calculation"
             try:
                 forecast = forecast_price(
                     history,
@@ -1300,8 +1301,11 @@ def fast_scan_market(market: str) -> list[Any]:
                 if forecast:
                     setattr(signal, "forecast_id", getattr(forecast, "forecast_id", None))
                     setattr(signal, "expected_edge_pct", getattr(forecast, "expected_move_pct", None))
+                if forecast is None:
+                    log.warning("FAST_FORECAST_MISSING | market=%s | symbol=%s | scan=fast", market, symbol)
                 signal_created_at = utc_now()
                 setattr(signal, "created_at", signal_created_at)
+                stage = "signal_persistence"
                 signal_id = save_json_signal(
                     market,
                     symbol,
@@ -1328,9 +1332,10 @@ def fast_scan_market(market: str) -> list[Any]:
                 )
                 setattr(signal, "signal_id", signal_id)
                 if forecast:
+                    stage = "forecast_persistence"
                     save_forecast(market, symbol, forecast, scan_type="fast", signal_id=signal_id, signal_created_at=signal_created_at)
             except Exception as exc:
-                log.debug("Fast persistence failed | market=%s | symbol=%s | error=%s", market, symbol, exc)
+                log.warning("FAST_PROVENANCE_WRITE_FAILED | market=%s | symbol=%s | stage=%s | exception_type=%s", market, symbol, stage, type(exc).__name__)
 
     if not signals:
         return []
