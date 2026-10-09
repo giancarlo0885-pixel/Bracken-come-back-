@@ -174,6 +174,12 @@ def test_brain_page_runs_javascript_iframe_and_bounds_nodes():
     assert "raw.slice(0,210)" in component
 
 
+def test_dashboard_brain_iframe_uses_supported_streamlit_signature():
+    page = Path("app.py").read_text(encoding="utf-8")
+    assert "st.iframe(render_oracle_brain_component(brain_snapshot), height=610)" in page
+    assert "height=610, scrolling=False" not in page
+
+
 def test_brain_retention_health_is_read_only(monkeypatch):
     monkeypatch.setenv("EXECUTION_MODE", "paper")
     monkeypatch.setenv("ENABLE_BROKER_SUBMISSION", "false")
