@@ -502,5 +502,6 @@ def test_crossed_estimated_price_logs_rejection_shape_without_raw_quotes(monkeyp
     assert "ROBINHOOD PAPER ESTIMATE SHAPE" in caplog.text
     assert "match=False" in caplog.text
     assert "has_ts=False" in caplog.text
+    assert "ESTIMATE_SYMBOL_MISMATCH" in caplog.text
     assert "SENSITIVE_BID" not in caplog.text
     assert "SENSITIVE_ASK" not in caplog.text
