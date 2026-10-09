@@ -650,6 +650,16 @@ def sample_open_positions(market: str) -> int:
                 exclusions=exclusions,
             )
             if not telemetry:
+                # Read-only diagnostic; never infer missing edge.
+                payload = _json_obj(signal.get("payload"))
+                log.warning(
+                    "SHADOW_SIGNAL_PROVENANCE_EXCLUSION | market=%s | symbol=%s | opened_at=%s | signal_id=%s | signal_at=%s | forecast_id=%s | edge_source=%s | edge_present=%s | quote_at=%s | quote_verified=%s",
+                    normalized_market, symbol, position.get("opened_at"),
+                    signal.get("id"), signal.get("created_at"),
+                    payload.get("forecast_id"), payload.get("edge_provenance"),
+                    signal.get("expected_edge_pct") is not None,
+                    payload.get("quote_timestamp"), payload.get("quote_verified"),
+                )
                 exclusions["ineligible_telemetry"] += 1
                 continue
 
