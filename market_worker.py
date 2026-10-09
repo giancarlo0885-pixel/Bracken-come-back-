@@ -191,7 +191,18 @@ def _average_dollar_volume(history: Any, lookback: int = 20) -> float | None:
             volume = volume.iloc[:, -1]
         close = pd.to_numeric(close, errors="coerce")
         volume = pd.to_numeric(volume, errors="coerce")
-        values = (close * volume).dropna()
+        route = dict(getattr(history, "attrs", {}).get("provider_route") or {})
+        provider = str(route.get("provider") or "").lower().strip()
+        symbol = str(route.get("requested_symbol") or route.get("provider_symbol") or "").upper().strip()
+        # Yahoo Finance crypto Volume is already quote-currency turnover (USD
+        # for *-USD), unlike stock share counts or exchange base-asset volume.
+        # Multiplying that notional by BTC's price inflated liquidity by ~80,000x.
+        quote_notional_usd = (
+            provider in {"yahoo finance", "yahoo"}
+            and symbol.endswith("-USD")
+            and str(route.get("provider_symbol") or symbol).upper().strip() == symbol
+        )
+        values = (volume if quote_notional_usd else close * volume).dropna()
         values = values[values.map(lambda item: math.isfinite(float(item)) and float(item) > 0)]
         if values.empty:
             return None
@@ -249,6 +260,12 @@ def _quote_payload_from_history(symbol: str, history: Any, price: Any = None, *,
         "quote_verified": quote_verified,
         "verified": quote_verified,
         "avg_dollar_volume": avg_dollar_volume,
+        "liquidity_volume_basis": (
+            "yahoo_crypto_quote_turnover_usd"
+            if str(route.get("provider") or "").lower().strip() in {"yahoo finance", "yahoo"}
+            and normalized_symbol.endswith("-USD")
+            else "price_times_reported_volume"
+        ),
         "data_quality_score": route.get("data_quality_score"),
         "tradeable": bool(quote_verified and identity_verified and avg_dollar_volume),
         "source_identity": route.get("source_identity"),
