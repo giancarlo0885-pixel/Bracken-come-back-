@@ -651,6 +651,22 @@ def sample_open_positions(market: str) -> int:
                 exclusions=exclusions,
             )
             if not telemetry:
+                # Exact entry-lot identifiers for provenance diagnosis only.
+                # No legacy edge reconstruction or eligibility changes.
+                entry_lots = list(conn.execute(
+                    """SELECT entry_signal_id,entry_forecast_id,decision_timestamp,
+                              quote_timestamp,opened_at
+                       FROM position_lots
+                       WHERE market=%s AND symbol=%s
+                         AND COALESCE(quantity_remaining,0)>0
+                       ORDER BY opened_at ASC,id ASC LIMIT 8""",
+                    (normalized_market, symbol),
+                ).fetchall())
+                log.warning(
+                    "SHADOW_ENTRY_LOT_PROVENANCE | market=%s | symbol=%s | lots=%s",
+                    normalized_market, symbol,
+                    [dict(lot) for lot in entry_lots],
+                )
                 # Read-only diagnostic; never infer missing edge.
                 payload = _json_obj(signal.get("payload"))
                 log.warning(
