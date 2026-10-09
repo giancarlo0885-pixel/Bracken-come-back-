@@ -412,7 +412,8 @@ def _trigger_telemetry(
     route = _json_obj(payload.get("market_data_route"))
     quote = {**route, **payload}
     quote_verified = quote.get("quote_verified") is True
-    quote_time = quote.get("quote_timestamp") or quote.get("source_quote_timestamp") or signal.get("created_at")
+    # A signal insertion timestamp is not market quote provenance. Fail closed.
+    quote_time = quote.get("quote_timestamp") or quote.get("source_quote_timestamp")
     from paper_exit_research import timestamp
     observed_at = timestamp(quote_time)
     now = datetime.now(timezone.utc)
