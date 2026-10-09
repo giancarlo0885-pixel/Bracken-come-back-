@@ -505,3 +505,62 @@ def test_crossed_estimated_price_logs_rejection_shape_without_raw_quotes(monkeyp
     assert "ESTIMATE_SYMBOL_MISMATCH" in caplog.text
     assert "SENSITIVE_BID" not in caplog.text
     assert "SENSITIVE_ASK" not in caplog.text
+
+
+def test_two_row_robinhood_estimate_recovers_only_time_aligned_broker_sides(monkeypatch):
+    from datetime import datetime, timezone, timedelta
+    from robinhood_quote_resilience import _atomic_estimated_both_quote
+
+    now = datetime.now(timezone.utc)
+    rows = [
+        {"symbol": "ETH-USD", "side": "bid", "quantity": "0.01",
+         "bid": "1999.80", "timestamp": now.isoformat()},
+        {"symbol": "ETH-USD", "side": "ask", "quantity": "0.01",
+         "ask": "2000.20", "timestamp": (now + timedelta(milliseconds=200)).isoformat()},
+    ]
+    combined = _atomic_estimated_both_quote(rows, "ETH-USD", "0.01")
+    assert combined is not None
+    assert combined["bid"] == "1999.80"
+    assert combined["ask"] == "2000.20"
+    assert combined["timestamp"] == now.isoformat()
+
+    worker, provider, _, _ = _paper_estimate_fixture(monkeypatch)
+    provider.client.estimated_price = lambda symbol, side, quantity: rows
+    snapshot = resilience._paper_estimated_snapshot(
+        provider, "ETH-USD", {"bid": "2001", "ask": "1999"}, worker,
+    )
+    assert snapshot is not None
+    assert snapshot.price == 2000.0
+    assert snapshot.verification_basis.startswith("paper_estimate:")
+    assert snapshot.provider_quote_verified is False
+
+
+def test_two_row_estimate_rejects_mismatched_time_identity_size_and_missing_prices():
+    from datetime import datetime, timedelta, timezone
+    from robinhood_quote_resilience import _atomic_estimated_both_quote
+
+    now = datetime.now(timezone.utc)
+    rows = [
+        {"symbol": "BTC-USD", "side": "bid", "quantity": "0.001",
+         "bid": "100.10", "timestamp": now.isoformat()},
+        {"symbol": "BTC-USD", "side": "ask", "quantity": "0.001",
+         "ask": "100.20", "timestamp": now.isoformat()},
+    ]
+
+    for changes in (
+        {"symbol": "ETH-USD"},
+        {"quantity": "0.01"},
+        {"side": "bid"},
+        {"ask": None},
+        {"timestamp": (now - timedelta(seconds=3)).isoformat()},
+        {"timestamp": "2026-10-09T23:59:00"},  # naive
+    ):
+        invalid = [dict(rows[0]), {**rows[1], **changes}]
+        assert _atomic_estimated_both_quote(invalid, "BTC-USD", "0.001") is None
+
+    assert _atomic_estimated_both_quote(rows[:1], "BTC-USD", "0.001") is not None
+    # A single incomplete row still fails downstream quote validation.
+    worker_quote = {"symbol": "BTC-USD", "side": "bid",
+                    "quantity": "0.001", "bid": "100.10",
+                    "timestamp": now.isoformat()}
+    assert _atomic_estimated_both_quote([worker_quote], "BTC-USD", "0.001") == worker_quote
