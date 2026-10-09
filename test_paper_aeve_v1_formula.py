@@ -78,3 +78,20 @@ def test_rebound_changes_only_rebound_component():
     strong = score_entry(**candidate(dip_depth_pct=0.25, rebound_from_low_pct=0.20))
     assert weak.rebound_quality < strong.rebound_quality
     assert weak.dip_quality == strong.dip_quality
+
+
+def test_mature_cohort_research_quarantines_only_confirmed_losers():
+    from paper_aeve_v1_formula import evaluate_mature_cohort_research as gate
+    assert gate(completed_trades=50, net_expectancy=-0.12, profit_factor=0.7).quarantine
+    assert not gate(completed_trades=28, net_expectancy=-0.45, profit_factor=0.4).quarantine
+    assert not gate(completed_trades=50, net_expectancy=0.01, profit_factor=1.2).quarantine
+    assert not gate(completed_trades=50, net_expectancy=None, profit_factor=None).quarantine
+    assert not gate(completed_trades=50, net_expectancy=float("nan"), profit_factor=0.5).quarantine
+    assert not gate(completed_trades=50, net_expectancy=-0.1, profit_factor=float("inf")).quarantine
+
+
+def test_mature_cohort_research_never_changes_baseline_scoring():
+    from paper_aeve_v1_formula import evaluate_mature_cohort_research
+    before = score_entry(**candidate())
+    evaluate_mature_cohort_research(completed_trades=60, net_expectancy=-0.1, profit_factor=0.5)
+    assert score_entry(**candidate()) == before
