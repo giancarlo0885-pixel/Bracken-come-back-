@@ -55,7 +55,7 @@ def test_formula_recomputes_current_features_and_excludes_future_outcomes(monkey
     import oracle_brain
     import oracle_brain_feedback as feedback
     from paper_strategy_economics import strategy_identity
-    signal = {'symbol': 'TEST-USD', 'strategy': 'Oracle Council V3', 'regime': 'range__low_vol',
+    signal = {'symbol': 'TEST-USD', 'strategy': 'Oracle Council V3', 'regime': 'range-bound', 'volatility_20d': .2,
               'momentum_5d': .03, 'decision_timestamp': START.isoformat()}
     strategy = strategy_identity(signal)
     records = [dict(symbol='TEST-USD', strategy=strategy, regime='range__low_vol',

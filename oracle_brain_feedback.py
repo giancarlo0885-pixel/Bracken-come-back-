@@ -405,7 +405,7 @@ def outcome_memory_for_signal(
         memory = _json_obj(reports[0].get("report")) if reports else {}
         candidates = memory.get("winner_entry_memory", {}).get("records", [])
         from paper_regime_economics_shadow import classify_regime
-        green_regime = target_regime if target_regime != "unknown" else classify_regime(
+        green_regime = target_regime if "__" in target_regime else classify_regime(
             feature_snapshot=green_signal)
         green_rows = [r for r in candidates
                       if normalize_strategy_identity(r.get("strategy")) == target_strategy_norm
