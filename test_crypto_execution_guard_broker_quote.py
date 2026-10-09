@@ -564,3 +564,41 @@ def test_two_row_estimate_rejects_mismatched_time_identity_size_and_missing_pric
                     "quantity": "0.001", "bid": "100.10",
                     "timestamp": now.isoformat()}
     assert _atomic_estimated_both_quote([worker_quote], "BTC-USD", "0.001") == worker_quote
+
+
+def test_independent_coinbase_quote_is_read_only_and_requires_fresh_coherent_book(monkeypatch):
+    from datetime import datetime, timezone, timedelta
+    from types import SimpleNamespace
+    import sys
+
+    monkeypatch.setenv("EXECUTION_MODE", "paper")
+    monkeypatch.setenv("ENABLE_BROKER_SUBMISSION", "false")
+    monkeypatch.setenv("LIVE_TRADING_ARMED", "false")
+    resilience._independent_quote_checked_at.clear()
+    calls = []
+    now = datetime.now(timezone.utc)
+    payload = {"time": now.isoformat(), "bid": "100.1", "ask": "100.3"}
+    def get(url, headers, timeout):
+        calls.append((url, timeout))
+        return SimpleNamespace(status_code=200, json=lambda: payload)
+    monkeypatch.setitem(sys.modules, "requests", SimpleNamespace(get=get))
+    worker = SimpleNamespace(log=logging.getLogger("test-independent-reference"))
+    crossed = {"bid": "101", "ask": "100"}
+    result = resilience._independent_coinbase_quote_check("BTC-USD", crossed, worker)
+    assert result == "INDEPENDENT_REFERENCE_COHERENT"
+    assert calls == [("https://api.exchange.coinbase.com/products/BTC-USD/ticker", 3)]
+    assert resilience._independent_coinbase_quote_check("BTC-USD", crossed, worker) == "THROTTLED"
+    assert len(calls) == 1
+
+    resilience._independent_quote_checked_at.clear()
+    payload["time"] = (now - timedelta(seconds=90)).isoformat()
+    assert resilience._independent_coinbase_quote_check("BTC-USD", crossed, worker) == "STALE_OR_FUTURE"
+    resilience._independent_quote_checked_at.clear()
+    payload["time"] = now.isoformat()
+    payload["bid"], payload["ask"] = "102", "100"
+    assert resilience._independent_coinbase_quote_check("BTC-USD", crossed, worker) == "CROSSED"
+
+    resilience._independent_quote_checked_at.clear()
+    monkeypatch.setenv("LIVE_TRADING_ARMED", "true")
+    assert resilience._independent_coinbase_quote_check("BTC-USD", crossed, worker) == "DISABLED"
+    assert len(calls) == 3
