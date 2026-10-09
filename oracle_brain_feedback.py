@@ -51,7 +51,9 @@ def _json_obj(value: Any) -> dict[str, Any]:
 _GREEN_FEATURES = (
     "momentum_5d", "momentum_20d", "trend_strength", "rsi_14", "volume_ratio",
     "news_sentiment", "macd_hist", "atr_pct", "bollinger_position",
-    "volatility_20d", "dip_depth_pct", "rebound_from_low_pct",
+    "volatility_20d", "dip_depth_pct", "rebound_from_low_pct", "rebound_pct",
+    "dip_rebound_score", "schwager_trend_score", "schwager_breakout_score",
+    "schwager_oscillator_score", "schwager_setup_score",
 )
 
 
@@ -390,6 +392,8 @@ def outcome_memory_for_signal(
     # The winner formula consumes independently reconciled complete BUY lots,
     # rather than trusting SELL snapshots or counting split exits as samples.
     green_rows = []
+    from paper_winner_memory import current_entry_features
+    green_signal = current_entry_features(signal)
     try:
         from paper_exit_research import REPORT_VERSION, timestamp
         reports = fetch_rows("SELECT report FROM paper_exit_research_reports WHERE market=%s AND version=%s",
@@ -402,7 +406,7 @@ def outcome_memory_for_signal(
         candidates = memory.get("winner_entry_memory", {}).get("records", [])
         from paper_regime_economics_shadow import classify_regime
         green_regime = target_regime if target_regime != "unknown" else classify_regime(
-            feature_snapshot={name: _value(signal, name) for name in _GREEN_FEATURES})
+            feature_snapshot=green_signal)
         green_rows = [r for r in candidates
                       if normalize_strategy_identity(r.get("strategy")) == target_strategy_norm
                       and _normalized_regime(r.get("regime")) == green_regime
@@ -413,8 +417,9 @@ def outcome_memory_for_signal(
             green_rows = matching
     except Exception:
         green_rows = []
-    green_core = green_core_profile(green_rows, signal, min_samples=max(5, int(min_samples)))
+    green_core = green_core_profile(green_rows, green_signal, min_samples=max(5, int(min_samples)))
     green_core["provenance"] = "canonical-winner-entry-v1"
+    green_core["input_units"] = "canonical_entry_fingerprint"
     base_adjustment = _number(result.get("ranking_adjustment"))
     green_adjustment = _number(green_core.get("adjustment"))
     counterfactual_memory = _counterfactual_memory_for_signal(
