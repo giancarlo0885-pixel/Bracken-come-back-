@@ -353,6 +353,13 @@ def _signal_payload(signal: Any, route: dict[str, Any], scan_type: str, **extra:
             "market_data_route": route,
         }
     )
+    # Preserve immutable forecast evidence already computed before this decision.
+    # Never synthesize an edge from a later forecast or a realized outcome.
+    forecast_edge = getattr(signal, "expected_edge_pct", None)
+    if forecast_edge is not None:
+        payload["expected_edge_pct"] = forecast_edge
+        payload["edge_provenance"] = "predecision_forecast_expected_move_pct"
+        payload["forecast_id"] = getattr(signal, "forecast_id", None)
     payload.update(extra)
     return payload
 
