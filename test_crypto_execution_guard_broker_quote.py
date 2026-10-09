@@ -375,6 +375,11 @@ def test_crossed_broker_book_recovers_as_paper_only_sized_estimate(monkeypatch):
         {"symbol": "BTC-USD", "avg_dollar_volume": 1_000_000}, snapshot
     )
     assert enriched["tradeable"] is False
+    assert enriched["provider_quote_verified"] is False
+    assert enriched["paper_reference_verified"] is True
+    assert enriched["current_data_verified"] is False
+    assert enriched["verified"] is False
+    assert enriched["source_mode"] == "broker_paper_estimate_reference"
 
 
 def test_crossed_book_fallback_is_completely_disabled_outside_disarmed_paper(monkeypatch):
