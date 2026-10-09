@@ -1284,6 +1284,15 @@ def fast_scan_market(market: str) -> list[Any]:
             signals.append(signal)
             prices[symbol] = quote_payload
             try:
+                forecast = forecast_price(
+                    history,
+                    3 if market == "cash" else 1,
+                    market=market,
+                    source_interval=route.get("interval", "1d"),
+                )
+                if forecast:
+                    setattr(signal, "forecast_id", getattr(forecast, "forecast_id", None))
+                    setattr(signal, "expected_edge_pct", getattr(forecast, "expected_move_pct", None))
                 signal_created_at = utc_now()
                 setattr(signal, "created_at", signal_created_at)
                 signal_id = save_json_signal(
@@ -1311,14 +1320,7 @@ def fast_scan_market(market: str) -> list[Any]:
                     created_at=signal_created_at,
                 )
                 setattr(signal, "signal_id", signal_id)
-                forecast = forecast_price(
-                    history,
-                    3 if market == "cash" else 1,
-                    market=market,
-                    source_interval=route.get("interval", "1d"),
-                )
                 if forecast:
-                    setattr(signal, "forecast_id", getattr(forecast, "forecast_id", None))
                     save_forecast(market, symbol, forecast, scan_type="fast", signal_id=signal_id, signal_created_at=signal_created_at)
             except Exception as exc:
                 log.debug("Fast persistence failed | market=%s | symbol=%s | error=%s", market, symbol, exc)
@@ -1470,6 +1472,15 @@ def scan_market(market: str) -> list[Any]:
                 continue
             signals.append(signal)
             prices[symbol] = quote_payload
+            forecast = forecast_price(
+                history,
+                5,
+                market=market,
+                source_interval=route.get("interval", "1d"),
+            )
+            if forecast:
+                setattr(signal, "forecast_id", getattr(forecast, "forecast_id", None))
+                setattr(signal, "expected_edge_pct", getattr(forecast, "expected_move_pct", None))
             signal_created_at = utc_now()
             setattr(signal, "created_at", signal_created_at)
             signal_id = save_json_signal(
@@ -1500,14 +1511,7 @@ def scan_market(market: str) -> list[Any]:
                 created_at=signal_created_at,
             )
             setattr(signal, "signal_id", signal_id)
-            forecast = forecast_price(
-                history,
-                5,
-                market=market,
-                source_interval=route.get("interval", "1d"),
-            )
             if forecast:
-                setattr(signal, "forecast_id", getattr(forecast, "forecast_id", None))
                 save_forecast(market, symbol, forecast, scan_type="deep", signal_id=signal_id, signal_created_at=signal_created_at)
         except Exception as exc:
             log.warning("Oracle pass failed | market=%s | symbol=%s | error=%s", market, symbol, exc)
