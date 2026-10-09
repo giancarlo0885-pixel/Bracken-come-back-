@@ -177,7 +177,11 @@ def overlay_execution_payload(payload: dict[str, Any], snapshot: MarketSnapshot)
             "stale": False,
             "spread_pct": snapshot.spread_pct,
             "spread_known": snapshot.spread_pct is not None,
-            "tradeable": bool(snapshot.quote_verified is True and liquidity is not None),
+            "tradeable": bool(
+                snapshot.quote_verified is True
+                and liquidity is not None
+                and not str(snapshot.verification_basis or "").startswith("paper_estimate:")
+            ),
             "source_mode": "broker_current_quote",
             "source_capability": snapshot.source_capability,
             "source_identity": snapshot.source_identity,
