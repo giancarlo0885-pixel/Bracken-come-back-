@@ -75,6 +75,8 @@ def prepare(rows, as_of):
               or row.get("market") not in {"cash", "crypto"}
               or any(label in {"unknown", "unclassified", ""} for label in _key(row))):
             counts["missing_features_or_economics"] += 1
+        elif not math.isfinite(net / notional):
+            counts["nonfinite_normalized_return"] += 1
         else:
             valid.append({**row, "net_pnl": net, "entry": entry, "exit": exit_,
                           "net_return": net / notional})
@@ -91,8 +93,13 @@ def summarize(rows, *, alpha=0.05):
         sums = np.array([sum(v) for v in clusters.values()])
         sizes = np.array([len(v) for v in clusters.values()])
         rng = np.random.default_rng(42)
-        indexes = rng.integers(0, len(sums), (4000, len(sums)))
-        means = sums[indexes].sum(axis=1) / sizes[indexes].sum(axis=1)
+        # Bound working memory for long histories; preserve whole-window draws.
+        means = np.empty(4000)
+        batch_size = max(1, min(128, 1_000_000 // len(sums)))
+        for start in range(0, 4000, batch_size):
+            end = min(4000, start + batch_size)
+            indexes = rng.integers(0, len(sums), (end - start, len(sums)))
+            means[start:end] = sums[indexes].sum(axis=1) / sizes[indexes].sum(axis=1)
         bound = float(np.quantile(means, alpha))
     wins, losses = values[values > 0], values[values < 0]
     return {"trades": len(rows), "episodes": len(clusters),
@@ -150,13 +157,92 @@ def discover(rows, *, cutoff, as_of):
             "limitations": "Observed completed trades only; unexecuted signals and continuous price paths are not measured. Four-hour/day windows are dependence proxies, not certified independent episodes. Requires separate chronological validation and risk review before promotion."}
 
 
+def verified_ledger_inputs(ledger, fills, *, as_of):
+    """Reconcile full history, then use BUY-side snapshots for entry labels only."""
+    from paper_exit_research import attach_fill_fee_evidence, reconcile_fifo
+
+    report = reconcile_fifo(attach_fill_fee_evidence(ledger, fills),
+                            as_of=as_of, require_fill_fee_evidence=True)
+    buys = {r["trade_id"]: r for r in ledger if r.get("side") == "BUY"}
+    rows, exclusions = [], Counter()
+    for close in report["closes"]:
+        if not close["fifo_complete"]:
+            exclusions["unreconciled_fifo"] += 1
+            continue
+        labels, evidence_times, notional = [], [], 0.0
+        for member in close["members"]:
+            buy = buys.get(member["buy_trade_id"], {})
+            snapshot = buy.get("feature_snapshot") or {}
+            if isinstance(snapshot, str):
+                try:
+                    snapshot = json.loads(snapshot)
+                except ValueError:
+                    snapshot = {}
+            if not isinstance(snapshot, dict):
+                snapshot = {}
+            labels.append((buy.get("strategy"), snapshot.get("regime"),
+                           snapshot.get("entry_pattern")))
+            evidence_times.append(_time(buy.get("decision_timestamp")))
+            price = _finite(buy.get("entry_price"))
+            quantity = _finite(member.get("quantity"))
+            if price is None or price <= 0 or quantity is None or quantity <= 0:
+                notional = float("nan")
+            else:
+                notional += price * quantity
+        entry = _time(close["entry_time"])
+        if (not labels or any(label != labels[0] for label in labels)
+                or any(not value or value in {"unknown", "unclassified"} for value in labels[0])
+                or any(t is None or entry is None or t > entry for t in evidence_times)
+                or not math.isfinite(notional) or notional <= 0):
+            exclusions["unverified_or_mixed_entry_snapshot"] += 1
+            continue
+        strategy, regime, pattern = labels[0]
+        rows.append({**close, "strategy": strategy, "regime": regime,
+                     "entry_pattern": pattern, "entry_notional": notional,
+                     "entry_evidence_time": max(evidence_times).isoformat(),
+                     "entry_cohort_verified": True})
+    return rows, {"fifo": report["diagnostics"], "adapter": dict(exclusions),
+                  "observed_closes": report["observed_closes"], "exported_trades": len(rows)}
+
+
+def read_verified_history(market, *, as_of):
+    """Read-only snapshot; never truncates opening inventory or writes reports."""
+    from database import connect
+    if market not in {"cash", "crypto"}:
+        raise ValueError("market must be cash or crypto")
+    with connect() as conn:
+        conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+        ledger = [dict(r) for r in conn.execute(
+            """SELECT id,trade_id,market,symbol,side,quantity,entry_price,exit_price,
+                      entry_time,exit_time,fees,gross_pnl,net_pnl,strategy,order_id,
+                      feature_snapshot,decision_timestamp
+               FROM trade_ledger WHERE market=%s AND broker_mode='PAPER'
+                 AND account_environment='PAPER' AND side IN ('BUY','SELL')""",
+            (market,)).fetchall()]
+        fills = [dict(r) for r in conn.execute(
+            """SELECT fill_id,market,symbol,side,quantity,fill_price,fee_amount,created_at
+               FROM paper_fills WHERE market=%s""", (market,)).fetchall()]
+    return verified_ledger_inputs(ledger, fills, as_of=as_of)
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("input", type=Path, help="JSON array of verified round trips")
+    parser.add_argument("input", type=Path, nargs="?", help="JSON array of verified round trips")
+    parser.add_argument("--database-market", choices=("cash", "crypto"))
     parser.add_argument("--cutoff", required=True)
     parser.add_argument("--as-of", required=True)
     args = parser.parse_args()
     cutoff, as_of = _time(args.cutoff), _time(args.as_of)
     if cutoff is None or as_of is None:
         parser.error("timestamps require explicit timezones")
-    print(json.dumps(discover(json.loads(args.input.read_text()), cutoff=cutoff, as_of=as_of), allow_nan=False))
+    if bool(args.input) == bool(args.database_market):
+        parser.error("choose exactly one JSON input or --database-market")
+    coverage = None
+    if args.database_market:
+        rows, coverage = read_verified_history(args.database_market, as_of=as_of)
+    else:
+        rows = json.loads(args.input.read_text())
+    result = discover(rows, cutoff=cutoff, as_of=as_of)
+    if coverage is not None:
+        result["history_coverage"] = coverage
+    print(json.dumps(result, allow_nan=False))

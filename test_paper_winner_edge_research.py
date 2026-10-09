@@ -78,3 +78,35 @@ def test_split_episode_and_timezone_validation():
     assert result["exclusions"]["boundary_or_open_training_episode"] == 1
     with pytest.raises(ValueError):
         discover([], cutoff=CUTOFF.replace(tzinfo=None), as_of=AS_OF)
+
+
+def test_adapter_uses_allocated_notional_and_buy_snapshot_only():
+    from paper_winner_edge_research import verified_ledger_inputs
+    from test_paper_exit_research import buy, sell, START as EVENT
+    opening = {**buy("buy", 2, 100, 0.2),
+               "decision_timestamp": EVENT.isoformat(),
+               "feature_snapshot": {"regime": "trend_up", "entry_pattern": "dip_rebound"}}
+    closing = {**sell("sell", 1, 100, 102, 0.1, 2),
+               "strategy": "posthoc", "feature_snapshot": {"regime": "posthoc"}}
+    fills = [dict(fill_id="b", market="crypto", symbol="TEST-USD", side="BUY",
+                  quantity=2, fill_price=100, fee_amount=0.2, created_at=EVENT),
+             dict(fill_id="s", market="crypto", symbol="TEST-USD", side="SELL",
+                  quantity=1, fill_price=102, fee_amount=0.1,
+                  created_at=EVENT + timedelta(minutes=20))]
+    rows, coverage = verified_ledger_inputs([opening, closing], fills, as_of=EVENT + timedelta(days=1))
+    assert coverage["exported_trades"] == 1
+    assert rows[0]["strategy"] == "council"
+    assert rows[0]["entry_pattern"] == "dip_rebound"
+    assert rows[0]["entry_notional"] == 100
+    assert rows[0]["net_pnl"] == pytest.approx(1.8)
+    opening["decision_timestamp"] = (EVENT + timedelta(minutes=1)).isoformat()
+    rows, coverage = verified_ledger_inputs([opening, closing], fills, as_of=EVENT + timedelta(days=1))
+    assert not rows
+    assert coverage["adapter"]["unverified_or_mixed_entry_snapshot"] == 1
+
+
+def test_nonfinite_normalized_return_is_excluded():
+    row = {**trade(1), "net_pnl": 1e308, "entry_notional": 1e-308}
+    rows, exclusions = prepare([row], AS_OF)
+    assert not rows
+    assert exclusions["nonfinite_normalized_return"] == 1

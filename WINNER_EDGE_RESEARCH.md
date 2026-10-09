@@ -36,10 +36,15 @@ The example is synthetic schema documentation, not Oracle performance.
 regime and pattern. An exit-time label cannot be substituted. Fee verification
 requires canonical fills and FIFO reconciliation. Missing facts remain missing.
 Raw runtime logs and existing bounded report details do not satisfy this input
-contract. A full verified export/adapter is still needed for production history.
+contract. The read-only database adapter reconciles full per-market history and
+uses BUY-side entry snapshots only. Missing or mixed snapshots are excluded.
 
 ```bash
 python paper_winner_edge_research.py verified_round_trips.json \
+  --cutoff 2026-10-01T00:00:00Z --as-of 2026-10-09T17:00:00Z
+
+# With DATABASE_URL configured, read a consistent, read-only snapshot:
+python paper_winner_edge_research.py --database-market crypto \
   --cutoff 2026-10-01T00:00:00Z --as-of 2026-10-09T17:00:00Z
 ```
 
