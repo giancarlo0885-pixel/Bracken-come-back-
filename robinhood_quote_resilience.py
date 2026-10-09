@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from dataclasses import replace
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 import os
 import time
 from typing import Any, Iterable
@@ -89,6 +89,97 @@ def _invalid_book_reason(quote: dict[str, Any]) -> str:
     if ask < bid:
         return "CROSSED_BOOK"
     return "UNKNOWN"
+
+
+# Fixed, small diagnostic sizes. These are quote requests, never orders.
+# No fallback is authorized for assets or quantities outside this list.
+_PAPER_ESTIMATE_QUANTITIES = {"BTC-USD": "0.001", "ETH-USD": "0.01"}
+_MAX_ESTIMATE_AGE_SECONDS = 10.0
+_MAX_ESTIMATE_FUTURE_SECONDS = 2.0
+
+
+def _paper_estimated_snapshot(
+    provider: Any,
+    symbol: str,
+    crossed_quote: dict[str, Any],
+    worker: Any,
+) -> Any | None:
+    """Read an independently generated, size-specific Robinhood v2 estimate.
+
+    Only used after a crossed best-bid/ask fails all retries, in fully disarmed
+    paper mode. It is a marked paper reference, *not* a replacement broker BBO
+    and never authorizes entries. Reject wrong identity, size, timestamp,
+    non-positive/crossed books, wide spreads and price divergence.
+    """
+    if not _paper_only():
+        return None
+    quantity = _PAPER_ESTIMATE_QUANTITIES.get(symbol)
+    if not quantity:
+        return None
+    try:
+        records = provider.client.estimated_price(symbol, "both", quantity)
+    except Exception as exc:
+        worker.log.info(
+            "CRYPTO | ROBINHOOD PAPER ESTIMATE | symbol=%s | status=ERROR | error=%s",
+            symbol, exc.__class__.__name__,
+        )
+        return None
+
+    # One atomic row with two sides: never join non-synchronous responses.
+    if not isinstance(records, list) or len(records) != 1 or not isinstance(records[0], dict):
+        return None
+    quote = records[0]
+    if str(quote.get("symbol") or "").upper().strip() != symbol:
+        return None
+    if str(quote.get("side") or "").lower().strip() not in {"bid", "ask", "both"}:
+        return None
+    try:
+        if Decimal(str(quote.get("quantity"))) != Decimal(quantity):
+            return None
+        observed = datetime.fromisoformat(str(quote.get("timestamp") or "").replace("Z", "+00:00"))
+        if observed.tzinfo is None:
+            return None
+        age = (datetime.now(timezone.utc) - observed.astimezone(timezone.utc)).total_seconds()
+        if age > _MAX_ESTIMATE_AGE_SECONDS or age < -_MAX_ESTIMATE_FUTURE_SECONDS:
+            return None
+        limit = Decimal(str(os.getenv("ROBINHOOD_BROKER_MAX_SPREAD_PCT", "1.50")))
+        divergence_limit = Decimal(str(os.getenv("ROBINHOOD_BROKER_PRICE_TOLERANCE_PCT", "0.75")))
+        if not limit.is_finite() or limit < 0 or not divergence_limit.is_finite() or divergence_limit < 0:
+            return None
+        bid = Decimal(str(_first_present(quote, "bid", "bid_price")))
+        ask = Decimal(str(_first_present(quote, "ask", "ask_price")))
+        crossed_bid = Decimal(str(_first_present(crossed_quote, "bid", "bid_price")))
+        crossed_ask = Decimal(str(_first_present(crossed_quote, "ask", "ask_price")))
+        if not all(v.is_finite() and v > 0 for v in (bid, ask, crossed_bid, crossed_ask)):
+            return None
+        if ask < bid or crossed_ask >= crossed_bid:
+            return None
+        mid = (bid + ask) / Decimal("2")
+        crossed_mid = (crossed_bid + crossed_ask) / Decimal("2")
+        spread_pct = (ask - bid) / mid * Decimal("100")
+        # Crossed book is used only as an independent sanity bound, never a price.
+        difference_pct = abs(mid - crossed_mid) / mid * Decimal("100")
+        if spread_pct > limit or difference_pct > divergence_limit:
+            return None
+    except (ValueError, TypeError, InvalidOperation, OverflowError):
+        return None
+
+    from robinhood_current_marketdata_runtime import snapshot_from_robinhood_quote
+
+    fetched_at = datetime.now(timezone.utc).isoformat()
+    snapshot = snapshot_from_robinhood_quote(symbol, quote, fetched_at=fetched_at)
+    if snapshot is None:
+        return None
+    return replace(
+        snapshot,
+        timestamp=observed.astimezone(timezone.utc).isoformat(),
+        source_capability="v2_estimated_price_paper_reference",
+        source_identity=f"Robinhood Crypto:{symbol}:v2_estimated_price:qty={quantity}",
+        cache_identity=f"robinhood_v2_paper_estimate:{symbol}:{quantity}",
+        verification_basis="paper_estimate:robinhood_crypto_v2_size_specific",
+        provider_quote_verified=False,
+        paper_reference_verified=True,
+    )
 
 
 def _paper_grace_snapshot(snapshot: Any) -> Any:
@@ -206,6 +297,7 @@ def install_robinhood_quote_resilience(worker: Any) -> bool:
         for symbol in missing:
             crossed_attempts = 0
             recovered = False
+            last_crossed_quote = None
             for attempt in range(1, attempts + 1):
                 try:
                     records = provider.client.best_bid_ask_quotes(symbol)
@@ -256,6 +348,7 @@ def install_robinhood_quote_resilience(worker: Any) -> bool:
                     reason = _invalid_book_reason(quote)
                     if reason == "CROSSED_BOOK":
                         crossed_attempts += 1
+                        last_crossed_quote = quote
                     worker.log.info(
                         "CRYPTO | ROBINHOOD SINGLE QUOTE RETRY | symbol=%s | attempt=%s/%s | status=INVALID_BOOK | reason=%s | public_keys=%s | api_tradable=true",
                         symbol,
@@ -267,6 +360,22 @@ def install_robinhood_quote_resilience(worker: Any) -> bool:
 
                 if attempt < attempts and retry_delay > 0:
                     time.sleep(retry_delay)
+
+            if not recovered and crossed_attempts == attempts and last_crossed_quote is not None:
+                paper_snapshot = _paper_estimated_snapshot(provider, symbol, last_crossed_quote, worker)
+                if paper_snapshot is not None:
+                    with provider._lock:
+                        provider._cache[symbol] = (time.monotonic(), paper_snapshot)
+                    results[symbol] = paper_snapshot
+                    recovered = True
+                    crossed_cycles.pop(symbol, None)
+                    quality_until.pop(symbol, None)
+                    worker.log.warning(
+                        "CRYPTO | ROBINHOOD PAPER ESTIMATE RECOVERY | symbol=%s | "
+                        "source=V2_ESTIMATED_PRICE | primary_book=CROSSED | "
+                        "entry_eligible=false | broker_submission=NONE | live_trading=DISARMED",
+                        symbol,
+                    )
 
             if not recovered and crossed_attempts == attempts:
                 cycles = crossed_cycles.get(symbol, 0) + 1
