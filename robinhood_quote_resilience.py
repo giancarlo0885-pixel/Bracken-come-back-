@@ -98,6 +98,63 @@ _MAX_ESTIMATE_AGE_SECONDS = 10.0
 _MAX_ESTIMATE_FUTURE_SECONDS = 2.0
 
 
+def _atomic_estimated_both_quote(
+    records: Any, symbol: str, quantity: str,
+) -> dict[str, Any] | None:
+    """Normalize one or two broker-provided rows from ONE estimated-price call.
+
+    The v2 endpoint may return separate bid and ask rows for side=both. Do not
+    infer a missing price or combine different symbols, sizes or market moments.
+    Only an exact bid+ask pair from the same response, at timestamps within one
+    second, may form a reference. The older timestamp governs freshness.
+    """
+    if not isinstance(records, list):
+        return None
+    if len(records) == 1 and isinstance(records[0], dict):
+        return records[0]
+    if len(records) != 2 or not all(isinstance(row, dict) for row in records):
+        return None
+
+    by_side: dict[str, dict[str, Any]] = {}
+    observed_times: list[datetime] = []
+    for row in records:
+        side = str(row.get("side") or "").lower().strip()
+        if side not in {"bid", "ask"} or side in by_side:
+            return None
+        if str(row.get("symbol") or "").upper().strip() != symbol:
+            return None
+        try:
+            if Decimal(str(row.get("quantity"))) != Decimal(quantity):
+                return None
+            observed = datetime.fromisoformat(
+                str(row.get("timestamp") or "").replace("Z", "+00:00")
+            )
+        except (ValueError, TypeError, InvalidOperation):
+            return None
+        if observed.tzinfo is None:
+            return None
+        by_side[side] = row
+        observed_times.append(observed.astimezone(timezone.utc))
+
+    if set(by_side) != {"bid", "ask"}:
+        return None
+    if abs((observed_times[0] - observed_times[1]).total_seconds()) > 1.0:
+        return None
+    bid = _first_present(by_side["bid"], "bid", "bid_price")
+    ask = _first_present(by_side["ask"], "ask", "ask_price")
+    if bid is None or ask is None:
+        return None
+
+    return {
+        "symbol": symbol,
+        "side": "both",
+        "quantity": quantity,
+        "timestamp": min(observed_times).isoformat(),
+        "bid": bid,
+        "ask": ask,
+    }
+
+
 def _paper_estimated_snapshot(
     provider: Any,
     symbol: str,
@@ -144,10 +201,11 @@ def _paper_estimated_snapshot(
         first.get("timestamp") not in (None, ""),
     )
 
-    # One atomic row with two sides: never join non-synchronous responses.
-    if not isinstance(records, list) or len(records) != 1 or not isinstance(records[0], dict):
-        return reject("NON_ATOMIC_OR_MISSING_ESTIMATE_ROW")
-    quote = records[0]
+    # Both sides must come from the same read and nearly identical provider
+    # times. Never pair separate HTTP responses or infer a missing side.
+    quote = _atomic_estimated_both_quote(records, symbol, quantity)
+    if quote is None:
+        return reject("UNPAIRED_OR_MISSING_ESTIMATE_SIDES")
     if str(quote.get("symbol") or "").upper().strip() != symbol:
         return reject("ESTIMATE_SYMBOL_MISMATCH")
     if str(quote.get("side") or "").lower().strip() not in {"bid", "ask", "both"}:
