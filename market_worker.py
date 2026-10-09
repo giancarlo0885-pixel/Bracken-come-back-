@@ -264,6 +264,8 @@ def _quote_payload_from_history(symbol: str, history: Any, price: Any = None, *,
             "yahoo_crypto_quote_turnover_usd"
             if str(route.get("provider") or "").lower().strip() in {"yahoo finance", "yahoo"}
             and normalized_symbol.endswith("-USD")
+            and str(route.get("requested_symbol") or normalized_symbol).upper().strip() == normalized_symbol
+            and str(route.get("provider_symbol") or normalized_symbol).upper().strip() == normalized_symbol
             else "price_times_reported_volume"
         ),
         "data_quality_score": route.get("data_quality_score"),
