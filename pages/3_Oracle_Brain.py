@@ -47,7 +47,12 @@ with st.expander("Paper fill reconciliation"):
         st.caption("Persisted paper prices and explicit fees. Missing observations remain unavailable. These totals do not certify a profitable model or premature exits.")
         if report.get("cohorts"):
             st.dataframe(pd.DataFrame(report["cohorts"]), use_container_width=True, hide_index=True)
-        st.json({"source_coverage": report.get("source_query_diagnostics"),
+        memory = report.get("winner_entry_memory") or {}
+        st.caption(f"Winner formula: {memory.get('winners', 0)} complete winning BUY lots and {memory.get('losers', 0)} losing lots with verified costs and original entry features.")
+        winners = [r for r in memory.get("records", []) if r.get("net_pnl", 0) > 0]
+        if winners:
+            st.json(winners)
+        st.json({"winner_feature_exclusions": memory.get("exclusions"), "source_coverage": report.get("source_query_diagnostics"),
                  "fifo_exclusions": report.get("diagnostics"),
                  "post_exit_path_coverage": report.get("path_coverage"),
                  "since_previous_report": report.get("since_previous_report"),
