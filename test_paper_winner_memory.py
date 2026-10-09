@@ -60,7 +60,7 @@ def test_formula_recomputes_current_features_and_excludes_future_outcomes(monkey
     strategy = strategy_identity(signal)
     records = [dict(symbol='TEST-USD', strategy=strategy, regime='range__low_vol',
                     exit_time=(START-timedelta(hours=1)).isoformat(), net_pnl=pnl,
-                    feature_snapshot={'momentum_5d': momentum})
+                    feature_snapshot={'momentum_5d': momentum / .30})
                for pnl, momentum in [(1, .03)]*20+[(-1, -.03)]*20]
     records.append({**records[0], 'exit_time': (START+timedelta(hours=1)).isoformat()})
     monkeypatch.setattr(oracle_brain, 'runtime_safety_state', lambda: {'safe_research_boundary': True})
@@ -72,3 +72,17 @@ def test_formula_recomputes_current_features_and_excludes_future_outcomes(monkey
     assert winner['samples'] == 40
     assert winner['adjustment'] > 0
     assert loser['adjustment'] < 0
+
+
+def test_current_features_match_persisted_fingerprint_units_without_missing_defaults():
+    from paper_winner_memory import current_entry_features
+    assert current_entry_features({}) == {}
+    result = current_entry_features({'momentum_5d': -.003, 'momentum_20d': .03,
+                                     'rsi_14': 60, 'atr_pct': .02, 'trend_strength': .01})
+    import pytest
+    assert result['momentum_5d'] == pytest.approx(-.01)
+    assert result['momentum_20d'] == pytest.approx(.05)
+    assert result['rsi_14'] == pytest.approx(.2)
+    assert result['atr_pct'] == pytest.approx(.1)
+    assert result['trend_strength'] == .01
+    assert 'volatility_20d' not in result
