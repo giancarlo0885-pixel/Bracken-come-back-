@@ -155,6 +155,80 @@ def _atomic_estimated_both_quote(
     }
 
 
+_independent_quote_checked_at: dict[str, float] = {}
+
+
+def _independent_coinbase_quote_check(
+    symbol: str, crossed_quote: dict[str, Any], worker: Any,
+) -> str:
+    """Read-only second-provider diagnostic. Never returns an executable quote.
+
+    Coinbase Exchange public ticker supplies its own UTC timestamp and two
+    sides. Identity is anchored to the fixed product endpoint; stale, crossed,
+    implausible or divergent prices are not treated as valid evidence.
+    """
+    if not _paper_only() or symbol not in {"BTC-USD", "ETH-USD"}:
+        return "DISABLED"
+    now = time.monotonic()
+    if now - _independent_quote_checked_at.get(symbol, -1e12) < 60:
+        return "THROTTLED"
+    _independent_quote_checked_at[symbol] = now
+    status = "UNAVAILABLE"
+    try:
+        import requests
+
+        response = requests.get(
+            f"https://api.exchange.coinbase.com/products/{symbol}/ticker",
+            headers={"Accept": "application/json", "User-Agent": "Oracle-paper-quote-diagnostic/1"},
+            timeout=3,
+        )
+        if response.status_code != 200:
+            status = "PROVIDER_HTTP_FAILURE"
+        else:
+            data = response.json()
+            if not isinstance(data, dict):
+                status = "INVALID_PAYLOAD"
+            else:
+                observed = datetime.fromisoformat(
+                    str(data.get("time") or "").replace("Z", "+00:00")
+                )
+                if observed.tzinfo is None:
+                    status = "MISSING_TIMEZONE"
+                else:
+                    age = (datetime.now(timezone.utc) - observed.astimezone(timezone.utc)).total_seconds()
+                    bid = Decimal(str(data.get("bid")))
+                    ask = Decimal(str(data.get("ask")))
+                    if age < -2 or age > 10:
+                        status = "STALE_OR_FUTURE"
+                    elif not all(v.is_finite() and v > 0 for v in (bid, ask)):
+                        status = "INVALID_PRICE"
+                    elif ask < bid:
+                        status = "CROSSED"
+                    else:
+                        primary_bid = Decimal(str(_first_present(crossed_quote, "bid", "bid_price")))
+                        primary_ask = Decimal(str(_first_present(crossed_quote, "ask", "ask_price")))
+                        mid = (bid + ask) / 2
+                        primary_mid = (primary_bid + primary_ask) / 2
+                        divergence = abs(mid - primary_mid) / mid * 100
+                        spread = (ask - bid) / mid * 100
+                        if not all(v.is_finite() and v > 0 for v in (primary_bid, primary_ask)):
+                            status = "INVALID_PRIMARY"
+                        elif divergence > Decimal("0.75"):
+                            status = "DIVERGENT"
+                        elif spread > Decimal("1.50"):
+                            status = "WIDE_SPREAD"
+                        else:
+                            status = "INDEPENDENT_REFERENCE_COHERENT"
+    except Exception:
+        status = "FETCH_OR_VALIDATION_FAILURE"
+    worker.log.info(
+        "CRYPTO | INDEPENDENT QUOTE CHECK | symbol=%s | provider=Coinbase Exchange | "
+        "status=%s | execution_impact=NONE | broker_submission=NONE",
+        symbol, status,
+    )
+    return status
+
+
 def _paper_estimated_snapshot(
     provider: Any,
     symbol: str,
@@ -460,6 +534,9 @@ def install_robinhood_quote_resilience(worker: Any) -> bool:
                         "entry_eligible=false | broker_submission=NONE | live_trading=DISARMED",
                         symbol,
                     )
+
+            if not recovered and crossed_attempts == attempts and last_crossed_quote is not None:
+                _independent_coinbase_quote_check(symbol, last_crossed_quote, worker)
 
             if not recovered and crossed_attempts == attempts:
                 cycles = crossed_cycles.get(symbol, 0) + 1
