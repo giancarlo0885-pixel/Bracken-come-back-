@@ -41,7 +41,8 @@ def _action(signal: Any) -> str:
 
 
 def _paper_grace_quote(quote: dict[str, Any]) -> bool:
-    return str(quote.get("verification_basis") or "").strip().lower().startswith("paper_grace:")
+    basis = str(quote.get("verification_basis") or "").strip().lower()
+    return basis.startswith(("paper_grace:", "paper_estimate:"))
 
 
 def _live_execution_mode() -> bool:

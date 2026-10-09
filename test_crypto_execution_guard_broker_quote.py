@@ -309,3 +309,180 @@ def test_paper_grace_marker_preserves_verified_snapshot_and_marks_provenance():
         "paper_grace:provider:robinhood_crypto_best_bid_ask_read_time"
     )
     assert original.verification_basis == "provider:robinhood_crypto_best_bid_ask_read_time"
+
+
+def _paper_estimate_fixture(monkeypatch, *, quote_overrides=None, records_override=None):
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+    import threading
+
+    monkeypatch.setenv("EXECUTION_MODE", "paper")
+    monkeypatch.setenv("ENABLE_BROKER_SUBMISSION", "false")
+    monkeypatch.setenv("LIVE_TRADING_ARMED", "false")
+    estimate_calls = []
+    retry_calls = []
+    quote = {
+        "symbol": "BTC-USD",
+        "side": "both",
+        "quantity": "0.001",
+        "bid": "100.20",
+        "ask": "100.40",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+    quote.update(quote_overrides or {})
+
+    def estimate(symbol, side, quantity):
+        estimate_calls.append((symbol, side, quantity))
+        return records_override if records_override is not None else [quote]
+
+    def best_bid_ask(*symbols):
+        retry_calls.append(symbols)
+        return [{"symbol": "BTC-USD", "bid": "101.00", "ask": "100.00"}]
+
+    provider = SimpleNamespace(
+        client=SimpleNamespace(estimated_price=estimate, best_bid_ask_quotes=best_bid_ask),
+        snapshots=lambda symbols: {},
+        tradable_symbols=lambda: {"BTC-USD", "ETH-USD"},
+        _cache={},
+        _lock=threading.Lock(),
+    )
+    worker = SimpleNamespace(
+        _robinhood_current_marketdata_provider=provider,
+        _held_symbols=lambda market: set(),
+        log=logging.getLogger("test-robinhood-paper-estimate"),
+    )
+    return worker, provider, estimate_calls, retry_calls
+
+
+def test_crossed_broker_book_recovers_as_paper_only_sized_estimate(monkeypatch):
+    worker, provider, estimates, retries = _paper_estimate_fixture(monkeypatch)
+    assert resilience.install_robinhood_quote_resilience(worker)
+    result = provider.snapshots(["BTC-USD"])
+    snapshot = result["BTC-USD"]
+
+    assert len(retries) == 3  # All actual BBO retries still reject the crossed book.
+    assert estimates == [("BTC-USD", "both", "0.001")]
+    assert snapshot.price == 100.3
+    assert snapshot.bid == 100.2 and snapshot.ask == 100.4
+    assert snapshot.verification_basis.startswith("paper_estimate:")
+    assert snapshot.source_capability == "v2_estimated_price_paper_reference"
+    assert snapshot.paper_reference_verified is True
+    assert snapshot.provider_quote_verified is False
+    assert guard._paper_grace_quote({"verification_basis": snapshot.verification_basis})
+    from robinhood_current_marketdata_runtime import overlay_execution_payload
+
+    enriched = overlay_execution_payload(
+        {"symbol": "BTC-USD", "avg_dollar_volume": 1_000_000}, snapshot
+    )
+    assert enriched["tradeable"] is False
+    assert enriched["provider_quote_verified"] is False
+    assert enriched["paper_reference_verified"] is True
+    assert enriched["current_data_verified"] is False
+    assert enriched["verified"] is False
+    assert enriched["source_mode"] == "broker_paper_estimate_reference"
+
+
+def test_crossed_book_fallback_is_completely_disabled_outside_disarmed_paper(monkeypatch):
+    worker, provider, estimates, retries = _paper_estimate_fixture(monkeypatch)
+    monkeypatch.setenv("LIVE_TRADING_ARMED", "true")
+    assert resilience.install_robinhood_quote_resilience(worker)
+    assert provider.snapshots(["BTC-USD"]) == {}
+    assert len(retries) == 3
+    assert estimates == []
+
+
+def test_estimated_quote_must_be_atomic_fresh_size_matched_and_uncrossed(monkeypatch):
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime.now(timezone.utc)
+    cases = [
+        {"symbol": "ETH-USD"},
+        {"side": "wrong"},
+        {"quantity": "0.01"},
+        {"timestamp": (now - timedelta(seconds=45)).isoformat()},
+        {"timestamp": (now + timedelta(seconds=30)).isoformat()},
+        {"timestamp": "not-a-timestamp"},
+        {"bid": "101", "ask": "100"},
+        {"bid": "99", "ask": "103"},  # spread + price divergence
+        {"bid": "100.2", "ask": ""},
+    ]
+    crossed = {"bid": "101", "ask": "100"}
+    for changes in cases:
+        worker, provider, estimates, _ = _paper_estimate_fixture(
+            monkeypatch, quote_overrides=changes
+        )
+        assert resilience._paper_estimated_snapshot(provider, "BTC-USD", crossed, worker) is None
+
+    worker, provider, _, _ = _paper_estimate_fixture(monkeypatch, records_override=[])
+    assert resilience._paper_estimated_snapshot(provider, "BTC-USD", crossed, worker) is None
+    worker, provider, _, _ = _paper_estimate_fixture(monkeypatch, records_override=[
+        {"symbol": "BTC-USD"}, {"symbol": "BTC-USD"}
+    ])
+    assert resilience._paper_estimated_snapshot(provider, "BTC-USD", crossed, worker) is None
+
+
+def test_paper_estimated_price_cannot_trigger_new_buy(monkeypatch):
+    monkeypatch.setenv("EXECUTION_MODE", "paper")
+    monkeypatch.setattr(oracle_bot, "_verified_quote_for", _verified)
+    worker, captured = _worker()
+    guard.install_crypto_execution_quote_guard(worker)
+    result = worker.process_signals(
+        "crypto",
+        [{"symbol": "BTC-USD", "action": "BUY"}],
+        {"BTC-USD": {
+            "symbol": "BTC-USD",
+            "price": 100.3,
+            "provider": "Robinhood Crypto",
+            "quote_verified": True,
+            "verification_basis": "paper_estimate:robinhood_crypto_v2_size_specific",
+        }},
+    )
+    assert result == []
+    assert captured == []
+
+
+def test_paper_estimate_is_counted_as_quality_degradation(monkeypatch):
+    from crypto_provider_health_runtime import install_crypto_provider_health_runtime
+
+    worker, provider, _, _ = _paper_estimate_fixture(monkeypatch)
+    assert resilience.install_robinhood_quote_resilience(worker)
+    assert install_crypto_provider_health_runtime(worker)
+    result = provider.snapshots(["BTC-USD"])
+    assert result["BTC-USD"].verification_basis.startswith("paper_estimate:")
+    health = worker._crypto_provider_health
+    assert health["last_resolved"] == 1
+    assert health["last_paper_estimate_only"] == ["BTC-USD"]
+    assert health["data_quality_score"] == 0.0
+
+
+def test_eth_paper_estimated_price_provides_independent_bid_ask(monkeypatch):
+    from datetime import datetime, timezone
+
+    worker, provider, _, _ = _paper_estimate_fixture(monkeypatch)
+    quote = {
+        "symbol": "ETH-USD",
+        "side": "both",
+        "quantity": "0.01",
+        "bid": "1999.8",
+        "ask": "2000.2",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+    provider.client.estimated_price = lambda symbol, side, quantity: [quote]
+    snapshot = resilience._paper_estimated_snapshot(
+        provider, "ETH-USD", {"bid": "2001", "ask": "1999"}, worker,
+    )
+    assert snapshot is not None
+    assert snapshot.price == 2000.0
+    assert snapshot.verification_basis.startswith("paper_estimate:")
+
+
+def test_cached_paper_estimate_cannot_be_reused_in_live_mode(monkeypatch):
+    worker, provider, _, _ = _paper_estimate_fixture(monkeypatch)
+    snapshot = resilience._paper_estimated_snapshot(
+        provider, "BTC-USD", {"bid": "101", "ask": "100"}, worker,
+    )
+    assert snapshot is not None
+    provider.snapshots = lambda symbols: {"BTC-USD": snapshot}
+    monkeypatch.setenv("EXECUTION_MODE", "live")
+    assert resilience.install_robinhood_quote_resilience(worker)
+    assert provider.snapshots(["BTC-USD"]) == {}
