@@ -173,7 +173,7 @@ def overlay_execution_payload(payload: dict[str, Any], snapshot: MarketSnapshot)
             "provider_symbol": snapshot.provider_symbol,
             "provider_native_symbol": snapshot.provider_native_symbol,
             "quote_verified": True,
-            "verified": True,
+            "verified": snapshot.provider_quote_verified is True,
             "stale": False,
             "spread_pct": snapshot.spread_pct,
             "spread_known": snapshot.spread_pct is not None,
@@ -182,17 +182,21 @@ def overlay_execution_payload(payload: dict[str, Any], snapshot: MarketSnapshot)
                 and liquidity is not None
                 and not str(snapshot.verification_basis or "").startswith("paper_estimate:")
             ),
-            "source_mode": "broker_current_quote",
+            "source_mode": (
+                "broker_paper_estimate_reference"
+                if str(snapshot.verification_basis or "").startswith("paper_estimate:")
+                else "broker_current_quote"
+            ),
             "source_capability": snapshot.source_capability,
             "source_identity": snapshot.source_identity,
             "cache_identity": snapshot.cache_identity,
-            "provider_quote_verified": True,
-            "paper_reference_verified": False,
+            "provider_quote_verified": snapshot.provider_quote_verified is True,
+            "paper_reference_verified": snapshot.paper_reference_verified is True,
             "verification_basis": snapshot.verification_basis,
             "provider_read_timestamp": snapshot.fetched_at,
             "provider_support": provider_support,
             "current_data_provider": "Robinhood Crypto",
-            "current_data_verified": True,
+            "current_data_verified": snapshot.provider_quote_verified is True,
         }
     )
     return data
