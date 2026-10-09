@@ -66,13 +66,20 @@ def install_crypto_provider_health_runtime(worker: Any) -> bool:
         # that call so telemetry reflects the final post-retry provider state.
         result = dict(original_snapshots(requested) or {})
         quality_quarantined = _quality_quarantined_symbols(provider)
+        paper_estimate_only = {
+            symbol for symbol, snapshot in result.items()
+            if str(getattr(snapshot, "verification_basis", "") or "").startswith("paper_estimate:")
+        }
         health_eligible = [
             symbol for symbol in requested
             if symbol in supported and symbol not in quality_quarantined
         ]
         resolved = sum(1 for symbol in health_eligible if symbol in result)
         quality_eligible = [symbol for symbol in requested if symbol in supported]
-        quality_good = [symbol for symbol in quality_eligible if symbol not in quality_quarantined]
+        quality_good = [
+            symbol for symbol in quality_eligible
+            if symbol not in quality_quarantined and symbol not in paper_estimate_only
+        ]
         events.append((
             time.monotonic(),
             len(health_eligible),
@@ -99,12 +106,13 @@ def install_crypto_provider_health_runtime(worker: Any) -> bool:
             "last_unresolved": unresolved[:12],
             "last_coverage_gaps": coverage_gaps[:12],
             "last_quality_quarantined": quarantined_requested[:12],
+            "last_paper_estimate_only": sorted(paper_estimate_only)[:12],
         }
 
-        if unresolved or coverage_gaps or quarantined_requested or len(events) in {1, 10, 25, 50, 100, 200}:
+        if unresolved or coverage_gaps or quarantined_requested or paper_estimate_only or len(events) in {1, 10, 25, 50, 100, 200}:
             worker.log.info(
                 "CRYPTO_PROVIDER_HEALTH | provider=Robinhood Crypto | score=%.2f | availability=%.2f | quality=%.2f | "
-                "eligible_requested=%d | resolved=%d | unresolved=%s | coverage_gaps=%s | quality_quarantined=%s | window_calls=%d",
+                "eligible_requested=%d | resolved=%d | unresolved=%s | coverage_gaps=%s | quality_quarantined=%s | paper_estimate_only=%s | window_calls=%d",
                 score,
                 availability_score,
                 data_quality_score,
@@ -113,6 +121,7 @@ def install_crypto_provider_health_runtime(worker: Any) -> bool:
                 ",".join(unresolved[:8]) or "none",
                 ",".join(coverage_gaps[:8]) or "none",
                 ",".join(quarantined_requested[:8]) or "none",
+                ",".join(sorted(paper_estimate_only)[:8]) or "none",
                 len(events),
             )
         return result
