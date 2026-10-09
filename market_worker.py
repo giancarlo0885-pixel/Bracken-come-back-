@@ -1291,18 +1291,21 @@ def fast_scan_market(market: str) -> list[Any]:
             signals.append(signal)
             prices[symbol] = quote_payload
             stage = "forecast_calculation"
+            forecast_diagnostics: dict[str, str] = {}
             try:
                 forecast = forecast_price(
                     history,
                     3 if market == "cash" else 1,
                     market=market,
                     source_interval=route.get("interval", "1d"),
+                    diagnostics=forecast_diagnostics,
                 )
                 if forecast:
                     setattr(signal, "forecast_id", getattr(forecast, "forecast_id", None))
                     setattr(signal, "expected_edge_pct", getattr(forecast, "expected_move_pct", None))
                 if forecast is None:
-                    log.warning("FAST_FORECAST_MISSING | market=%s | symbol=%s | scan=fast", market, symbol)
+                    log.warning("FAST_FORECAST_MISSING | market=%s | symbol=%s | scan=fast | unavailable_reason=%s",
+                                market, symbol, forecast_diagnostics.get("unavailable_reason", "unknown"))
                 signal_created_at = utc_now()
                 setattr(signal, "created_at", signal_created_at)
                 stage = "signal_persistence"
@@ -1318,6 +1321,7 @@ def fast_scan_market(market: str) -> list[Any]:
                         route,
                         "fast",
                         always_on_fast_scan=True,
+                        forecast_unavailable_reason=forecast_diagnostics.get("unavailable_reason"),
                         trade_configuration={
                             "mode": EXECUTION_MODE,
                             "scan": "fast",
@@ -1484,12 +1488,17 @@ def scan_market(market: str) -> list[Any]:
                 continue
             signals.append(signal)
             prices[symbol] = quote_payload
+            forecast_diagnostics: dict[str, str] = {}
             forecast = forecast_price(
                 history,
                 5,
                 market=market,
                 source_interval=route.get("interval", "1d"),
+                diagnostics=forecast_diagnostics,
             )
+            if forecast is None:
+                log.warning("DEEP_FORECAST_MISSING | market=%s | symbol=%s | scan=deep | unavailable_reason=%s",
+                            market, symbol, forecast_diagnostics.get("unavailable_reason", "unknown"))
             if forecast:
                 setattr(signal, "forecast_id", getattr(forecast, "forecast_id", None))
                 setattr(signal, "expected_edge_pct", getattr(forecast, "expected_move_pct", None))
@@ -1506,6 +1515,7 @@ def scan_market(market: str) -> list[Any]:
                     signal,
                     route,
                     "deep",
+                    forecast_unavailable_reason=forecast_diagnostics.get("unavailable_reason"),
                     headlines=news.headlines[:8],
                     news_source=news.source,
                     news_priority=priority,
