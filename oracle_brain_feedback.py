@@ -9,14 +9,9 @@ trading.
 """
 
 import math
-import time
 from typing import Any
 
 from paper_strategy_economics import normalize_strategy_identity, strategy_identity
-
-
-_CACHE: dict[tuple[str, str, str, str], tuple[float, dict[str, Any]]] = {}
-_CACHE_SECONDS = 60.0
 
 
 def _value(obj: Any, name: str, default: Any = None) -> Any:
@@ -124,7 +119,7 @@ def green_core_profile(rows: list[dict[str, Any]], signal: Any, *, min_samples: 
     return {
         "status": "ok", "samples": len(complete), "green_samples": len(positives),
         "red_samples": len(negatives), "adjustment": round(adjustment, 3),
-        "features": learned[:8],
+        "features": learned,
     }
 
 
@@ -343,11 +338,8 @@ def outcome_memory_for_signal(
             "execution_impact": "NONE",
         }
 
-    key = (normalized_market, target_symbol, normalize_strategy_identity(target_strategy), target_regime)
-    cached = _CACHE.get(key)
-    now = time.monotonic()
-    if cached and now - cached[0] <= _CACHE_SECONDS:
-        return dict(cached[1])
+    # Feature-dependent ranking must be recomputed for each signal, even within
+    # the same symbol/strategy/regime cache interval.
 
     try:
         from database import rows as fetch_rows
@@ -395,14 +387,34 @@ def outcome_memory_for_signal(
         min_samples=max(5, int(min_samples)),
     )
     target_strategy_norm = normalize_strategy_identity(target_strategy)
-    cohort_rows = [
-        row for row in records
-        if normalize_strategy_identity(row.get("strategy")) == target_strategy_norm
-        and _normalized_regime(row.get("regime")) == target_regime
-    ]
-    symbol_rows = [row for row in cohort_rows if str(row.get("symbol") or "").upper().strip() == target_symbol]
-    green_rows = symbol_rows if len(symbol_rows) >= max(5, int(min_samples)) else cohort_rows
+    # The winner formula consumes independently reconciled complete BUY lots,
+    # rather than trusting SELL snapshots or counting split exits as samples.
+    green_rows = []
+    try:
+        from paper_exit_research import REPORT_VERSION, timestamp
+        reports = fetch_rows("SELECT report FROM paper_exit_research_reports WHERE market=%s AND version=%s",
+                             (normalized_market, REPORT_VERSION))
+        cutoff = timestamp(_value(signal, "decision_timestamp"))
+        if cutoff is None:
+            from datetime import datetime, timezone
+            cutoff = datetime.now(timezone.utc)
+        memory = _json_obj(reports[0].get("report")) if reports else {}
+        candidates = memory.get("winner_entry_memory", {}).get("records", [])
+        from paper_regime_economics_shadow import classify_regime
+        green_regime = target_regime if target_regime != "unknown" else classify_regime(
+            feature_snapshot={name: _value(signal, name) for name in _GREEN_FEATURES})
+        green_rows = [r for r in candidates
+                      if normalize_strategy_identity(r.get("strategy")) == target_strategy_norm
+                      and _normalized_regime(r.get("regime")) == green_regime
+                      and timestamp(r.get("exit_time")) is not None
+                      and timestamp(r["exit_time"]) < cutoff]
+        matching = [r for r in green_rows if r.get("symbol") == target_symbol]
+        if len(matching) >= max(5, int(min_samples)):
+            green_rows = matching
+    except Exception:
+        green_rows = []
     green_core = green_core_profile(green_rows, signal, min_samples=max(5, int(min_samples)))
+    green_core["provenance"] = "canonical-winner-entry-v1"
     base_adjustment = _number(result.get("ranking_adjustment"))
     green_adjustment = _number(green_core.get("adjustment"))
     counterfactual_memory = _counterfactual_memory_for_signal(
@@ -424,7 +436,6 @@ def outcome_memory_for_signal(
             else "insufficient_or_mixed_exact_outcomes"
         ),
     })
-    _CACHE[key] = (now, dict(result))
     return result
 
 

@@ -162,7 +162,12 @@ def reconcile_fifo(fills: list[dict[str, Any]], metrics: dict[str, dict[str, Any
             identity_matches &= declared_price == lot["price"] and declared_time == lot["time"]
             members.append({"buy_trade_id": lot["identity"], "sell_trade_id": identity,
                             "buy_fill_id": lot["row"].get("_canonical_fill_id"),
-                            "quantity": float(matched), "entry_time": lot["time"].isoformat()})
+                            "quantity": float(matched), "entry_time": lot["time"].isoformat(),
+                            "opened_quantity": float(lot["opened"]),
+                            "decision_timestamp": timestamp(lot["row"].get("decision_timestamp")).isoformat() if timestamp(lot["row"].get("decision_timestamp")) else None,
+                            "feature_snapshot": lot["row"].get("feature_snapshot"),
+                            "entry_strategy": lot["row"].get("strategy"),
+                            "entry_regime": (lot["row"].get("feature_snapshot") or {}).get("regime") if isinstance(lot["row"].get("feature_snapshot"), dict) else None})
             lot["remaining"] -= matched
             remaining -= matched
             if lot["remaining"] == 0:
@@ -378,7 +383,7 @@ def emit_reconciliation(market: str) -> dict[str, Any]:
         # Full per-market FIFO history is required. An arbitrary row limit would
         # drop opening lots and manufacture reconciliation failures.
         fills = list(conn.execute("""SELECT id,trade_id,market,symbol,side,quantity,entry_price,
-            exit_price,entry_time,exit_time,fees,gross_pnl,net_pnl,strategy,order_id
+            exit_price,entry_time,exit_time,fees,gross_pnl,net_pnl,strategy,order_id,decision_timestamp,feature_snapshot
             FROM trade_ledger WHERE market=%s AND broker_mode='PAPER' AND account_environment='PAPER'
             AND side IN ('BUY','SELL')""", (market,)).fetchall())
         metrics = {r["trade_id"]: dict(r) for r in conn.execute(
@@ -405,6 +410,8 @@ def emit_reconciliation(market: str) -> dict[str, Any]:
         factual_fills = list(conn.execute("SELECT fill_id,market,symbol,side,quantity,fill_price,fee_amount,created_at FROM paper_fills WHERE market=%s", (market,)).fetchall())
         fee_verified_ledger = attach_fill_fee_evidence([dict(r) for r in fills], [dict(r) for r in factual_fills])
         report = reconcile_fifo(fee_verified_ledger, metrics, prices, require_fill_fee_evidence=True)
+        from paper_winner_memory import winner_entry_memory
+        report["winner_entry_memory"] = winner_entry_memory(report["closes"])
         report["snapshot_semantics"] = "repeatable_read"
         watermark = max((int(r["id"]) for r in fills), default=0)
         previous_watermark = previous_report.get("ledger_watermark")
@@ -435,6 +442,12 @@ def emit_reconciliation(market: str) -> dict[str, Any]:
     log.info("PAPER FIFO RECONCILIATION | market=%s | closes=%s | qualified=%s | net_pnl=%.6f | sell_signal_losses=%s | metric_discrepancies=%s | diagnostics=%s | verdict=INSUFFICIENT_DATA | execution_impact=NONE",
              market, report["observed_closes"], report["qualified_fifo_closes"], report["net_pnl"],
              report["sell_signal_losses"], report["metric_discrepancies"], json.dumps(report["diagnostics"], sort_keys=True))
+    memory = report["winner_entry_memory"]
+    log.info("PAPER WINNER ENTRY MEMORY | market=%s | winners=%s | losers=%s | exclusions=%s",
+             market, memory["winners"], memory["losers"], json.dumps(memory["exclusions"], sort_keys=True))
+    for winner in memory["records"]:
+        if winner["net_pnl"] > 0:
+            log.info("PAPER INDIVIDUAL WINNER | evidence=%s", json.dumps(json_safe(winner), sort_keys=True))
     log.info("SHADOW EXIT SOURCE COVERAGE | market=%s | exclusions=%s | new_since_baseline=%s | execution_impact=NONE",
              market, json.dumps(report["source_query_diagnostics"], sort_keys=True), json.dumps(report["since_previous_report"], sort_keys=True))
     return report
