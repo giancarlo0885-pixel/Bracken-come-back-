@@ -172,9 +172,18 @@ def forecast_price(
     market: str = "",
     model: str = "log-return diffusion",
     model_version: str = FORECAST_MODEL_VERSION,
+    diagnostics: dict[str, str] | None = None,
 ) -> Forecast | None:
-    if history is None or history.empty or len(history) < 40 or "Close" not in history.columns:
+    """Optionally record why no forecast was available; never change abstentions."""
+    if diagnostics is not None:
+        diagnostics.pop("unavailable_reason", None)
+
+    def unavailable(reason: str) -> None:
+        if diagnostics is not None:
+            diagnostics["unavailable_reason"] = reason
         return None
+    if history is None or history.empty or len(history) < 40 or "Close" not in history.columns:
+        return unavailable("insufficient_history_or_close")
     route = dict(getattr(history, "attrs", {}).get("provider_route") or {})
     interval = str(source_interval or route.get("interval") or history.attrs.get("interval") or "1d")
     requested_symbol = normalize_symbol(route.get("requested_symbol") or history.attrs.get("requested_symbol") or "")
@@ -182,18 +191,18 @@ def forecast_price(
     asset = asset_class or infer_asset_class(requested_symbol, market)
     close = _series(history, "Close")
     if close.empty:
-        return None
+        return unavailable("no_valid_close")
     spot = float(close.iloc[-1])
     if not math.isfinite(spot) or spot <= 0:
-        return None
+        return unavailable("invalid_spot")
     returns = np.log(close / close.shift(1)).dropna()
     if len(returns) < 10:
-        return None
+        return unavailable("insufficient_returns")
     recent = returns.tail(min(180, max(30, len(returns))))
     drift_per_bar = float(recent.mean())
     vol_per_bar = float(recent.std())
     if not math.isfinite(drift_per_bar) or not math.isfinite(vol_per_bar):
-        return None
+        return unavailable("nonfinite_return_statistics")
     bars, minutes, calendar_days = _horizon(
         source_interval=interval,
         asset_class=asset,
@@ -211,12 +220,12 @@ def forecast_price(
     causal_requested = selected_model == CRYPTO_CAUSAL_MODEL
     if asset == "crypto" and (causal_requested or short_horizon_crypto):
         if not short_horizon_crypto:
-            return None
+            return unavailable("unsupported_causal_horizon")
         causal_prediction = predict_crypto_direction(history, bars)
         if causal_prediction is None:
             # Selective abstention is intentional. Never replace an abstention
             # with the older diffusion model on the same short-horizon decision.
-            return None
+            return unavailable("causal_model_abstention")
         selected_model = CRYPTO_CAUSAL_MODEL
         selected_version = CRYPTO_CAUSAL_MODEL_VERSION
 
