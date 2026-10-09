@@ -125,6 +125,18 @@ def _paper_estimated_snapshot(
         )
         return None
 
+    # Report response shape, never prices, account data, or credentials.
+    first = records[0] if isinstance(records, list) and records and isinstance(records[0], dict) else {}
+    worker.log.info(
+        "CRYPTO | ROBINHOOD PAPER ESTIMATE SHAPE | symbol=%s | rows=%s | match=%s | side=%s | two_sided=%s | has_qty=%s | has_ts=%s",
+        symbol, len(records) if isinstance(records, list) else "not_list",
+        str(first.get("symbol") or "").upper().strip() == symbol,
+        str(first.get("side") or "").lower().strip() or "none",
+        _first_present(first, "bid", "bid_price") is not None and _first_present(first, "ask", "ask_price") is not None,
+        first.get("quantity") not in (None, ""),
+        first.get("timestamp") not in (None, ""),
+    )
+
     # One atomic row with two sides: never join non-synchronous responses.
     if not isinstance(records, list) or len(records) != 1 or not isinstance(records[0], dict):
         return None
