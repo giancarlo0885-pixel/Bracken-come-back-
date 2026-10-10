@@ -410,6 +410,7 @@ def install_robinhood_quote_resilience(worker: Any) -> bool:
     original_snapshots = provider.snapshots
     crossed_cycles: dict[str, int] = {}
     quality_until: dict[str, float] = {}
+    boundary_logged_at: dict[str, float] = {}
     provider._oracle_quality_quarantined_symbols = set()
 
     def _held_symbols() -> set[str]:
@@ -540,7 +541,8 @@ def install_robinhood_quote_resilience(worker: Any) -> bool:
                     if reason == "CROSSED_BOOK":
                         crossed_attempts += 1
                         last_crossed_quote = quote
-                    if reason == "CROSSED_BOOK" and _paper_only():
+                    if reason == "CROSSED_BOOK" and _paper_only() and time.monotonic() - boundary_logged_at.get(symbol, -1e12) >= 60:
+                        boundary_logged_at[symbol] = time.monotonic()
                         boundary = _sanitized_book_boundary(quote, symbol)
                         worker.log.info(
                             "CRYPTO | ROBINHOOD BOOK BOUNDARY | symbol=%s | raw_symbol_match=%s | "
