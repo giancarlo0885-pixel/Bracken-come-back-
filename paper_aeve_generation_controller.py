@@ -460,6 +460,7 @@ def record_generation_outcomes(limit: int = 250) -> int:
             # Fail closed when immutable entry-time AEVE evidence is absent. Never
             # substitute post-entry excursion or realized P&L for candidate inputs.
             entry_evidence_complete = (edge is not None and entry_cost_pct is not None
+                and _timestamp(entry_time) is not None
                 and math.isfinite(_f(dip_depth, float("nan")))
                 and math.isfinite(_f(rebound, float("nan"))))
             decision = score_entry(
