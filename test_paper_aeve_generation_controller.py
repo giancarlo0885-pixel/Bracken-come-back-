@@ -344,9 +344,9 @@ def test_evaluator_passes_independent_entry_inputs_and_persists_version(monkeypa
     assert rebound_changed[0]['rebound_from_low_pct'] == pytest.approx(0.20)
     assert rebound_changed[1].dip_quality == dip_changed[1].dip_quality
     assert rebound_changed[1].rebound_quality != dip_changed[1].rebound_quality
-    assert all(row[-3] == 7 for row in inserted)
-    assert all(row[-2] == "exact_lot" for row in inserted)
-    assert all(row[-1] is True for row in inserted)
+    assert all(row[12] == 7 for row in inserted)
+    assert all(row[13] == "exact_lot" for row in inserted)
+    assert all(row[14] is True for row in inserted)
     assert all(item[0]['config'] == cfg.__dict__ for item in captured)
     assert 'input_schema=dip_depth_rebound_net_edge_entry_cost_v7' in caplog.text
     assert 'dip_depth_pct=1.25 | rebound_from_low_pct=0.2' in caplog.text
@@ -358,7 +358,7 @@ def test_evaluator_passes_independent_entry_inputs_and_persists_version(monkeypa
     features.pop('dip_depth_pct')
     assert controller.record_generation_outcomes() == 1
     assert inserted[-1][8] is False
-    assert inserted[-1][-1] is False
+    assert inserted[-1][14] is False
 
 
 def test_aeve_v4_uses_durable_forward_epoch_and_exact_round_trip_costs():
@@ -475,6 +475,7 @@ def test_postgres_generation_report_freezes_exact_membership():
         conn.execute("""CREATE TEMP TABLE paper_aeve_generation_outcomes(
             id bigserial, generation int, config_hash text, provenance_version int,
             observed_at timestamptz, entry_evidence_complete boolean, would_trade boolean,
+            episode_id text,
             net_pnl float8, mfe_pct float8, mae_pct float8, excursion_sample_count int, cost_pct float8)
         """)
         conn.execute("""INSERT INTO paper_aeve_generation_outcomes(
