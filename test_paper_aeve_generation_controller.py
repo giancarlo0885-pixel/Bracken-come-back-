@@ -475,23 +475,27 @@ def test_postgres_generation_report_freezes_exact_membership():
         conn.execute("""CREATE TEMP TABLE paper_aeve_generation_outcomes(
             id bigserial, generation int, config_hash text, provenance_version int,
             observed_at timestamptz, entry_evidence_complete boolean, would_trade boolean,
-            episode_id text,
+            entry_time timestamptz, episode_id text,
             net_pnl float8, mfe_pct float8, mae_pct float8, excursion_sample_count int, cost_pct float8)
         """)
         conn.execute("""INSERT INTO paper_aeve_generation_outcomes(
             generation,config_hash,provenance_version,observed_at,entry_evidence_complete,
-            would_trade,net_pnl,mfe_pct,mae_pct,excursion_sample_count,cost_pct)
-            SELECT 1,'test-hash',%s,'2026-10-08T10:00:00Z',TRUE,i%%2=0,1.0,2.0,-1.0,1,0.1
+            would_trade,entry_time,episode_id,net_pnl,mfe_pct,mae_pct,excursion_sample_count,cost_pct)
+            SELECT 1,'test-hash',%s,'2026-10-08T10:00:00Z',TRUE,i%%2=0,
+                   '2026-10-08T09:00:00Z','2026-10-08',1.0,2.0,-1.0,1,0.1
             FROM generate_series(1,1002) AS i""", (controller.PROVENANCE_VERSION,))
         report = controller.generation_research_report(conn, 1, "test-hash")
         assert report["window_trades"] == 1000
         assert report["accepted_trades"] == 500
+        assert report["accepted_entry_episodes"] == 1
+        assert report["accepted_missing_entry_episode"] == 0
         assert report["outcome_ids"] == list(range(1, 1001))
         assert report["net_pnl"] == 500
         conn.execute("UPDATE paper_aeve_generations SET research_report=%s::jsonb", (json.dumps(report),))
         conn.execute("""INSERT INTO paper_aeve_generation_outcomes(
             generation,config_hash,provenance_version,observed_at,entry_evidence_complete,
-            would_trade,net_pnl,mfe_pct,mae_pct,excursion_sample_count,cost_pct)
-            VALUES (1,'test-hash',%s,'2026-10-08T09:00:00Z',TRUE,TRUE,-9999,2,-1,1,0.1)
+            would_trade,entry_time,episode_id,net_pnl,mfe_pct,mae_pct,excursion_sample_count,cost_pct)
+            VALUES (1,'test-hash',%s,'2026-10-08T09:00:00Z',TRUE,TRUE,
+                    '2026-10-08T08:00:00Z','2026-10-08',-9999,2,-1,1,0.1)
         """, (controller.PROVENANCE_VERSION,))
         assert controller.generation_research_report(conn, 1, "test-hash") == report
