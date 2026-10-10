@@ -34,6 +34,7 @@ with st.expander("Kelly V1 — forward paper-only sizing research"):
                    AVG(proposed_fraction) AS avg_allocation,
                    AVG(council_net_return_pct) AS avg_council_return_pct,
                    SUM(shadow_return_on_equity_pct) AS hypothetical_sum_return_pct,
+                   SUM(fixed10_return_on_equity_pct) AS matched_fixed10_sum_return_pct,
                    COUNT(*) FILTER (WHERE NOT eligible AND council_net_pnl>0)::int AS abstained_winners
             FROM paper_kelly_shadow_results
             WHERE version='kelly-v1-forward-council-benchmark'
@@ -42,7 +43,7 @@ with st.expander("Kelly V1 — forward paper-only sizing research"):
         kelly_recent = rows("""
             SELECT trade_id,regime,entry_time,prior_trades,prior_episodes,
                    eligible,reason,proposed_fraction,council_net_return_pct,
-                   shadow_return_on_equity_pct
+                   shadow_return_on_equity_pct,fixed10_return_on_equity_pct
             FROM paper_kelly_shadow_results
             WHERE version='kelly-v1-forward-council-benchmark'
             ORDER BY exit_time DESC LIMIT 30
@@ -53,7 +54,7 @@ with st.expander("Kelly V1 — forward paper-only sizing research"):
         st.caption("No completed Kelly research observations yet. The isolated shadow epoch records only future Council entries that subsequently close with exact-lot attribution.")
     else:
         st.dataframe(pd.DataFrame(kelly_summary), use_container_width=True, hide_index=True)
-        st.caption("Council return = verified net return on each entry notional. Kelly hypothetical = Council return multiplied by Kelly's proposed equity fraction. Summed hypothetical percentages do not represent independently executed fills, compounded portfolio performance, or profit proof. Episode confidence assumes independent UTC days and has not been calibrated out of sample.")
+        st.caption("Council return = verified net return on each entry notional. Kelly hypothetical = Council return multiplied by Kelly's proposed equity fraction. The fixed-10% reference uses the same Council outcomes, scaled to a hypothetical 10% equity allocation per entry. Summed hypothetical percentages do not represent independently executed fills, compounded portfolio performance, or profit proof. Episode confidence assumes independent UTC days and has not been calibrated out of sample.")
         if kelly_recent:
             st.dataframe(pd.DataFrame(kelly_recent),use_container_width=True,hide_index=True)
 
