@@ -165,7 +165,26 @@ def verified_ledger_inputs(ledger, fills, *, as_of):
                             as_of=as_of, require_fill_fee_evidence=True)
     buys = {r["trade_id"]: r for r in ledger if r.get("side") == "BUY"}
     rows, exclusions = [], Counter()
+    grouped = defaultdict(list)
     for close in report["closes"]:
+        if len(close["members"]) != 1:
+            exclusions["mixed_entry_close"] += 1
+            continue
+        grouped[close["members"][0]["buy_trade_id"]].append(close)
+    for buy_id, parts in grouped.items():
+        opened = _finite(buys.get(buy_id, {}).get("quantity"))
+        closed = sum(part["members"][0]["quantity"] for part in parts)
+        if opened is None or opened <= 0 or not math.isclose(closed, opened, rel_tol=1e-9, abs_tol=1e-12):
+            exclusions["open_or_partial_entry_lot"] += 1
+            continue
+        if any(not part["fifo_complete"] for part in parts):
+            exclusions["unreconciled_fifo"] += 1
+            continue
+        close = {**parts[0], "trade_id": buy_id,
+                 "exit_time": max(part["exit_time"] for part in parts),
+                 "net_pnl": sum(part["net_pnl"] for part in parts),
+                 "members": [{**parts[0]["members"][0], "quantity": closed}],
+                 "sell_trade_ids": [part["trade_id"] for part in parts]}
         if not close["fifo_complete"]:
             exclusions["unreconciled_fifo"] += 1
             continue

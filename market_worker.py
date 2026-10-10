@@ -191,7 +191,18 @@ def _average_dollar_volume(history: Any, lookback: int = 20) -> float | None:
             volume = volume.iloc[:, -1]
         close = pd.to_numeric(close, errors="coerce")
         volume = pd.to_numeric(volume, errors="coerce")
-        values = (close * volume).dropna()
+        route = dict(getattr(history, "attrs", {}).get("provider_route") or {})
+        provider = str(route.get("provider") or "").lower().strip()
+        symbol = str(route.get("requested_symbol") or route.get("provider_symbol") or "").upper().strip()
+        # Yahoo Finance crypto Volume is already quote-currency turnover (USD
+        # for *-USD), unlike stock share counts or exchange base-asset volume.
+        # Multiplying that notional by BTC's price inflated liquidity by ~80,000x.
+        quote_notional_usd = (
+            provider in {"yahoo finance", "yahoo"}
+            and symbol.endswith("-USD")
+            and str(route.get("provider_symbol") or symbol).upper().strip() == symbol
+        )
+        values = (volume if quote_notional_usd else close * volume).dropna()
         values = values[values.map(lambda item: math.isfinite(float(item)) and float(item) > 0)]
         if values.empty:
             return None
@@ -249,6 +260,14 @@ def _quote_payload_from_history(symbol: str, history: Any, price: Any = None, *,
         "quote_verified": quote_verified,
         "verified": quote_verified,
         "avg_dollar_volume": avg_dollar_volume,
+        "liquidity_volume_basis": (
+            "yahoo_crypto_quote_turnover_usd"
+            if str(route.get("provider") or "").lower().strip() in {"yahoo finance", "yahoo"}
+            and normalized_symbol.endswith("-USD")
+            and str(route.get("requested_symbol") or normalized_symbol).upper().strip() == normalized_symbol
+            and str(route.get("provider_symbol") or normalized_symbol).upper().strip() == normalized_symbol
+            else "price_times_reported_volume"
+        ),
         "data_quality_score": route.get("data_quality_score"),
         "tradeable": bool(quote_verified and identity_verified and avg_dollar_volume),
         "source_identity": route.get("source_identity"),
@@ -1290,18 +1309,25 @@ def fast_scan_market(market: str) -> list[Any]:
                 continue
             signals.append(signal)
             prices[symbol] = quote_payload
+            stage = "forecast_calculation"
+            forecast_diagnostics: dict[str, str] = {}
             try:
                 forecast = forecast_price(
                     history,
                     3 if market == "cash" else 1,
                     market=market,
                     source_interval=route.get("interval", "1d"),
+                    diagnostics=forecast_diagnostics,
                 )
                 if forecast:
                     setattr(signal, "forecast_id", getattr(forecast, "forecast_id", None))
                     setattr(signal, "expected_edge_pct", getattr(forecast, "expected_move_pct", None))
+                if forecast is None:
+                    log.warning("FAST_FORECAST_MISSING | market=%s | symbol=%s | scan=fast | unavailable_reason=%s",
+                                market, symbol, forecast_diagnostics.get("unavailable_reason", "unknown"))
                 signal_created_at = utc_now()
                 setattr(signal, "created_at", signal_created_at)
+                stage = "signal_persistence"
                 signal_id = save_json_signal(
                     market,
                     symbol,
@@ -1314,6 +1340,7 @@ def fast_scan_market(market: str) -> list[Any]:
                         route,
                         "fast",
                         always_on_fast_scan=True,
+                        forecast_unavailable_reason=forecast_diagnostics.get("unavailable_reason"),
                         trade_configuration={
                             "mode": EXECUTION_MODE,
                             "scan": "fast",
@@ -1328,9 +1355,10 @@ def fast_scan_market(market: str) -> list[Any]:
                 )
                 setattr(signal, "signal_id", signal_id)
                 if forecast:
+                    stage = "forecast_persistence"
                     save_forecast(market, symbol, forecast, scan_type="fast", signal_id=signal_id, signal_created_at=signal_created_at)
             except Exception as exc:
-                log.debug("Fast persistence failed | market=%s | symbol=%s | error=%s", market, symbol, exc)
+                log.warning("FAST_PROVENANCE_WRITE_FAILED | market=%s | symbol=%s | stage=%s | exception_type=%s", market, symbol, stage, type(exc).__name__)
 
     if not signals:
         return []
@@ -1479,12 +1507,17 @@ def scan_market(market: str) -> list[Any]:
                 continue
             signals.append(signal)
             prices[symbol] = quote_payload
+            forecast_diagnostics: dict[str, str] = {}
             forecast = forecast_price(
                 history,
                 5,
                 market=market,
                 source_interval=route.get("interval", "1d"),
+                diagnostics=forecast_diagnostics,
             )
+            if forecast is None:
+                log.warning("DEEP_FORECAST_MISSING | market=%s | symbol=%s | scan=deep | unavailable_reason=%s",
+                            market, symbol, forecast_diagnostics.get("unavailable_reason", "unknown"))
             if forecast:
                 setattr(signal, "forecast_id", getattr(forecast, "forecast_id", None))
                 setattr(signal, "expected_edge_pct", getattr(forecast, "expected_move_pct", None))
@@ -1501,6 +1534,7 @@ def scan_market(market: str) -> list[Any]:
                     signal,
                     route,
                     "deep",
+                    forecast_unavailable_reason=forecast_diagnostics.get("unavailable_reason"),
                     headlines=news.headlines[:8],
                     news_source=news.source,
                     news_priority=priority,

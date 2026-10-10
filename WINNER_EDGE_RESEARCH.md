@@ -37,7 +37,9 @@ regime and pattern. An exit-time label cannot be substituted. Fee verification
 requires canonical fills and FIFO reconciliation. Missing facts remain missing.
 Raw runtime logs and existing bounded report details do not satisfy this input
 contract. The read-only database adapter reconciles full per-market history and
-uses BUY-side entry snapshots only. Missing or mixed snapshots are excluded.
+uses BUY-side entry snapshots only. Partial exits are aggregated into one fully
+closed BUY lot; open lots and mixed-entry closes are excluded. Missing or mixed
+snapshots are excluded. Thus partial SELL events cannot inflate trade counts.
 
 ```bash
 python paper_winner_edge_research.py verified_round_trips.json \

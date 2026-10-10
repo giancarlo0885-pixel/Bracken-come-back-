@@ -412,7 +412,8 @@ def _trigger_telemetry(
     route = _json_obj(payload.get("market_data_route"))
     quote = {**route, **payload}
     quote_verified = quote.get("quote_verified") is True
-    quote_time = quote.get("quote_timestamp") or quote.get("source_quote_timestamp") or signal.get("created_at")
+    # A signal insertion timestamp is not market quote provenance. Fail closed.
+    quote_time = quote.get("quote_timestamp") or quote.get("source_quote_timestamp")
     from paper_exit_research import timestamp
     observed_at = timestamp(quote_time)
     now = datetime.now(timezone.utc)
@@ -650,14 +651,41 @@ def sample_open_positions(market: str) -> int:
                 exclusions=exclusions,
             )
             if not telemetry:
-                # Read-only diagnostic; never infer missing edge.
+                # Exact entry-lot identifiers for provenance diagnosis only.
+                # No legacy edge reconstruction or eligibility changes.
+                entry_lots = list(conn.execute(
+                    """SELECT entry_signal_id,entry_forecast_id,decision_timestamp,
+                              quote_timestamp,opened_at
+                       FROM position_lots
+                       WHERE market=%s AND symbol=%s
+                         AND COALESCE(quantity_remaining,0)>0
+                       ORDER BY opened_at ASC,id ASC LIMIT 8""",
+                    (normalized_market, symbol),
+                ).fetchall())
+                log.warning(
+                    "SHADOW_ENTRY_LOT_PROVENANCE | market=%s | symbol=%s | lots=%s",
+                    normalized_market, symbol,
+                    [dict(lot) for lot in entry_lots],
+                )
+                # Entry-time provenance is attribution only; it must never
+                # replace the edge required at the current exit decision.
+                entry_forecast_ids = [
+                    str(lot["entry_forecast_id"])
+                    for lot in entry_lots if lot.get("entry_forecast_id")
+                ]
                 payload = _json_obj(signal.get("payload"))
                 log.warning(
-                    "SHADOW_SIGNAL_PROVENANCE_EXCLUSION | market=%s | symbol=%s | opened_at=%s | signal_id=%s | signal_at=%s | forecast_id=%s | edge_source=%s | edge_present=%s | quote_at=%s | quote_verified=%s",
+                    "SHADOW_SIGNAL_PROVENANCE_EXCLUSION | market=%s | symbol=%s | "
+                    "opened_at=%s | entry_forecast_ids=%s | current_signal_id=%s | "
+                    "current_signal_at=%s | current_forecast_id=%s | "
+                    "current_edge_source=%s | current_edge_present=%s | "
+                    "current_forecast_unavailable_reason=%s | current_quote_at=%s | "
+                    "current_quote_verified=%s",
                     normalized_market, symbol, position.get("opened_at"),
-                    signal.get("id"), signal.get("created_at"),
+                    entry_forecast_ids, signal.get("id"), signal.get("created_at"),
                     payload.get("forecast_id"), payload.get("edge_provenance"),
                     signal.get("expected_edge_pct") is not None,
+                    payload.get("forecast_unavailable_reason"),
                     payload.get("quote_timestamp"), payload.get("quote_verified"),
                 )
                 exclusions["ineligible_telemetry"] += 1

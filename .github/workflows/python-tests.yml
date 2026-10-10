@@ -112,5 +112,6 @@ jobs:
           test_paper_regime_entry_signal_fallback.py
           test_paper_regime_fifo_provenance.py
           test_paper_aeve_generation_controller.py::test_postgres_generation_report_freezes_exact_membership
+          test_paper_kelly_postgres.py::test_postgres_kelly_schema_and_immutable_forward_epoch
           test_paper_shadow_exit_challenger.py::test_postgres_forecast_cutoff_and_timestamp_order
           test_paper_exit_research.py::test_postgres_source_query_and_bounded_report_schema

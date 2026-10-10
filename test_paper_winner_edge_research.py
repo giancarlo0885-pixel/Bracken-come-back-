@@ -86,19 +86,19 @@ def test_adapter_uses_allocated_notional_and_buy_snapshot_only():
     opening = {**buy("buy", 2, 100, 0.2),
                "decision_timestamp": EVENT.isoformat(),
                "feature_snapshot": {"regime": "trend_up", "entry_pattern": "dip_rebound"}}
-    closing = {**sell("sell", 1, 100, 102, 0.1, 2),
+    closing = {**sell("sell", 2, 100, 102, 0.1, 4),
                "strategy": "posthoc", "feature_snapshot": {"regime": "posthoc"}}
     fills = [dict(fill_id="b", market="crypto", symbol="TEST-USD", side="BUY",
                   quantity=2, fill_price=100, fee_amount=0.2, created_at=EVENT),
              dict(fill_id="s", market="crypto", symbol="TEST-USD", side="SELL",
-                  quantity=1, fill_price=102, fee_amount=0.1,
+                  quantity=2, fill_price=102, fee_amount=0.1,
                   created_at=EVENT + timedelta(minutes=20))]
     rows, coverage = verified_ledger_inputs([opening, closing], fills, as_of=EVENT + timedelta(days=1))
     assert coverage["exported_trades"] == 1
     assert rows[0]["strategy"] == "council"
     assert rows[0]["entry_pattern"] == "dip_rebound"
-    assert rows[0]["entry_notional"] == 100
-    assert rows[0]["net_pnl"] == pytest.approx(1.8)
+    assert rows[0]["entry_notional"] == 200
+    assert rows[0]["net_pnl"] == pytest.approx(3.7)
     opening["decision_timestamp"] = (EVENT + timedelta(minutes=1)).isoformat()
     rows, coverage = verified_ledger_inputs([opening, closing], fills, as_of=EVENT + timedelta(days=1))
     assert not rows
@@ -110,3 +110,24 @@ def test_nonfinite_normalized_return_is_excluded():
     rows, exclusions = prepare([row], AS_OF)
     assert not rows
     assert exclusions["nonfinite_normalized_return"] == 1
+
+
+def test_partial_exits_count_as_one_completed_entry():
+    from paper_winner_edge_research import verified_ledger_inputs
+    from test_paper_exit_research import buy, sell, START as EVENT
+    opening = {**buy("buy", 2, 100, 0.2), "decision_timestamp": EVENT.isoformat(),
+               "feature_snapshot": {"regime": "trend_up", "entry_pattern": "dip_rebound"}}
+    closes = [sell("s1", 1, 100, 102, 0.1, 2),
+              sell("s2", 1, 100, 103, 0.1, 3, minute=30)]
+    fills = [dict(fill_id="b", market="crypto", symbol="TEST-USD", side="BUY",
+                  quantity=2, fill_price=100, fee_amount=0.2, created_at=EVENT)]
+    for i, price in enumerate((102, 103)):
+        fills.append(dict(fill_id=f"s{i}", market="crypto", symbol="TEST-USD", side="SELL",
+                          quantity=1, fill_price=price, fee_amount=0.1,
+                          created_at=EVENT + timedelta(minutes=20 + 10*i)))
+    rows, _ = verified_ledger_inputs([opening, *closes], fills, as_of=EVENT + timedelta(days=1))
+    assert len(rows) == 1
+    assert rows[0]["trade_id"] == "buy"
+    assert rows[0]["net_pnl"] == pytest.approx(4.6)
+    assert rows[0]["entry_notional"] == 200
+    assert not verified_ledger_inputs([opening, closes[0]], fills, as_of=EVENT + timedelta(days=1))[0]
