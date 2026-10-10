@@ -186,6 +186,7 @@ def ensure_schema() -> None:
                 council_net_pnl DOUBLE PRECISION NOT NULL,
                 council_net_return_pct DOUBLE PRECISION NOT NULL,
                 shadow_return_on_equity_pct DOUBLE PRECISION NOT NULL,
+                fixed10_return_on_equity_pct DOUBLE PRECISION NOT NULL,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 PRIMARY KEY (version,trade_id)
             )
@@ -276,8 +277,9 @@ def evaluate_new_closes(limit: int = 30) -> int:
                     version,trade_id,generation,config_hash,regime,entry_time,exit_time,episode_id,
                     prior_trades,prior_episodes,win_probability,win_lower_bound,
                     mean_net_win_pct,mean_net_loss_pct,eligible,reason,proposed_fraction,
-                    council_net_pnl,council_net_return_pct,shadow_return_on_equity_pct
-                ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    council_net_pnl,council_net_return_pct,shadow_return_on_equity_pct,
+                    fixed10_return_on_equity_pct
+                ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                 ON CONFLICT(version,trade_id) DO NOTHING
             """, (
                 _VERSION,candidate["trade_id"],candidate["generation"],candidate["config_hash"],
@@ -287,7 +289,7 @@ def evaluate_new_closes(limit: int = 30) -> int:
                 diagnostics.get("win_probability"),diagnostics.get("win_lower_bound"),
                 diagnostics.get("mean_net_win_pct"),diagnostics.get("mean_net_loss_pct"),
                 proposal.eligible,proposal.reason,f,candidate["round_trip_net_pnl"],
-                observed,f*observed,
+                observed,f*observed,0.10*observed,
             ))
             created += 1
     return created
@@ -304,17 +306,18 @@ def emit_summary() -> None:
                    AVG(proposed_fraction) AS mean_fraction,
                    AVG(council_net_return_pct) AS council_trade_return_pct,
                    SUM(shadow_return_on_equity_pct) AS sum_kelly_shadow_equity_pct,
+                   SUM(fixed10_return_on_equity_pct) AS sum_fixed10_shadow_equity_pct,
                    COUNT(*) FILTER (WHERE NOT eligible AND council_net_pnl>0) AS abstained_winners
             FROM paper_kelly_shadow_results WHERE version=%s
         """, (_VERSION,)).fetchone() or {}
     log.info(
         "KELLY SHADOW | compared=%s | sized=%s | episodes=%s | mean_fraction=%s | "
-        "council_trade_return_pct=%s | sum_kelly_shadow_equity_pct=%s | "
+        "council_trade_return_pct=%s | sum_kelly_shadow_equity_pct=%s | sum_fixed10_shadow_equity_pct=%s | "
         "abstained_winners=%s | return_basis=linear_counterfactual_not_portfolio_equity | "
         "execution_impact=NONE | live_trading=DISARMED",
         row.get("compared"),row.get("sized"),row.get("episodes"),
         row.get("mean_fraction"),row.get("council_trade_return_pct"),
-        row.get("sum_kelly_shadow_equity_pct"),row.get("abstained_winners"),
+        row.get("sum_kelly_shadow_equity_pct"),row.get("sum_fixed10_shadow_equity_pct"),row.get("abstained_winners"),
     )
 
 
