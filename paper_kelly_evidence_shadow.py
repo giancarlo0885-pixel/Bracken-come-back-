@@ -24,6 +24,7 @@ def evaluate_prior_generation_evidence(
     generation_id: str,
     candidate_entry_time: datetime,
     lower_bound_win_probability: float | None,
+    candidate_episode_id: str,
 ) -> KellyProposal:
     """Only fully closed prior trades from the same generation are eligible.
 
@@ -35,7 +36,7 @@ def evaluate_prior_generation_evidence(
     def abstain(reason: str) -> KellyProposal:
         return KellyProposal(False, reason, 0.0, 0.0)
 
-    if not generation_id or candidate_entry_time.tzinfo is None:
+    if not generation_id or not candidate_episode_id or candidate_entry_time.tzinfo is None:
         return abstain("invalid_provenance")
     if any(
         not o.trade_id or not o.episode_id or
@@ -45,7 +46,7 @@ def evaluate_prior_generation_evidence(
         for o in outcomes
     ):
         return abstain("invalid_or_future_outcome")
-    prior = [o for o in outcomes if o.generation_id == generation_id]
+    prior = [o for o in outcomes if o.generation_id == generation_id and o.episode_id != candidate_episode_id]
     if len({o.trade_id for o in prior}) != len(prior):
         return abstain("duplicate_trade")
     import math
