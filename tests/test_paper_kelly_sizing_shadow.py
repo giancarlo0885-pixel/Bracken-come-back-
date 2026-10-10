@@ -13,8 +13,19 @@ class KellySizingTests(unittest.TestCase):
     def test_fractional_conservative_kelly(self):
         r = self.base()
         self.assertTrue(r.eligible)
-        self.assertAlmostEqual(r.full_fraction, .325)
-        self.assertAlmostEqual(r.proposed_fraction, .08125)
+        # Loss magnitude is 1% of notional, so full log-optimal notional
+        # is 32.5x before the unlevered 10% exposure cap.
+        self.assertAlmostEqual(r.full_fraction, 32.5)
+        self.assertAlmostEqual(r.proposed_fraction, .10)
+
+    def test_notional_sizing_when_loss_is_full_stake(self):
+        r = self.base(average_net_win_pct=100.0, average_net_loss_pct=-100.0)
+        self.assertAlmostEqual(r.full_fraction, .10)
+        self.assertAlmostEqual(r.proposed_fraction, .025)
+
+    def test_loss_exceeding_unlevered_stake_abstains(self):
+        self.assertEqual(self.base(average_net_loss_pct=-110).reason,
+                         "loss_exceeds_unlevered_notional")
 
     def test_no_probability_bound_abstains(self):
         self.assertEqual(self.base(lower_bound_win_probability=None).proposed_fraction, 0)
