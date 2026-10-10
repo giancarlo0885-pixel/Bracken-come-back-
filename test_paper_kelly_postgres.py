@@ -26,6 +26,11 @@ def test_postgres_kelly_schema_and_immutable_forward_epoch(monkeypatch):
             "SELECT to_regclass('paper_kelly_shadow_results') AS name"
         ).fetchone()
         assert relation["name"] is not None
+        columns = [row["column_name"] for row in conn.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name='paper_kelly_shadow_results'"
+        ).fetchall()]
+        assert "fixed10_return_on_equity_pct" in columns
         assert conn.execute("SELECT to_regclass('paper_kelly_shadow_exclusions') AS name").fetchone()["name"] is not None
 
     # Calling schema setup again must never reset the forward enrollment epoch.
