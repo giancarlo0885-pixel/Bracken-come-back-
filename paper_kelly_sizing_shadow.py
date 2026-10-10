@@ -26,9 +26,13 @@ def propose_kelly_size(
     min_episodes: int = 25,
     min_trades: int = 50,
 ) -> KellyProposal:
-    """Use one cost convention: realized wins/losses are already net of all costs.
+    """Binary-payoff approximation to log-optimal fraction of equity notional.
 
-    Output is a hypothetical fraction of equity, not risk per trade or an order.
+    Both payoff inputs are percentage RETURNS on position entry notional, net
+    of ALL costs exactly once. Unlike a fixed-stake binary bet, this requires
+    dividing the classical Kelly risk fraction by the loss return magnitude.
+    Unlevered, paper-only proposals are capped separately at max_allocation.
+    This does not model the full empirical return distribution or execution.
     The caller must use only entry-time-available, generation-isolated evidence.
     """
     abstain = lambda reason: KellyProposal(False, reason, 0.0, 0.0)
@@ -53,8 +57,20 @@ def propose_kelly_size(
         return abstain("invalid_sample_counts")
     if independent_episodes < min_episodes or completed_trades < min_trades:
         return abstain("insufficient_independent_evidence")
-    b = average_net_win_pct / abs(average_net_loss_pct)
-    full = lower_bound_win_probability - (1 - lower_bound_win_probability) / b
-    if full <= 0:
+    win_return = average_net_win_pct / 100.0
+    loss_return = abs(average_net_loss_pct) / 100.0
+    if loss_return > 1.0:
+        return abstain("loss_exceeds_unlevered_notional")
+    # Expected return must be positive even under conservative probability.
+    expected = lower_bound_win_probability * win_return - (1.0 - lower_bound_win_probability) * loss_return
+    if expected <= 0:
         return abstain("nonpositive_conservative_edge")
+    denominator = win_return * loss_return
+    if not math.isfinite(denominator) or denominator <= 0:
+        return abstain("invalid_numeric_input")
+    full = expected / denominator
+    if not math.isfinite(full):
+        return abstain("invalid_numeric_input")
+    # full is the unconstrained log-optimal *notional* fraction for a two-point
+    # approximation, not a percent. No margin/leverage is authorized.
     return KellyProposal(True, "shadow_only", full, min(max_allocation, fraction_of_kelly * full))
