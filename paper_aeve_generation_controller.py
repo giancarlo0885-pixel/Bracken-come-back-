@@ -416,7 +416,7 @@ def record_generation_outcomes(limit: int = 250) -> int:
             }
             cfg, config_hash = _decode_generation_row(generation_row)
             config_snapshot = asdict(cfg)
-            entry_time = row.get("entry_time")
+            entry_time = _timestamp(row.get("entry_time"))
             prior = conn.execute("""
                 SELECT COUNT(*) AS samples,AVG(round_trip_net_pnl) AS expectancy,
                        SUM(CASE WHEN round_trip_net_pnl>0 THEN round_trip_net_pnl ELSE 0 END) AS gross_win,
@@ -492,8 +492,7 @@ def record_generation_outcomes(limit: int = 250) -> int:
                 cost_pct,(decision.would_trade if entry_evidence_complete else False),decision.score,
                 json.dumps(config_snapshot),config_hash,PROVENANCE_VERSION,"exact_lot",
                 entry_evidence_complete,entry_time,
-                entry_time.astimezone(timezone.utc).date().isoformat()
-                if isinstance(entry_time, datetime) and entry_time.tzinfo is not None else None,
+                entry_time.date().isoformat() if entry_time is not None else None,
             ))
             log.info(
                 "AEVE SHADOW RESULT | trade_id=%s | generation=%s | config_hash=%s | provenance_version=%s | would_trade=%s | score=%.6f | input_schema=dip_depth_rebound_net_edge_entry_cost_v7 | dip_depth_pct=%s | rebound_from_low_pct=%s | entry_evidence_complete=%s | mode=shadow | execution_impact=NONE | broker_submission=NONE | live_trading=DISARMED",
