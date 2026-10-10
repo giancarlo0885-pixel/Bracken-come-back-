@@ -344,9 +344,9 @@ def test_evaluator_passes_independent_entry_inputs_and_persists_version(monkeypa
     assert rebound_changed[0]['rebound_from_low_pct'] == pytest.approx(0.20)
     assert rebound_changed[1].dip_quality == dip_changed[1].dip_quality
     assert rebound_changed[1].rebound_quality != dip_changed[1].rebound_quality
-    assert all(row[-3] == 7 for row in inserted)
-    assert all(row[-2] == "exact_lot" for row in inserted)
-    assert all(row[-1] is True for row in inserted)
+    assert all(row[12] == 7 for row in inserted)
+    assert all(row[13] == "exact_lot" for row in inserted)
+    assert all(row[14] is True for row in inserted)
     assert all(item[0]['config'] == cfg.__dict__ for item in captured)
     assert 'input_schema=dip_depth_rebound_net_edge_entry_cost_v7' in caplog.text
     assert 'dip_depth_pct=1.25 | rebound_from_low_pct=0.2' in caplog.text
@@ -358,7 +358,7 @@ def test_evaluator_passes_independent_entry_inputs_and_persists_version(monkeypa
     features.pop('dip_depth_pct')
     assert controller.record_generation_outcomes() == 1
     assert inserted[-1][8] is False
-    assert inserted[-1][-1] is False
+    assert inserted[-1][14] is False
 
 
 def test_aeve_v4_uses_durable_forward_epoch_and_exact_round_trip_costs():
@@ -475,22 +475,27 @@ def test_postgres_generation_report_freezes_exact_membership():
         conn.execute("""CREATE TEMP TABLE paper_aeve_generation_outcomes(
             id bigserial, generation int, config_hash text, provenance_version int,
             observed_at timestamptz, entry_evidence_complete boolean, would_trade boolean,
+            entry_time timestamptz, episode_id text,
             net_pnl float8, mfe_pct float8, mae_pct float8, excursion_sample_count int, cost_pct float8)
         """)
         conn.execute("""INSERT INTO paper_aeve_generation_outcomes(
             generation,config_hash,provenance_version,observed_at,entry_evidence_complete,
-            would_trade,net_pnl,mfe_pct,mae_pct,excursion_sample_count,cost_pct)
-            SELECT 1,'test-hash',%s,'2026-10-08T10:00:00Z',TRUE,i%%2=0,1.0,2.0,-1.0,1,0.1
+            would_trade,entry_time,episode_id,net_pnl,mfe_pct,mae_pct,excursion_sample_count,cost_pct)
+            SELECT 1,'test-hash',%s,'2026-10-08T10:00:00Z',TRUE,i%%2=0,
+                   '2026-10-08T09:00:00Z','2026-10-08',1.0,2.0,-1.0,1,0.1
             FROM generate_series(1,1002) AS i""", (controller.PROVENANCE_VERSION,))
         report = controller.generation_research_report(conn, 1, "test-hash")
         assert report["window_trades"] == 1000
         assert report["accepted_trades"] == 500
+        assert report["accepted_entry_episodes"] == 1
+        assert report["accepted_missing_entry_episode"] == 0
         assert report["outcome_ids"] == list(range(1, 1001))
         assert report["net_pnl"] == 500
         conn.execute("UPDATE paper_aeve_generations SET research_report=%s::jsonb", (json.dumps(report),))
         conn.execute("""INSERT INTO paper_aeve_generation_outcomes(
             generation,config_hash,provenance_version,observed_at,entry_evidence_complete,
-            would_trade,net_pnl,mfe_pct,mae_pct,excursion_sample_count,cost_pct)
-            VALUES (1,'test-hash',%s,'2026-10-08T09:00:00Z',TRUE,TRUE,-9999,2,-1,1,0.1)
+            would_trade,entry_time,episode_id,net_pnl,mfe_pct,mae_pct,excursion_sample_count,cost_pct)
+            VALUES (1,'test-hash',%s,'2026-10-08T09:00:00Z',TRUE,TRUE,
+                    '2026-10-08T08:00:00Z','2026-10-08',-9999,2,-1,1,0.1)
         """, (controller.PROVENANCE_VERSION,))
         assert controller.generation_research_report(conn, 1, "test-hash") == report

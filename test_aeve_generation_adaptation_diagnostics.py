@@ -14,6 +14,8 @@ class FakeConn:
         return FakeCursor({
             "window_trades": self.window,
             "accepted_trades": self.accepted,
+            "accepted_entry_episodes": min(self.accepted, 12),
+            "accepted_missing_entry_episode": 0,
             "outcome_ids": list(range(self.window)),
         })
 
@@ -30,6 +32,9 @@ def test_complete_generation_is_not_automatically_adaptation_eligible():
     result = generation_research_report(FakeConn(BATCH_SIZE, 50), 1, "hash")
     assert result["generation_complete"] is True
     assert result["adaptation_eligible"] is False
+    assert result["accepted_entry_episodes"] == 12
+    assert result["accepted_missing_entry_episode"] == 0
+    assert result["episode_clustering"] == "utc_entry_calendar_day"
     assert result["adaptation_block_reason"] == "accepted_sample_requirement_equals_full_generation_window"
 
 
