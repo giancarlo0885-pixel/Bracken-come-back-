@@ -46,6 +46,11 @@ def propose_kelly_size(
         return abstain("invalid_net_payoffs")
     if not 0 < fraction_of_kelly <= 1 or not 0 <= max_allocation <= 1:
         return abstain("invalid_sizing_limits")
+    counts = (independent_episodes, completed_trades, min_episodes, min_trades)
+    if any(type(n) is not int or n < 0 for n in counts):
+        return abstain("invalid_sample_counts")
+    if min_episodes == 0 or min_trades == 0 or independent_episodes > completed_trades:
+        return abstain("invalid_sample_counts")
     if independent_episodes < min_episodes or completed_trades < min_trades:
         return abstain("insufficient_independent_evidence")
     b = average_net_win_pct / abs(average_net_loss_pct)
