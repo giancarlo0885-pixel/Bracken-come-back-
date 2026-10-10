@@ -60,3 +60,17 @@ This analyzes executed, completed trades only. It cannot measure opportunities
 that Oracle never traded or future results that have not occurred. Such signals
 need a separate verified forward sampler. Promotion needs untouched chronological
 validation, drawdown/tail-risk review, multiple conditions and exact-head CI.
+
+## Worker diagnostics
+
+The existing paper FIFO diagnostic process reuses its full reconciled snapshot
+to store `winner_edge_research` in the single current report per market. It logs
+input coverage, cohort count and research candidate count. It never submits or
+changes a trade. Regime labels may be derived with the shared classifier only
+when directional and volatility inputs exist in the immutable BUY snapshot.
+
+The predeclared runtime cutoff is **2026-10-11 00:00 UTC / October 10 5:00 PM
+Pacific**. Reports before then are training-only. The first post-cutoff report
+freezes discovery; later reports reuse that selection manifest and evaluate
+prospective completed trades. A new experiment requires a new version and cutoff,
+not automatic retuning after viewing holdout results. No automatic promotion.

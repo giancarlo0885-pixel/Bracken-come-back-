@@ -19,6 +19,8 @@ import numpy as np
 
 VERSION = "winner-edge-research-v1"
 COHORT_FIELDS = ("market", "strategy", "regime", "entry_pattern")
+# Predeclared before prospective outcomes; no automatically rolling holdout.
+FORWARD_CUTOFF = datetime(2026, 10, 11, tzinfo=timezone.utc)
 
 
 def _time(value):
@@ -117,8 +119,8 @@ def discover(rows, *, cutoff, as_of):
     Entire episode windows touching the split are purged. Forward records never
     influence cohort selection, weights, costs or candidate scores.
     """
-    if cutoff.tzinfo is None or as_of.tzinfo is None or cutoff >= as_of:
-        raise ValueError("timezone-aware cutoff must precede as_of")
+    if cutoff.tzinfo is None or as_of.tzinfo is None:
+        raise ValueError("cutoff and as_of must be timezone-aware")
     valid, exclusions = prepare(rows, as_of)
     train, forward = defaultdict(list), []
     for row in valid:
@@ -157,12 +159,12 @@ def discover(rows, *, cutoff, as_of):
             "limitations": "Observed completed trades only; unexecuted signals and continuous price paths are not measured. Four-hour/day windows are dependence proxies, not certified independent episodes. Requires separate chronological validation and risk review before promotion."}
 
 
-def verified_ledger_inputs(ledger, fills, *, as_of):
+def verified_ledger_inputs(ledger, fills, *, as_of, fifo_report=None):
     """Reconcile full history, then use BUY-side snapshots for entry labels only."""
     from paper_exit_research import attach_fill_fee_evidence, reconcile_fifo
 
-    report = reconcile_fifo(attach_fill_fee_evidence(ledger, fills),
-                            as_of=as_of, require_fill_fee_evidence=True)
+    report = fifo_report if fifo_report is not None else reconcile_fifo(
+        attach_fill_fee_evidence(ledger, fills), as_of=as_of, require_fill_fee_evidence=True)
     buys = {r["trade_id"]: r for r in ledger if r.get("side") == "BUY"}
     rows, exclusions = [], Counter()
     grouped = defaultdict(list)
@@ -199,8 +201,18 @@ def verified_ledger_inputs(ledger, fills, *, as_of):
                     snapshot = {}
             if not isinstance(snapshot, dict):
                 snapshot = {}
-            labels.append((buy.get("strategy"), snapshot.get("regime"),
-                           snapshot.get("entry_pattern")))
+            regime = snapshot.get("regime")
+            if not regime:
+                # Classify only when both directional and volatility evidence
+                # exist; the shared classifier's default zeros are not data.
+                directional = any(_finite(snapshot.get(f)) is not None
+                                  for f in ("trend_strength", "trend", "momentum_20d"))
+                volatility = _finite(snapshot.get("volatility_20d", snapshot.get("volatility")))
+                if directional and volatility is not None and volatility > 0:
+                    from paper_regime_economics_shadow import classify_regime
+                    regime = classify_regime(feature_snapshot=snapshot)
+            labels.append((buy.get("strategy"), regime,
+                           snapshot.get("entry_pattern") or snapshot.get("schwager_pattern_tag")))
             evidence_times.append(_time(buy.get("decision_timestamp")))
             price = _finite(buy.get("entry_price"))
             quantity = _finite(member.get("quantity"))
@@ -210,7 +222,8 @@ def verified_ledger_inputs(ledger, fills, *, as_of):
                 notional += price * quantity
         entry = _time(close["entry_time"])
         if (not labels or any(label != labels[0] for label in labels)
-                or any(not value or value in {"unknown", "unclassified"} for value in labels[0])
+                or any(not isinstance(value, str) or not value
+                       or value in {"unknown", "unclassified"} for value in labels[0])
                 or any(t is None or entry is None or t > entry for t in evidence_times)
                 or not math.isfinite(notional) or notional <= 0):
             exclusions["unverified_or_mixed_entry_snapshot"] += 1
@@ -222,6 +235,35 @@ def verified_ledger_inputs(ledger, fills, *, as_of):
                      "entry_cohort_verified": True})
     return rows, {"fifo": report["diagnostics"], "adapter": dict(exclusions),
                   "observed_closes": report["observed_closes"], "exported_trades": len(rows)}
+
+
+def runtime_report(rows, *, as_of, previous=None, coverage=None):
+    """Freeze once at cutoff; later outcome updates cannot rerank discovery."""
+    provisional = discover(rows, cutoff=FORWARD_CUTOFF, as_of=as_of)
+    previous = previous if isinstance(previous, dict) else {}
+    matching = (previous.get("version") == VERSION
+                and previous.get("cutoff") == FORWARD_CUTOFF.isoformat())
+    if matching and previous.get("discovery_frozen") is True:
+        # A schema/version change requires a new declared experiment, never an
+        # implicit replacement of the existing holdout's selection manifest.
+        candidates = previous.get("candidates", [])
+        provisional["candidates"] = candidates
+        provisional["search_cohorts"] = previous.get("search_cohorts", 0)
+        provisional["discovery_alpha"] = previous.get("discovery_alpha")
+        selected = {_key(c["cohort"]) for c in candidates if c.get("research_candidate")}
+        valid, _ = prepare(rows, as_of)
+        forward = [r for r in valid if r["entry"] >= FORWARD_CUTOFF]
+        accepted = [r for r in forward if _key(r) in selected]
+        rejected = [r for r in forward if _key(r) not in selected]
+        provisional["forward"] = {"baseline": summarize(forward), "selected": summarize(accepted),
+            "avoided_loss_pnl": -sum(r["net_pnl"] for r in rejected if r["net_pnl"] < 0),
+            "rejected_winner_pnl": sum(r["net_pnl"] for r in rejected if r["net_pnl"] > 0),
+            "rejected_winners": sum(r["net_pnl"] > 0 for r in rejected),
+            "selection_pnl_delta": -sum(r["net_pnl"] for r in rejected)}
+    provisional["discovery_frozen"] = as_of >= FORWARD_CUTOFF
+    provisional["phase"] = "forward_validation" if provisional["discovery_frozen"] else "training_only"
+    provisional["history_coverage"] = coverage or {}
+    return provisional
 
 
 def read_verified_history(market, *, as_of):

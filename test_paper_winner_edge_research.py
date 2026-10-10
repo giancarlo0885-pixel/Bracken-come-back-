@@ -131,3 +131,37 @@ def test_partial_exits_count_as_one_completed_entry():
     assert rows[0]["net_pnl"] == pytest.approx(4.6)
     assert rows[0]["entry_notional"] == 200
     assert not verified_ledger_inputs([opening, closes[0]], fills, as_of=EVENT + timedelta(days=1))[0]
+
+
+def test_runtime_freezes_discovery_before_later_outcomes_or_history_changes():
+    from paper_winner_edge_research import runtime_report, FORWARD_CUTOFF
+    rows = [trade(i) for i in range(60)]
+    before = runtime_report(rows, as_of=FORWARD_CUTOFF - timedelta(hours=1))
+    assert before["phase"] == "training_only"
+    frozen = runtime_report(rows, as_of=FORWARD_CUTOFF + timedelta(hours=1), previous=before)
+    assert frozen["discovery_frozen"]
+    days = (FORWARD_CUTOFF - START).days + 1
+    changed = [{**r, "net_pnl": -100} for r in rows]
+    later = runtime_report(changed + [trade(100, 2, days=days)],
+                           as_of=FORWARD_CUTOFF + timedelta(days=2), previous=frozen)
+    assert later["candidates"] == frozen["candidates"]
+    assert later["forward"]["selected"]["net_pnl"] == 2
+    assert later["promotion_action"] == "NONE"
+
+
+def test_runtime_reuses_reconciled_snapshot_and_classifies_observed_entry_features():
+    from paper_winner_edge_research import verified_ledger_inputs
+    opening = {"trade_id": "b", "side": "BUY", "quantity": 2, "entry_price": 100,
+               "strategy": "council", "decision_timestamp": START.isoformat(),
+               "feature_snapshot": {"trend_strength": 0.1, "volatility_20d": 0.7,
+                                    "schwager_pattern_tag": "resistance_test"}}
+    close = dict(trade_id="s", market="crypto", entry_time=START.isoformat(),
+                 exit_time=(START+timedelta(hours=1)).isoformat(), fifo_complete=True,
+                 fill_fee_evidence_verified=True, net_pnl=2,
+                 members=[dict(buy_trade_id="b", quantity=2)])
+    snapshot = dict(closes=[close], diagnostics={}, observed_closes=1)
+    rows, _ = verified_ledger_inputs([opening], [], as_of=AS_OF, fifo_report=snapshot)
+    assert rows[0]["regime"] == "trend_up__high_vol"
+    assert rows[0]["entry_pattern"] == "resistance_test"
+    opening["feature_snapshot"].pop("trend_strength")
+    assert not verified_ledger_inputs([opening], [], as_of=AS_OF, fifo_report=snapshot)[0]

@@ -412,6 +412,13 @@ def emit_reconciliation(market: str) -> dict[str, Any]:
         report = reconcile_fifo(fee_verified_ledger, metrics, prices, require_fill_fee_evidence=True)
         from paper_winner_memory import winner_entry_memory
         report["winner_entry_memory"] = winner_entry_memory(report["closes"])
+        # Reuse the verified FIFO snapshot; do not query or modify execution state.
+        from paper_winner_edge_research import verified_ledger_inputs, runtime_report
+        winner_rows, winner_coverage = verified_ledger_inputs(
+            [dict(r) for r in fills], [], as_of=datetime.now(timezone.utc), fifo_report=report)
+        report["winner_edge_research"] = json_safe(runtime_report(
+            winner_rows, as_of=datetime.now(timezone.utc),
+            previous=previous_report.get("winner_edge_research"), coverage=winner_coverage))
         report["snapshot_semantics"] = "repeatable_read"
         watermark = max((int(r["id"]) for r in fills), default=0)
         previous_watermark = previous_report.get("ledger_watermark")
@@ -443,6 +450,11 @@ def emit_reconciliation(market: str) -> dict[str, Any]:
              market, report["observed_closes"], report["qualified_fifo_closes"], report["net_pnl"],
              report["sell_signal_losses"], report["metric_discrepancies"], json.dumps(report["diagnostics"], sort_keys=True))
     memory = report["winner_entry_memory"]
+    edge = report["winner_edge_research"]
+    log.info("PAPER WINNER EDGE RESEARCH | market=%s | phase=%s | verified_entry_lots=%s | cohorts=%s | research_candidates=%s | forward_trades=%s | coverage=%s | execution_impact=NONE | promotion_action=NONE",
+             market, edge["phase"], edge["history_coverage"].get("exported_trades", 0),
+             edge["search_cohorts"], sum(c["research_candidate"] for c in edge["candidates"]),
+             edge["forward"]["baseline"]["trades"], json.dumps(edge["history_coverage"], sort_keys=True))
     log.info("PAPER WINNER ENTRY MEMORY | market=%s | winners=%s | losers=%s | exclusions=%s",
              market, memory["winners"], memory["losers"], json.dumps(memory["exclusions"], sort_keys=True))
     for winner in memory["records"]:
