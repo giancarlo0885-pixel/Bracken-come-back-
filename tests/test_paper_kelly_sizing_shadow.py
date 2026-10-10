@@ -25,6 +25,17 @@ class KellySizingTests(unittest.TestCase):
     def test_no_episode_independence_abstains(self):
         self.assertFalse(self.base(independent_episodes=2).eligible)
 
+    def test_invalid_evidence_counts_abstain(self):
+        for kwargs in (
+            {"independent_episodes": -1},
+            {"completed_trades": 10, "independent_episodes": 30},
+            {"min_episodes": 0},
+            {"completed_trades": 100.5},
+            {"independent_episodes": True},
+        ):
+            with self.subTest(kwargs=kwargs):
+                self.assertEqual(self.base(**kwargs).reason, "invalid_sample_counts")
+
     def test_invalid_payoff_abstains(self):
         self.assertFalse(self.base(average_net_loss_pct=0).eligible)
 
