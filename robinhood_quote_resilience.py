@@ -359,6 +359,39 @@ def _public_quote_keys(quote: dict[str, Any]) -> str:
     return ",".join(sorted(str(key) for key in quote.keys() if str(key) in allowed)) or "none"
 
 
+
+def _sanitized_book_boundary(quote: dict[str, Any], symbol: str) -> dict[str, str]:
+    """Allowlisted raw-to-normalized quote evidence; never log payloads or credentials."""
+    def value(*keys: str) -> str:
+        raw = _first_present(quote, *keys)
+        if raw is None:
+            return "missing"
+        try:
+            number = Decimal(str(raw))
+            return str(number) if number.is_finite() and number > 0 else "invalid"
+        except (InvalidOperation, ValueError, TypeError):
+            return "invalid"
+
+    raw_symbol = str(quote.get("symbol") or "").upper().strip()
+    raw_time = quote.get("timestamp")
+    try:
+        parsed = datetime.fromisoformat(str(raw_time).replace("Z", "+00:00"))
+        timestamp = parsed.astimezone(timezone.utc).isoformat() if parsed.tzinfo else "invalid"
+    except (ValueError, TypeError, OverflowError):
+        timestamp = "invalid"
+    return {
+        "requested_symbol": symbol,
+        "raw_symbol_match": str(raw_symbol == symbol).lower(),
+        "raw_bid": value("bid"),
+        "raw_ask": value("ask"),
+        "normalized_bid": value("bid_price", "bid", "bid_inclusive_of_sell_spread"),
+        "normalized_ask": value("ask_price", "ask", "ask_inclusive_of_buy_spread"),
+        "source": "Robinhood Crypto:best_bid_ask",
+        "source_timestamp_utc": timestamp,
+        "timestamp_basis": "provider_payload" if raw_time is not None else "missing",
+    }
+
+
 def install_robinhood_quote_resilience(worker: Any) -> bool:
     """Repair transient books and cool repeated crossed books for non-held assets.
 
@@ -507,6 +540,19 @@ def install_robinhood_quote_resilience(worker: Any) -> bool:
                     if reason == "CROSSED_BOOK":
                         crossed_attempts += 1
                         last_crossed_quote = quote
+                    if reason == "CROSSED_BOOK" and _paper_only():
+                        boundary = _sanitized_book_boundary(quote, symbol)
+                        worker.log.info(
+                            "CRYPTO | ROBINHOOD BOOK BOUNDARY | symbol=%s | raw_symbol_match=%s | "
+                            "raw_bid=%s | raw_ask=%s | normalized_bid=%s | normalized_ask=%s | "
+                            "source=%s | source_timestamp_utc=%s | timestamp_basis=%s | "
+                            "execution_impact=NONE | broker_submission=NONE",
+                            boundary["requested_symbol"], boundary["raw_symbol_match"],
+                            boundary["raw_bid"], boundary["raw_ask"],
+                            boundary["normalized_bid"], boundary["normalized_ask"],
+                            boundary["source"], boundary["source_timestamp_utc"],
+                            boundary["timestamp_basis"],
+                        )
                     worker.log.info(
                         "CRYPTO | ROBINHOOD SINGLE QUOTE RETRY | symbol=%s | attempt=%s/%s | status=INVALID_BOOK | reason=%s | public_keys=%s | api_tradable=true",
                         symbol,
