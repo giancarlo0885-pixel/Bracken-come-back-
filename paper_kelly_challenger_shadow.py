@@ -190,6 +190,15 @@ def ensure_schema() -> None:
                 PRIMARY KEY (version,trade_id)
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS paper_kelly_shadow_exclusions (
+                version TEXT NOT NULL,
+                trade_id TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                PRIMARY KEY (version,trade_id)
+            )
+        """)
         conn.execute("INSERT INTO paper_kelly_shadow_epoch(version) VALUES (%s) ON CONFLICT (version) DO NOTHING", (_VERSION,))
 
 
@@ -225,8 +234,12 @@ def evaluate_new_closes(limit: int = 30) -> int:
                   SELECT 1 FROM paper_kelly_shadow_results x
                   WHERE x.version=%s AND x.trade_id=m.trade_id
               )
+              AND NOT EXISTS (
+                  SELECT 1 FROM paper_kelly_shadow_exclusions e
+                  WHERE e.version=%s AND e.trade_id=m.trade_id
+              )
             ORDER BY m.exit_time ASC,m.trade_id ASC LIMIT %s
-        """, (epoch["started_at"], _VERSION, max(1, min(int(limit), 100)))).fetchall())
+        """, (epoch["started_at"], _VERSION, _VERSION, max(1, min(int(limit), 100)))).fetchall())
         for raw in candidates:
             candidate = dict(raw)
             # Same market/regime, SAME generation start, strictly prior completed closes.
@@ -250,7 +263,12 @@ def evaluate_new_closes(limit: int = 30) -> int:
             # Every row is exact-lot filtered, but no result is manufactured if
             # a corrupted trade fails the in-memory notional/provenance check.
             if observed is None:
-                log.warning("KELLY SHADOW | skipped invalid canonical trade=%s", candidate.get("trade_id"))
+                conn.execute("""
+                    INSERT INTO paper_kelly_shadow_exclusions(version,trade_id,reason)
+                    VALUES (%s,%s,%s) ON CONFLICT(version,trade_id) DO NOTHING
+                """, (_VERSION,candidate["trade_id"],proposal.reason))
+                log.warning("KELLY SHADOW | excluded invalid canonical trade=%s | reason=%s",
+                            candidate.get("trade_id"), proposal.reason)
                 continue
             f = proposal.proposed_fraction
             conn.execute("""
