@@ -543,6 +543,12 @@ def generation_research_report(conn: Any, generation: int, config_hash: str) -> 
         "outcome_ids": list(row.get("outcome_ids") or []),
         "window_trades": int(row.get("window_trades") or 0),
         "accepted_trades": int(row.get("accepted_trades") or 0),
+        "generation_complete": int(row.get("window_trades") or 0) >= BATCH_SIZE,
+        "adaptation_eligible": int(row.get("accepted_trades") or 0) >= BATCH_SIZE,
+        "adaptation_block_reason": (
+            None if int(row.get("accepted_trades") or 0) >= BATCH_SIZE
+            else "accepted_sample_requirement_equals_full_generation_window"
+        ),
         "expectancy": _f(row.get("expectancy")),
         "net_pnl": _f(row.get("net_pnl")),
         "profit_factor": (gross_win / gross_loss) if gross_loss > 0 else None,
