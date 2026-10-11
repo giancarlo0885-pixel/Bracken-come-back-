@@ -173,6 +173,7 @@ def forecast_price(
     model: str = "log-return diffusion",
     model_version: str = FORECAST_MODEL_VERSION,
     diagnostics: dict[str, str] | None = None,
+    require_live_quote: bool = False,
 ) -> Forecast | None:
     """Optionally record why no forecast was available; never change abstentions."""
     if diagnostics is not None:
@@ -220,7 +221,7 @@ def forecast_price(
     causal_requested = selected_model == CRYPTO_CAUSAL_MODEL
     # Fail closed on stale, malformed or future-dated provider quotes for fast
     # crypto decisions. Never treat a bar's timestamp as a live quote.
-    if asset == "crypto" and (causal_requested or short_horizon_crypto):
+    if require_live_quote and asset == "crypto" and (causal_requested or short_horizon_crypto):
         raw_quote_time = route.get("quote_timestamp")
         if not raw_quote_time:
             return unavailable("missing_live_quote_timestamp")
