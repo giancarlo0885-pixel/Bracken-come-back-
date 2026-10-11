@@ -292,8 +292,13 @@ def get_history(symbol: str, period: str = "1y", interval: str = "1d") -> pd.Dat
         }
     )
     quote_time = latest_bar_timestamp(frame, interval, symbol=symbol)
-    if quote_time is not None and not route_metadata.get("quote_timestamp"):
-        route_metadata["quote_timestamp"] = quote_time.isoformat()
+    if quote_time is not None:
+        # Bar-close time is analytical provenance, not necessarily a live quote.
+        # Preserve a genuine provider timestamp, but never synthesize one from
+        # daily candles (whose session boundary may be 23:59 UTC).
+        route_metadata["latest_bar_timestamp"] = quote_time.isoformat()
+        if _is_intraday_interval(interval) and not route_metadata.get("quote_timestamp"):
+            route_metadata["quote_timestamp"] = quote_time.isoformat()
 
     if _paper_market_reference_eligible(
         symbol=symbol,
