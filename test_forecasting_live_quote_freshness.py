@@ -35,7 +35,7 @@ def test_fast_crypto_rejects_unverified_quote(timestamp, reason):
     with patch("forecasting.predict_crypto_direction") as predictor:
         result = forecast_price(
             _history(timestamp), source_interval="1m", horizon_bars=5,
-            asset_class="crypto", diagnostics=diagnostics,
+            asset_class="crypto", diagnostics=diagnostics, require_live_quote=True,
         )
     assert result is None
     assert diagnostics["unavailable_reason"] == reason
@@ -48,7 +48,7 @@ def test_fast_crypto_passes_fresh_quote_to_selective_model():
     with patch("forecasting.predict_crypto_direction", return_value=None) as predictor:
         result = forecast_price(
             _history(fresh), source_interval="1m", horizon_bars=5,
-            asset_class="crypto", diagnostics=diagnostics,
+            asset_class="crypto", diagnostics=diagnostics, require_live_quote=True,
         )
     assert result is None
     assert diagnostics["unavailable_reason"] == "causal_model_abstention"
