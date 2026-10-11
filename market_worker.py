@@ -1515,6 +1515,7 @@ def scan_market(market: str) -> list[Any]:
                 market=market,
                 source_interval=route.get("interval", "1d"),
                 diagnostics=forecast_diagnostics,
+                require_live_quote=(market == "crypto"),
             )
             if forecast is None:
                 log.warning("DEEP_FORECAST_MISSING | market=%s | symbol=%s | scan=deep | unavailable_reason=%s",
