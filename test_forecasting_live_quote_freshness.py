@@ -17,6 +17,7 @@ def _history(timestamp):
         "requested_symbol": "BTC-USD",
         "provider_symbol": "BTC-USD",
         "interval": "1m",
+        "quote_verified": True,
     }
     if timestamp is not None:
         frame.attrs["provider_route"]["quote_timestamp"] = timestamp
@@ -53,3 +54,17 @@ def test_fast_crypto_passes_fresh_quote_to_selective_model():
     assert result is None
     assert diagnostics["unavailable_reason"] == "causal_model_abstention"
     predictor.assert_called_once()
+
+
+def test_fast_crypto_rejects_unverified_fresh_quote():
+    history = _history(datetime.now(timezone.utc).isoformat())
+    history.attrs["provider_route"]["quote_verified"] = False
+    diagnostics = {}
+    with patch("forecasting.predict_crypto_direction") as predictor:
+        result = forecast_price(
+            history, source_interval="1m", horizon_bars=5,
+            asset_class="crypto", diagnostics=diagnostics, require_live_quote=True,
+        )
+    assert result is None
+    assert diagnostics["unavailable_reason"] == "unverified_live_quote"
+    predictor.assert_not_called()
