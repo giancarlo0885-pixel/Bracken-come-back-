@@ -1318,6 +1318,7 @@ def fast_scan_market(market: str) -> list[Any]:
                     market=market,
                     source_interval=route.get("interval", "1d"),
                     diagnostics=forecast_diagnostics,
+                    require_live_quote=(market == "crypto"),
                 )
                 if forecast:
                     setattr(signal, "forecast_id", getattr(forecast, "forecast_id", None))
