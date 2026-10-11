@@ -47,5 +47,5 @@ def test_incomplete_generation_is_not_complete():
 def test_full_acceptance_is_distinct_from_completion():
     result = generation_research_report(FakeConn(BATCH_SIZE, BATCH_SIZE), 1, "hash")
     assert result["generation_complete"] is True
-    assert result["adaptation_eligible"] is True
-    assert result["adaptation_block_reason"] is None
+    assert result["adaptation_eligible"] is False
+    assert result["adaptation_block_reason"] == "independent_market_episodes_not_verified"
