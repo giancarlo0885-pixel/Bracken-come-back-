@@ -222,6 +222,8 @@ def forecast_price(
     # Fail closed on stale, malformed or future-dated provider quotes for fast
     # crypto decisions. Never treat a bar's timestamp as a live quote.
     if require_live_quote and asset == "crypto" and (causal_requested or short_horizon_crypto):
+        if route.get("quote_verified") is not True:
+            return unavailable("unverified_live_quote")
         raw_quote_time = route.get("quote_timestamp")
         if not raw_quote_time:
             return unavailable("missing_live_quote_timestamp")
