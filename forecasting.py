@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import hashlib
 import math
 from typing import Any
@@ -218,6 +218,24 @@ def forecast_price(
     causal_prediction = None
     short_horizon_crypto = asset == "crypto" and interval_minutes(interval) <= 15.0 and minutes <= 30.0
     causal_requested = selected_model == CRYPTO_CAUSAL_MODEL
+    # Fail closed on stale, malformed or future-dated provider quotes for fast
+    # crypto decisions. Never treat a bar's timestamp as a live quote.
+    if asset == "crypto" and (causal_requested or short_horizon_crypto):
+        raw_quote_time = route.get("quote_timestamp")
+        if not raw_quote_time:
+            return unavailable("missing_live_quote_timestamp")
+        try:
+            quote_time = datetime.fromisoformat(str(raw_quote_time).replace("Z", "+00:00"))
+            if quote_time.tzinfo is None:
+                return unavailable("unverified_live_quote_timezone")
+            quote_time = quote_time.astimezone(timezone.utc)
+        except (ValueError, TypeError, OverflowError):
+            return unavailable("invalid_live_quote_timestamp")
+        now = datetime.now(timezone.utc)
+        if quote_time > now + timedelta(seconds=5):
+            return unavailable("future_live_quote_timestamp")
+        if now - quote_time > timedelta(seconds=90):
+            return unavailable("stale_live_quote_timestamp")
     if asset == "crypto" and (causal_requested or short_horizon_crypto):
         if not short_horizon_crypto:
             return unavailable("unsupported_causal_horizon")
