@@ -219,9 +219,10 @@ def forecast_price(
     causal_prediction = None
     short_horizon_crypto = asset == "crypto" and interval_minutes(interval) <= 15.0 and minutes <= 30.0
     causal_requested = selected_model == CRYPTO_CAUSAL_MODEL
-    # Fail closed on stale, malformed or future-dated provider quotes for fast
-    # crypto decisions. Never treat a bar's timestamp as a live quote.
-    if require_live_quote and asset == "crypto" and (causal_requested or short_horizon_crypto):
+    # Any crypto forecast explicitly used for a live decision must have a
+    # verified, recent provider quote, regardless of bar interval or horizon.
+    # Daily-bar close timestamps are not evidence of an executable live quote.
+    if require_live_quote and asset == "crypto":
         if route.get("quote_verified") is not True:
             return unavailable("unverified_live_quote")
         raw_quote_time = route.get("quote_timestamp")
