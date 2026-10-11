@@ -561,10 +561,13 @@ def generation_research_report(conn: Any, generation: int, config_hash: str) -> 
         "accepted_missing_entry_episode": int(row.get("accepted_missing_entry_episode") or 0),
         "episode_clustering": "utc_entry_calendar_day",
         "generation_complete": int(row.get("window_trades") or 0) >= BATCH_SIZE,
-        "adaptation_eligible": int(row.get("accepted_trades") or 0) >= BATCH_SIZE,
+        # Calendar-day clusters are descriptive, not verified independent market episodes.
+        # Fail closed until episode independence is established from immutable entry evidence.
+        "adaptation_eligible": False,
         "adaptation_block_reason": (
-            None if int(row.get("accepted_trades") or 0) >= BATCH_SIZE
-            else "accepted_sample_requirement_equals_full_generation_window"
+            "accepted_sample_requirement_equals_full_generation_window"
+            if int(row.get("accepted_trades") or 0) < BATCH_SIZE
+            else "independent_market_episodes_not_verified"
         ),
         "expectancy": _f(row.get("expectancy")),
         "net_pnl": _f(row.get("net_pnl")),
