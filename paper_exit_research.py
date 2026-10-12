@@ -114,6 +114,12 @@ def reconcile_fifo(fills: list[dict[str, Any]], metrics: dict[str, dict[str, Any
         row = dict(raw)
         identity = str(row.get("trade_id") or "")
         key = (str(row.get("market") or ""), str(row.get("symbol") or ""))
+        # Future records cannot taint historical duplicate-identity checks.
+        side = str(row.get("side") or "").upper()
+        event_time = timestamp(row.get("entry_time") if side == "BUY" else row.get("exit_time"))
+        if event_time is not None and event_time > as_of:
+            diagnostics["future_fill"] += 1
+            continue
         if identity in unique:
             if row == unique[identity]:
                 diagnostics["duplicate_fill"] += 1
