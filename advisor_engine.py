@@ -175,7 +175,9 @@ def generate_recommendation(
     if raw_confidence is None:
         raw_confidence = ensemble["overall_confidence"]
     normalized_confidence = normalize_legacy_display_score(raw_confidence)
-    confidence = normalized_confidence * 100.0 if normalized_confidence is not None else 0.0
+    # Preserve the advisor's existing 0..100 decision scale. Metadata alone
+    # uses normalized display scoring; it must not increase trade confidence.
+    confidence = float(raw_confidence) if normalized_confidence is not None else 0.0
     expected_return = float(candidate.get("expected_return") or candidate.get("expected_move_pct") or 0.0)
     downside = abs(float(candidate.get("expected_downside") or candidate.get("volatility") or 0.0))
     risk_reward = expected_return / downside if downside > 0 else 0.0
