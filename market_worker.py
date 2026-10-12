@@ -1190,7 +1190,16 @@ def _fast_candidate_batch(market: str) -> list[tuple[str, str]]:
     universe = [(str(symbol).upper(), str(name)) for symbol, name in watchlist.items()]
     for symbol, name in _rolling_batch(universe, market, FAST_SCAN_BATCH_SIZE):
         candidates.setdefault(symbol, name)
-    return list(candidates.items())[: max(FAST_SCAN_BATCH_SIZE, FAST_SCAN_TOP_RANKED)]
+    # Held positions are risk-monitoring obligations, not optional candidates.
+    # The ranked/rotating opportunity budget must never evict an open holding.
+    held = set(_held_symbols(market))
+    limit = max(FAST_SCAN_BATCH_SIZE, FAST_SCAN_TOP_RANKED)
+    selected = [(symbol, name) for symbol, name in candidates.items() if symbol in held]
+    selected.extend(
+        (symbol, name) for symbol, name in candidates.items()
+        if symbol not in held
+    )
+    return selected[: max(limit, len(held))]
 
 
 def _log_fast_history_provider_diagnostics(symbol: str, period: str, interval: str, history: Any) -> None:
