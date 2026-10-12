@@ -142,3 +142,26 @@ def test_fill_fee_evidence_is_required_and_ambiguous_matches_fail_closed():
     assert report["qualified_fifo_closes"] == 1
     assert report["net_pnl"] == pytest.approx(1.7)
     assert report["closes"][0]["ledger_fee_semantics"] == "round_trip"
+
+
+def test_future_conflicting_identity_does_not_taint_asof_fifo():
+    opening = buy("entry", 2, 100, 0.2)
+    close = sell("exit", 2, 100, 102, 0.1, 4, minute=20)
+    cutoff = START + timedelta(minutes=30)
+    future_conflict = {**opening, "entry_price": 999, "entry_time": START + timedelta(hours=2)}
+    baseline = reconcile_fifo([opening, close], as_of=cutoff)
+    result = reconcile_fifo([opening, future_conflict, close], as_of=cutoff)
+    assert baseline["qualified_fifo_closes"] == 1
+    assert result["qualified_fifo_closes"] == 1
+    assert result["net_pnl"] == pytest.approx(baseline["net_pnl"])
+    assert result["diagnostics"]["future_fill"] == 1
+    assert result["diagnostics"].get("conflicting_fill_identity", 0) == 0
+
+
+def test_historical_conflicting_identity_still_taints_fifo():
+    opening = buy("entry", 2, 100, 0.2)
+    close = sell("exit", 2, 100, 102, 0.1, 4, minute=20)
+    conflicting = {**opening, "entry_price": 999}
+    result = reconcile_fifo([opening, conflicting, close], as_of=START + timedelta(hours=1))
+    assert result["qualified_fifo_closes"] == 0
+    assert result["diagnostics"]["conflicting_fill_identity"] == 1
