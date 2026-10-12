@@ -108,3 +108,75 @@ def chronological_episode_holdout(rows: list[dict[str, Any]], *,
     return {"cutoff": boundary.isoformat(), "excluded_unqualified_or_leaking": excluded,
             "phenotypes": results, "execution_impact": "NONE",
             "broker_submission": "NONE", "promotion_authorized": False}
+
+
+def episode_risk_report(rows: list[dict[str, Any]], *, confidence: float = 0.95) -> dict[str, Any]:
+    """Descriptive episode-level tail risk; no IID-trade significance claims.
+
+    Episodes are ordered by their last close. The report uses net realized P&L,
+    not unobserved intra-trade equity, so drawdown is a close-to-close proxy.
+    """
+    if not 0 < confidence < 1:
+        raise ValueError("confidence must be between zero and one")
+    trades = [t for row in rows if (t := qualified_trade(row)) is not None]
+    by_episode: dict[str, dict[str, Any]] = {}
+    for trade in trades:
+        episode = by_episode.setdefault(trade["episode_id"],
+                                        {"pnl": 0.0, "closed": trade["exit_time"]})
+        episode["pnl"] += trade["pnl"]
+        episode["closed"] = max(episode["closed"], trade["exit_time"])
+    ordered = sorted(by_episode.values(), key=lambda e: (e["closed"], e["pnl"]))
+    equity = peak = max_drawdown = 0.0
+    for episode in ordered:
+        equity += episode["pnl"]
+        peak = max(peak, equity)
+        max_drawdown = max(max_drawdown, peak - equity)
+    outcomes = sorted(e["pnl"] for e in ordered)
+    if not outcomes:
+        return {"episodes": 0, "var_loss": None, "cvar_loss": None,
+                "max_closed_episode_drawdown": None, "qualified_trades": 0}
+    # Lower-tail empirical quantile. Negative outcomes become positive loss values.
+    tail_count = max(1, math.ceil((1 - confidence) * len(outcomes)))
+    tail = outcomes[:tail_count]
+    return {"episodes": len(outcomes), "qualified_trades": len(trades),
+            "var_loss": round(max(0.0, -tail[-1]), 8),
+            "cvar_loss": round(max(0.0, -sum(tail) / len(tail)), 8),
+            "max_closed_episode_drawdown": round(max_drawdown, 8),
+            "confidence": confidence,
+            "tail_episode_count": tail_count,
+            "risk_scope": "realized-episode-close-only",
+            "promotion_authorized": False}
+
+
+def matched_exit_comparison(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Compare immutable paired exits only; reject unmatched or fabricated edges."""
+    pairs = []
+    rejected = 0
+    for row in rows:
+        try:
+            if row.get("matched_forward_observation") is not True:
+                raise ValueError("unmatched")
+            if row.get("fees_verified") is not True:
+                raise ValueError("unverified fees")
+            decision = _time(row["decision_time"])
+            quote = _time(row["quote_observed_at"])
+            if quote > decision:
+                raise ValueError("lookahead quote")
+            champion = _finite(row["champion_net_pnl"])
+            challenger = _finite(row["challenger_net_pnl"])
+            if not row.get("episode_id") or not row.get("trade_id"):
+                raise ValueError("missing identity")
+            pairs.append({"episode": str(row["episode_id"]),
+                          "delta": challenger - champion,
+                          "avoided_loss": champion < 0 <= challenger,
+                          "missed_winner": champion > 0 and challenger < champion})
+        except (KeyError, ValueError, TypeError, OverflowError):
+            rejected += 1
+    episodes = {p["episode"] for p in pairs}
+    return {"matched_pairs": len(pairs), "independent_episodes": len(episodes),
+            "unqualified_pairs": rejected,
+            "average_net_delta": round(sum(p["delta"] for p in pairs) / len(pairs), 8)
+            if pairs else None,
+            "avoided_losses": sum(p["avoided_loss"] for p in pairs),
+            "missed_winners": sum(p["missed_winner"] for p in pairs),
+            "promotion_authorized": False}
