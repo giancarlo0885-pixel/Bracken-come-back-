@@ -148,9 +148,9 @@ const app=document.getElementById("app");
 const cryptoIdeas=(Array.isArray(DATA.opportunities)?DATA.opportunities:[]).filter(x=>["crypto","us_crypto"].includes(String(x.market||"").toLowerCase()));
 const decisionEl=document.getElementById("cryptoDecision");
 const coverageEl=document.getElementById("cryptoCoverage");
-coverageEl.textContent=cryptoIdeas.length+" crypto idea(s) in this snapshot";
+coverageEl.textContent=cryptoIdeas.length+" recorded crypto idea(s) · read-only";
 const lead=cryptoIdeas[0];
-decisionEl.textContent=lead?(String(lead.symbol||"UNKNOWN")+" · "+String(lead.action||"RESEARCH")+" · "+String(lead.strategy||"unclassified")):"No recorded crypto idea in this snapshot";
+decisionEl.textContent=lead?(String(lead.symbol||"UNKNOWN")+" · "+String(lead.action||"RESEARCH")+" · "+String(lead.strategy||"unclassified")+" · "+String(lead.regime||"regime unknown")):"No recorded crypto idea in this snapshot";
 
 const stage=document.getElementById("stage");
 const status=document.getElementById("status");
