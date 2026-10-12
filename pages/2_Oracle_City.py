@@ -42,6 +42,7 @@ if not health.get("ok"):
 left, middle, spacer = st.columns([1, 1, 4])
 with left:
     if st.button("Refresh now", type="primary", width="stretch"):
+        st.cache_data.clear()
         st.rerun()
 with middle:
     auto_refresh = st.toggle("Sync data every 60s", value=False)
@@ -49,7 +50,13 @@ with middle:
 if auto_refresh and st_autorefresh is not None:
     st_autorefresh(interval=60_000, key="oracle-city-world-sync")
 
-snapshot = build_oracle_city_snapshot(rows)
+# Share a short-lived, read-only snapshot across ordinary Streamlit reruns.
+# Manual refresh explicitly clears the cache; no accounting or trading data is written.
+@st.cache_data(ttl=15, show_spinner="Loading Oracle City snapshot…")
+def _city_snapshot_cached():
+    return build_oracle_city_snapshot(rows)
+
+snapshot = _city_snapshot_cached()
 summary = snapshot["summary"]
 
 st.title("Oracle City — Cinematic Metropolis")
