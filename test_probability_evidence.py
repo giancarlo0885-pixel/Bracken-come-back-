@@ -103,3 +103,35 @@ def test_prediction_rejects_invalid_nonmissing_forecast_probabilities(invalid):
         assert decision["probability_up"] is None
         assert decision["probability_evidence"]["classification"] == UNVALIDATED
         assert "Invalid forecast probability" in decision["data_status"]
+
+def _advisor_candidate(confidence):
+    now = datetime.now(timezone.utc).isoformat()
+    quote = {
+        "symbol": "AAPL", "requested_symbol": "AAPL", "provider_symbol": "AAPL",
+        "price": 200, "provider": "unit", "quote_timestamp": now,
+        "quote_verified": True, "interval": "5m", "currency": "USD", "exchange": "NASDAQ",
+    }
+    return {
+        "symbol": "AAPL", "market": "cash", "verified_quote": quote,
+        "confidence": confidence, "opportunity_score": 90,
+        "expected_return": 6, "expected_downside": 3,
+        "data_quality_score": 90, "liquidity_value": 1_000_000,
+        "validation_status": "approved",
+    }
+
+
+def test_advisor_invalid_confidence_is_not_rendered_as_probability():
+    from advisor_engine import generate_recommendation
+    for invalid in (150, -20, float("nan")):
+        rec = generate_recommendation(_advisor_candidate(invalid))
+        assert rec.probability_evidence == {}
+        assert rec.confidence == 0.0
+        assert rec.action not in {"BUY", "STRONG BUY", "ACCUMULATE"}
+
+
+def test_advisor_legacy_scale_is_not_promoted_into_decision_confidence():
+    from advisor_engine import generate_recommendation
+    rec = generate_recommendation(_advisor_candidate(.9))
+    assert rec.confidence == .9  # existing advisor decision-scale semantics
+    assert rec.probability_evidence["classification"] == HEURISTIC_SCORE
+    assert rec.probability_evidence["value"] == .9
