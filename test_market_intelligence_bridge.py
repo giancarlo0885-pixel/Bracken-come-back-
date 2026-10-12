@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from contextlib import contextmanager
 
+import database
 import market_intelligence_bridge as bridge
 
 
@@ -222,3 +224,70 @@ def test_source_cache_context_accepts_datetime_values():
         market="crypto",
     )
     assert context["catalyst_score"] > 0
+
+
+def test_recent_source_cache_reserves_lane_for_structured_market_briefs(monkeypatch):
+    class Result:
+        def __init__(self, values):
+            self.values = values
+
+        def fetchall(self):
+            return self.values
+
+    class Connection:
+        def __init__(self):
+            self.queries: list[str] = []
+
+        def execute(self, query):
+            self.queries.append(query)
+            if "metadata ? 'brief_id'" in query:
+                return Result([
+                    {
+                        "source_key": "intel:reuters:brief:2026-10-12:0",
+                        "provider": "Reuters",
+                        "category": "macro_policy",
+                        "symbol": None,
+                        "title": "Weekly oil and inflation regime",
+                        "source_ref": "https://reuters.test/brief",
+                        "observed_at": "2026-10-12T15:00:00+00:00",
+                        "source_quality": 0.84,
+                        "freshness_score": 1.0,
+                        "confidence": 0.75,
+                        "status": "active",
+                        "metadata": {"brief_id": "2026-10-12", "market_wide": True},
+                    }
+                ])
+            return Result([
+                {
+                    "source_key": "intel:finnhub:future-earnings",
+                    "provider": "Finnhub",
+                    "category": "Earnings Calendar",
+                    "symbol": "ABC",
+                    "title": "Future earnings",
+                    "source_ref": "intelligence_events:1",
+                    "observed_at": "2026-10-26T00:00:00+00:00",
+                    "source_quality": 0.86,
+                    "freshness_score": 1.0,
+                    "confidence": 0.72,
+                    "status": "active",
+                    "metadata": {},
+                }
+            ])
+
+    conn = Connection()
+
+    @contextmanager
+    def fake_connect():
+        yield conn
+
+    monkeypatch.setattr(database, "connect", fake_connect)
+    monkeypatch.setattr(bridge, "_SOURCE_CACHE", (0.0, []))
+    monkeypatch.setattr(bridge.time, "monotonic", lambda: 1_000.0)
+
+    sources = bridge._recent_brain_sources()
+
+    assert {item["source_key"] for item in sources} == {
+        "intel:finnhub:future-earnings",
+        "intel:reuters:brief:2026-10-12:0",
+    }
+    assert any("metadata ? 'brief_id'" in query for query in conn.queries)

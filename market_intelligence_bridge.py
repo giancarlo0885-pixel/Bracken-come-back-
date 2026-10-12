@@ -582,7 +582,7 @@ def _recent_brain_sources() -> list[dict[str, Any]]:
         from database import connect
 
         with connect() as conn:
-            rows = conn.execute(
+            recent_rows = conn.execute(
                 """
                 SELECT source_key,provider,category,symbol,title,source_ref,observed_at,
                        source_quality,freshness_score,confidence,status,metadata
@@ -592,7 +592,29 @@ def _recent_brain_sources() -> list[dict[str, Any]]:
                 LIMIT 320
                 """
             ).fetchall()
-        sources = [dict(row) for row in rows]
+            # Future-dated calendars can legitimately dominate the general
+            # recency window. Keep a small dedicated weekly-brief lane so the
+            # owner's current macro/AI/space/quantum packet remains available
+            # to symbol relevance filtering and is not crowded out by hundreds
+            # of upcoming earnings rows.
+            brief_rows = conn.execute(
+                """
+                SELECT source_key,provider,category,symbol,title,source_ref,observed_at,
+                       source_quality,freshness_score,confidence,status,metadata
+                FROM oracle_brain_sources
+                WHERE status='active' AND freshness_score >= 0.18 AND confidence >= 0.30
+                  AND metadata ? 'brief_id'
+                ORDER BY observed_at DESC NULLS LAST, confidence DESC
+                LIMIT 64
+                """
+            ).fetchall()
+        source_by_key: dict[str, dict[str, Any]] = {}
+        for row in [*recent_rows, *brief_rows]:
+            source = dict(row)
+            source_key = _clean(source.get("source_key"), limit=500)
+            if source_key:
+                source_by_key[source_key] = source
+        sources = list(source_by_key.values())
     except Exception:
         return []
     with _CACHE_LOCK:
