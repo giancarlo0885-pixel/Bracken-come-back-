@@ -63,6 +63,22 @@ if st.button("Refresh Brain", type="primary"):
 
 snapshot = build_oracle_brain_snapshot(rows)
 
+brief_receipt = snapshot["market_brief_receipt"]
+if brief_receipt["status"] == "learned":
+    st.success(
+        "Monday Market Intelligence received and learned: "
+        f"brief {brief_receipt['brief_id']} · "
+        f"{brief_receipt['sources_learned']}/{brief_receipt['sources_expected']} source records in Brain · "
+        "execution authority NONE"
+    )
+elif brief_receipt["status"] in {"awaiting_brain_sync", "partially_learned"}:
+    st.info(
+        "Monday Market Intelligence received and awaiting the next Brain sync: "
+        f"brief {brief_receipt['brief_id']} · "
+        f"{brief_receipt['sources_learned']}/{brief_receipt['sources_expected']} source records learned · "
+        "execution authority NONE"
+    )
+
 with st.expander("Paper fill reconciliation"):
     try:
         reconciliation_rows = rows("SELECT market,updated_at,report FROM paper_exit_research_reports WHERE version=%s ORDER BY market", (REPORT_VERSION,))
