@@ -145,12 +145,12 @@ window.__oracleCityBooted=true;
 const DATA=JSON.parse(document.getElementById("oracle-data").textContent);
 const app=document.getElementById("app");
 // Present only persisted crypto ideas; never fabricate signals or prices.
-const cryptoIdeas=(Array.isArray(DATA.opportunities)?DATA.opportunities:[]).filter(x=>String(x.market||"").toLowerCase()==="crypto");
+const cryptoIdeas=(Array.isArray(DATA.opportunities)?DATA.opportunities:[]).filter(x=>["crypto","us_crypto"].includes(String(x.market||"").toLowerCase()));
 const decisionEl=document.getElementById("cryptoDecision");
 const coverageEl=document.getElementById("cryptoCoverage");
 coverageEl.textContent=cryptoIdeas.length+" crypto idea(s) in this snapshot";
 const lead=cryptoIdeas[0];
-decisionEl.textContent=lead?(String(lead.symbol||"UNKNOWN")+" · "+String(lead.action||"RESEARCH")+" · "+String(lead.strategy||"unclassified")):"No verified crypto idea available";
+decisionEl.textContent=lead?(String(lead.symbol||"UNKNOWN")+" · "+String(lead.action||"RESEARCH")+" · "+String(lead.strategy||"unclassified")):"No recorded crypto idea in this snapshot";
 
 const stage=document.getElementById("stage");
 const status=document.getElementById("status");
