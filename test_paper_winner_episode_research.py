@@ -75,3 +75,32 @@ def test_positive_holdout_still_does_not_authorize_promotion():
                                         min_holdout_episodes=2)["phenotypes"]["breakout"]
     assert item["holdout_positive"] is True
     assert item["promotion_authorized"] is False
+
+
+def test_episode_risk_report_realized_loss_and_tail():
+    from paper_winner_episode_research import episode_risk_report
+    rows = [trade("one", pnl=3), trade("two", later=True, pnl=-5)]
+    result = episode_risk_report(rows, confidence=0.5)
+    assert result["episodes"] == 2
+    assert result["max_closed_episode_drawdown"] == 5
+    assert result["var_loss"] == 5
+    assert result["cvar_loss"] == 5
+    assert result["promotion_authorized"] is False
+
+
+def test_matched_exits_reject_future_quotes_and_missing_pairs():
+    from paper_winner_episode_research import matched_exit_comparison
+    base = {"matched_forward_observation": True, "fees_verified": True,
+            "decision_time": ENTRY, "quote_observed_at": ENTRY,
+            "champion_net_pnl": -2, "challenger_net_pnl": 1,
+            "episode_id": "episode1", "trade_id": "trade1"}
+    result = matched_exit_comparison([
+        base,
+        {**base, "trade_id": "future", "quote_observed_at": EXIT},
+        {**base, "trade_id": "missing", "matched_forward_observation": False},
+    ])
+    assert result["matched_pairs"] == 1
+    assert result["unqualified_pairs"] == 2
+    assert result["avoided_losses"] == 1
+    assert result["missed_winners"] == 0
+    assert result["promotion_authorized"] is False
