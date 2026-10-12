@@ -17,7 +17,21 @@ st.set_page_config(
     page_title="Oracle City V3 - GARIBALDI MARKET ORACLE",
     page_icon="ORCL",
     layout="wide",
+    initial_sidebar_state="collapsed",
 )
+
+# Compact controls and metrics on narrow screens. Preserve full desktop layout.
+st.markdown("""<style>
+@media (max-width: 720px) {
+  [data-testid="stHorizontalBlock"] {flex-wrap: wrap !important; gap: .5rem !important;}
+  [data-testid="stHorizontalBlock"] > [data-testid="stColumn"] {
+    flex: 1 1 min(42%, 180px) !important; min-width: 0 !important;
+  }
+  [data-testid="stMetricLabel"] {white-space: normal !important; overflow-wrap: anywhere;}
+  [data-testid="stMetricValue"] {font-size: clamp(1.1rem, 5vw, 1.7rem) !important;}
+  [data-testid="stIFrame"] {max-width: 100% !important;}
+}
+</style>""", unsafe_allow_html=True)
 
 health = database_ready(connect_timeout=5)
 if not health.get("ok"):
