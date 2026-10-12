@@ -65,6 +65,7 @@ from global_adaptive_engine import (
     record_invalid_symbol_failure,
 )
 from intelligence_hub import collect_all
+from github_market_intelligence_inbox import sync_market_brief_inbox
 from market_data import get_history, get_many_snapshots
 from market_intelligence_bridge import ingest_monitor_record
 from news_intelligence import get_news_sentiment
@@ -1706,6 +1707,29 @@ def live_position_pulse(market: str) -> tuple[list[Any], int, str]:
 
 def _collect_stock_intelligence() -> None:
     try:
+        try:
+            brief_result = sync_market_brief_inbox()
+            if brief_result.get("status") == "ingested":
+                log.info(
+                    "MONDAY MARKET INTELLIGENCE INBOX | status=INGESTED | brief_id=%s | "
+                    "events=%s | execution_impact=NONE",
+                    brief_result.get("brief_id"),
+                    brief_result.get("events_persisted", 0),
+                )
+            elif brief_result.get("status") not in {"disabled", "no_change"}:
+                log.info(
+                    "MONDAY MARKET INTELLIGENCE INBOX | status=%s | execution_impact=NONE",
+                    str(brief_result.get("status") or "unknown").upper(),
+                )
+        except Exception as exc:
+            # The regular provider collectors must continue if the external
+            # weekly brief is absent, malformed, stale, or temporarily
+            # unavailable.
+            log.warning(
+                "MONDAY MARKET INTELLIGENCE INBOX | status=UNAVAILABLE | reason=%s | "
+                "execution_impact=NONE",
+                exc.__class__.__name__,
+            )
         intelligence_results = collect_all()
         for category, result in intelligence_results.items():
             if stop_event.is_set():

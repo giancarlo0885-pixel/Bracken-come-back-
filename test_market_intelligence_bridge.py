@@ -169,6 +169,35 @@ def test_structured_brief_keeps_fact_and_inference_separate(monkeypatch):
     assert saved[0]["source_url"] == "https://issuer.test/filing"
 
 
+def test_structured_brief_does_not_override_explicit_reported_status(monkeypatch):
+    saved: list[dict] = []
+
+    def fake_save(category, provider, title, details, symbol=None, event_time=None, **kwargs):
+        saved.append({"details": details, **kwargs})
+        return {"event_key": kwargs["event_key"], "execution_impact": "NONE"}
+
+    monkeypatch.setattr(bridge, "save_intelligence_event", fake_save)
+    bridge.ingest_market_brief(
+        {
+            "brief_id": "2026-10-12",
+            "generated_at": "2026-10-12T15:00:00+00:00",
+            "developments": [{
+                "category": "AI_TECHNOLOGY",
+                "title": "Two related facts without claim-level corroboration",
+                "fact": "The sources support different parts of the development.",
+                "verification_status": "reported",
+                "sources": [
+                    {"provider": "Reuters", "url": "https://reuters.test/report"},
+                    {"provider": "Official", "url": "https://agency.gov/release"},
+                ],
+            }],
+        }
+    )
+
+    assert saved[0]["verification_status"] == "reported"
+    assert saved[0]["details"]["source_count"] == 2
+
+
 def test_source_cache_context_accepts_datetime_values():
     context = bridge.brain_context_from_sources(
         [

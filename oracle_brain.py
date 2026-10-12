@@ -279,6 +279,68 @@ def build_oracle_brain_snapshot(fetch_rows: FetchRows) -> dict[str, Any]:
         """,
     )
 
+    market_brief_receipt = {
+        "status": "not_received",
+        "brief_id": None,
+        "received_at": None,
+        "events_persisted": 0,
+        "sources_learned": 0,
+        "sources_expected": 0,
+        "execution_impact": "NONE",
+    }
+    inbox_state = next(
+        (
+            item
+            for item in learning_state
+            if item.get("pipeline_key") == "github_market_brief_inbox"
+            and item.get("market") == "global"
+        ),
+        None,
+    )
+    if inbox_state:
+        receipt = _json_obj(inbox_state.get("last_result"))
+        event_keys = [
+            str(value).strip()
+            for value in receipt.get("event_keys", [])
+            if str(value).strip()
+        ] if isinstance(receipt.get("event_keys"), list) else []
+        learned_keys: set[str] = set()
+        if event_keys:
+            learned_rows = _safe_rows(
+                fetch_rows,
+                """
+                SELECT source_key
+                FROM oracle_brain_sources
+                WHERE source_key = ANY(%s)
+                """,
+                ([f"intel:{event_key}" for event_key in event_keys],),
+            )
+            learned_keys = {
+                str(item.get("source_key") or "")
+                for item in learned_rows
+                if item.get("source_key")
+            }
+        expected = len(event_keys)
+        learned = len(learned_keys)
+        receipt_status = str(receipt.get("status") or "ingested").lower()
+        if expected and learned >= expected:
+            receipt_status = "learned"
+        elif learned:
+            receipt_status = "partially_learned"
+        elif receipt_status == "ingested":
+            receipt_status = "awaiting_brain_sync"
+        market_brief_receipt = {
+            "status": receipt_status,
+            "brief_id": receipt.get("brief_id"),
+            "received_at": receipt.get("received_at") or inbox_state.get("last_sync_at"),
+            "events_persisted": int(_num(receipt.get("events_persisted"), 0.0)),
+            "sources_learned": learned,
+            "sources_expected": expected,
+            "repository": receipt.get("repository"),
+            "issue_number": receipt.get("issue_number"),
+            "execution_impact": "NONE",
+        }
+
     now = datetime.now(timezone.utc)
     sync_rows: list[tuple[dict[str, Any], datetime]] = []
     for item in learning_state:
@@ -522,6 +584,7 @@ def build_oracle_brain_snapshot(fetch_rows: FetchRows) -> dict[str, Any]:
         "contradictions": contradictions,
         "research_queue": research_queue,
         "learning_state": learning_state,
+        "market_brief_receipt": market_brief_receipt,
         "learning_activity": learning_activity,
         "retention_health": retention_health,
         "growth": growth,

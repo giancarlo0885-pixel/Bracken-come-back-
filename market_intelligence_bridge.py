@@ -395,6 +395,9 @@ def ingest_market_brief(packet: dict[str, Any], *, provider: str = "Monday Marke
             for source in sources
             if isinstance(source, dict) and _clean(source.get("url"), limit=2000)
         }
+        requested_verification = _clean(raw.get("verification_status"), limit=24).lower()
+        if requested_verification not in _VERIFICATION_WEIGHTS:
+            requested_verification = ""
         record = {
             **raw,
             "event_id": f"brief:{brief_id}:{index}",
@@ -402,9 +405,8 @@ def ingest_market_brief(packet: dict[str, Any], *, provider: str = "Monday Marke
             "published_at": raw.get("published_at") or primary_source.get("published_at") or packet.get("generated_at"),
             "verified_fact": raw.get("verified_fact") or raw.get("fact"),
             "verification_status": (
-                "corroborated"
-                if len(source_urls) >= 2
-                else raw.get("verification_status") or ("reported" if source_urls else "unverified")
+                requested_verification
+                or ("corroborated" if len(source_urls) >= 2 else "reported" if source_urls else "unverified")
             ),
             "confidence": raw.get("confidence", 0.88 if len(source_urls) >= 2 else 0.72 if source_urls else 0.30),
             "brief_id": brief_id,

@@ -87,6 +87,47 @@ def test_brain_snapshot_queries_are_select_only():
     assert all("insert " not in query and "update " not in query and "delete " not in query for query in queries)
 
 
+def test_brain_snapshot_confirms_market_brief_sources_were_learned(monkeypatch):
+    monkeypatch.setenv("EXECUTION_MODE", "paper")
+    monkeypatch.setenv("ENABLE_BROKER_SUBMISSION", "false")
+    monkeypatch.setenv("LIVE_TRADING_ARMED", "false")
+
+    def fetch(query: str, params=()):
+        if "FROM oracle_brain_learning_state" in query:
+            return [{
+                "pipeline_key": "github_market_brief_inbox",
+                "market": "global",
+                "last_sync_at": "2026-10-12T15:05:00+00:00",
+                "last_result": {
+                    "status": "ingested",
+                    "brief_id": "2026-10-12",
+                    "received_at": "2026-10-12T15:05:00+00:00",
+                    "events_persisted": 2,
+                    "event_keys": ["reuters:brief:2026-10-12:0", "darpa:brief:2026-10-12:1"],
+                    "execution_impact": "NONE",
+                },
+            }]
+        if "WHERE source_key = ANY" in query:
+            assert params == ([
+                "intel:reuters:brief:2026-10-12:0",
+                "intel:darpa:brief:2026-10-12:1",
+            ],)
+            return [
+                {"source_key": "intel:reuters:brief:2026-10-12:0"},
+                {"source_key": "intel:darpa:brief:2026-10-12:1"},
+            ]
+        return []
+
+    snapshot = oracle_brain.build_oracle_brain_snapshot(fetch)
+    receipt = snapshot["market_brief_receipt"]
+    assert receipt["status"] == "learned"
+    assert receipt["brief_id"] == "2026-10-12"
+    assert receipt["events_persisted"] == 2
+    assert receipt["sources_learned"] == 2
+    assert receipt["sources_expected"] == 2
+    assert receipt["execution_impact"] == "NONE"
+
+
 def test_runtime_boundary_detects_live_state(monkeypatch):
     monkeypatch.setenv("EXECUTION_MODE", "live")
     monkeypatch.setenv("ENABLE_BROKER_SUBMISSION", "true")
