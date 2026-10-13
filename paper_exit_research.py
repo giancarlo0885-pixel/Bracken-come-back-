@@ -371,6 +371,19 @@ def json_safe(value: Any) -> Any:
     return value
 
 
+def emit_winner_edge_diagnostics(market: str, edge: dict[str, Any]) -> None:
+    """Expose bounded forward economics without interpreting selection as fills."""
+    log.info("PAPER WINNER EDGE RESEARCH | market=%s | phase=%s | verified_entry_lots=%s | cohorts=%s | research_candidates=%s | forward_trades=%s | coverage=%s | execution_impact=NONE | promotion_action=NONE",
+             market, edge["phase"], edge["history_coverage"].get("exported_trades", 0),
+             edge["search_cohorts"], sum(c["research_candidate"] for c in edge["candidates"]),
+             edge["forward"]["baseline"]["trades"], json.dumps(edge["history_coverage"], sort_keys=True))
+    # These are the frozen selector's observed completed entries, not all
+    # signals or unobserved market paths. Selection remains counterfactual.
+    log.info("PAPER WINNER FORWARD ECONOMICS | market=%s | cutoff=%s | discovery_frozen=%s | statistics=%s | scope=verified_completed_entries | selection=COUNTERFACTUAL | execution_impact=NONE | promotion_action=NONE",
+             market, edge["cutoff"], edge["discovery_frozen"],
+             json.dumps(json_safe(edge["forward"]), sort_keys=True, allow_nan=False))
+
+
 def emit_reconciliation(market: str) -> dict[str, Any]:
     from database import connect
     from paper_shadow_exit_challenger import active, MODEL_VERSION
@@ -457,10 +470,7 @@ def emit_reconciliation(market: str) -> dict[str, Any]:
              report["sell_signal_losses"], report["metric_discrepancies"], json.dumps(report["diagnostics"], sort_keys=True))
     memory = report["winner_entry_memory"]
     edge = report["winner_edge_research"]
-    log.info("PAPER WINNER EDGE RESEARCH | market=%s | phase=%s | verified_entry_lots=%s | cohorts=%s | research_candidates=%s | forward_trades=%s | coverage=%s | execution_impact=NONE | promotion_action=NONE",
-             market, edge["phase"], edge["history_coverage"].get("exported_trades", 0),
-             edge["search_cohorts"], sum(c["research_candidate"] for c in edge["candidates"]),
-             edge["forward"]["baseline"]["trades"], json.dumps(edge["history_coverage"], sort_keys=True))
+    emit_winner_edge_diagnostics(market, edge)
     log.info("PAPER WINNER ENTRY MEMORY | market=%s | winners=%s | losers=%s | exclusions=%s",
              market, memory["winners"], memory["losers"], json.dumps(memory["exclusions"], sort_keys=True))
     for winner in memory["records"]:

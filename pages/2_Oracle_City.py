@@ -39,10 +39,20 @@ if not health.get("ok"):
     st.caption(str(health.get("message") or "Database readiness check failed."))
     st.stop()
 
+@st.cache_data(ttl=15, show_spinner="Loading Oracle City snapshot…")
+def _city_snapshot_cached(market_scope):
+    return build_oracle_city_snapshot(rows, market_scope=market_scope)
+
+
+view = st.radio("City scope", ["Crypto", "All markets"], horizontal=True)
+market_scope = "crypto" if view == "Crypto" else None
+if market_scope:
+    st.caption("Crypto display focus · capital transfer and stock-worker retirement pending.")
+
 left, middle, spacer = st.columns([1, 1, 4])
 with left:
     if st.button("Refresh now", type="primary", width="stretch"):
-        st.cache_data.clear()
+        _city_snapshot_cached.clear()
         st.rerun()
 with middle:
     auto_refresh = st.toggle("Sync data every 60s", value=False)
@@ -50,16 +60,10 @@ with middle:
 if auto_refresh and st_autorefresh is not None:
     st_autorefresh(interval=60_000, key="oracle-city-world-sync")
 
-# Share a short-lived, read-only snapshot across ordinary Streamlit reruns.
-# Manual refresh explicitly clears the cache; no accounting or trading data is written.
-@st.cache_data(ttl=15, show_spinner="Loading Oracle City snapshot…")
-def _city_snapshot_cached():
-    return build_oracle_city_snapshot(rows)
-
-snapshot = _city_snapshot_cached()
+snapshot = _city_snapshot_cached(market_scope)
 summary = snapshot["summary"]
 
-st.title("Oracle City — Cinematic Metropolis")
+st.title("Oracle City — Crypto Metropolis" if market_scope else "Oracle City — Cinematic Metropolis")
 if snapshot["warnings"]:
     st.warning("Partial Oracle City feeds: " + "; ".join(snapshot["warnings"]))
 

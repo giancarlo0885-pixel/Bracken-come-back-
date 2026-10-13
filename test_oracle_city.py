@@ -9,6 +9,49 @@ from oracle_city_component import render_oracle_city_component
 from oracle_city_model import _read_only, build_oracle_city_snapshot
 
 
+def test_crypto_scope_filters_financial_records_before_limits_and_keeps_global_context():
+    queries = []
+
+    def scoped_rows(sql, params=()):
+        queries.append(sql)
+        found = _fake_rows(sql, params)
+        if "FROM opportunity_rankings" in sql:
+            found += [{"market": "US_CRYPTO", "symbol": "BTC-USD",
+                       "opportunity_score": 90, "payload": {"action": "WATCH"}}]
+        if "market IN ('crypto','US_CRYPTO','us_crypto')" in sql:
+            found = [r for r in found if r.get("market") in {"crypto", "US_CRYPTO", "us_crypto"}]
+            if "LIMIT" in sql:
+                assert sql.index("market IN") < sql.index("LIMIT")
+        return found
+
+    snapshot = build_oracle_city_snapshot(
+        scoped_rows, now=datetime(2026, 9, 19, tzinfo=timezone.utc), market_scope="crypto")
+    assert snapshot["market_scope"] == "crypto"
+    assert snapshot["summary"]["workers_total"] == 1
+    assert snapshot["summary"]["workers_online"] == 1
+    assert snapshot["summary"]["open_positions"] == 1
+    assert snapshot["summary"]["known_exposure"] == 1000
+    assert snapshot["summary"]["paper_fill_records"] == 0
+    assert [r["symbol"] for r in snapshot["opportunities"]] == ["BTC-USD"]
+    assert not any(n["id"] == "stock" for n in snapshot["nodes"])
+    assert not any("stock" in {f["source"], f["target"]} for f in snapshot["flows"])
+    assert not any(r["id"] == "resident-stock" for r in snapshot["resident_agents"])
+    assert snapshot["world_state"]["current_events"] > 0
+    for table in ("market_worker_status", "portfolios", "positions", "opportunity_rankings",
+                  "trades", "oracle_decision_audit", "global_decision_ledger",
+                  "global_decision_events", "trade_ledger", "paper_regime_trade_metrics"):
+        query = next(q for q in queries if f"FROM {table} " in q or f"FROM {table}\n" in q)
+        assert "market IN ('crypto','US_CRYPTO','us_crypto')" in query
+    assert all(q.lstrip().upper().startswith("SELECT") for q in queries)
+
+
+def test_city_scope_rejects_unrecognized_market_without_queries():
+    def no_query(*args):
+        raise AssertionError("Invalid scope must fail before querying")
+    with pytest.raises(ValueError):
+        build_oracle_city_snapshot(no_query, market_scope="unrecognized")
+
+
 def _fake_rows(sql, params=()):
     if "market_worker_status" in sql:
         return [

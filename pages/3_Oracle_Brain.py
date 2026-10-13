@@ -35,11 +35,26 @@ if not health.get("ok"):
     st.caption(str(health.get("message") or "Database readiness check failed."))
     st.stop()
 
+@st.cache_data(ttl=15, show_spinner=False)
+def _brain_rows(query, params=()):
+    if not query.lstrip().upper().startswith("SELECT"):
+        raise ValueError("Brain display queries must be read-only")
+    return rows(query, params)
+
+
+view = st.radio("Brain scope", ["Crypto", "All markets"], horizontal=True)
+market_scope = "crypto" if view == "Crypto" else None
+scope_where = " WHERE market IN ('crypto','US_CRYPTO','us_crypto')" if market_scope else ""
+scope_and = " AND market IN ('crypto','US_CRYPTO','us_crypto')" if market_scope else ""
+if st.button("Refresh Brain", type="primary"):
+    _brain_rows.clear()
+    st.rerun()
+
 # Read-only Kelly V1 evidence. Never equate a sum of per-trade hypothetical
 # fractions with actual account equity or Council realized dollars.
 with st.expander("Kelly V1 — forward paper-only sizing research"):
     try:
-        kelly_summary = rows("""
+        kelly_summary = _brain_rows("""
             SELECT generation,config_hash,COUNT(*)::int AS compared,
                    COUNT(*) FILTER (WHERE eligible)::int AS sized,
                    COUNT(DISTINCT episode_id)::int AS episodes,
@@ -52,7 +67,7 @@ with st.expander("Kelly V1 — forward paper-only sizing research"):
             WHERE version='kelly-v1-forward-council-benchmark'
             GROUP BY generation,config_hash ORDER BY generation DESC
         """)
-        kelly_recent = rows("""
+        kelly_recent = _brain_rows("""
             SELECT trade_id,regime,entry_time,prior_trades,prior_episodes,
                    eligible,reason,proposed_fraction,council_net_return_pct,
                    shadow_return_on_equity_pct,fixed10_return_on_equity_pct
@@ -70,10 +85,7 @@ with st.expander("Kelly V1 — forward paper-only sizing research"):
         if kelly_recent:
             st.dataframe(pd.DataFrame(kelly_recent),use_container_width=True,hide_index=True)
 
-if st.button("Refresh Brain", type="primary"):
-    st.rerun()
-
-snapshot = build_oracle_brain_snapshot(rows)
+snapshot = build_oracle_brain_snapshot(_brain_rows, market_scope=market_scope)
 
 brief_receipt = snapshot["market_brief_receipt"]
 if brief_receipt["status"] == "learned":
@@ -93,7 +105,7 @@ elif brief_receipt["status"] in {"awaiting_brain_sync", "partially_learned"}:
 
 with st.expander("Paper fill reconciliation"):
     try:
-        reconciliation_rows = rows("SELECT market,updated_at,report FROM paper_exit_research_reports WHERE version=%s ORDER BY market", (REPORT_VERSION,))
+        reconciliation_rows = _brain_rows(f"SELECT market,updated_at,report FROM paper_exit_research_reports WHERE version=%s{scope_and} ORDER BY market", (REPORT_VERSION,))
     except Exception:
         reconciliation_rows = []
     if not reconciliation_rows:
@@ -125,7 +137,7 @@ with st.expander("Paper fill reconciliation"):
 # Authoritative AEVE research-generation progress. Count only generation-isolated
 # outcomes produced by the AEVE evaluator; Council approvals/signals are not trades.
 try:
-    aeve_rows = rows("""
+    aeve_rows = _brain_rows("""
         SELECT g.generation,g.started_at,g.config_hash,g.status,
                COUNT(o.id)::int AS observed_outcomes,
                COUNT(o.id) FILTER (WHERE o.entry_evidence_complete AND o.would_trade AND o.provenance_version = 7)::int AS accepted_trades,
@@ -178,7 +190,7 @@ else:
 
 # Research diagnostics: expose the economics behind the counter, not merely volume.
 try:
-    aeve_diag = rows("""
+    aeve_diag = _brain_rows("""
         SELECT COUNT(*) FILTER (WHERE would_trade)::int AS trades,
                AVG(net_pnl) FILTER (WHERE would_trade) AS expectancy,
                CASE WHEN ABS(SUM(CASE WHEN would_trade AND net_pnl<0 THEN net_pnl ELSE 0 END)) > 0
@@ -208,7 +220,7 @@ if aeve_diag:
 
 # Lifecycle reconciliation makes the difference between a decision and a completed trade explicit.
 try:
-    lifecycle = rows("""
+    lifecycle = _brain_rows("""
         SELECT COUNT(*)::int AS closed_trades,
                COUNT(*) FILTER (WHERE m.entry_time IS NOT NULL AND m.exit_time IS NOT NULL)::int AS complete_lifecycle,
                COUNT(*) FILTER (WHERE t.entry_signal_id IS NOT NULL AND t.feature_snapshot IS NOT NULL)::int AS exact_entry_provenance
@@ -229,7 +241,7 @@ if lifecycle:
 
 # Unified research cockpit: evidence throughput, knowledge use, source health and control comparison.
 try:
-    cockpit = rows("""
+    cockpit = _brain_rows("""
         WITH active AS (
           SELECT generation,config_hash,started_at FROM paper_aeve_generations
           WHERE status='ACTIVE' ORDER BY generation DESC LIMIT 1
@@ -259,7 +271,7 @@ if cockpit:
     st.caption("The authoritative generation counter uses complete forward entry evidence under provenance v7 and the active config hash. Shadow acceptance is separate; rejected valid outcomes still teach the next generation.")
 
 try:
-    source_health=rows("""
+    source_health=_brain_rows("""
         SELECT provider,
                COUNT(*)::int AS observations,
                COUNT(*) FILTER (WHERE status='active')::int AS active,
@@ -278,7 +290,7 @@ if source_health:
 
 # Learning + validation cockpit (research-only).
 try:
-    lv = rows("""SELECT
+    lv = _brain_rows("""SELECT
       (SELECT COUNT(*)::int FROM oracle_counterfactual_outcomes) counterfactuals,
       (SELECT COUNT(*)::int FROM oracle_counterfactual_outcomes WHERE outcome_class='avoided_loss') avoided_losses,
       (SELECT COUNT(*)::int FROM oracle_counterfactual_outcomes WHERE outcome_class='missed_winner') counterfactual_missed_opportunities,
@@ -288,9 +300,9 @@ try:
       (SELECT COUNT(*)::int FROM oracle_validation_weaknesses WHERE state='negative') negative_cohorts,
       (SELECT SUM(samples*calibration_error)/NULLIF(SUM(samples),0) FROM oracle_calibration_buckets) calibration_error
     """)
-    failure_rows=rows("""SELECT failure_class,COUNT(*)::int samples FROM oracle_failure_taxonomy GROUP BY failure_class ORDER BY samples DESC""")
-    challenger_rows=rows("""SELECT candidate_key,market,samples,expectancy,profit_factor,max_drawdown,state,updated_at FROM oracle_challenger_validation ORDER BY state DESC,samples DESC LIMIT 30""")
-    setup_rows=rows("""SELECT market,strategy,regime,samples,wins,losses,expectancy,profit_factor,avg_mfe_pct,avg_mae_pct FROM oracle_setup_validation ORDER BY samples DESC LIMIT 30""")
+    failure_rows=_brain_rows("""SELECT failure_class,COUNT(*)::int samples FROM oracle_failure_taxonomy GROUP BY failure_class ORDER BY samples DESC""")
+    challenger_rows=_brain_rows(f"""SELECT candidate_key,market,samples,expectancy,profit_factor,max_drawdown,state,updated_at FROM oracle_challenger_validation{scope_where} ORDER BY state DESC,samples DESC LIMIT 30""")
+    setup_rows=_brain_rows(f"""SELECT market,strategy,regime,samples,wins,losses,expectancy,profit_factor,avg_mfe_pct,avg_mae_pct FROM oracle_setup_validation{scope_where} ORDER BY samples DESC LIMIT 30""")
 except Exception:
     lv,failure_rows,challenger_rows,setup_rows=[],[],[],[]
 

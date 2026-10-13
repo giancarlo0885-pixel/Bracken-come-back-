@@ -1,6 +1,20 @@
-# SUPER CRYPTO ORACLE — staged migration contract (research-only)
+# SUPER CRYPTO ORACLE — staged migration contract
 
-Status: proposal; no runtime changes or live trading authorization.
+Status: crypto-focused read-only City/Brain presentation implemented. Execution
+migration, capital transfer, stock-worker retirement and research promotion remain
+pending. No live trading authorization.
+
+## Implemented display stage
+- City and Brain default to Crypto with an All markets view for stock history.
+- Scope trading records and financial evidence before aggregation and row limits;
+  retain shared durable memories and macro/world context.
+- Hide the stock desk and its signal flows only in the crypto City view.
+- Use 15-second read-only display caches with targeted manual invalidation;
+  preserve responsive layouts, camera controls and recorded crypto ideas.
+- Capital is displayed from canonical portfolios; no balances are combined,
+  rewritten or presented as transferred. Worker configuration is unchanged.
+- Coverage and winner-cohort prototypes are standalone research utilities; they
+  are not a connected full-universe scanner or a validated trading formula.
 
 ## Mission
 Concentrate future discovery, research, paper execution and City/Brain presentation on cryptocurrency and blockchain networks. Preserve stock history read-only, canonical paper fills, fees, ledger identities, provenance and Brain memories. Do not delete stock data or services until verified rollback is possible.

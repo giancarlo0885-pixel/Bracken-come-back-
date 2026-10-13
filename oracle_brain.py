@@ -138,7 +138,11 @@ def runtime_safety_state() -> dict[str, Any]:
     }
 
 
-def build_oracle_brain_snapshot(fetch_rows: FetchRows) -> dict[str, Any]:
+def build_oracle_brain_snapshot(fetch_rows: FetchRows, *, market_scope: str | None = None) -> dict[str, Any]:
+    if market_scope not in {None, "crypto"}:
+        raise ValueError("market_scope must be crypto or None")
+    scope_where = " WHERE market IN ('crypto','US_CRYPTO','us_crypto')" if market_scope else ""
+    scope_and = " AND market IN ('crypto','US_CRYPTO','us_crypto')" if market_scope else ""
     entries = [
         _entry_from_row(row).to_dict()
         for row in _safe_rows(
@@ -156,7 +160,7 @@ def build_oracle_brain_snapshot(fetch_rows: FetchRows) -> dict[str, Any]:
 
     regime_rows = _safe_rows(
         fetch_rows,
-        """
+        f"""
         SELECT strategy, regime, COUNT(*)::int AS samples,
                SUM(net_pnl) AS net_pnl,
                SUM(fees) AS fees,
@@ -164,7 +168,7 @@ def build_oracle_brain_snapshot(fetch_rows: FetchRows) -> dict[str, Any]:
                AVG(mfe_pct) FILTER (WHERE excursion_sample_count > 0) AS avg_mfe_pct,
                AVG(mae_pct) FILTER (WHERE excursion_sample_count > 0) AS avg_mae_pct,
                SUM(CASE WHEN excursion_sample_count > 0 THEN 1 ELSE 0 END)::int AS excursion_trades
-        FROM paper_regime_trade_metrics
+        FROM paper_regime_trade_metrics{scope_where}
         GROUP BY strategy, regime
         ORDER BY samples DESC
         LIMIT 40
@@ -198,10 +202,10 @@ def build_oracle_brain_snapshot(fetch_rows: FetchRows) -> dict[str, Any]:
 
     workers = _safe_rows(
         fetch_rows,
-        """
+        f"""
         SELECT market,status,message,last_run,heartbeat,execution_mode
         FROM market_worker_status
-        WHERE market IN ('cash','crypto')
+        WHERE market IN {"('crypto','US_CRYPTO','us_crypto')" if market_scope else "('cash','crypto')"}
         ORDER BY market
         """,
     )
@@ -229,12 +233,12 @@ def build_oracle_brain_snapshot(fetch_rows: FetchRows) -> dict[str, Any]:
     source_total = int(_num(source_count_rows[0].get("total"), len(sources))) if source_count_rows else len(sources)
     episodes = _safe_rows(
         fetch_rows,
-        """
+        f"""
         SELECT episode_key,trade_id,market,symbol,strategy,regime,entry_time,exit_time,
                net_pnl,fees,return_pct,mfe_pct,mae_pct,provenance_status,
                source_quality,freshness_score,confidence,feature_snapshot,outcome_snapshot,tags
         FROM oracle_brain_episodes
-        WHERE provenance_status='exact'
+        WHERE provenance_status='exact'{scope_and}
         ORDER BY exit_time DESC NULLS LAST
         LIMIT 120
         """,
@@ -404,7 +408,7 @@ def build_oracle_brain_snapshot(fetch_rows: FetchRows) -> dict[str, Any]:
     for table, timestamp_column, key, predicate in (
         ("oracle_brain_entries", "created_at", "entries", ""),
         ("oracle_brain_sources", "observed_at", "sources", ""),
-        ("oracle_brain_episodes", "exit_time", "episodes", " WHERE provenance_status='exact'"),
+        ("oracle_brain_episodes", "exit_time", "episodes", " WHERE provenance_status='exact'" + scope_and),
         ("oracle_brain_observations", "event_time", "observations", ""),
     ):
         stats = _safe_rows(
@@ -570,6 +574,7 @@ def build_oracle_brain_snapshot(fetch_rows: FetchRows) -> dict[str, Any]:
     ]
 
     return {
+        "market_scope": market_scope or "all",
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "read_only": True,
         "execution_authority": "NONE",

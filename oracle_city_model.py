@@ -752,38 +752,44 @@ def build_oracle_city_snapshot(
     fetch_rows: FetchRows = rows,
     *,
     now: datetime | None = None,
+    market_scope: str | None = None,
 ) -> dict[str, Any]:
+    if market_scope not in {None, "crypto"}:
+        raise ValueError("market_scope must be crypto or None")
+    # Filter trading records before LIMIT; macro and durable Brain context stay global.
+    scope_where = " WHERE market IN ('crypto','US_CRYPTO','us_crypto')" if market_scope else ""
+    scope_and = " AND market IN ('crypto','US_CRYPTO','us_crypto')" if market_scope else ""
     now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
     warnings: list[str] = []
 
     workers = _safe_select(
-        fetch_rows, "SELECT * FROM market_worker_status ORDER BY market", (),
+        fetch_rows, f"SELECT * FROM market_worker_status{scope_where} ORDER BY market", (),
         warnings, "worker status unavailable",
     )
     portfolios = _safe_select(
-        fetch_rows, "SELECT * FROM portfolios ORDER BY market", (),
+        fetch_rows, f"SELECT * FROM portfolios{scope_where} ORDER BY market", (),
         warnings, "portfolio summary unavailable",
     )
     positions = _safe_select(
-        fetch_rows, "SELECT * FROM positions WHERE COALESCE(quantity,0) <> 0 ORDER BY market,symbol", (),
+        fetch_rows, f"SELECT * FROM positions WHERE COALESCE(quantity,0) <> 0{scope_and} ORDER BY market,symbol", (),
         warnings, "positions unavailable",
     )
     opportunities = _safe_select(
         fetch_rows,
-        """SELECT DISTINCT ON (market,symbol)
+        f"""SELECT DISTINCT ON (market,symbol)
                   market,symbol,rank,opportunity_score,payload,created_at
-           FROM opportunity_rankings
+           FROM opportunity_rankings{scope_where}
            ORDER BY market,symbol,created_at DESC""",
         (), warnings, "opportunity rankings unavailable",
     )
     trades = _safe_select(
-        fetch_rows, """SELECT * FROM trades
-           WHERE UPPER(COALESCE(side, '')) IN ('BUY','SELL')
+        fetch_rows, f"""SELECT * FROM trades
+           WHERE UPPER(COALESCE(side, '')) IN ('BUY','SELL'){scope_and}
            ORDER BY id DESC LIMIT 80""", (),
         warnings, "trade history unavailable",
     )
     decisions = _safe_select(
-        fetch_rows, "SELECT * FROM oracle_decision_audit ORDER BY id DESC LIMIT 80", (),
+        fetch_rows, f"SELECT * FROM oracle_decision_audit{scope_where} ORDER BY id DESC LIMIT 80", (),
         warnings, "decision audit unavailable",
     )
     events = _safe_select(
@@ -791,15 +797,15 @@ def build_oracle_city_snapshot(
         warnings, "intelligence unavailable",
     )
     decision_ledger = _safe_select(
-        fetch_rows, "SELECT * FROM global_decision_ledger ORDER BY created_at DESC LIMIT 40", (),
+        fetch_rows, f"SELECT * FROM global_decision_ledger{scope_where} ORDER BY created_at DESC LIMIT 40", (),
         warnings, "decision ledger unavailable",
     )
     decision_events = _safe_select(
-        fetch_rows, "SELECT * FROM global_decision_events ORDER BY id DESC LIMIT 180", (),
+        fetch_rows, f"SELECT * FROM global_decision_events{scope_where} ORDER BY id DESC LIMIT 180", (),
         warnings, "decision event trace unavailable",
     )
     canonical_trade_ledger = _safe_select(
-        fetch_rows, "SELECT * FROM trade_ledger ORDER BY id DESC LIMIT 120", (),
+        fetch_rows, f"SELECT * FROM trade_ledger{scope_where} ORDER BY id DESC LIMIT 120", (),
         warnings, "trade provenance unavailable",
     )
     active_aeve_rows = _safe_select(
@@ -839,13 +845,13 @@ def build_oracle_city_snapshot(
         )
     regime_economics = _safe_select(
         fetch_rows,
-        """SELECT strategy,regime,COUNT(*)::int AS samples,
+        f"""SELECT strategy,regime,COUNT(*)::int AS samples,
                   AVG(net_pnl) AS expectancy,
                   SUM(CASE WHEN net_pnl>0 THEN net_pnl ELSE 0 END) AS gross_win,
                   ABS(SUM(CASE WHEN net_pnl<0 THEN net_pnl ELSE 0 END)) AS gross_loss,
                   AVG(mfe_pct) FILTER (WHERE excursion_sample_count>0) AS avg_mfe_pct,
                   AVG(mae_pct) FILTER (WHERE excursion_sample_count>0) AS avg_mae_pct
-           FROM paper_regime_trade_metrics
+           FROM paper_regime_trade_metrics{scope_where}
            GROUP BY strategy,regime
            ORDER BY samples DESC
            LIMIT 40""",
@@ -1325,8 +1331,15 @@ def build_oracle_city_snapshot(
     if any(item["evidence_state"] == "PROMISING — PAPER ONLY" for item in strategy_arena):
         rewards.append({"title": "Positive Post-Cost Cohort", "reason": "A mature paper evidence cohort is positive and remains research-only."})
 
+    if market_scope == "crypto":
+        worker_views = [item for item in worker_views if item["market"] == "crypto"]
+        nodes = [item for item in nodes if item["id"] != "stock"]
+        flows = [item for item in flows if "stock" not in {item["source"], item["target"]}]
+        resident_agents = [item for item in resident_agents if item["id"] != "resident-stock"]
+
     return {
         "generated_at": now.isoformat(),
+        "market_scope": market_scope or "all",
         "read_only": True,
         "execution_mode": EXECUTION_MODE,
         "warnings": warnings,
