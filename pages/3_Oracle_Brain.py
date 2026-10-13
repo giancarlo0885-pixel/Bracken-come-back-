@@ -82,10 +82,10 @@ with st.expander("Kelly V1 — forward paper-only sizing research"):
     if not kelly_summary:
         st.caption("No completed Kelly research observations yet. The isolated shadow epoch records only future Council entries that subsequently close with exact-lot attribution.")
     else:
-        st.dataframe(pd.DataFrame(kelly_summary), use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame(kelly_summary), width="stretch", hide_index=True)
         st.caption("Council return = verified net return on each entry notional. Kelly hypothetical = Council return multiplied by Kelly's proposed equity fraction. The fixed-10% reference uses the same Council outcomes, scaled to a hypothetical 10% equity allocation per entry. Summed hypothetical percentages do not represent independently executed fills, compounded portfolio performance, or profit proof. Episode confidence assumes independent UTC days and has not been calibrated out of sample.")
         if kelly_recent:
-            st.dataframe(pd.DataFrame(kelly_recent),use_container_width=True,hide_index=True)
+            st.dataframe(pd.DataFrame(kelly_recent),width="stretch",hide_index=True)
 
 snapshot = build_oracle_brain_snapshot(_brain_rows, market_scope=market_scope)
 
@@ -123,7 +123,7 @@ with st.expander("Paper fill reconciliation"):
         right.metric("Cost-metric discrepancies", report.get("metric_discrepancies", 0))
         st.caption("Persisted paper prices and explicit fees. Missing observations remain unavailable. These totals do not certify a profitable model or premature exits.")
         if report.get("cohorts"):
-            st.dataframe(pd.DataFrame(report["cohorts"]), use_container_width=True, hide_index=True)
+            st.dataframe(pd.DataFrame(report["cohorts"]), width="stretch", hide_index=True)
         memory = report.get("winner_entry_memory") or {}
         st.caption(f"Winner formula: {memory.get('winners', 0)} complete winning BUY lots and {memory.get('losers', 0)} losing lots with verified costs and original entry features.")
         winners = [r for r in memory.get("records", []) if r.get("net_pnl", 0) > 0]
@@ -370,7 +370,7 @@ else:
 # Evidence-driven anatomical neural field. Raw generated HTML runs in Streamlit's supported iframe.
 st.iframe(
     render_oracle_brain_component(snapshot),
-    height=610,
+    height=700,
 )
 st.caption(
     "The brain shape is a visualization of persisted research memory. "

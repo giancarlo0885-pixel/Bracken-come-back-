@@ -87,7 +87,9 @@ button.active{color:#4cf9c7;border-color:#26cdb9}
 .crypto-cockpit .caption{font-size:10px;color:#9cc4da;margin:5px 0}
 .crypto-cockpit .idea{font-size:12px;margin-top:7px;color:#f1faff;overflow-wrap:anywhere}
 .crypto-cockpit .warning{color:#ffbf75;font-size:10px;margin-top:7px}
-@media(max-width:720px){.crypto-cockpit{left:8px;bottom:68px;width:min(230px,calc(100% - 16px));padding:8px}.crypto-cockpit .idea{font-size:10px}.brand{max-width:156px}.toolbar{max-width:150px}}
+/* Reveal the inspector or replay instead of letting the cockpit cover them. */
+#app:has(.inspector.open) .crypto-cockpit,#app:has(.replay.open) .crypto-cockpit{display:none}
+@media(max-width:720px){.crypto-cockpit{left:8px;bottom:8px;width:min(230px,calc(100% - 16px));padding:8px}.crypto-cockpit .idea{font-size:10px}.brand{max-width:156px}.toolbar{max-width:150px}}
 </style>
 <script type="importmap">
 {"imports":{
@@ -136,6 +138,23 @@ button.active{color:#4cf9c7;border-color:#26cdb9}
   </div>
 </div>
 <script type="application/json" id="oracle-data">__ORACLE_DATA__</script>
+<script>
+// The 3D imports run before the module body: if the CDN fails, the module cannot
+// install its own error handlers. Keep a dependency-independent visible fallback.
+window.__oracleCityBooted=false;
+window.__oracleCityReady=false;
+window.setTimeout(()=>{
+  if(window.__oracleCityReady)return;
+  const fallback=document.getElementById("fallbackCity");
+  if(fallback){
+    fallback.classList.add("show");
+    const note=fallback.querySelector(".fallbackTitle span");
+    if(note)note.textContent="3D display unavailable · check browser graphics or network";
+  }
+  const status=document.getElementById("status");
+  if(status)status.style.display="none";
+},8000);
+</script>
 <script type="module">
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
@@ -258,6 +277,11 @@ renderer.shadowMap.type=THREE.PCFSoftShadowMap;
 renderer.toneMapping=THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure=1.0+initialDaylight*.42+initialTwilight*.10;
 stage.appendChild(renderer.domElement);
+renderer.domElement.addEventListener("webglcontextlost",event=>{
+  event.preventDefault();
+  window.__oracleCityReady=false;
+  activateCityFallback("WebGL context lost");
+});
 
 const labelRenderer=new CSS2DRenderer();
 labelRenderer.domElement.style.position="absolute";
@@ -1056,6 +1080,8 @@ function setBrainMode(on){
 }
 
 function inspect(kind,data){
+  replayPanel.classList.remove("open");
+  document.getElementById("replayToggle").classList.remove("active");
   let eyebrow="ORACLE CITY",title="",metric="",detail="";
   if(kind==="node"){eyebrow="CITY DISTRICT";title=data.title;metric=data.metric;detail=data.detail;}
   else if(kind==="resident"){eyebrow="ORACLE CITY WORKER · VISUAL ONLY";title=data.title;metric=String(data.state||"IDLE").replaceAll("_"," ");detail=data.detail+" Assigned district: "+String(data.destination||"unknown")+". This worker cannot place or approve trades.";}
@@ -1138,7 +1164,7 @@ document.getElementById("autorotate").onclick=function(){controls.autoRotate=!co
 document.getElementById("brain").onclick=()=>setBrainMode(!brainMode);
 document.getElementById("workers").onclick=function(){workersVisible=!workersVisible;workerObjects.forEach(w=>w.visible=!brainMode&&workersVisible);this.textContent=workersVisible?"WORKERS":"WORKERS OFF";this.classList.toggle("active",workersVisible);};
 document.getElementById("traffic").onclick=function(){trafficVisible=!trafficVisible;vehicleObjects.forEach(v=>v.visible=!brainMode&&trafficVisible);this.textContent=trafficVisible?"TRAFFIC":"TRAFFIC OFF";this.classList.toggle("active",trafficVisible);};
-document.getElementById("replayToggle").onclick=function(){replayPanel.classList.toggle("open");this.classList.toggle("active",replayPanel.classList.contains("open"));};
+document.getElementById("replayToggle").onclick=function(){inspector.classList.remove("open");replayPanel.classList.toggle("open");this.classList.toggle("active",replayPanel.classList.contains("open"));};
 
 const replay=DATA.replay||[],timeline=document.getElementById("timeline"),replayTitle=document.getElementById("replayTitle"),replayDetail=document.getElementById("replayDetail"),play=document.getElementById("play");
 timeline.max=String(Math.max(0,replay.length-1));timeline.value=String(Math.max(0,replay.length-1));let replayIndex=Number(timeline.value||0),replayTimer=null;
@@ -1146,34 +1172,36 @@ function showReplay(index){if(!replay.length){replayTitle.textContent="No replay
 timeline.oninput=function(){showReplay(Number(this.value));};
 play.onclick=function(){if(replayTimer){clearInterval(replayTimer);replayTimer=null;play.textContent="PLAY";play.classList.remove("active");return;}play.textContent="PAUSE";play.classList.add("active");replayTimer=setInterval(()=>{replayIndex=(replayIndex+1)%Math.max(1,replay.length);showReplay(replayIndex);},1600);};showReplay(replayIndex);
 
-let lastMobileView=null;
+let lastMobileView=null,lastViewportWidth=0;
 function resize(){
   const w=Math.max(1,app.clientWidth),h=Math.max(1,app.clientHeight);
   const mobile=mobileView();
+  const changedMode=lastMobileView===null||lastMobileView!==mobile;
+  // Ignore browser-toolbar/iframe reflows; these must not steal camera control.
+  const changedWidth=Math.abs(w-lastViewportWidth)>24;
   camera.aspect=w/h;
-  if(brainMode){
-    fitBrainView();
-  }else if(mobile){
-    camera.fov=62;
-  }else{
-    camera.fov=46;
-  }
+  if(!brainMode)camera.fov=mobile?62:46;
   camera.updateProjectionMatrix();
   renderer.setSize(w,h,false);labelRenderer.setSize(w,h);
-  if(lastMobileView===null||lastMobileView!==mobile){
-    lastMobileView=mobile;
+  if(changedMode||(changedWidth&&mobile)){
     if(brainMode)fitBrainView();
     else resetView();
-  }else if(mobile&&!brainMode){
-    // Reframe when the embedded canvas changes width (e.g. mobile rotation).
-    resetView();
   }
+  lastMobileView=mobile;
+  lastViewportWidth=w;
 }
 new ResizeObserver(resize).observe(app);resize();
 
-let elapsed=0;
-function animate(){
-  requestAnimationFrame(animate);elapsed+=prefersReduced?.004:.012;controls.update();
+let elapsed=0,previousFrameMs=0;
+const frameInterval=isMobileDevice?1000/30:(prefersReduced?1000/20:1000/60);
+function animate(frameMs=0){
+  requestAnimationFrame(animate);
+  if(document.hidden){previousFrameMs=frameMs;return;}
+  if(previousFrameMs&&frameMs-previousFrameMs<frameInterval)return;
+  const dt=previousFrameMs?Math.min(.05,(frameMs-previousFrameMs)/1000):1/60;
+  previousFrameMs=frameMs;
+  elapsed+=dt*(prefersReduced?.24:.72);
+  controls.update();
   flowObjects.forEach(item=>{const phase=(elapsed*.12+item.particle.userData.phase)%1;item.particle.position.copy(item.curve.getPointAt(phase));});
   brainEdges.forEach(item=>{const phase=(elapsed*.18+item.particle.userData.phase)%1;item.particle.position.copy(item.curve.getPointAt(phase));});
   brainObjects.forEach(o=>{if(brainMode){const amp=brainLearningStatus==="LEARNING"?.11:.035;const p=1+Math.sin(elapsed*2.4+o.userData.phase)*amp;o.scale.setScalar(p);o.rotation.y+=brainLearningStatus==="LEARNING"?.007:.003;}});
