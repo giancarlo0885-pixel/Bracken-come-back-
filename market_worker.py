@@ -1190,15 +1190,20 @@ def _active_quarantined_symbols() -> set[str]:
 def _fast_candidate_batch(market: str) -> list[tuple[str, str]]:
     """Blend holdings, current leaders, and a rotating universe slice."""
     watchlist = dict(WATCHLISTS[market])
+    held = set(_held_symbols(market))
     candidates: dict[str, str] = {}
-    for symbol in sorted(_held_symbols(market)):
+    for symbol in sorted(held):
         candidates[symbol] = watchlist.get(symbol, symbol)
     for symbol in _latest_ranked_symbols(market, FAST_SCAN_TOP_RANKED):
         candidates.setdefault(symbol, watchlist.get(symbol, symbol))
     universe = [(str(symbol).upper(), str(name)) for symbol, name in watchlist.items()]
     for symbol, name in _rolling_batch(universe, market, FAST_SCAN_BATCH_SIZE):
         candidates.setdefault(symbol, name)
-    return list(candidates.items())[: max(FAST_SCAN_BATCH_SIZE, FAST_SCAN_TOP_RANKED)]
+    # Open holdings must not be evicted by the opportunity-scan budget.
+    limit = max(FAST_SCAN_BATCH_SIZE, FAST_SCAN_TOP_RANKED)
+    selected = [(symbol, name) for symbol, name in candidates.items() if symbol in held]
+    selected.extend((symbol, name) for symbol, name in candidates.items() if symbol not in held)
+    return selected[: max(limit, len(held))]
 
 
 def _log_fast_history_provider_diagnostics(symbol: str, period: str, interval: str, history: Any) -> None:
