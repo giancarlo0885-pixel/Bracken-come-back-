@@ -165,3 +165,32 @@ def test_runtime_reuses_reconciled_snapshot_and_classifies_observed_entry_featur
     assert rows[0]["entry_pattern"] == "resistance_test"
     opening["feature_snapshot"].pop("trend_strength")
     assert not verified_ledger_inputs([opening], [], as_of=AS_OF, fifo_report=snapshot)[0]
+
+
+def test_forward_diagnostics_report_post_cost_economics_and_counterfactual_scope(caplog):
+    import json
+    from paper_exit_research import emit_winner_edge_diagnostics
+    from paper_winner_edge_research import runtime_report, FORWARD_CUTOFF
+
+    days = (FORWARD_CUTOFF - START).days + 1
+    # A small training pocket must not masquerade as an accepted strategy.
+    rows = [trade(0)] + [trade(100, 4, days=days), trade(101, -3, days=days)]
+    edge = runtime_report(rows, as_of=FORWARD_CUTOFF + timedelta(days=2),
+                          coverage={"exported_trades": 3})
+    edge["private_raw_rows"] = "must-not-be-logged"
+    with caplog.at_level("INFO", logger="paper-exit-research"):
+        emit_winner_edge_diagnostics("crypto", edge)
+    line = next(r.message for r in caplog.records if "PAPER WINNER FORWARD ECONOMICS" in r.message)
+    stats = json.loads(line.split("statistics=", 1)[1].split(" | scope=", 1)[0])
+    assert stats["baseline"]["trades"] == 2
+    assert stats["baseline"]["episodes"] == 1
+    assert stats["baseline"]["net_pnl"] == 1
+    assert stats["baseline"]["mean_net_return"] == pytest.approx(0.005)
+    assert stats["baseline"]["score_lower_bound"] is None
+    assert stats["selected"]["trades"] == 0
+    assert stats["selected"]["mean_net_return"] is None
+    assert stats["rejected_winner_pnl"] == 4
+    assert stats["avoided_loss_pnl"] == 3
+    assert "selection=COUNTERFACTUAL" in line
+    assert "execution_impact=NONE" in line and "promotion_action=NONE" in line
+    assert "must-not-be-logged" not in caplog.text

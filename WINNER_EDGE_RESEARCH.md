@@ -74,3 +74,10 @@ Pacific**. Reports before then are training-only. The first post-cutoff report
 freezes discovery; later reports reuse that selection manifest and evaluate
 prospective completed trades. A new experiment requires a new version and cutoff,
 not automatic retuning after viewing holdout results. No automatic promotion.
+
+`PAPER WINNER FORWARD ECONOMICS` logs the bounded baseline and selected forward
+statistics, including completed entry counts, dependence windows, post-cost P&L,
+mean net return, win rate, rejected winners and avoided losses. Selected results
+are counterfactual for observed completed entries, not executed orders or all
+unexecuted signals. Empty mean returns and unavailable confidence bounds remain
+null. This diagnostic neither reranks the frozen manifest nor authorizes trades.
