@@ -1080,9 +1080,20 @@ class BrainCohortAnalyzerV4:
             return float("nan")
         profits = values[values > 0].sum()
         losses = abs(values[values < 0].sum())
-        if losses > 0:
-            return float(profits / losses)
-        return float("inf") if profits > 0 else float("nan")
+        if math.isfinite(profits) and math.isfinite(losses) and losses > 0:
+            result = float(profits / losses)
+            return result if math.isfinite(result) else float("nan")
+        return float("nan")
+
+    @staticmethod
+    def _profit_factor_status(series: pd.Series) -> str:
+        values = pd.to_numeric(series, errors="coerce").dropna()
+        values = values[np.isfinite(values)]
+        if values.empty:
+            return "unavailable"
+        if not (values < 0).any():
+            return "no_losses"
+        return "available" if math.isfinite(BrainCohortAnalyzerV4._safe_profit_factor(values)) else "nonfinite_totals"
 
     def _episode_returns(self, column: str) -> pd.DataFrame:
         if self.df.empty or column not in self.df:
@@ -1178,6 +1189,7 @@ class BrainCohortAnalyzerV4:
             "challenger_exit_type",
             "risk_basis_source",
             "trigger_snapshot",
+            "initial_risk_usd",
         }
         self.df = self._source_df.copy()
         observed_trade_count = int(len(self.df))
@@ -1192,7 +1204,14 @@ class BrainCohortAnalyzerV4:
                 "bootstrap_delta_ci": (None, None),
                 "actual_profit_factor": None,
                 "challenger_profit_factor": None,
+                "actual_profit_factor_status": "unavailable",
+                "challenger_profit_factor_status": "unavailable",
+                "profit_factor_basis": "post_cost_pnl_usd",
                 "challenger_post_cost_expectancy_r": None,
+                "actual_post_cost_net_pnl_usd": None,
+                "challenger_post_cost_net_pnl_usd": None,
+                "actual_post_cost_expectancy_usd": None,
+                "challenger_post_cost_expectancy_usd": None,
                 "actual_max_drawdown_r": None,
                 "challenger_max_drawdown_r": None,
                 "challenger_episode_var_05_r": None,
@@ -1216,6 +1235,10 @@ class BrainCohortAnalyzerV4:
                       & self.df["_trigger_risk_basis_source"].eq("exact_entry_stop_lots"))
         exclusions["unqualified_risk_provenance"] = int((~exact_risk).sum())
         self.df = self.df[exact_risk].copy()
+        self.df["initial_risk_usd"] = pd.to_numeric(self.df["initial_risk_usd"], errors="coerce")
+        valid_risk_amount = np.isfinite(self.df["initial_risk_usd"]) & (self.df["initial_risk_usd"] > 0)
+        exclusions["invalid_initial_risk_usd"] = int((~valid_risk_amount).sum())
+        self.df = self.df[valid_risk_amount].copy()
 
         self.df["actual_realized_r_net"] = pd.to_numeric(
             self.df["actual_realized_r_net"], errors="coerce"
@@ -1255,13 +1278,27 @@ class BrainCohortAnalyzerV4:
         finite_delta = np.isfinite(self.df["delta_r"])
         exclusions["nonfinite_paired_delta"] = int((~finite_delta).sum())
         self.df = self.df[finite_delta].copy()
+        # R normalizes each lot by its own risk. Dollar profitability must undo
+        # that normalization; summing R can hide a large dollar loss.
+        self.df["actual_post_cost_pnl_usd"] = self.df["actual_realized_r_net"] * self.df["initial_risk_usd"]
+        self.df["challenger_post_cost_pnl_usd"] = self.df["challenger_counterfactual_r_net"] * self.df["initial_risk_usd"]
+        finite_usd = (np.isfinite(self.df["actual_post_cost_pnl_usd"])
+                      & np.isfinite(self.df["challenger_post_cost_pnl_usd"]))
+        exclusions["nonfinite_post_cost_usd"] = int((~finite_usd).sum())
+        self.df = self.df[finite_usd].copy()
 
         trade_count = int(len(self.df))
         episode_count = int(self.df["episode_id"].nunique())
         boot_low, boot_high = self.bootstrap_clustered_delta_ci()
-        actual_pf = self._safe_profit_factor(self.df["actual_realized_r_net"])
-        challenger_pf = self._safe_profit_factor(self.df["challenger_counterfactual_r_net"])
+        actual_usd = self.df["actual_post_cost_pnl_usd"]
+        challenger_usd = self.df["challenger_post_cost_pnl_usd"]
+        actual_pf = self._safe_profit_factor(actual_usd)
+        challenger_pf = self._safe_profit_factor(challenger_usd)
         challenger_expectancy = float(self.df["challenger_counterfactual_r_net"].mean()) if trade_count else float("nan")
+        actual_net_usd = float(actual_usd.sum()) if trade_count else float("nan")
+        challenger_net_usd = float(challenger_usd.sum()) if trade_count else float("nan")
+        actual_expectancy_usd = actual_net_usd / trade_count if trade_count else float("nan")
+        challenger_expectancy_usd = challenger_net_usd / trade_count if trade_count else float("nan")
         actual_dd = self._max_drawdown_r("actual_realized_r_net")
         challenger_dd = self._max_drawdown_r("challenger_counterfactual_r_net")
         tail_var, tail_cvar = self._tail_metrics("challenger_counterfactual_r_net")
@@ -1285,9 +1322,11 @@ class BrainCohortAnalyzerV4:
             "sufficient_episodes": episode_count >= self.c.min_episodes,
             "sufficient_trades": trade_count >= self.c.min_trades,
             "paired_episode_ci_positive": bool(math.isfinite(boot_low) and boot_low > 0.0),
-            "profit_factor_improving": challenger_pf > actual_pf,
+            "profit_factor_improving": bool(math.isfinite(actual_pf) and math.isfinite(challenger_pf)
+                and challenger_pf > actual_pf),
             "post_cost_expectancy_positive": bool(math.isfinite(challenger_expectancy)
-                and challenger_expectancy > 0 and challenger_pf > 1.0),
+                and challenger_expectancy > 0 and math.isfinite(challenger_expectancy_usd)
+                and challenger_expectancy_usd > 0 and math.isfinite(challenger_pf) and challenger_pf > 1.0),
             "drawdown_bounded": bool(math.isfinite(challenger_dd)
                 and challenger_dd <= self.c.allowed_drawdown_limit_r),
             "tail_var_protected": bool(
@@ -1310,7 +1349,14 @@ class BrainCohortAnalyzerV4:
             "bootstrap_delta_ci": tuple(value if math.isfinite(value) else None for value in (boot_low, boot_high)),
             "actual_profit_factor": actual_pf if not math.isnan(actual_pf) else None,
             "challenger_profit_factor": challenger_pf if not math.isnan(challenger_pf) else None,
+            "actual_profit_factor_status": self._profit_factor_status(actual_usd),
+            "challenger_profit_factor_status": self._profit_factor_status(challenger_usd),
+            "profit_factor_basis": "post_cost_pnl_usd",
             "challenger_post_cost_expectancy_r": challenger_expectancy if math.isfinite(challenger_expectancy) else None,
+            "actual_post_cost_net_pnl_usd": actual_net_usd if math.isfinite(actual_net_usd) else None,
+            "challenger_post_cost_net_pnl_usd": challenger_net_usd if math.isfinite(challenger_net_usd) else None,
+            "actual_post_cost_expectancy_usd": actual_expectancy_usd if math.isfinite(actual_expectancy_usd) else None,
+            "challenger_post_cost_expectancy_usd": challenger_expectancy_usd if math.isfinite(challenger_expectancy_usd) else None,
             "actual_max_drawdown_r": actual_dd if math.isfinite(actual_dd) else None,
             "challenger_max_drawdown_r": challenger_dd if math.isfinite(challenger_dd) else None,
             "challenger_episode_var_05_r": tail_var if math.isfinite(tail_var) else None,
