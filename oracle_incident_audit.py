@@ -49,15 +49,10 @@ def classify_inventory(rows: list[dict[str, Any]]) -> list[Finding]:
 
 
 def audit_inventory(conn: Any) -> list[Finding]:
-    """Audit read-only; query deliberately fails closed on missing schema.
+    """Fail closed until schema-verified lot reconciliation is implemented.
 
-    Schema-specific joins must be verified against production migrations before
-    this function is connected to the scheduler.
+    Never return an empty list merely because the production schema is unknown.
     """
-    with conn.transaction(read_only=True):
-        rows = conn.execute(
-            """SELECT market, symbol, quantity AS position_quantity,
-                      NULL::numeric AS lot_quantity
-               FROM positions WHERE 1=0"""
-        ).fetchall()
-    return classify_inventory([dict(row) for row in rows])
+    raise NotImplementedError(
+        "Production inventory schema and lot reconciliation must be verified before audit execution"
+    )
