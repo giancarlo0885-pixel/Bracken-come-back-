@@ -20,7 +20,7 @@ class FakeSnapshot:
         now = datetime.now(timezone.utc).isoformat()
         self.symbol = symbol
         self.price = price
-        self.provider = "Yahoo Finance"
+        self.provider = "Alpaca IEX" if provider_verified and not paper_reference_verified else "Yahoo Finance"
         self.timestamp = now
         self.interval = "1m"
         self.quote_verified = True
@@ -44,7 +44,7 @@ class FakeSnapshot:
             "verified": True,
             "stale": False,
             "source_capability": "history_intraday",
-            "source_identity": f"Yahoo Finance:{self.symbol}:1d:1m",
+            "source_identity": f"{self.provider}:{self.symbol}:1d:1m",
             "correlation_id": self.correlation_id,
             "provider_quote_verified": self.provider_verified,
             "paper_reference_verified": self.paper_reference_verified,
