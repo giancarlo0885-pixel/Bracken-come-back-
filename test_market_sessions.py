@@ -89,3 +89,21 @@ def test_tokyo_daily_date_only_stays_tokyo_session_date():
 def test_ambiguous_naive_intraday_timestamp_is_rejected():
     frame = pd.DataFrame({"Close": [100]}, index=pd.DatetimeIndex(["2026-07-31 10:15"]))
     assert latest_valid_bar_timestamp(frame, "1m", exchange="NASDAQ", symbol="AAPL") is None
+
+
+def test_future_dated_quotes_fail_closed_across_sessions():
+    from market_sessions import quote_freshness_seconds
+    now = datetime(2026, 10, 13, 19, 30, tzinfo=timezone.utc)
+    future = datetime(2026, 10, 13, 23, 59, tzinfo=timezone.utc)
+    assert quote_freshness_seconds(future, now) < 0
+    assert not quote_is_fresh(future, interval='5m', now=now, symbol='BTC-USD')
+    assert not quote_is_fresh(future, interval='1d', now=now, exchange='NYSE', symbol='AAPL')
+    assert not quote_is_fresh(future, interval='1d', now=now, symbol='UNKNOWN')
+    assert not completed_daily_bar_is_fresh(future, now=now, exchange='NYSE', symbol='AAPL')
+    assert not completed_daily_bar_is_fresh(future, now=now, symbol='UNKNOWN')
+
+
+def test_recent_past_intraday_quote_remains_fresh():
+    now = datetime(2026, 10, 13, 19, 30, tzinfo=timezone.utc)
+    past = datetime(2026, 10, 13, 19, 29, tzinfo=timezone.utc)
+    assert quote_is_fresh(past, interval='5m', now=now, symbol='BTC-USD')
