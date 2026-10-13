@@ -163,7 +163,7 @@ def test_brain_map_is_anatomical_and_mobile_fitted():
     assert "controls.autoRotate=false" in html
     assert "function setBrainControlMode(on)" in html
     assert "function clearOrbitMomentum()" in html
-    assert "controls.enablePan=false" in html
+    assert "controls.enablePan=true" in html
     assert "controls.enableRotate=true" in html
     assert "controls.enableZoom=true" in html
     assert "controls.zoomToCursor=false" in html
