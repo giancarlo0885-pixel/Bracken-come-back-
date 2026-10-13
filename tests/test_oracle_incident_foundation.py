@@ -41,3 +41,19 @@ def test_receipt_and_bounded_retry():
     assert accepted_status(200) and accepted_status(204) and not accepted_status(429)
     assert retry_delay(50) <= 300
     assert retry_delay(1, 99999) == 300
+
+
+def test_audit_adapter_fails_closed_until_schema_is_verified():
+    from oracle_incident_audit import audit_inventory
+
+    with pytest.raises(NotImplementedError, match="schema"):
+        audit_inventory(None)
+
+
+def test_invalid_nonfinite_quantities_are_unknown_not_clean():
+    findings = classify_inventory([
+        {"market": "crypto", "symbol": "BTC-USD",
+         "position_quantity": float("nan"), "lot_quantity": 0}
+    ])
+    assert len(findings) == 1
+    assert findings[0].severity == "WARNING"
