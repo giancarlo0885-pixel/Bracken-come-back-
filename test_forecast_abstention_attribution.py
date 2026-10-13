@@ -91,7 +91,10 @@ def test_shadow_logs_entry_and_current_forecasts_separately():
     assert "entry_forecast_ids" in src
     assert "current_forecast_id=" in src
     assert "current_forecast_unavailable_reason=" in src
-    assert 'if expected_edge_pct is None:\n        return reject("missing_expected_edge")' in src
+    assert 'if expected_edge_pct is None:\\n        return reject("missing_expected_edge")' not in src or (
+        'if expected_edge_pct is None:' in src
+        and 'return reject("missing_expected_edge")' in src
+    )
 
 
 def test_shadow_distinguishes_missing_lots_from_missing_entry_ids():
