@@ -98,7 +98,7 @@ def render_oracle_brain_component(snapshot: dict[str, Any]) -> str:
 <style>
 *{box-sizing:border-box}
 html,body{margin:0;background:#03060b;color:#eef8ff;font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;overflow:hidden}
-#wrap{position:relative;height:590px;min-height:520px;border:1px solid #203a54;border-radius:24px;overflow:hidden;background:radial-gradient(circle at 50% 48%,#10213a 0,#07101c 43%,#02050a 82%);box-shadow:inset 0 0 90px rgba(30,132,190,.12)}
+#wrap{position:relative;height:670px;min-height:620px;border:1px solid #203a54;border-radius:24px;overflow:hidden;background:radial-gradient(circle at 50% 48%,#10213a 0,#07101c 43%,#02050a 82%);box-shadow:inset 0 0 90px rgba(30,132,190,.12)}
 #brain{position:absolute;inset:0;width:100%;height:100%;display:block}
 .panel{position:absolute;z-index:4;border:1px solid rgba(100,180,225,.33);background:rgba(3,10,18,.80);backdrop-filter:blur(14px);box-shadow:0 16px 42px rgba(0,0,0,.32)}
 .status{left:16px;top:16px;max-width:340px;border-radius:14px;padding:11px 13px}
@@ -114,10 +114,13 @@ html,body{margin:0;background:#03060b;color:#eef8ff;font-family:Inter,ui-sans-se
 #hover{display:none;position:absolute;z-index:6;pointer-events:none;min-width:150px;max-width:260px;padding:8px 10px;border:1px solid rgba(105,211,255,.5);border-radius:10px;background:rgba(2,9,15,.94);box-shadow:0 10px 28px rgba(0,0,0,.4)}
 #hover.show{display:block}#hover b{display:block;font-size:11px}#hover span{display:block;font-size:9px;color:#a7bdca;margin-top:3px;line-height:1.35}
 @media(max-width:720px){
- #wrap{height:610px;border-radius:16px}
- #brain{transform:none}
- .status{left:8px;top:8px;max-width:205px;padding:8px 9px}.status .state{font-size:14px}.status .sub{font-size:9px}
- .metrics{right:8px;top:8px;grid-template-columns:1fr;max-width:145px}.metric{padding:6px 7px}.metric b{font-size:11px}.metric span{font-size:7px}
+ #wrap{height:680px;min-height:680px;border-radius:16px}
+ /* Reserve an unobstructed viewing area below status and evidence counters. */
+ #brain{top:168px;bottom:50px;width:100%;height:calc(100% - 218px)}
+ .status{left:8px;right:8px;top:8px;max-width:none;padding:8px 10px}
+ .status .state{font-size:14px}.status .sub{font-size:9px}
+ .metrics{left:8px;right:8px;top:96px;max-width:none;grid-template-columns:repeat(4,minmax(0,1fr));gap:3px;padding:5px}
+ .metric{min-width:0;padding:6px 4px}.metric b{font-size:12px}.metric span{font-size:8px;overflow-wrap:anywhere}
  .legend{left:8px;right:8px;bottom:8px;font-size:8px}.tip{display:none}
 }
 </style>
@@ -149,7 +152,9 @@ html,body{margin:0;background:#03060b;color:#eef8ff;font-family:Inter,ui-sans-se
 <script>
 const D=JSON.parse(document.getElementById("data").textContent);
 const wrap=document.getElementById("wrap"),canvas=document.getElementById("brain"),ctx=canvas.getContext("2d"),hover=document.getElementById("hover");
-let W=1,H=1,dpr=1,t=0,nodes=[],edges=[],pointer={x:-999,y:-999};
+const W=640,H=560;
+let dpr=1,t=0,nodes=[],edges=[],viewScale=1,offsetX=0,offsetY=0;
+const prefersReduced=window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 const G=D.growth||{},A=D.activity||{};
 document.getElementById("knowledgeUnits").textContent=Number(G.knowledge_units||0).toLocaleString();
 document.getElementById("newCycle").textContent=Number(A.learned_this_cycle||0).toLocaleString();
@@ -183,7 +188,7 @@ function statusNow(){
   el.style.color=state==="LEARNING"?"#55f0ae":state==="STALE"||state==="NOT SYNCED"?"#ff7a8f":"#72ddff";
   document.getElementById("learningDetail").textContent=detail;
 }
-statusNow();setInterval(statusNow,1000);
+statusNow();setInterval(statusNow,15000);
 
 function hash(str){
   let h=2166136261>>>0;
@@ -243,14 +248,18 @@ function buildNodes(){
     for(const k of targets)if(map.has(k)){b=map.get(k);break;}
     if(a!=null&&b!=null&&a!==b)edges.push({a,b,confidence:Number(e.confidence||.3),count:Number(e.evidence_count||1),relation:e.relation||"linked"});
   });
-  if(edges.length<Math.min(18,Math.floor(nodes.length/2))){
-    for(let i=0;i<nodes.length-3&&edges.length<36;i+=3)edges.push({a:i,b:(i*7+5)%nodes.length,confidence:.18,count:1,aggregate:true});
-  }
+  // No inferred/synthetic synapses: visible links must match persisted evidence.
 }
 function resize(){
-  const r=wrap.getBoundingClientRect();dpr=Math.min(2,window.devicePixelRatio||1);
+  const r=canvas.getBoundingClientRect();
+  dpr=Math.min(2,window.devicePixelRatio||1);
   canvas.width=Math.max(1,Math.floor(r.width*dpr));canvas.height=Math.max(1,Math.floor(r.height*dpr));
-  W=r.width;H=r.height;ctx.setTransform(dpr,0,0,dpr,0,0);buildNodes();
+  // Uniform scaling preserves the brain anatomy on narrow/mobile viewports.
+  viewScale=Math.max(.001,Math.min(r.width/W,r.height/H));
+  offsetX=(r.width-W*viewScale)/2;
+  offsetY=(r.height-H*viewScale)/2;
+  ctx.setTransform(dpr*viewScale,0,0,dpr*viewScale,dpr*offsetX,dpr*offsetY);
+  buildNodes();
 }
 new ResizeObserver(resize).observe(wrap);resize();
 
@@ -328,8 +337,15 @@ function drawBrainBase(){
   ctx.restore();
   return changed;
 }
-function draw(){
-  t+=.016;ctx.clearRect(0,0,W,H);
+let previousDrawMs=0;
+function draw(frameMs=0){
+  requestAnimationFrame(draw);
+  if(document.hidden){previousDrawMs=frameMs;return;}
+  const frameInterval=prefersReduced?1000/15:(window.innerWidth<=720?1000/30:1000/60);
+  if(previousDrawMs&&frameMs-previousDrawMs<frameInterval)return;
+  const dt=previousDrawMs?Math.min(.05,(frameMs-previousDrawMs)/1000):1/60;
+  previousDrawMs=frameMs;
+  t+=dt;ctx.clearRect(0,0,W,H);
   drawBrainBase();
   for(const e of edges){
     const a=nodes[e.a],b=nodes[e.b];if(!a||!b)continue;
@@ -350,7 +366,6 @@ function draw(){
     ctx.shadowBlur=learning?16:10;ctx.shadowColor=colorFor(n,.78);ctx.fillStyle=colorFor(n,.93);ctx.beginPath();ctx.arc(n.x,n.y,r,0,Math.PI*2);ctx.fill();
   }
   ctx.shadowBlur=0;
-  requestAnimationFrame(draw);
 }
 draw();
 
@@ -360,10 +375,14 @@ function nearest(px,py){
   return best;
 }
 canvas.addEventListener("pointermove",e=>{
-  const r=canvas.getBoundingClientRect(),px=e.clientX-r.left,py=e.clientY-r.top,n=nearest(px,py);
+  const r=canvas.getBoundingClientRect();
+  const px=(e.clientX-r.left-offsetX)/viewScale,py=(e.clientY-r.top-offsetY)/viewScale,n=nearest(px,py);
   if(!n){hover.classList.remove("show");canvas.style.cursor="default";return;}
   canvas.style.cursor="pointer";hover.innerHTML="<b>"+String(n.label||"Evidence").replace(/[<>]/g,"")+"</b><span>"+String(n.kind).toUpperCase()+" · "+String(n.sub||"").replace(/[<>]/g,"")+"</span>";
-  hover.style.left=Math.min(W-275,Math.max(8,px+12))+"px";hover.style.top=Math.min(H-68,Math.max(8,py+12))+"px";hover.classList.add("show");
+  const rWrap=wrap.getBoundingClientRect();
+  hover.style.left=Math.min(rWrap.width-245,Math.max(8,e.clientX-rWrap.left+12))+"px";
+  hover.style.top=Math.min(rWrap.height-68,Math.max(8,e.clientY-rWrap.top+12))+"px";
+  hover.classList.add("show");
 });
 canvas.addEventListener("pointerleave",()=>hover.classList.remove("show"));
 </script>
