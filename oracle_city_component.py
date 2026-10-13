@@ -273,7 +273,7 @@ controls.minDistance=9;
 controls.maxDistance=88;
 controls.maxPolarAngle=Math.PI*.49;
 controls.minPolarAngle=.12;
-controls.enablePan=!isMobileDevice;
+controls.enablePan=true;
 
 const hemisphere=new THREE.HemisphereLight(0xbfe8ff,0x27331f,1.6);
 scene.add(hemisphere);
@@ -1016,17 +1016,16 @@ function setBrainControlMode(on){
   controls.touches.ONE=THREE.TOUCH.ROTATE;
 
   if(on){
-    // Brain mode keeps one immutable visual target. Users can orbit and pinch
-    // zoom around it, but cannot pan the anatomy away from screen center.
+    // Allow orbit, pinch zoom and two-finger pan on touchscreens in both views.
     clearOrbitMomentum();
-    controls.enablePan=false;
+    controls.enablePan=true;
     controls.minDistance=4.5;
     controls.maxDistance=52;
     controls.minPolarAngle=.01;
     controls.maxPolarAngle=Math.PI-.01;
-    controls.touches.TWO=THREE.TOUCH.DOLLY_ROTATE;
+    controls.touches.TWO=THREE.TOUCH.DOLLY_PAN;
   }else{
-    controls.enablePan=!isMobileDevice;
+    controls.enablePan=true;
     controls.minDistance=9;
     controls.maxDistance=88;
     controls.minPolarAngle=.12;
@@ -1152,7 +1151,7 @@ function resize(){
   const mobile=mobileView();
   camera.aspect=w/h;
   if(brainMode){
-    fitBrainView();
+    camera.fov=mobile?56:46;
   }else if(mobile){
     camera.fov=62;
   }else{
@@ -1160,14 +1159,15 @@ function resize(){
   }
   camera.updateProjectionMatrix();
   renderer.setSize(w,h,false);labelRenderer.setSize(w,h);
-  if(lastMobileView===null||lastMobileView!==mobile){
+  if(lastMobileView===null){
     lastMobileView=mobile;
     if(brainMode)fitBrainView();
     else resetView();
-  }else if(mobile&&!brainMode){
-    // Reframe when the embedded canvas changes width (e.g. mobile rotation).
-    resetView();
+  }else if(lastMobileView!==mobile){
+    lastMobileView=mobile;
+    // Preserve the active camera and target across responsive layout changes.
   }
+  // A resize must never discard a user-controlled camera pose.
 }
 new ResizeObserver(resize).observe(app);resize();
 
