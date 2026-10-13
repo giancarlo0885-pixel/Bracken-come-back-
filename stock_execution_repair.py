@@ -5,6 +5,8 @@ import time
 import uuid
 from typing import Any
 
+from quote_provenance import provider_verified
+
 log = logging.getLogger("stock-execution-repair")
 
 _CACHE_TTL_SECONDS = 8.0
@@ -47,10 +49,7 @@ def _verified_payload(worker: Any, symbol: str, history: Any, scan_type: str) ->
     payload = dict(snapshot.to_quote_payload())
     quote_eligible = payload.get("quote_verified") is True
     paper_reference_verified = payload.get("paper_reference_verified") is True
-    if "provider_quote_verified" in payload:
-        provider_verified = payload.get("provider_quote_verified") is True
-    else:
-        provider_verified = bool(quote_eligible and not paper_reference_verified)
+    provider_is_verified = provider_verified(payload)
 
     correlation_id = str(
         payload.get("correlation_id")
@@ -65,20 +64,20 @@ def _verified_payload(worker: Any, symbol: str, history: Any, scan_type: str) ->
             "scan_type": scan_type,
             "source_interval": payload.get("interval"),
             "quote_verified": True,
-            "verified": True,
+            "verified": provider_is_verified,
             "execution_quote_eligible": True,
-            "provider_quote_verified": provider_verified,
+            "provider_quote_verified": provider_is_verified,
             "paper_reference_verified": paper_reference_verified,
             "verification_kind": (
                 "provider"
-                if provider_verified
+                if provider_is_verified
                 else "paper_reference"
                 if paper_reference_verified
                 else "unverified"
             ),
             "stale": False,
             "tradeable": True,
-            "execution_source": "verified_live_snapshot",
+            "execution_source": "paper_reference_snapshot" if paper_reference_verified else "verified_live_snapshot",
             "correlation_id": correlation_id,
             "decision_correlation_id": correlation_id,
         }

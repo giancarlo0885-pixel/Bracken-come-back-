@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from oracle_learning_market_scope import learning_market_filter
+from oracle_learning_validation import _chronological_drawdown, _exact_cost_outcome_sql
 
 """Advanced research-only learning diagnostics for Oracle.
 
@@ -130,11 +131,11 @@ def refresh_setup_attribution(conn: Any, *, market: str | None=None) -> dict[str
           ABS(SUM(CASE WHEN net_pnl<0 THEN net_pnl ELSE 0 END)) gross_loss,
           AVG(mfe_pct) FILTER(WHERE mfe_pct IS NOT NULL) avg_mfe,
           AVG(mae_pct) FILTER(WHERE mae_pct IS NOT NULL) avg_mae
-          FROM oracle_brain_episodes WHERE provenance_status='exact'{scope}
+          FROM oracle_brain_episodes WHERE {_exact_cost_outcome_sql()}{scope}
           GROUP BY market,strategy,regime""", scope_params
     ).fetchall())
     for x in rows:
-        loss=_f(x.get("gross_loss")); pf=_f(x.get("gross_win"))/loss if loss>0 else 0.0
+        loss=_f(x.get("gross_loss")); pf=_f(x.get("gross_win"))/loss if loss>0 else None
         key=f"{x.get('market')}:{x.get('strategy')}:{x.get('regime')}"
         conn.execute(
             """INSERT INTO oracle_setup_validation(
@@ -152,7 +153,7 @@ def classify_failures(conn: Any, *, limit:int=500, market: str | None=None) -> d
     scope, scope_params = learning_market_filter(market, "e.market")
     rows=list(conn.execute(
         f"""SELECT episode_key,market,strategy,regime,net_pnl,fees,return_pct,mfe_pct,mae_pct,feature_snapshot
-           FROM oracle_brain_episodes e WHERE provenance_status='exact' AND net_pnl<0{scope}
+           FROM oracle_brain_episodes e WHERE {_exact_cost_outcome_sql('e')} AND net_pnl<0{scope}
            AND NOT EXISTS(SELECT 1 FROM oracle_failure_taxonomy f WHERE f.episode_key=e.episode_key)
            ORDER BY exit_time ASC LIMIT %s""",(*scope_params,max(1,int(limit)))
     ).fetchall())
@@ -191,7 +192,7 @@ def exit_diagnostics(conn: Any, *, market: str | None=None) -> dict[str,Any]:
           AVG(CASE WHEN net_pnl<0 AND mfe_pct>0 THEN mfe_pct ELSE NULL END) avg_giveback_mfe,
           COUNT(*) FILTER(WHERE net_pnl<0 AND mfe_pct>=0.5)::int giveback_losses,
           AVG(mae_pct) FILTER(WHERE net_pnl<0) avg_loser_mae
-          FROM oracle_brain_episodes WHERE provenance_status='exact'{scope}""", scope_params
+          FROM oracle_brain_episodes WHERE {_exact_cost_outcome_sql()}{scope}""", scope_params
     ).fetchone() or {}
     return dict(row)
 
@@ -200,12 +201,12 @@ def portfolio_concentration(conn: Any, *, market: str | None=None) -> dict[str,A
     scope, scope_params = learning_market_filter(market, "market")
     rows=list(conn.execute(
         f"""SELECT symbol,SUM(ABS(COALESCE(net_pnl,0))) exposure_proxy
-           FROM oracle_brain_episodes WHERE provenance_status='exact'{scope}
+           FROM oracle_brain_episodes WHERE {_exact_cost_outcome_sql()}{scope}
            GROUP BY symbol ORDER BY exposure_proxy DESC""", scope_params
     ).fetchall())
     total=sum(_f(x.get("exposure_proxy")) for x in rows)
     top=sum(_f(x.get("exposure_proxy")) for x in rows[:3])
-    return {"symbols":len(rows),"top3_concentration":top/total if total>0 else 0.0}
+    return {"symbols":len(rows),"top3_concentration":top/total if total>0 else None}
 
 
 def refresh_data_quality(conn: Any, *, market: str | None=None) -> dict[str,Any]:
@@ -260,11 +261,12 @@ def _episode_clusters(rows: list[dict[str,Any]], *, gap_seconds:int=CLUSTER_GAP_
     intervals=[]
     for row in rows:
         end=_dt_utc(row.get("exit_time"))
-        start=_dt_utc(row.get("entry_time")) or end
-        if start is None or end is None:
+        start=_dt_utc(row.get("entry_time"))
+        if start is None or end is None or end < start:
             continue
-        if end < start:
-            start,end=end,start
+        net_pnl=_f(row.get("net_pnl"),float("nan"))
+        if not math.isfinite(net_pnl):
+            continue
         ret=row.get("return_pct")
         try:
             ret_value=float(ret) if ret is not None else None
@@ -275,8 +277,9 @@ def _episode_clusters(rows: list[dict[str,Any]], *, gap_seconds:int=CLUSTER_GAP_
         intervals.append({
             "start":start,
             "end":end,
-            "net_pnl":_f(row.get("net_pnl")),
+            "net_pnl":net_pnl,
             "return_pct":ret_value,
+            "row":row,
         })
     intervals.sort(key=lambda x:(x["start"],x["end"]))
     clusters=[]
@@ -290,10 +293,12 @@ def _episode_clusters(rows: list[dict[str,Any]], *, gap_seconds:int=CLUSTER_GAP_
                 "net_pnl":0.0,
                 "return_pct":0.0,
                 "return_samples":0,
+                "rows":[],
             })
         cluster=clusters[-1]
         cluster["end"]=max(cluster["end"],item["end"])
         cluster["trades"]+=1
+        cluster["rows"].append(item["row"])
         cluster["net_pnl"]+=item["net_pnl"]
         if item["return_pct"] is not None:
             cluster["return_pct"]+=item["return_pct"]
@@ -367,25 +372,31 @@ def _cluster_validation_metrics(
 def walk_forward_challengers(conn: Any, market:str) -> dict[str,Any]:
     """Evaluate newest 30% using clustered episodes and multi-gate research qualification."""
     cohorts=list(conn.execute(
-        """SELECT DISTINCT strategy,regime FROM oracle_brain_episodes
-           WHERE provenance_status='exact' AND market=%s""",(market,)
+        f"""SELECT DISTINCT strategy,regime FROM oracle_brain_episodes
+           WHERE {_exact_cost_outcome_sql()} AND market=%s""",(market,)
     ).fetchall())
     qualified=0
     for cohort in cohorts:
         rows=list(conn.execute(
-            """SELECT entry_time,exit_time,net_pnl,return_pct FROM oracle_brain_episodes
-               WHERE provenance_status='exact' AND market=%s AND strategy=%s AND regime=%s
-               ORDER BY exit_time ASC""",(market,cohort.get("strategy"),cohort.get("regime"))
+            f"""SELECT entry_time,exit_time,net_pnl,return_pct FROM oracle_brain_episodes
+               WHERE {_exact_cost_outcome_sql()} AND market=%s AND strategy=%s AND regime=%s
+               ORDER BY exit_time ASC,episode_key ASC""",(market,cohort.get("strategy"),cohort.get("regime"))
         ).fetchall())
-        if len(rows)<30: continue
-        cut=max(1,int(len(rows)*0.70)); test=rows[cut:]
+        # Split whole market episodes before evaluation. Splitting individual
+        # exits first can put trades from the same overlapping event in both
+        # training and validation, manufacturing independent confirmations.
+        clusters=_episode_clusters(rows)
+        valid_samples=sum(x["trades"] for x in clusters)
+        if valid_samples<30 or len(clusters)<2: continue
+        cut=min(len(clusters)-1,max(1,int(len(clusters)*0.70)))
+        train=[row for cluster in clusters[:cut] for row in cluster["rows"]]
+        test=[row for cluster in clusters[cut:] for row in cluster["rows"]]
+        test.sort(key=lambda row:_dt_utc(row.get("exit_time")))
         wins=sum(max(0.0,_f(x.get("net_pnl"))) for x in test)
         losses=abs(sum(min(0.0,_f(x.get("net_pnl"))) for x in test))
         exp=sum(_f(x.get("net_pnl")) for x in test)/len(test)
-        pf=wins/losses if losses>0 else (999.0 if wins>0 else 0.0)
-        equity=peak=dd=0.0
-        for x in test:
-            equity+=_f(x.get("net_pnl")); peak=max(peak,equity); dd=max(dd,peak-equity)
+        pf=wins/losses if losses>0 else None
+        dd=_chronological_drawdown(test)
 
         key=f"{cohort.get('strategy')}:{cohort.get('regime')}"
         clustered=_cluster_validation_metrics(test,market=market,candidate_key=key)
@@ -393,7 +404,7 @@ def walk_forward_challengers(conn: Any, market:str) -> dict[str,Any]:
             "min_trades":len(test)>=MIN_CLUSTER_TRADES,
             "min_episodes":clustered["episodes"]>=MIN_CLUSTER_EPISODES,
             "positive_expectancy":exp>0,
-            "profit_factor":pf>1.05,
+            "profit_factor":pf>1.05 if pf is not None else wins>0,
             "bootstrap_lower_positive":(
                 clustered["bootstrap_lower_expectancy"] is not None
                 and clustered["bootstrap_lower_expectancy"]>0
@@ -411,9 +422,14 @@ def walk_forward_challengers(conn: Any, market:str) -> dict[str,Any]:
         state="shadow" if all(gates.values()) else "research"
         if state=="shadow": qualified+=1
         evidence={
-            "train_samples":cut,
+            "train_samples":len(train),
             "test_samples":len(test),
+            "rejected_interval_samples":len(rows)-valid_samples,
             "split":"70/30_time_ordered_clustered",
+            "accounting_version":"exact_round_trip_v1",
+            "cost_provenance":"exact_lot",
+            "profit_factor_status":"available" if pf is not None else "no_losses",
+            "train_episode_count":cut,
             "episode_count":clustered["episodes"],
             "bootstrap_draws":CLUSTER_BOOTSTRAP_DRAWS,
             "bootstrap_expectancy_90pct":[
@@ -440,7 +456,7 @@ def walk_forward_challengers(conn: Any, market:str) -> dict[str,Any]:
               train_end=EXCLUDED.train_end,test_start=EXCLUDED.test_start,samples=EXCLUDED.samples,
               expectancy=EXCLUDED.expectancy,profit_factor=EXCLUDED.profit_factor,
               max_drawdown=EXCLUDED.max_drawdown,state=EXCLUDED.state,evidence=EXCLUDED.evidence,updated_at=NOW()""",
-            (key,market,rows[cut-1].get("exit_time"),test[0].get("exit_time"),len(test),exp,pf,dd,state,json.dumps(evidence)))
+            (key,market,clusters[cut-1]["end"],clusters[cut]["start"],len(test),exp,pf,dd,state,json.dumps(evidence)))
     return {"challengers":len(cohorts),"shadow_qualified":qualified,"execution_impact":"NONE"}
 
 

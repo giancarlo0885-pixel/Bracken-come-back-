@@ -436,11 +436,12 @@ PROVIDER_WIDE_CAPABILITY = "__provider__"
 
 
 def provider_cooldown_active_db(conn: Any, provider: str, capability: str = PROVIDER_WIDE_CAPABILITY, *, now: datetime | None = None) -> dict[str, Any]:
-    now_dt = now or datetime.now(timezone.utc)
+    now_dt = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
     row = conn.execute(
         """SELECT cooldown_until, last_failure FROM provider_budget_ledger
-           WHERE provider=%s AND capability=%s AND utc_date=%s""",
-        (provider, capability, now_dt.date().isoformat()),
+           WHERE provider=%s AND capability=%s AND cooldown_until IS NOT NULL
+           ORDER BY cooldown_until DESC LIMIT 1""",
+        (provider, capability),
     ).fetchone()
     if not row:
         return {"active": False}
@@ -463,7 +464,7 @@ def mark_provider_cooldown_db(
     capability: str = PROVIDER_WIDE_CAPABILITY,
     now: datetime | None = None,
 ) -> dict[str, Any]:
-    now_dt = now or datetime.now(timezone.utc)
+    now_dt = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
     timestamp = now_dt.isoformat()
     utc_date = now_dt.date().isoformat()
     cooldown_until = (now_dt + timedelta(seconds=max(1, int(seconds)))).isoformat()
@@ -472,8 +473,12 @@ def mark_provider_cooldown_db(
            (provider,capability,utc_date,entitlement,daily_budget,requests_used,remaining_budget,last_failure,cooldown_until,data_mode,updated_at)
            VALUES (%s,%s,%s,%s,0,0,0,%s,%s,%s,%s)
            ON CONFLICT (provider, capability, utc_date) DO UPDATE SET
-               last_failure=EXCLUDED.last_failure,
-               cooldown_until=EXCLUDED.cooldown_until,
+               last_failure=CASE
+                   WHEN provider_budget_ledger.cooldown_until > EXCLUDED.cooldown_until
+                   THEN provider_budget_ledger.last_failure ELSE EXCLUDED.last_failure END,
+               cooldown_until=CASE
+                   WHEN provider_budget_ledger.cooldown_until > EXCLUDED.cooldown_until
+                   THEN provider_budget_ledger.cooldown_until ELSE EXCLUDED.cooldown_until END,
                updated_at=EXCLUDED.updated_at""",
         (provider, capability, utc_date, "configured", reason[:500], cooldown_until, "shared_cooldown", timestamp),
     )

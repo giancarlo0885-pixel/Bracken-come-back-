@@ -7,7 +7,7 @@ import pandas as pd
 import streamlit as st
 
 from database import database_ready, rows
-from oracle_brain import build_oracle_brain_snapshot
+from oracle_brain import build_learning_validation_snapshot, build_oracle_brain_snapshot
 from oracle_brain_component import render_oracle_brain_component
 from paper_exit_research import REPORT_VERSION
 
@@ -292,26 +292,31 @@ if source_health:
 
 # Learning + validation cockpit (research-only).
 try:
+    validation_snapshot = build_learning_validation_snapshot(_brain_rows, market_scope=market_scope)
     lv = _brain_rows("""SELECT
       (SELECT COUNT(*)::int FROM oracle_counterfactual_outcomes) counterfactuals,
       (SELECT COUNT(*)::int FROM oracle_counterfactual_outcomes WHERE outcome_class='avoided_loss') avoided_losses,
       (SELECT COUNT(*)::int FROM oracle_counterfactual_outcomes WHERE outcome_class='missed_winner') counterfactual_missed_opportunities,
       (SELECT COUNT(*)::int FROM oracle_decision_replays) decision_replays,
-      (SELECT COUNT(*)::int FROM oracle_setup_validation) setup_cohorts,
-      (SELECT COUNT(*)::int FROM oracle_challenger_validation WHERE state='shadow') shadow_challengers,
-      (SELECT COUNT(*)::int FROM oracle_validation_weaknesses WHERE state='negative') negative_cohorts,
-      (SELECT SUM(samples*calibration_error)/NULLIF(SUM(samples),0) FROM oracle_calibration_buckets) calibration_error
+      (SELECT COUNT(*)::int FROM oracle_challenger_validation WHERE state='shadow'
+        AND evidence->>'accounting_version'='exact_round_trip_v1'
+        AND evidence->>'cost_provenance'='exact_lot') shadow_challengers
     """)
+    if lv:
+        lv[0] = {**lv[0], **validation_snapshot}
     failure_rows=_brain_rows("""SELECT failure_class,COUNT(*)::int samples FROM oracle_failure_taxonomy GROUP BY failure_class ORDER BY samples DESC""")
-    challenger_rows=_brain_rows(f"""SELECT candidate_key,market,samples,expectancy,profit_factor,max_drawdown,state,updated_at FROM oracle_challenger_validation{scope_where} ORDER BY state DESC,samples DESC LIMIT 30""")
-    setup_rows=_brain_rows(f"""SELECT market,strategy,regime,samples,wins,losses,expectancy,profit_factor,avg_mfe_pct,avg_mae_pct FROM oracle_setup_validation{scope_where} ORDER BY samples DESC LIMIT 30""")
+    challenger_rows=_brain_rows(f"""SELECT candidate_key,market,samples,expectancy,profit_factor,max_drawdown,state,updated_at FROM oracle_challenger_validation
+        WHERE evidence->>'accounting_version'='exact_round_trip_v1'
+          AND evidence->>'cost_provenance'='exact_lot'{scope_and}
+        ORDER BY state DESC,samples DESC LIMIT 30""")
+    setup_rows=validation_snapshot["setups"][:30]
 except Exception:
     lv,failure_rows,challenger_rows,setup_rows=[],[],[],[]
 
 if lv:
     v=lv[0]
     st.subheader("Shared learning & validation")
-    st.caption("Shared retained research totals across markets; scoped trade evidence appears in the crypto reconciliation and setup views.")
+    st.caption("Research activity totals are retained separately. Setup, calibration and qualification metrics require complete round-trip cost evidence; legacy rollups remain observational and unavailable for profitability claims.")
     c1,c2,c3,c4=st.columns(4)
     c1.metric("Decision replays",int(v.get("decision_replays") or 0))
     c2.metric("Counterfactual avoided losses",int(v.get("avoided_losses") or 0))
@@ -327,6 +332,7 @@ if lv:
         st.dataframe(pd.DataFrame(setup_rows),width="stretch",hide_index=True)
     with st.expander("Failure taxonomy"):
         st.dataframe(pd.DataFrame(failure_rows),width="stretch",hide_index=True)
+        st.caption("Retained observational classifications may predate complete round-trip accounting.")
     with st.expander("Walk-forward challengers"):
         st.dataframe(pd.DataFrame(challenger_rows),width="stretch",hide_index=True)
 
@@ -376,7 +382,7 @@ st.subheader("Brain retention health")
 rh1, rh2, rh3, rh4 = st.columns(4)
 rh1.metric("Persistent entries", retention["entries"]["count"])
 rh2.metric("Retained sources", retention["sources"]["count"])
-rh3.metric("Exact episodes retained", retention["episodes"]["count"])
+rh3.metric("Entry-linked episodes retained", retention["episodes"]["count"])
 rh4.metric("Learning pipelines", retention["learning_pipelines"])
 st.caption(
     f"Store: {retention['persistent_store']} · Last learning sync: "

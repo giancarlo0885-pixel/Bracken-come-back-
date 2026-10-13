@@ -114,5 +114,8 @@ jobs:
           test_paper_aeve_generation_controller.py::test_postgres_generation_report_freezes_exact_membership
           test_paper_kelly_postgres.py::test_postgres_kelly_schema_and_immutable_forward_epoch
           test_paper_shadow_exit_challenger.py::test_postgres_forecast_cutoff_and_timestamp_order
+          test_paper_shadow_exit_challenger.py::test_postgres_partial_close_keeps_durable_trigger_until_original_inventory_closes
           test_paper_exit_research.py::test_postgres_source_query_and_bounded_report_schema
           test_oracle_learning_market_isolation.py::test_postgres_stock_outcomes_do_not_change_crypto_exit_or_concentration
+          test_oracle_learning_market_isolation.py::test_postgres_legacy_or_incomplete_cost_outcomes_cannot_support_profitability_claims
+          test_oracle_learning_market_isolation.py::test_postgres_brain_regime_display_uses_round_trip_costs

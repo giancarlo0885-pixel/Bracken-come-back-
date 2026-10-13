@@ -240,28 +240,20 @@ def _install_core_rebalance_producer(market_worker_module: Any) -> None:
 
 
 def _verification_metadata(route: dict[str, Any], payload: dict[str, Any]) -> None:
-    """Expose verification types without changing legacy execution eligibility.
+    """Keep legacy quote eligibility separate from provider verification."""
+    from quote_provenance import provider_verified
 
-    `quote_verified`/`verified` are retained as the historical generic eligibility
-    aliases because existing execution code relies on them. Explicit fields now
-    distinguish a provider-verified quote from a paper-reference fallback.
-    """
     quote_eligible = _truthy(payload.get("quote_verified"))
     paper_reference_verified = _truthy(route.get("paper_reference_verified"))
-
-    if "provider_quote_verified" in route:
-        provider_verified = _truthy(route.get("provider_quote_verified"))
-    else:
-        # Backward-compatible provider/unit routes historically supplied only
-        # quote_verified. Never use this fallback for a marked paper reference.
-        provider_verified = bool(quote_eligible and not paper_reference_verified)
-
-    payload["provider_quote_verified"] = provider_verified
+    provider_is_verified = provider_verified({
+        **payload, **route, "paper_reference_verified": paper_reference_verified,
+    })
+    payload["provider_quote_verified"] = provider_is_verified
     payload["paper_reference_verified"] = paper_reference_verified
     payload["execution_quote_eligible"] = quote_eligible
-    payload["verified"] = quote_eligible
+    payload["verified"] = provider_is_verified
     payload["verification_basis"] = str(route.get("verification_basis") or "unverified")
-    if provider_verified:
+    if provider_is_verified:
         payload["verification_kind"] = "provider"
     elif paper_reference_verified:
         payload["verification_kind"] = "paper_reference"

@@ -78,7 +78,7 @@ def test_yahoo_paper_reference_is_not_mislabeled_provider_verified():
     patch._verification_metadata(route, payload)
 
     assert payload["quote_verified"] is True
-    assert payload["verified"] is True  # legacy generic eligibility alias
+    assert payload["verified"] is False  # paper eligibility is separate from provider verification
     assert payload["execution_quote_eligible"] is True
     assert payload["provider_quote_verified"] is False
     assert payload["paper_reference_verified"] is True

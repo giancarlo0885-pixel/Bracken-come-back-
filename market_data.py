@@ -21,6 +21,7 @@ from config import (
 )
 from provider_router import normalize_symbol, route_history, verify_frame_symbol
 from market_sessions import latest_valid_bar_timestamp, quote_is_fresh
+from quote_provenance import provider_verified, reference_allowed_in_mode
 
 log = logging.getLogger("market-data")
 
@@ -66,7 +67,12 @@ class MarketSnapshot:
             "timestamp": self.timestamp,
             "interval": self.interval,
             "quote_verified": self.quote_verified,
-            "verified": self.quote_verified,
+            "verified": provider_verified({
+                "provider": self.provider,
+                "provider_quote_verified": self.provider_quote_verified,
+                "paper_reference_verified": self.paper_reference_verified,
+            }),
+            "execution_quote_eligible": self.quote_verified is True and self.stale is False,
             "stale": self.stale,
             "spread_pct": self.spread_pct,
             "source_capability": self.source_capability,
@@ -252,19 +258,11 @@ def latest_bar_timestamp(
 
 
 def _download_yahoo(symbol: str, period: str, interval: str) -> pd.DataFrame:
-    data = yf.download(
-        symbol,
-        period=period,
-        interval=interval,
-        auto_adjust=True,
-        progress=False,
-        threads=False,
-        prepost=True,
-    )
-    normalized = _normalize(data, symbol)
-    if normalized.empty:
-        return pd.DataFrame()
-    return _stamp_history(normalized, symbol, symbol, "Yahoo Finance", interval)
+    # Ticker.history raises provider errors; bulk download silently swallows 429s.
+    # Reuse the worker helper so the web route preserves the same cooldown path.
+    import sys
+    from runtime_provider_reliability import yahoo_reference_history
+    return yahoo_reference_history(sys.modules[__name__], symbol, period, interval)
 
 
 def get_history(symbol: str, period: str = "1y", interval: str = "1d") -> pd.DataFrame:
@@ -272,7 +270,7 @@ def get_history(symbol: str, period: str = "1y", interval: str = "1d") -> pd.Dat
     frame = routed.frame.copy(deep=True)
     route_metadata = routed.metadata()
     latest_close = finite_scalar(_column(frame, "Close")) if "Close" in frame.columns else None
-    provider_verified = frame.attrs.get("quote_verified") is True
+    provider_is_verified = provider_verified({**frame.attrs, "provider": routed.provider})
     route_metadata.update(
         {
             "requested_symbol": normalize_symbol(symbol),
@@ -285,10 +283,10 @@ def get_history(symbol: str, period: str = "1y", interval: str = "1d") -> pd.Dat
             "source_identity": frame.attrs.get("source_identity"),
             "cache_identity": frame.attrs.get("cache_identity"),
             "ohlcv_fingerprint": _ohlcv_fingerprint(frame),
-            "quote_verified": provider_verified,
-            "provider_quote_verified": provider_verified,
+            "quote_verified": provider_is_verified,
+            "provider_quote_verified": provider_is_verified,
             "paper_reference_verified": False,
-            "verification_basis": "provider" if provider_verified else "unverified",
+            "verification_basis": "provider" if provider_is_verified else "unverified",
         }
     )
     quote_time = latest_bar_timestamp(frame, interval, symbol=symbol)
@@ -319,7 +317,7 @@ def get_history(symbol: str, period: str = "1y", interval: str = "1d") -> pd.Dat
         frame.attrs["verification_basis"] = route_metadata["verification_basis"]
         frame.attrs["source_mode"] = route_metadata["source_mode"]
     else:
-        frame.attrs["provider_quote_verified"] = provider_verified
+        frame.attrs["provider_quote_verified"] = provider_is_verified
         frame.attrs["paper_reference_verified"] = False
         frame.attrs["verification_basis"] = route_metadata["verification_basis"]
 
@@ -373,6 +371,8 @@ def _snapshot_from_history(symbol: str, history: pd.DataFrame, interval: str) ->
     if not quote_timestamp:
         return None
     verified = route.get("quote_verified") is True
+    fresh = quote_is_fresh(quote_timestamp, interval,
+        max_intraday_age_seconds=_decision_max_age_seconds(symbol), symbol=symbol)
     return MarketSnapshot(
         symbol=symbol,
         price=price,
@@ -388,7 +388,7 @@ def _snapshot_from_history(symbol: str, history: pd.DataFrame, interval: str) ->
         provider_symbol=provider_symbol,
         provider_native_symbol=provider_native_symbol,
         quote_verified=verified,
-        stale=not verified,
+        stale=not fresh,
         spread_pct=finite_scalar(route.get("spread_pct")),
         source_capability=str(route.get("source_capability") or route.get("capability") or ("history_intraday" if interval not in {"1d", "daily"} else "history_daily")),
         correlation_id=str(route.get("correlation_id") or route.get("decision_correlation_id") or ""),
@@ -493,6 +493,8 @@ def snapshot_is_verified(snapshot: MarketSnapshot | None, symbol: str) -> bool:
     ):
         return False
     if snapshot.quote_verified is not True:
+        return False
+    if not reference_allowed_in_mode(snapshot.to_quote_payload(), EXECUTION_MODE, PAPER_BROKER_MODE):
         return False
     price = finite_scalar(snapshot.price)
     if price is None or price <= 0:

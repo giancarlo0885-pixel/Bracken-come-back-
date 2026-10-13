@@ -220,7 +220,7 @@ def test_brain_attributes_thesis_separately_from_realized_outcome(monkeypatch):
                     "probability_of_profit": 55,
                     "estimated_cost_pct": 0.08,
                 },
-                "outcome_snapshot": {"entry_signal_id": "sig-42"},
+                "outcome_snapshot": {"entry_signal_id": "sig-42", "accounting_version": "exact_round_trip_v1", "cost_provenance": "exact_lot"},
                 "tags": [],
             }]
         return []
@@ -282,6 +282,10 @@ def test_brain_growth_is_derived_from_persisted_evidence(monkeypatch):
     monkeypatch.setenv("LIVE_TRADING_ARMED", "false")
 
     def fetch(query: str, params=()):
+        if "SELECT COUNT(*)::int AS total FROM oracle_brain_episodes" in query:
+            assert "accounting_version" in query and "exact_round_trip_v1" in query
+            assert "cost_provenance" in query and "exact_lot" in query
+            return [{"total": 7}]
         if "COUNT(*)::int AS total, MIN(created_at)" in query:
             return [{"total": 10, "oldest": "2026-09-01", "newest": "2026-09-21"}]
         if "COUNT(*)::int AS total, MIN(observed_at)" in query:
@@ -302,7 +306,7 @@ def test_brain_growth_is_derived_from_persisted_evidence(monkeypatch):
     assert growth["durable_lessons"] == 10
     assert growth["observations"] == 40
     assert growth["intelligence_sources"] == 20
-    assert growth["exact_outcomes"] == 30
+    assert growth["exact_outcomes"] == 7  # retained records are not all full-cost evidence
     assert growth["relationships"] == 1
     assert growth["execution_authority"] == "NONE"
 

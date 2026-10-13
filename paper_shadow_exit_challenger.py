@@ -361,6 +361,10 @@ def _open_position_risk_context(
         snapshot_qty = abs(_num(snapshot.get("quantity"), opened))
         if snapshot_risk > 0 and snapshot_qty > 0:
             total_risk += snapshot_risk * min(1.0, remaining / snapshot_qty)
+            if str(snapshot.get("risk_basis_source") or "entry_risk_snapshot") not in {
+                "entry_stop_price", "entry_risk_snapshot"
+            }:
+                exact = False
         else:
             exact = False
             total_risk += entry * remaining * _stop_loss_pct()
@@ -845,6 +849,43 @@ def _counterfactual_net_r(item: dict[str, Any], fill: dict[str, Any], risk: floa
     return ((price - entry) * quantity - price * quantity * simulated_fee_pct - (total - exit_fee)) / risk
 
 
+def _cleanup_consumed_triggers(conn: Any, pending_keys: set[str]) -> None:
+    """Keep a frozen treatment until inventory and matching close backlog settle."""
+    for pending_key in pending_keys:
+        removed = conn.execute(
+            """
+            DELETE FROM garibaldi_shadow_exit_triggers AS t
+            WHERE t.position_key=%s AND t.model_version=%s
+              AND NOT EXISTS (
+                  SELECT 1 FROM positions p
+                  WHERE p.market=t.market AND p.symbol=t.symbol
+                    AND COALESCE(p.quantity,0)>0
+                    AND NULLIF(p.opened_at,'')::timestamptz
+                        IS NOT DISTINCT FROM t.opened_at
+              )
+              AND NOT EXISTS (
+                  SELECT 1 FROM trade_ledger l
+                  WHERE l.market=t.market AND l.symbol=t.symbol AND l.side='SELL'
+                    AND l.broker_mode='PAPER' AND l.account_environment='PAPER'
+                    AND (NULLIF(l.entry_time,'') IS NULL
+                         OR NULLIF(l.entry_time,'')::timestamptz<=t.trigger_at)
+                    AND (NULLIF(l.exit_time,'') IS NULL
+                         OR NULLIF(l.exit_time,'')::timestamptz>=t.trigger_at)
+                    AND NOT EXISTS (
+                        SELECT 1 FROM garibaldi_shadow_experiments e
+                        WHERE e.trade_id=l.trade_id AND e.generation=%s
+                          AND e.model_version=t.model_version
+                    )
+              )
+            RETURNING t.position_key
+            """,
+            (pending_key, MODEL_VERSION, GENERATION),
+        ).fetchone()
+        if removed:
+            with _STATE_LOCK:
+                _POSITION_STATE.pop(pending_key, None)
+
+
 def finalize_closed_trades(market: str, limit: int = 250) -> int:
     if not active():
         return 0
@@ -853,6 +894,7 @@ def finalize_closed_trades(market: str, limit: int = 250) -> int:
 
     created = 0
     exclusions = {"invalid_identity_or_quantity": 0, "invalid_risk": 0,
+                  "invalid_outcome_or_time": 0,
                   "no_matched_trigger": 0, "unavailable_fill_or_costs": 0}
     with connect() as conn:
         epoch = conn.execute(
@@ -904,12 +946,22 @@ def finalize_closed_trades(market: str, limit: int = 250) -> int:
             if not trade_id or not symbol or entry_price <= 0 or quantity <= 0:
                 exclusions["invalid_identity_or_quantity"] += 1
                 continue
+            entry_time = _dt(item.get("entry_time"))
+            exit_time = _dt(item.get("exit_time"))
+            actual_net_pnl = _num(item.get("round_trip_net_pnl"), float("nan"))
+            if (not math.isfinite(actual_net_pnl) or entry_time is None or exit_time is None
+                    or entry_time > exit_time or exit_time > datetime.now(timezone.utc)):
+                exclusions["invalid_outcome_or_time"] += 1
+                continue
             initial_risk_usd, initial_risk_pct, risk_basis_source = _lot_risk_context(item)
             if initial_risk_usd <= 0 or initial_risk_pct <= 0:
                 exclusions["invalid_risk"] += 1
                 continue
 
-            actual_r = _num(item.get("round_trip_net_pnl")) / initial_risk_usd
+            actual_r = actual_net_pnl / initial_risk_usd
+            if not math.isfinite(actual_r):
+                exclusions["invalid_outcome_or_time"] += 1
+                continue
             trigger = _matching_trigger(
                 conn,
                 normalized_market,
@@ -937,23 +989,23 @@ def finalize_closed_trades(market: str, limit: int = 250) -> int:
                 challenger_exit_type = "ACTUAL_EXIT_FALLBACK"
                 confidence_bucket = _confidence_bucket(_json_obj(item.get("feature_snapshot")).get("confidence"))
 
-            entry_time = _dt(item.get("entry_time"))
-            exit_time = _dt(item.get("exit_time"))
             holding_seconds = (
                 int(max(0.0, (exit_time - entry_time).total_seconds()))
                 if entry_time is not None and exit_time is not None
                 else None
             )
             mfe_r = (
-                _num(item.get("mfe_pct")) / initial_risk_pct
-                if item.get("mfe_pct") is not None and initial_risk_pct > 0
+                _num(item.get("mfe_pct"), float("nan")) / initial_risk_pct
+                if _num(item.get("excursion_sample_count")) > 0 and initial_risk_pct > 0
                 else None
             )
             mae_r = (
-                _num(item.get("mae_pct")) / initial_risk_pct
-                if item.get("mae_pct") is not None and initial_risk_pct > 0
+                _num(item.get("mae_pct"), float("nan")) / initial_risk_pct
+                if _num(item.get("excursion_sample_count")) > 0 and initial_risk_pct > 0
                 else None
             )
+            mfe_r = mfe_r if mfe_r is not None and math.isfinite(mfe_r) else None
+            mae_r = mae_r if mae_r is not None and math.isfinite(mae_r) else None
             actual_exit_type = str(item.get("order_id") or "ACTUAL_EXIT")[:64]
             snapshot_json = json.dumps(trigger, default=str, sort_keys=True) if trigger else None
 
@@ -995,16 +1047,7 @@ def finalize_closed_trades(market: str, limit: int = 250) -> int:
             )
             created += 1
 
-        for pending_key in consumed_pending_keys:
-            conn.execute(
-                """
-                DELETE FROM garibaldi_shadow_exit_triggers
-                WHERE position_key=%s AND model_version=%s
-                """,
-                (pending_key, MODEL_VERSION),
-            )
-            with _STATE_LOCK:
-                _POSITION_STATE.pop(pending_key, None)
+        _cleanup_consumed_triggers(conn, consumed_pending_keys)
     log.info(
         "SHADOW EXIT FINALIZATION | market=%s | exact_cost_candidates=%s | "
         "processed=%s | exclusions=%s | execution_impact=NONE",
@@ -1025,17 +1068,21 @@ class BrainCohortAnalyzerV4:
         completed_experiments_list: list[dict[str, Any]],
         constraints: ShadowExitConstraints | None = None,
     ):
-        self.df = pd.DataFrame(completed_experiments_list)
+        self._source_df = pd.DataFrame(completed_experiments_list)
+        self.df = self._source_df.copy()
         self.c = constraints or ShadowExitConstraints.from_env()
 
     @staticmethod
     def _safe_profit_factor(series: pd.Series) -> float:
         values = pd.to_numeric(series, errors="coerce").dropna()
+        values = values[np.isfinite(values)]
+        if values.empty:
+            return float("nan")
         profits = values[values > 0].sum()
         losses = abs(values[values < 0].sum())
         if losses > 0:
             return float(profits / losses)
-        return float("inf") if profits > 0 else 1.0
+        return float("inf") if profits > 0 else float("nan")
 
     def _episode_returns(self, column: str) -> pd.DataFrame:
         if self.df.empty or column not in self.df:
@@ -1043,7 +1090,8 @@ class BrainCohortAnalyzerV4:
         frame = self.df[["episode_id", "exit_time", column]].copy()
         frame[column] = pd.to_numeric(frame[column], errors="coerce")
         frame["exit_time"] = pd.to_datetime(frame["exit_time"], utc=True, errors="coerce")
-        frame = frame.dropna(subset=["episode_id", column])
+        frame = frame.dropna(subset=["episode_id", "exit_time", column])
+        frame = frame[np.isfinite(frame[column])]
         return (
             frame.groupby("episode_id", as_index=False)
             .agg(exit_time=("exit_time", "max"), **{column: (column, "sum")})
@@ -1052,14 +1100,17 @@ class BrainCohortAnalyzerV4:
 
     def _max_drawdown_r(self, column: str) -> float:
         if self.df.empty or column not in self.df:
-            return 0.0
+            return float("nan")
         frame = self.df[["exit_time", column]].copy()
         frame[column] = pd.to_numeric(frame[column], errors="coerce")
         frame["exit_time"] = pd.to_datetime(frame["exit_time"], utc=True, errors="coerce")
         frame = frame.dropna(subset=["exit_time", column]).sort_values("exit_time", kind="stable")
+        frame = frame[np.isfinite(frame[column])]
         if frame.empty:
-            return 0.0
-        values = frame[column].astype(float)
+            return float("nan")
+        # Simultaneous closes have no observed internal order. Aggregate them
+        # before accumulating equity so input row order cannot invent a peak.
+        values = frame.groupby("exit_time", sort=True)[column].sum().astype(float)
         cumulative = values.cumsum()
         # Include a zero starting-equity anchor so an initial losing sequence is
         # counted as drawdown rather than incorrectly becoming the first peak.
@@ -1079,9 +1130,10 @@ class BrainCohortAnalyzerV4:
         if source.empty or "episode_id" not in source or "delta_r" not in source:
             return float("nan"), float("nan")
 
+        finite_source = source.assign(delta_r=pd.to_numeric(source["delta_r"], errors="coerce"))
+        finite_source = finite_source[np.isfinite(finite_source["delta_r"])]
         episode_means = (
-            source.assign(delta_r=pd.to_numeric(source["delta_r"], errors="coerce"))
-            .dropna(subset=["episode_id", "delta_r"])
+            finite_source.dropna(subset=["episode_id", "delta_r"])
             .groupby("episode_id")["delta_r"]
             .mean()
             .to_numpy(dtype=float)
@@ -1116,30 +1168,54 @@ class BrainCohortAnalyzerV4:
 
     def evaluate_portfolio_safety_gate(self) -> dict[str, Any]:
         required = {
+            "trade_id",
             "episode_id",
             "exit_time",
             "entry_pattern",
             "regime",
             "actual_realized_r_net",
             "challenger_counterfactual_r_net",
+            "challenger_exit_type",
+            "risk_basis_source",
+            "trigger_snapshot",
         }
+        self.df = self._source_df.copy()
+        observed_trade_count = int(len(self.df))
         if self.df.empty or not required.issubset(self.df.columns):
             return {
                 "promotion_evidence_ready": False,
                 "reason": "insufficient_or_invalid_dataset",
+                "trade_count": 0,
+                "observed_trade_count": observed_trade_count,
+                "episode_count": 0,
+                "paired_mean_delta_r": None,
+                "bootstrap_delta_ci": (None, None),
+                "actual_profit_factor": None,
+                "challenger_profit_factor": None,
+                "challenger_post_cost_expectancy_r": None,
+                "actual_max_drawdown_r": None,
+                "challenger_max_drawdown_r": None,
+                "challenger_episode_var_05_r": None,
+                "challenger_episode_cvar_05_r": None,
+                "promotion_action": "NONE",
                 "execution_impact": "NONE",
             }
 
-        self.df = self.df.copy()
-        observed_trade_count = int(len(self.df))
         # Only rows where the challenger actually fired are paired treatment
         # evidence. ACTUAL_EXIT_FALLBACK rows are useful audit/control records,
         # but challenger_r == actual_r by construction; counting them would
         # manufacture zero-delta samples and inflate episode/trade gates.
-        if "challenger_exit_type" in self.df.columns:
-            self.df = self.df[
-                self.df["challenger_exit_type"] == "FORWARD_EVIDENCE_EXIT"
-            ].copy()
+        self.df = self.df[
+            self.df["challenger_exit_type"] == "FORWARD_EVIDENCE_EXIT"
+        ].copy()
+        exclusions = {"no_qualified_treatment": observed_trade_count - len(self.df)}
+        self.df["_trigger_risk_basis_source"] = self.df["trigger_snapshot"].map(
+            lambda value: _json_obj(value).get("risk_basis_source")
+        )
+        exact_risk = (self.df["risk_basis_source"].isin({"entry_stop_price", "entry_risk_snapshot"})
+                      & self.df["_trigger_risk_basis_source"].eq("exact_entry_stop_lots"))
+        exclusions["unqualified_risk_provenance"] = int((~exact_risk).sum())
+        self.df = self.df[exact_risk].copy()
 
         self.df["actual_realized_r_net"] = pd.to_numeric(
             self.df["actual_realized_r_net"], errors="coerce"
@@ -1147,19 +1223,45 @@ class BrainCohortAnalyzerV4:
         self.df["challenger_counterfactual_r_net"] = pd.to_numeric(
             self.df["challenger_counterfactual_r_net"], errors="coerce"
         )
-        self.df = self.df.dropna(
-            subset=["actual_realized_r_net", "challenger_counterfactual_r_net", "episode_id"]
-        )
+        self.df["exit_time"] = pd.to_datetime(self.df["exit_time"], utc=True, errors="coerce")
+        self.df["trade_id"] = self.df["trade_id"].fillna("").astype(str).str.strip()
+        self.df["episode_id"] = self.df["episode_id"].fillna("").astype(str).str.strip()
+        valid = (np.isfinite(self.df["actual_realized_r_net"])
+                 & np.isfinite(self.df["challenger_counterfactual_r_net"])
+                 & self.df["exit_time"].notna()
+                 & (self.df["exit_time"] <= datetime.now(timezone.utc))
+                 & self.df["trade_id"].ne("") & self.df["episode_id"].ne(""))
+        if "entry_time" in self.df:
+            self.df["entry_time"] = pd.to_datetime(self.df["entry_time"], utc=True, errors="coerce")
+            valid &= self.df["entry_time"].notna() & (self.df["entry_time"] <= self.df["exit_time"])
+        exclusions["invalid_identity_time_or_return"] = int((~valid).sum())
+        self.df = self.df[valid].copy()
+        # Canonical trade identity, not row count, is the experimental unit.
+        # Conflicting versions are unqualified; identical replays count once.
+        signature = sorted(required - {"trigger_snapshot"}) + ["_trigger_risk_basis_source"] + [name for name in
+            ("entry_time", "generation", "model_version", "cost_model_version", "risk_basis_source")
+            if name in self.df]
+        versions = self.df.drop_duplicates(subset=signature)
+        conflicts = versions[versions.duplicated(subset=["trade_id"], keep=False)]["trade_id"]
+        exclusions["conflicting_trade_identity"] = int(self.df["trade_id"].isin(conflicts).sum())
+        self.df = self.df[~self.df["trade_id"].isin(conflicts)]
+        before_dedup = len(self.df)
+        self.df = self.df.drop_duplicates(subset=["trade_id"]).copy()
+        exclusions["duplicate_trade_identity"] = before_dedup - len(self.df)
         self.df["delta_r"] = (
             self.df["challenger_counterfactual_r_net"]
             - self.df["actual_realized_r_net"]
         )
+        finite_delta = np.isfinite(self.df["delta_r"])
+        exclusions["nonfinite_paired_delta"] = int((~finite_delta).sum())
+        self.df = self.df[finite_delta].copy()
 
         trade_count = int(len(self.df))
         episode_count = int(self.df["episode_id"].nunique())
         boot_low, boot_high = self.bootstrap_clustered_delta_ci()
         actual_pf = self._safe_profit_factor(self.df["actual_realized_r_net"])
         challenger_pf = self._safe_profit_factor(self.df["challenger_counterfactual_r_net"])
+        challenger_expectancy = float(self.df["challenger_counterfactual_r_net"].mean()) if trade_count else float("nan")
         actual_dd = self._max_drawdown_r("actual_realized_r_net")
         challenger_dd = self._max_drawdown_r("challenger_counterfactual_r_net")
         tail_var, tail_cvar = self._tail_metrics("challenger_counterfactual_r_net")
@@ -1184,7 +1286,10 @@ class BrainCohortAnalyzerV4:
             "sufficient_trades": trade_count >= self.c.min_trades,
             "paired_episode_ci_positive": bool(math.isfinite(boot_low) and boot_low > 0.0),
             "profit_factor_improving": challenger_pf > actual_pf,
-            "drawdown_bounded": challenger_dd <= self.c.allowed_drawdown_limit_r,
+            "post_cost_expectancy_positive": bool(math.isfinite(challenger_expectancy)
+                and challenger_expectancy > 0 and challenger_pf > 1.0),
+            "drawdown_bounded": bool(math.isfinite(challenger_dd)
+                and challenger_dd <= self.c.allowed_drawdown_limit_r),
             "tail_var_protected": bool(
                 math.isfinite(tail_var) and tail_var >= self.c.allowed_tail_loss_limit_r
             ),
@@ -1200,14 +1305,16 @@ class BrainCohortAnalyzerV4:
             "trade_count": trade_count,
             "observed_trade_count": observed_trade_count,
             "episode_count": episode_count,
-            "paired_mean_delta_r": float(self.df["delta_r"].mean()) if trade_count else 0.0,
-            "bootstrap_delta_ci": (boot_low, boot_high),
-            "actual_profit_factor": actual_pf,
-            "challenger_profit_factor": challenger_pf,
-            "actual_max_drawdown_r": actual_dd,
-            "challenger_max_drawdown_r": challenger_dd,
-            "challenger_episode_var_05_r": tail_var,
-            "challenger_episode_cvar_05_r": tail_cvar,
+            "exclusions": exclusions,
+            "paired_mean_delta_r": float(self.df["delta_r"].mean()) if trade_count else None,
+            "bootstrap_delta_ci": tuple(value if math.isfinite(value) else None for value in (boot_low, boot_high)),
+            "actual_profit_factor": actual_pf if not math.isnan(actual_pf) else None,
+            "challenger_profit_factor": challenger_pf if not math.isnan(challenger_pf) else None,
+            "challenger_post_cost_expectancy_r": challenger_expectancy if math.isfinite(challenger_expectancy) else None,
+            "actual_max_drawdown_r": actual_dd if math.isfinite(actual_dd) else None,
+            "challenger_max_drawdown_r": challenger_dd if math.isfinite(challenger_dd) else None,
+            "challenger_episode_var_05_r": tail_var if math.isfinite(tail_var) else None,
+            "challenger_episode_cvar_05_r": tail_cvar if math.isfinite(tail_cvar) else None,
             "harmed_cohorts": harmed_cohorts,
             "execution_impact": "NONE",
             "promotion_action": "NONE",
@@ -1227,7 +1334,7 @@ def shadow_evidence_report(market: str) -> dict[str, Any]:
                        confidence_bucket,actual_exit_type,challenger_exit_type,
                        actual_realized_r_net,challenger_counterfactual_r_net,delta_r,
                        mfe_r,mae_r,holding_time,entry_time,exit_time,initial_risk_usd,
-                       risk_basis_source,model_version,cost_model_version
+                       risk_basis_source,model_version,cost_model_version,trigger_snapshot
                 FROM garibaldi_shadow_experiments
                 WHERE market=%s AND model_version=%s
                 ORDER BY exit_time ASC

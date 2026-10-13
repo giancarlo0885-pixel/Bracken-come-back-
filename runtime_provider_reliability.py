@@ -134,9 +134,10 @@ def yahoo_reference_history(market_data_module: Any, symbol: str, period: str, i
 
     yfinance's bulk ``download`` helper logs missing symbols at ERROR before the
     caller can classify the result. ``Ticker.history(..., raise_errors=True)``
-    instead raises the provider exception to us. We convert it to an empty frame
-    and place that exact canonical symbol/period/interval on a cooldown. A per-key
-    lock prevents concurrent fast/deep scans from issuing the same doomed request.
+    instead raises the provider exception to us. Ordinary unavailable results
+    become empty frames, while rate limits propagate to the router's shared
+    provider cooldown. Both place the exact symbol/period/interval on a cooldown.
+    A per-key lock prevents concurrent fast/deep scans from issuing the same doomed request.
 
     Yahoo provider-native aliases are resolved only at this boundary. The returned
     frame always preserves the Oracle canonical requested/provider identity and
@@ -175,6 +176,13 @@ def yahoo_reference_history(market_data_module: Any, symbol: str, period: str, i
                 interval,
                 exc.__class__.__name__,
             )
+            # The router must see rate limits to protect all symbols and all
+            # workers. Returning an empty frame here bypasses the shared Yahoo
+            # cooldown and repeats the same throttled request on other symbols.
+            from provider_router import classify_provider_failure
+
+            if classify_provider_failure(exc) == "rate_limited":
+                raise
             return pd.DataFrame()
 
         normalized = market_data_module._normalize(data, provider_native)

@@ -11,6 +11,7 @@ submit an order.
 
 import json
 import math
+from datetime import datetime, timezone
 from typing import Any
 
 COUNTERFACTUAL_HORIZON_MINUTES = 60
@@ -21,6 +22,50 @@ PROMOTION_MIN_SAMPLES = 200
 PROMOTION_MIN_PROFIT_FACTOR = 1.05
 PROMOTION_MAX_CALIBRATION_ERROR = 0.15
 PROMOTION_MAX_DRAWDOWN_PCT = 20.0
+
+
+def _exact_cost_outcome_sql(alias: str = "") -> str:
+    """Entry linkage alone does not prove a complete post-cost trade outcome.
+
+    Historical episodes remain in durable storage, but the old exit-ledger
+    accounting must not support quantitative profitability or qualification.
+    """
+    prefix = f"{alias}." if alias else ""
+    return (
+        f"{prefix}provenance_status='exact'"
+        f" AND {prefix}outcome_snapshot->>'accounting_version'='exact_round_trip_v1'"
+        f" AND {prefix}outcome_snapshot->>'cost_provenance'='exact_lot'"
+        f" AND {prefix}net_pnl > '-Infinity'::double precision"
+        f" AND {prefix}net_pnl < 'Infinity'::double precision"
+        f" AND {prefix}fees >= 0 AND {prefix}fees < 'Infinity'::double precision"
+        f" AND {prefix}entry_time <= {prefix}exit_time AND {prefix}exit_time <= NOW()"
+    )
+
+
+def _chronological_drawdown(rows: list[dict[str, Any]]) -> float | None:
+    """Settle simultaneous exits together, without inventing an intra-time order."""
+    realized: dict[datetime, list[float]] = {}
+    for row in rows:
+        timestamp = row.get("exit_time")
+        if not isinstance(timestamp, datetime):
+            try:
+                timestamp = datetime.fromisoformat(str(timestamp).replace("Z", "+00:00"))
+            except ValueError:
+                return None
+        if timestamp.tzinfo is None:
+            timestamp = timestamp.replace(tzinfo=timezone.utc)
+        pnl = _f(row.get("net_pnl"), float("nan"))
+        if not math.isfinite(pnl):
+            return None
+        realized.setdefault(timestamp.astimezone(timezone.utc), []).append(pnl)
+    if not realized:
+        return None
+    equity = peak = drawdown = 0.0
+    for timestamp in sorted(realized):
+        equity += math.fsum(realized[timestamp])
+        peak = max(peak, equity)
+        drawdown = max(drawdown, peak - equity)
+    return drawdown
 
 
 def _f(v: Any, default: float = 0.0) -> float:
@@ -122,20 +167,14 @@ def sync_counterfactuals(conn: Any, *, limit: int = 250, market: str | None = No
     return counts
 
 
-def refresh_calibration(conn: Any, *, market: str | None = None) -> dict[str, int]:
-    """Compare entry-time probability/edge with exact realized paper outcomes."""
-    scope, scope_params = learning_market_filter(market, "market")
-    rows = list(conn.execute(
-        f"""SELECT market,feature_snapshot,return_pct
-           FROM oracle_brain_episodes
-           WHERE provenance_status='exact' AND return_pct IS NOT NULL{scope}""", scope_params
-    ).fetchall())
+def _calibration_buckets(rows: list[dict[str, Any]]) -> dict[tuple[str, float], list[tuple[float, float | None, float]]]:
     buckets: dict[tuple[str, float], list[tuple[float, float | None, float]]] = {}
     for row in rows:
         features = _obj(row.get("feature_snapshot"))
         probability = _deep_number(features, ("probability_of_profit","probability","win_probability"))
         edge = _deep_number(features, ("expected_edge_pct","expected_value_pct","net_expected_value_pct","edge_pct"))
-        if probability is None:
+        realized_return = _f(row.get("return_pct"), float("nan"))
+        if probability is None or not math.isfinite(realized_return):
             continue
         if 1.0 < probability <= 100.0:
             probability /= 100.0
@@ -143,8 +182,20 @@ def refresh_calibration(conn: Any, *, market: str | None = None) -> dict[str, in
             continue
         floor = min(0.9, math.floor(probability * 10.0) / 10.0)
         buckets.setdefault((str(row.get("market") or "unknown"), floor), []).append(
-            (probability, edge, _f(row.get("return_pct")))
+            (probability, edge, realized_return)
         )
+    return buckets
+
+
+def refresh_calibration(conn: Any, *, market: str | None = None) -> dict[str, int]:
+    """Compare entry-time probability/edge with complete post-cost outcomes."""
+    scope, scope_params = learning_market_filter(market, "market")
+    rows = list(conn.execute(
+        f"""SELECT market,feature_snapshot,return_pct
+           FROM oracle_brain_episodes
+           WHERE {_exact_cost_outcome_sql()} AND return_pct IS NOT NULL{scope}""", scope_params
+    ).fetchall())
+    buckets = _calibration_buckets(rows)
     written = 0
     for (market, floor), values in buckets.items():
         n = len(values)
@@ -182,16 +233,16 @@ def refresh_weaknesses(conn: Any, *, market: str | None = None) -> dict[str, int
                   AVG(mfe_pct) FILTER (WHERE mfe_pct IS NOT NULL) AS avg_mfe,
                   AVG(mae_pct) FILTER (WHERE mae_pct IS NOT NULL) AS avg_mae
            FROM oracle_brain_episodes
-           WHERE provenance_status='exact'{scope}
+           WHERE {_exact_cost_outcome_sql()}{scope}
            GROUP BY market,strategy,regime""", scope_params
     ).fetchall())
     negative = 0
     for row in rows:
         samples = int(row.get("samples") or 0)
         loss = _f(row.get("gross_loss"))
-        pf = (_f(row.get("gross_win")) / loss) if loss > 0 else (999.0 if _f(row.get("gross_win")) > 0 else 0.0)
+        pf = (_f(row.get("gross_win")) / loss) if loss > 0 else None
         expectancy = _f(row.get("expectancy"))
-        state = "negative" if samples >= WEAKNESS_MIN_SAMPLES and (expectancy < 0 or pf <= 1.0) else "insufficient_or_nonnegative"
+        state = "negative" if samples >= WEAKNESS_MIN_SAMPLES and (expectancy <= 0 or (pf is not None and pf <= 1.0)) else "insufficient_or_nonnegative"
         if state == "negative":
             negative += 1
         key = f"{row.get('market')}:{row.get('strategy')}:{row.get('regime')}"
@@ -213,53 +264,65 @@ def refresh_weaknesses(conn: Any, *, market: str | None = None) -> dict[str, int
 def evaluate_promotion_evidence(conn: Any, market: str) -> dict[str, Any]:
     """Research recommendation only; never promotes or changes execution behavior."""
     stats = conn.execute(
-        """SELECT COUNT(*)::int AS samples,AVG(net_pnl) AS expectancy,
+        f"""SELECT COUNT(*)::int AS samples,AVG(net_pnl) AS expectancy,
                   SUM(CASE WHEN net_pnl>0 THEN net_pnl ELSE 0 END) AS gross_win,
                   ABS(SUM(CASE WHEN net_pnl<0 THEN net_pnl ELSE 0 END)) AS gross_loss
-           FROM oracle_brain_episodes WHERE provenance_status='exact' AND market=%s""",
+           FROM oracle_brain_episodes WHERE {_exact_cost_outcome_sql()} AND market=%s""",
         (market,),
     ).fetchone() or {}
     samples = int(stats.get("samples") or 0)
     loss = _f(stats.get("gross_loss"))
-    pf = (_f(stats.get("gross_win")) / loss) if loss > 0 else 0.0
-    cal = conn.execute(
-        """SELECT SUM(samples*calibration_error)/NULLIF(SUM(samples),0) AS error
-           FROM oracle_calibration_buckets WHERE market=%s AND samples >= %s""",
-        (market,CALIBRATION_MIN_SAMPLES),
-    ).fetchone() or {}
-    calibration_error = _f(cal.get("error"), 1.0)
+    pf = (_f(stats.get("gross_win")) / loss) if loss > 0 else None
+    # A legacy calibration cache may still contain exit-only-cost outcomes.
+    # Recompute from canonical eligible episodes before making any claim.
+    calibration_rows = list(conn.execute(
+        f"""SELECT market,feature_snapshot,return_pct FROM oracle_brain_episodes
+           WHERE {_exact_cost_outcome_sql()} AND market=%s AND return_pct IS NOT NULL""",
+        (market,),
+    ).fetchall())
+    mature = [values for values in _calibration_buckets(calibration_rows).values()
+              if len(values) >= CALIBRATION_MIN_SAMPLES]
+    calibration_samples = sum(len(values) for values in mature)
+    calibration_error = (
+        sum(abs(sum(x[0] for x in values) - sum(x[2] > 0 for x in values))
+            for values in mature) / calibration_samples
+        if calibration_samples else None
+    )
     pnl_rows = list(conn.execute(
-        """SELECT net_pnl FROM oracle_brain_episodes
-           WHERE provenance_status='exact' AND market=%s
+        f"""SELECT exit_time,net_pnl FROM oracle_brain_episodes
+           WHERE {_exact_cost_outcome_sql()} AND market=%s
            ORDER BY exit_time ASC,episode_key ASC""",
         (market,),
     ).fetchall())
-    equity = peak = 0.0
-    max_drawdown = 0.0
-    for item in pnl_rows:
-        equity += _f(item.get("net_pnl"))
-        peak = max(peak, equity)
-        max_drawdown = max(max_drawdown, peak - equity)
+    max_drawdown = _chronological_drawdown(pnl_rows)
     gross_profit = max(_f(stats.get("gross_win")), 0.0)
-    max_drawdown_pct = (max_drawdown / gross_profit * 100.0) if gross_profit > 0 else (100.0 if max_drawdown > 0 else 0.0)
+    max_drawdown_pct = (max_drawdown / gross_profit * 100.0) if gross_profit > 0 and max_drawdown is not None else None
+    expectancy = _f(stats.get("expectancy"), float("nan"))
+    expectancy = expectancy if samples and math.isfinite(expectancy) else None
     reasons = []
     if samples < PROMOTION_MIN_SAMPLES: reasons.append("insufficient_exact_samples")
-    if _f(stats.get("expectancy")) <= 0: reasons.append("nonpositive_expectancy")
-    if pf < PROMOTION_MIN_PROFIT_FACTOR: reasons.append("profit_factor_below_floor")
-    if calibration_error > PROMOTION_MAX_CALIBRATION_ERROR: reasons.append("calibration_error_above_ceiling")
-    if max_drawdown_pct > PROMOTION_MAX_DRAWDOWN_PCT: reasons.append("drawdown_above_ceiling")
+    if expectancy is None: reasons.append("post_cost_expectancy_unavailable")
+    elif expectancy <= 0: reasons.append("nonpositive_expectancy")
+    if pf is None: reasons.append("profit_factor_unavailable")
+    elif pf < PROMOTION_MIN_PROFIT_FACTOR: reasons.append("profit_factor_below_floor")
+    if calibration_error is None: reasons.append("calibration_unavailable")
+    elif calibration_error > PROMOTION_MAX_CALIBRATION_ERROR: reasons.append("calibration_error_above_ceiling")
+    if max_drawdown_pct is None: reasons.append("drawdown_unavailable")
+    elif max_drawdown_pct > PROMOTION_MAX_DRAWDOWN_PCT: reasons.append("drawdown_above_ceiling")
     eligible = not reasons
     result = {
         "candidate_key": f"brain_paper_influence:{market}",
         "market": market,
         "samples": samples,
-        "expectancy": _f(stats.get("expectancy")),
+        "expectancy": expectancy,
         "profit_factor": pf,
         "calibration_error": calibration_error,
         "max_drawdown": max_drawdown_pct,
         "eligible": eligible,
         "reasons": reasons,
         "execution_impact": "NONE",
+        "accounting_version": "exact_round_trip_v1",
+        "cost_provenance": "exact_lot",
     }
     conn.execute(
         """INSERT INTO oracle_paper_promotion_evidence(

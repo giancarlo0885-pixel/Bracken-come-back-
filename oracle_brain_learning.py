@@ -13,6 +13,7 @@ BRAIN_LEARNING_SYNC_SECONDS = max(300, int(os.getenv("ORACLE_BRAIN_SYNC_SECONDS"
 MIN_MATURE_SAMPLES = max(20, int(os.getenv("ORACLE_BRAIN_MATURE_SAMPLES", "30")))
 _SOURCE_BATCH = max(25, int(os.getenv("ORACLE_BRAIN_SOURCE_BATCH", "250")))
 _EPISODE_BATCH = max(25, int(os.getenv("ORACLE_BRAIN_EPISODE_BATCH", "250")))
+_ACCOUNTING_VERSION = "exact_round_trip_v1"
 
 
 def _num(value: Any, default: float = 0.0) -> float:
@@ -238,21 +239,33 @@ def episode_from_row(row: dict[str, Any], *, now: datetime | None = None) -> dic
     if not trade_id or not signal_id or not feature_snapshot:
         return None
 
+    # SELL-ledger net_pnl/fees cover only the exit. Only uniquely matched
+    # canonical entry lots establish the complete round-trip cost outcome.
+    net_pnl = _num(row.get("round_trip_net_pnl"), float("nan"))
+    fees = _num(row.get("round_trip_fees"), float("nan"))
+    if (row.get("cost_provenance") != "exact_lot"
+            or not math.isfinite(net_pnl) or not math.isfinite(fees) or fees < 0):
+        return None
+
     entry_price = _num(row.get("entry_price"))
     quantity = abs(_num(row.get("quantity")))
     basis = entry_price * quantity if entry_price > 0 and quantity > 0 else 0.0
-    net_pnl = _num(row.get("net_pnl"))
     return_pct = (net_pnl / basis) * 100.0 if basis > 0 else None
     entry_time = _dt(row.get("entry_time"))
     exit_time = _dt(row.get("exit_time"))
+    current = _dt(now) or datetime.now(timezone.utc)
+    if (entry_time is None or exit_time is None or exit_time < entry_time
+            or entry_time > current or exit_time > current):
+        return None
     exit_price = _num(row.get("exit_price"))
-    gross_pnl = _num(row.get("gross_pnl"), net_pnl + max(0.0, _num(row.get("fees"))))
-    holding_seconds = (
-        max(0.0, (exit_time - entry_time).total_seconds())
-        if entry_time is not None and exit_time is not None
-        else None
-    )
-    fresh = freshness_score(exit_time, now=now, half_life_days=45.0)
+    gross_pnl = net_pnl + fees
+    excursion_sample_count = max(0, int(_num(row.get("excursion_sample_count"), 0)))
+    mfe_pct = _num(row.get("mfe_pct"), float("nan")) if excursion_sample_count > 0 else float("nan")
+    mae_pct = _num(row.get("mae_pct"), float("nan")) if excursion_sample_count > 0 else float("nan")
+    mfe_pct = mfe_pct if math.isfinite(mfe_pct) else None
+    mae_pct = mae_pct if math.isfinite(mae_pct) else None
+    holding_seconds = (exit_time - entry_time).total_seconds()
+    fresh = freshness_score(exit_time, now=current, half_life_days=45.0)
     confidence = min(0.99, 0.82 + fresh * 0.17)
     strategy = _normalized_strategy_identity(row.get("strategy"))
     regime = str(row.get("regime") or "unknown")
@@ -270,10 +283,10 @@ def episode_from_row(row: dict[str, Any], *, now: datetime | None = None) -> dic
         "entry_time": entry_time,
         "exit_time": exit_time,
         "net_pnl": net_pnl,
-        "fees": max(0.0, _num(row.get("fees"))),
+        "fees": fees,
         "return_pct": return_pct,
-        "mfe_pct": None if row.get("mfe_pct") is None else _num(row.get("mfe_pct")),
-        "mae_pct": None if row.get("mae_pct") is None else _num(row.get("mae_pct")),
+        "mfe_pct": mfe_pct,
+        "mae_pct": mae_pct,
         "provenance_status": "exact",
         "source_quality": 1.0,
         "freshness_score": fresh,
@@ -283,17 +296,19 @@ def episode_from_row(row: dict[str, Any], *, now: datetime | None = None) -> dic
             "outcome": outcome,
             "gross_pnl": gross_pnl,
             "net_pnl": net_pnl,
-            "fees": max(0.0, _num(row.get("fees"))),
+            "fees": fees,
+            "accounting_version": _ACCOUNTING_VERSION,
+            "cost_provenance": "exact_lot",
             "entry_price": entry_price,
             "exit_price": exit_price if exit_price > 0 else None,
             "holding_seconds": holding_seconds,
-            "mfe_pct": None if row.get("mfe_pct") is None else _num(row.get("mfe_pct")),
-            "mae_pct": None if row.get("mae_pct") is None else _num(row.get("mae_pct")),
+            "mfe_pct": mfe_pct,
+            "mae_pct": mae_pct,
             "entry_signal_id": signal_id,
             "entry_decision_id": row.get("entry_decision_id"),
             "entry_forecast_id": row.get("entry_forecast_id"),
             "entry_quote_id": row.get("entry_quote_id"),
-            "excursion_sample_count": int(_num(row.get("excursion_sample_count"), 0)),
+            "excursion_sample_count": excursion_sample_count,
         },
         "tags": [
             f"market:{_slug(market)}",
@@ -658,7 +673,8 @@ def _sync_trade_episodes(conn: Any, market: str, *, limit: int = _EPISODE_BATCH)
         conn.execute(
             """
             SELECT m.trade_id,m.market,m.symbol,m.strategy,m.regime,m.entry_time,m.exit_time,
-                   m.entry_price,m.exit_price,m.net_pnl,m.fees,m.mfe_pct,m.mae_pct,
+                   m.entry_price,m.exit_price,m.round_trip_net_pnl,m.round_trip_fees,
+                   m.cost_provenance,m.mfe_pct,m.mae_pct,
                    m.excursion_sample_count,
                    t.quantity,t.entry_signal_id,t.entry_decision_id,t.entry_forecast_id,
                    t.entry_quote_id,t.feature_snapshot
@@ -683,9 +699,27 @@ def _sync_trade_episodes(conn: Any, market: str, *, limit: int = _EPISODE_BATCH)
             continue
         latest_exit = max(latest_exit or episode["exit_time"], episode["exit_time"]) if episode["exit_time"] else latest_exit
         existing_episode = conn.execute(
-            "SELECT 1 FROM oracle_brain_episodes WHERE episode_key=%s LIMIT 1",
+            "SELECT net_pnl,fees,return_pct,outcome_snapshot FROM oracle_brain_episodes WHERE episode_key=%s LIMIT 1",
             (episode["episode_key"],),
         ).fetchone()
+        if existing_episode:
+            previous = _json_obj(existing_episode.get("outcome_snapshot"))
+            if (previous.get("accounting_version") != _ACCOUNTING_VERSION
+                    or previous.get("cost_provenance") != "exact_lot"
+                    or existing_episode.get("net_pnl") != episode["net_pnl"]
+                    or existing_episode.get("fees") != episode["fees"]):
+                # Preserve the former durable snapshot when a normal bounded
+                # sync corrects it from canonical full-cost accounting.
+                episode["outcome_snapshot"]["accounting_revision"] = {
+                    "previous_outcome_snapshot": previous,
+                    "previous_net_pnl": existing_episode.get("net_pnl"),
+                    "previous_fees": existing_episode.get("fees"),
+                    "previous_return_pct": existing_episode.get("return_pct"),
+                    "source_ref": f"paper_regime_trade_metrics:{episode['trade_id']}",
+                    "corrected_at": now.isoformat(),
+                }
+            elif "accounting_revision" in previous:
+                episode["outcome_snapshot"]["accounting_revision"] = previous["accounting_revision"]
         conn.execute(
             """
             INSERT INTO oracle_brain_episodes(
@@ -808,8 +842,12 @@ def _insert_regime_lesson(conn: Any, market: str, strategy: str, regime: str, su
     sample_growth = int(summary["samples"]) - prior_samples
     meaningful_growth = sample_growth >= max(10, int(max(prior_samples, 1) * 0.25))
     polarity_flip = bool(prior_polarity and prior_polarity != polarity)
+    accounting_changed = (
+        prior_meta.get("accounting_version") != _ACCOUNTING_VERSION
+        or prior_meta.get("cost_provenance") != "exact_lot"
+    )
 
-    if active and not polarity_flip and not meaningful_growth:
+    if active and not polarity_flip and not meaningful_growth and not accounting_changed:
         return int(active["id"])
 
     prior_id = int(active["id"]) if active.get("id") is not None else None
@@ -839,6 +877,8 @@ def _insert_regime_lesson(conn: Any, market: str, strategy: str, regime: str, su
         "strategy": strategy,
         "regime": regime,
         "source_quality": 1.0,
+        "accounting_version": _ACCOUNTING_VERSION,
+        "cost_provenance": "exact_lot",
     }
     inserted = conn.execute(
         """
@@ -872,6 +912,8 @@ def _insert_regime_lesson(conn: Any, market: str, strategy: str, regime: str, su
                 current_id,
                 prior_polarity,
                 polarity,
+                "Mature exact-provenance paper evidence changed polarity after canonical accounting reconciliation."
+                if accounting_changed else
                 "Mature exact-provenance paper evidence changed polarity as new outcomes accumulated.",
                 json.dumps({"samples": summary["samples"], "expectancy": summary["expectancy"]}),
             ),
@@ -886,6 +928,8 @@ def _sync_regime_lessons_and_queue(conn: Any, market: str) -> tuple[int, int]:
             SELECT strategy,regime,net_pnl,fees,freshness_score
             FROM oracle_brain_episodes
             WHERE market=%s AND provenance_status='exact'
+              AND outcome_snapshot->>'accounting_version'='exact_round_trip_v1'
+              AND outcome_snapshot->>'cost_provenance'='exact_lot'
             ORDER BY exit_time DESC
             LIMIT 3000
             """,
@@ -1125,7 +1169,11 @@ def retrieve_brain_context(
     """Read the most relevant durable research memory without affecting execution."""
     from database import connect
 
-    clauses = ["market=%s", "provenance_status='exact'"]
+    clauses = [
+        "market=%s", "provenance_status='exact'",
+        "outcome_snapshot->>'accounting_version'='exact_round_trip_v1'",
+        "outcome_snapshot->>'cost_provenance'='exact_lot'",
+    ]
     params: list[Any] = [market]
     if symbol:
         clauses.append("symbol=%s")
