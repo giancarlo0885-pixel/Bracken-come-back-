@@ -125,6 +125,7 @@ def _positive_experiments():
                     "challenger_counterfactual_r_net": challenger,
                     "challenger_exit_type": "FORWARD_EVIDENCE_EXIT",
                     "risk_basis_source": "entry_stop_price",
+                    "initial_risk_usd": 10.0,
                     "trigger_snapshot": {"risk_basis_source": "exact_entry_stop_lots"},
                 }
             )
@@ -160,6 +161,7 @@ def test_mature_harmed_cohort_vetoes_promotion_evidence():
                 "challenger_counterfactual_r_net": 0.10,
                 "challenger_exit_type": "FORWARD_EVIDENCE_EXIT",
                 "risk_basis_source": "entry_stop_price",
+                "initial_risk_usd": 10.0,
                 "trigger_snapshot": {"risk_basis_source": "exact_entry_stop_lots"},
             }
         )
@@ -495,7 +497,7 @@ def test_canonical_trade_replays_count_once_and_conflicts_are_excluded():
 
 
 def test_missing_identity_or_treatment_is_not_implicit_paired_evidence():
-    for field in ("trade_id", "challenger_exit_type", "risk_basis_source", "trigger_snapshot"):
+    for field in ("trade_id", "challenger_exit_type", "risk_basis_source", "trigger_snapshot", "initial_risk_usd"):
         records = _positive_experiments()
         for row in records:
             row.pop(field)
@@ -516,7 +518,9 @@ def test_empty_treatment_metrics_are_unavailable_not_zero_or_break_even():
         assert report["bootstrap_delta_ci"] == (None, None)
         for metric in ("paired_mean_delta_r", "actual_profit_factor", "challenger_profit_factor",
                        "actual_max_drawdown_r", "challenger_max_drawdown_r",
-                       "challenger_episode_var_05_r", "challenger_episode_cvar_05_r"):
+                       "challenger_episode_var_05_r", "challenger_episode_cvar_05_r",
+                       "actual_post_cost_net_pnl_usd", "challenger_post_cost_net_pnl_usd",
+                       "actual_post_cost_expectancy_usd", "challenger_post_cost_expectancy_usd"):
             assert report[metric] is None
 
 
@@ -710,3 +714,94 @@ def test_relative_improvement_is_not_positive_post_cost_expectancy():
     assert report["conditions"]["post_cost_expectancy_positive"] is False
     assert report["promotion_evidence_ready"] is False
     assert report["promotion_action"] == "NONE"
+
+
+def test_unequal_risk_positive_r_expectancy_cannot_hide_dollar_losses():
+    base = _positive_experiments()[0]
+    records = []
+    for episode in range(30):
+        for leg in range(10):
+            winner = leg < 9
+            records.append({**base, "trade_id": f"unequal-{episode}-{leg}",
+                "episode_id": f"unequal-episode-{episode}",
+                "exit_time": base["exit_time"] + timedelta(days=episode, minutes=leg),
+                "initial_risk_usd": 1.0 if winner else 100.0,
+                "actual_realized_r_net": 0.9 if winner else -0.6,
+                "challenger_counterfactual_r_net": 1.0 if winner else -0.5})
+    report = BrainCohortAnalyzerV4(records).evaluate_portfolio_safety_gate()
+    assert report["trade_count"] == 300
+    assert report["episode_count"] == 30
+    assert report["conditions"]["paired_episode_ci_positive"] is True
+    assert report["conditions"]["profit_factor_improving"] is True
+    assert report["challenger_post_cost_expectancy_r"] > 0
+    assert abs(report["challenger_profit_factor"] - 9 / 50) < 1e-12
+    assert abs(report["challenger_post_cost_net_pnl_usd"] - (-41 * 30)) < 1e-10
+    assert abs(report["challenger_post_cost_expectancy_usd"] - (-4.1)) < 1e-12
+    assert report["profit_factor_basis"] == "post_cost_pnl_usd"
+    assert report["conditions"]["post_cost_expectancy_positive"] is False
+    assert report["promotion_evidence_ready"] is False
+    assert report["promotion_action"] == "NONE"
+    assert report["execution_impact"] == "NONE"
+
+
+def test_post_cost_dollar_totals_undo_risk_normalization_without_charging_costs_again():
+    report = BrainCohortAnalyzerV4(_positive_experiments()).evaluate_portfolio_safety_gate()
+    assert abs(report["actual_post_cost_net_pnl_usd"] - (-30)) < 1e-12
+    assert abs(report["challenger_post_cost_net_pnl_usd"] - 45) < 1e-12
+    assert abs(report["actual_post_cost_expectancy_usd"] - (-0.5)) < 1e-12
+    assert abs(report["challenger_post_cost_expectancy_usd"] - 0.75) < 1e-12
+    assert report["actual_profit_factor"] == 0.5
+    assert report["challenger_profit_factor"] == 4.0
+    assert report["actual_profit_factor_status"] == "available"
+    assert report["challenger_profit_factor_status"] == "available"
+
+
+def test_missing_nonfinite_or_nonpositive_initial_risk_cannot_make_dollar_evidence():
+    base = _positive_experiments()[0]
+    invalid = (None, float("nan"), float("inf"), -float("inf"), 0, -1, "missing")
+    rows = [{**base, "trade_id": f"bad-risk-{index}", "initial_risk_usd": risk}
+            for index, risk in enumerate(invalid)]
+    report = BrainCohortAnalyzerV4(rows).evaluate_portfolio_safety_gate()
+    assert report["observed_trade_count"] == len(invalid)
+    assert report["trade_count"] == 0
+    assert report["exclusions"]["invalid_initial_risk_usd"] == len(invalid)
+    assert report["challenger_post_cost_net_pnl_usd"] is None
+    assert report["challenger_post_cost_expectancy_usd"] is None
+    assert report["promotion_evidence_ready"] is False
+    base.pop("initial_risk_usd")
+    assert BrainCohortAnalyzerV4([base]).evaluate_portfolio_safety_gate()["trade_count"] == 0
+
+
+def test_no_losses_profit_factor_is_unavailable_with_explicit_status():
+    records = [{**row, "actual_realized_r_net": 0.1, "challenger_counterfactual_r_net": 0.2}
+               for row in _positive_experiments()]
+    report = BrainCohortAnalyzerV4(records).evaluate_portfolio_safety_gate()
+    assert report["actual_profit_factor"] is None
+    assert report["challenger_profit_factor"] is None
+    assert report["actual_profit_factor_status"] == "no_losses"
+    assert report["challenger_profit_factor_status"] == "no_losses"
+    assert report["challenger_post_cost_net_pnl_usd"] == 120
+    assert report["promotion_evidence_ready"] is False
+
+
+def test_nonfinite_dollar_product_is_unavailable_even_with_finite_r_and_risk():
+    base = {**_positive_experiments()[0], "initial_risk_usd": 100,
+            "actual_realized_r_net": 1e308, "challenger_counterfactual_r_net": 1e308}
+    report = BrainCohortAnalyzerV4([base]).evaluate_portfolio_safety_gate()
+    assert report["trade_count"] == 0
+    assert report["exclusions"]["nonfinite_post_cost_usd"] == 1
+    assert report["challenger_post_cost_net_pnl_usd"] is None
+    assert report["promotion_evidence_ready"] is False
+
+
+def test_profit_within_stored_risk_and_r_rounding_error_cannot_qualify():
+    records = [{**row, "initial_risk_usd": 1e-6,
+                "actual_realized_r_net": 1e-6 if index % 3 else -2e-6,
+                "challenger_counterfactual_r_net": 2e-6 if index % 3 else -1e-6}
+               for index, row in enumerate(_positive_experiments())]
+    report = BrainCohortAnalyzerV4(records).evaluate_portfolio_safety_gate()
+    assert report["challenger_post_cost_net_pnl_usd"] > 0
+    assert report["conditions"]["post_cost_expectancy_positive"] is True
+    assert report["challenger_dollar_rounding_error_bound_usd"] > report["challenger_post_cost_net_pnl_usd"]
+    assert report["conditions"]["dollar_profit_exceeds_rounding_uncertainty"] is False
+    assert report["promotion_evidence_ready"] is False
