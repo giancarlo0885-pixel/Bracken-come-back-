@@ -152,6 +152,7 @@ def matched_exit_comparison(rows: list[dict[str, Any]]) -> dict[str, Any]:
     """Compare immutable paired exits only; reject unmatched or fabricated edges."""
     pairs = []
     rejected = 0
+    seen_trade_ids: set[str] = set()
     for row in rows:
         try:
             if row.get("matched_forward_observation") is not True:
@@ -166,6 +167,10 @@ def matched_exit_comparison(rows: list[dict[str, Any]]) -> dict[str, Any]:
             challenger = _finite(row["challenger_net_pnl"])
             if not row.get("episode_id") or not row.get("trade_id"):
                 raise ValueError("missing identity")
+            trade_id = str(row["trade_id"])
+            if trade_id in seen_trade_ids:
+                raise ValueError("duplicate matched trade")
+            seen_trade_ids.add(trade_id)
             pairs.append({"episode": str(row["episode_id"]),
                           "delta": challenger - champion,
                           "avoided_loss": champion < 0 <= challenger,
