@@ -74,6 +74,20 @@ input[type=range]{width:100%;accent-color:#55d4ff}
   .inspector h3{font-size:14px}.inspector .metric{font-size:11px}.inspector p{font-size:10px}
   .replay{left:8px;right:8px;width:auto;bottom:8px;padding:8px 9px}
 }
+
+/* Super Crypto Oracle — holographic research cockpit. Display-only. */
+#app{border-color:#0f7db0;background:#020b1d;box-shadow:inset 0 0 90px #042f50,0 0 26px #035d9250}
+#app:after{content:"";position:absolute;inset:0;pointer-events:none;z-index:2;background:linear-gradient(180deg,#00101b25,transparent 28%,#00112355 100%)}
+.brand,.toolbar,.inspector,.replay,.crypto-cockpit{background:linear-gradient(145deg,#02152beb,#03101ae8);border:1px solid #168dc7;box-shadow:0 0 20px #006ca633,inset 0 0 18px #00487622}
+.brand b{color:#4dd7ff;text-shadow:0 0 12px #009dff;letter-spacing:.12em}
+button{border-color:#126c9a;color:#bdefff;background:#04182b}
+button.active{color:#4cf9c7;border-color:#26cdb9}
+.crypto-cockpit{position:absolute;z-index:11;pointer-events:none;left:14px;bottom:14px;width:min(315px,calc(100% - 28px));padding:11px 13px;border-radius:12px}
+.crypto-cockpit .heading{color:#50d7ff;font-size:11px;font-weight:900;letter-spacing:.12em}
+.crypto-cockpit .caption{font-size:10px;color:#9cc4da;margin:5px 0}
+.crypto-cockpit .idea{font-size:12px;margin-top:7px;color:#f1faff;overflow-wrap:anywhere}
+.crypto-cockpit .warning{color:#ffbf75;font-size:10px;margin-top:7px}
+@media(max-width:720px){.crypto-cockpit{left:8px;bottom:68px;width:min(230px,calc(100% - 16px));padding:8px}.crypto-cockpit .idea{font-size:10px}.brand{max-width:156px}.toolbar{max-width:150px}}
 </style>
 <script type="importmap">
 {"imports":{
@@ -111,6 +125,7 @@ input[type=range]{width:100%;accent-color:#55d4ff}
       <button id="replayToggle">REPLAY</button>
     </div>
   </div>
+  <div class="crypto-cockpit" aria-label="Crypto trading decision research"><div class="heading">◈ CRYPTO DECISION CORE</div><div class="caption" id="cryptoCoverage">Verified research feed</div><div class="idea" id="cryptoDecision">Loading recorded trade ideas…</div><div class="warning">PAPER RESEARCH · NO LIVE ORDERS</div></div>
   <div class="hud inspector" id="inspector"></div>
   <div class="hud replay" id="replayPanel">
     <div class="replay-head">
@@ -129,6 +144,14 @@ import { CSS2DRenderer, CSS2DObject } from "three/addons/renderers/CSS2DRenderer
 window.__oracleCityBooted=true;
 const DATA=JSON.parse(document.getElementById("oracle-data").textContent);
 const app=document.getElementById("app");
+// Present only persisted crypto ideas; never fabricate signals or prices.
+const cryptoIdeas=(Array.isArray(DATA.opportunities)?DATA.opportunities:[]).filter(x=>["crypto","us_crypto"].includes(String(x.market||"").toLowerCase()));
+const decisionEl=document.getElementById("cryptoDecision");
+const coverageEl=document.getElementById("cryptoCoverage");
+coverageEl.textContent=cryptoIdeas.length+" recorded crypto idea(s) · read-only";
+const lead=cryptoIdeas[0];
+decisionEl.textContent=lead?(String(lead.symbol||"UNKNOWN")+" · "+String(lead.action||"RESEARCH")+" · "+String(lead.strategy||"unclassified")+" · "+String(lead.regime||"regime unknown")):"No recorded crypto idea in this snapshot";
+
 const stage=document.getElementById("stage");
 const status=document.getElementById("status");
 const inspector=document.getElementById("inspector");

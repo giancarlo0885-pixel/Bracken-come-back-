@@ -17,7 +17,21 @@ st.set_page_config(
     page_title="Oracle City V3 - GARIBALDI MARKET ORACLE",
     page_icon="ORCL",
     layout="wide",
+    initial_sidebar_state="collapsed",
 )
+
+# Compact controls and metrics on narrow screens. Preserve full desktop layout.
+st.markdown("""<style>
+@media (max-width: 720px) {
+  [data-testid="stHorizontalBlock"] {flex-wrap: wrap !important; gap: .5rem !important;}
+  [data-testid="stHorizontalBlock"] > [data-testid="stColumn"] {
+    flex: 1 1 min(42%, 180px) !important; min-width: 0 !important;
+  }
+  [data-testid="stMetricLabel"] {white-space: normal !important; overflow-wrap: anywhere;}
+  [data-testid="stMetricValue"] {font-size: clamp(1.1rem, 5vw, 1.7rem) !important;}
+  [data-testid="stIFrame"] {max-width: 100% !important;}
+}
+</style>""", unsafe_allow_html=True)
 
 health = database_ready(connect_timeout=5)
 if not health.get("ok"):
@@ -25,9 +39,20 @@ if not health.get("ok"):
     st.caption(str(health.get("message") or "Database readiness check failed."))
     st.stop()
 
+@st.cache_data(ttl=15, show_spinner="Loading Oracle City snapshot…")
+def _city_snapshot_cached(market_scope):
+    return build_oracle_city_snapshot(rows, market_scope=market_scope)
+
+
+view = st.radio("City scope", ["Crypto", "All markets"], horizontal=True)
+market_scope = "crypto" if view == "Crypto" else None
+if market_scope:
+    st.caption("Crypto display focus · capital transfer and stock-worker retirement pending.")
+
 left, middle, spacer = st.columns([1, 1, 4])
 with left:
     if st.button("Refresh now", type="primary", width="stretch"):
+        _city_snapshot_cached.clear()
         st.rerun()
 with middle:
     auto_refresh = st.toggle("Sync data every 60s", value=False)
@@ -35,10 +60,10 @@ with middle:
 if auto_refresh and st_autorefresh is not None:
     st_autorefresh(interval=60_000, key="oracle-city-world-sync")
 
-snapshot = build_oracle_city_snapshot(rows)
+snapshot = _city_snapshot_cached(market_scope)
 summary = snapshot["summary"]
 
-st.title("Oracle City — Cinematic Metropolis")
+st.title("Oracle City — Crypto Metropolis" if market_scope else "Oracle City — Cinematic Metropolis")
 if snapshot["warnings"]:
     st.warning("Partial Oracle City feeds: " + "; ".join(snapshot["warnings"]))
 

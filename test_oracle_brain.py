@@ -8,6 +8,37 @@ import oracle_brain
 from oracle_brain_component import render_oracle_brain_component
 
 
+def test_crypto_brain_scope_filters_trade_evidence_but_preserves_shared_memory():
+    queries = []
+
+    def scoped_fetch(query, params=()):
+        queries.append(query)
+        if "FROM oracle_brain_episodes" in query:
+            assert "market IN ('crypto','US_CRYPTO','us_crypto')" in query
+            if "COUNT(*)" in query:
+                return [{"total": 2}]
+            assert query.index("market IN") < query.index("LIMIT")
+            return []
+        return _fetch(query, params)
+
+    snapshot = oracle_brain.build_oracle_brain_snapshot(scoped_fetch, market_scope="crypto")
+    assert snapshot["market_scope"] == "crypto"
+    assert snapshot["summary"]["active_entries"] == 1
+    assert snapshot["retention_health"]["episodes"]["count"] == 2
+    for table in ("paper_regime_trade_metrics", "market_worker_status"):
+        query = next(q for q in queries if f"FROM {table}" in q)
+        assert "market IN ('crypto','US_CRYPTO','us_crypto')" in query
+    assert snapshot["execution_authority"] == "NONE"
+
+
+def test_invalid_brain_scope_fails_before_reading():
+    import pytest
+    with pytest.raises(ValueError):
+        oracle_brain.build_oracle_brain_snapshot(
+            lambda *args: (_ for _ in ()).throw(AssertionError("Unexpected query")),
+            market_scope="unknown")
+
+
 def _fetch(query: str, params=()):
     if "FROM oracle_brain_entries" in query:
         return [
