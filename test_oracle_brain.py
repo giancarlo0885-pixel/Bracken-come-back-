@@ -237,7 +237,7 @@ def test_brain_page_runs_javascript_iframe_and_bounds_nodes():
     page = Path("pages/3_Oracle_Brain.py").read_text(encoding="utf-8")
     component = Path("oracle_brain_component.py").read_text(encoding="utf-8")
     assert "st.iframe(" in page
-    assert "height=610" in page
+    assert "height=700" in page  # responsive anatomy canvas is 680px tall
     assert "components.html(" not in page
     assert "import streamlit.components.v1 as components" not in page
     assert "st.html(render_oracle_brain_component(snapshot))" not in page
@@ -441,4 +441,5 @@ def test_brain_visual_uses_lateral_anatomy_and_mobile_centering():
     assert "const cerebellum=" in component
     assert "function cerebellumPath()" in component
     assert "function brainStemPath()" in component
-    assert "#brain{transform:none}" in component
+    assert "#brain{top:168px;bottom:50px;" in component
+    assert "viewScale=Math.max(.001,Math.min(r.width/W,r.height/H))" in component
