@@ -69,11 +69,14 @@ def chronological_episode_holdout(rows: list[dict[str, Any]], *,
     training: dict[str, list[dict[str, Any]]] = defaultdict(list)
     holdout: dict[str, list[dict[str, Any]]] = defaultdict(list)
     excluded = 0
+    seen_trade_ids: set[str] = set()
     for row in rows:
         trade = qualified_trade(row)
-        if trade is None:
+        trade_id = str(row.get("trade_id") or "").strip()
+        if trade is None or not trade_id or trade_id in seen_trade_ids:
             excluded += 1
             continue
+        seen_trade_ids.add(trade_id)
         # Trades straddling the cutoff are excluded, never assigned to training.
         if trade["exit_time"] <= boundary:
             training[trade["phenotype"]].append(trade)
