@@ -349,7 +349,7 @@ def quote_freshness_seconds(quote_time: Any, now: datetime | None = None) -> flo
     current = now or datetime.now(timezone.utc)
     if current.tzinfo is None:
         current = current.replace(tzinfo=timezone.utc)
-    return max(0.0, (current.astimezone(timezone.utc) - quote_dt).total_seconds())
+    return (current.astimezone(timezone.utc) - quote_dt).total_seconds()
 
 
 def quote_is_fresh(
@@ -364,7 +364,7 @@ def quote_is_fresh(
     max_unknown_age_seconds: int = 900,
 ) -> bool:
     quote_dt = parse_utc(quote_time)
-    if quote_dt is None:
+    if quote_dt is None or quote_freshness_seconds(quote_dt, now) < 0:
         return False
     interval_text = str(interval or "").lower()
     if interval_text.endswith("m") or interval_text.endswith("h"):
@@ -390,7 +390,7 @@ def completed_daily_bar_is_fresh(
     max_unknown_age_seconds: int = 86_400,
 ) -> bool:
     quote_dt = parse_utc(quote_time)
-    if quote_dt is None:
+    if quote_dt is None or quote_freshness_seconds(quote_dt, now) < 0:
         return False
     resolved = resolve_exchange(exchange, region, symbol)
     if resolved not in EXCHANGE_SESSIONS:
