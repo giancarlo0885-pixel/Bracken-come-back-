@@ -677,6 +677,15 @@ def sample_open_positions(market: str) -> int:
                     str(lot["entry_forecast_id"])
                     for lot in entry_lots if lot.get("entry_forecast_id")
                 ]
+                # Distinguish absent open lots from lots with missing immutable IDs.
+                # These diagnostic counts never qualify an exit.
+                entry_lot_count = len(entry_lots)
+                entry_lots_with_signal_id = sum(
+                    lot.get("entry_signal_id") is not None for lot in entry_lots
+                )
+                entry_lots_with_forecast_id = sum(
+                    lot.get("entry_forecast_id") is not None for lot in entry_lots
+                )
                 payload = _json_obj(signal.get("payload"))
                 log.warning(
                     "SHADOW_SIGNAL_PROVENANCE_EXCLUSION | market=%s | symbol=%s | "
@@ -684,13 +693,16 @@ def sample_open_positions(market: str) -> int:
                     "current_signal_at=%s | current_forecast_id=%s | "
                     "current_edge_source=%s | current_edge_present=%s | "
                     "current_forecast_unavailable_reason=%s | current_quote_at=%s | "
-                    "current_quote_verified=%s",
+                    "current_quote_verified=%s | entry_lot_count=%s | "
+                    "entry_lots_with_signal_id=%s | entry_lots_with_forecast_id=%s",
                     normalized_market, symbol, position.get("opened_at"),
                     entry_forecast_ids, signal.get("id"), signal.get("created_at"),
                     payload.get("forecast_id"), payload.get("edge_provenance"),
                     signal.get("expected_edge_pct") is not None,
                     payload.get("forecast_unavailable_reason"),
                     payload.get("quote_timestamp"), payload.get("quote_verified"),
+                    entry_lot_count, entry_lots_with_signal_id,
+                    entry_lots_with_forecast_id,
                 )
                 exclusions["ineligible_telemetry"] += 1
                 continue
