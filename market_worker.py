@@ -451,6 +451,13 @@ def _run_brain_learning_sync(market: str) -> dict[str, Any]:
         from oracle_brain_learning import sync_brain_learning
 
         result = sync_brain_learning(market)
+        validation_market = (result.get("validation") or {}).get("market")
+        advanced_market = (result.get("advanced_learning") or {}).get("market")
+        log.info(
+            "ORACLE LEARNING MARKET ISOLATION | market=%s | validation_market=%s | advanced_market=%s | scoped=%s | execution_impact=NONE",
+            market, validation_market, advanced_market,
+            validation_market == market and advanced_market == market,
+        )
         log.info(
             "ORACLE BRAIN LEARNING | market=%s | status=%s | sources=%s | episodes=%s | "
             "skipped_provenance=%s | lessons=%s | research_topics=%s | execution_impact=NONE",

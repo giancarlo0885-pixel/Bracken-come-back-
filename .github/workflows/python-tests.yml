@@ -115,3 +115,4 @@ jobs:
           test_paper_kelly_postgres.py::test_postgres_kelly_schema_and_immutable_forward_epoch
           test_paper_shadow_exit_challenger.py::test_postgres_forecast_cutoff_and_timestamp_order
           test_paper_exit_research.py::test_postgres_source_query_and_bounded_report_schema
+          test_oracle_learning_market_isolation.py::test_postgres_stock_outcomes_do_not_change_crypto_exit_or_concentration
