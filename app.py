@@ -64,7 +64,7 @@ st.set_page_config(
     page_title=f"{APP_NAME} — AI Chief Investment Officer",
     page_icon="ORCL",
     layout="wide",
-    initial_sidebar_state="expanded",
+    initial_sidebar_state="collapsed",
 )
 
 if UI_AUTO_REFRESH and st_autorefresh is not None:
@@ -84,6 +84,23 @@ html{font-size:17px}.stApp{background:var(--bg);color:var(--text)}.block-contain
 .stTabs [data-baseweb="tab-list"]{gap:.3rem;overflow-x:auto}.stTabs [data-baseweb="tab"]{min-height:48px;font-weight:800;white-space:nowrap}.stTabs [aria-selected="true"]{border-bottom:4px solid var(--green)!important}
 [data-testid="stDataFrame"]{border:2px solid var(--line);border-radius:15px;overflow:hidden}button,input,textarea,select{min-height:44px}
 @media(max-width:900px){.grid,.money-grid,.status-bar{grid-template-columns:repeat(2,minmax(0,1fr))}}@media(max-width:650px){html{font-size:16px}.block-container{padding-left:.7rem;padding-right:.7rem}.hero{padding:18px}.grid,.money-grid,.status-bar{grid-template-columns:1fr}}
+/* Fit the available content width, including narrow embedded/desktop-mode browsers. */
+.block-container{container-type:inline-size;container-name:oracle-dashboard}
+.money-grid{grid-template-columns:repeat(auto-fit,minmax(min(100%,150px),1fr))}
+.grid,.status-bar{grid-template-columns:repeat(auto-fit,minmax(min(100%,190px),1fr))}
+.money-tile,.tile,.summary-cell{min-width:0}
+.money-tile small{display:block;overflow-wrap:normal;word-break:normal}
+.money-tile b{white-space:nowrap;overflow-wrap:normal;word-break:normal}
+@container oracle-dashboard (max-width:900px){
+  [data-testid="stHorizontalBlock"]{flex-wrap:wrap!important;gap:.75rem!important}
+  [data-testid="stHorizontalBlock"]>[data-testid="stColumn"]{flex:1 1 240px!important;min-width:0!important;width:auto!important}
+  [data-testid="stMetricLabel"]{white-space:normal!important;overflow-wrap:anywhere}
+  [data-testid="stMetricValue"]{white-space:normal!important;font-size:clamp(1.1rem,3cqw,1.7rem)!important}
+}
+@container oracle-dashboard (max-width:520px){
+  [data-testid="stHorizontalBlock"]>[data-testid="stColumn"]{flex-basis:100%!important}
+  .hero{padding:16px}.hero h1{font-size:1.8rem}
+}
 </style>
 """,
     unsafe_allow_html=True,
