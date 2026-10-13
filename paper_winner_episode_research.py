@@ -121,7 +121,15 @@ def episode_risk_report(rows: list[dict[str, Any]], *, confidence: float = 0.95)
     """
     if not 0 < confidence < 1:
         raise ValueError("confidence must be between zero and one")
-    trades = [t for row in rows if (t := qualified_trade(row)) is not None]
+    trades = []
+    seen_trade_ids: set[str] = set()
+    for row in rows:
+        trade = qualified_trade(row)
+        trade_id = str(row.get("trade_id") or "").strip()
+        if trade is None or not trade_id or trade_id in seen_trade_ids:
+            continue
+        seen_trade_ids.add(trade_id)
+        trades.append(trade)
     by_episode: dict[str, dict[str, Any]] = {}
     for trade in trades:
         episode = by_episode.setdefault(trade["episode_id"],
