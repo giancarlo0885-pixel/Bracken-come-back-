@@ -1207,6 +1207,8 @@ class BrainCohortAnalyzerV4:
                 "actual_profit_factor_status": "unavailable",
                 "challenger_profit_factor_status": "unavailable",
                 "profit_factor_basis": "post_cost_pnl_usd",
+            "dollar_pnl_basis": "persisted_net_r_times_initial_risk_usd",
+            "challenger_dollar_rounding_error_bound_usd": dollar_rounding_bound if math.isfinite(dollar_rounding_bound) else None,
                 "challenger_post_cost_expectancy_r": None,
                 "actual_post_cost_net_pnl_usd": None,
                 "challenger_post_cost_net_pnl_usd": None,
@@ -1299,6 +1301,14 @@ class BrainCohortAnalyzerV4:
         challenger_net_usd = float(challenger_usd.sum()) if trade_count else float("nan")
         actual_expectancy_usd = actual_net_usd / trade_count if trade_count else float("nan")
         challenger_expectancy_usd = challenger_net_usd / trade_count if trade_count else float("nan")
+        # Both persisted R and risk use NUMERIC(...,6). Multiplying rounded
+        # values reconstructs dollars; it cannot establish tiny profits within
+        # the maximum absolute product-rounding error.
+        quantum_half = 0.5e-6
+        dollar_rounding_bound = float((
+            (self.df["challenger_counterfactual_r_net"].abs() + self.df["initial_risk_usd"])
+            * quantum_half + quantum_half ** 2
+        ).sum()) if trade_count else float("nan")
         actual_dd = self._max_drawdown_r("actual_realized_r_net")
         challenger_dd = self._max_drawdown_r("challenger_counterfactual_r_net")
         tail_var, tail_cvar = self._tail_metrics("challenger_counterfactual_r_net")
@@ -1327,6 +1337,8 @@ class BrainCohortAnalyzerV4:
             "post_cost_expectancy_positive": bool(math.isfinite(challenger_expectancy)
                 and challenger_expectancy > 0 and math.isfinite(challenger_expectancy_usd)
                 and challenger_expectancy_usd > 0 and math.isfinite(challenger_pf) and challenger_pf > 1.0),
+            "dollar_profit_exceeds_rounding_uncertainty": bool(math.isfinite(dollar_rounding_bound)
+                and challenger_net_usd > dollar_rounding_bound),
             "drawdown_bounded": bool(math.isfinite(challenger_dd)
                 and challenger_dd <= self.c.allowed_drawdown_limit_r),
             "tail_var_protected": bool(
@@ -1352,6 +1364,8 @@ class BrainCohortAnalyzerV4:
             "actual_profit_factor_status": self._profit_factor_status(actual_usd),
             "challenger_profit_factor_status": self._profit_factor_status(challenger_usd),
             "profit_factor_basis": "post_cost_pnl_usd",
+            "dollar_pnl_basis": "persisted_net_r_times_initial_risk_usd",
+            "challenger_dollar_rounding_error_bound_usd": dollar_rounding_bound if math.isfinite(dollar_rounding_bound) else None,
             "challenger_post_cost_expectancy_r": challenger_expectancy if math.isfinite(challenger_expectancy) else None,
             "actual_post_cost_net_pnl_usd": actual_net_usd if math.isfinite(actual_net_usd) else None,
             "challenger_post_cost_net_pnl_usd": challenger_net_usd if math.isfinite(challenger_net_usd) else None,

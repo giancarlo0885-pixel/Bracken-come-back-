@@ -792,3 +792,16 @@ def test_nonfinite_dollar_product_is_unavailable_even_with_finite_r_and_risk():
     assert report["exclusions"]["nonfinite_post_cost_usd"] == 1
     assert report["challenger_post_cost_net_pnl_usd"] is None
     assert report["promotion_evidence_ready"] is False
+
+
+def test_profit_within_stored_risk_and_r_rounding_error_cannot_qualify():
+    records = [{**row, "initial_risk_usd": 1e-6,
+                "actual_realized_r_net": 1e-6 if index % 3 else -2e-6,
+                "challenger_counterfactual_r_net": 2e-6 if index % 3 else -1e-6}
+               for index, row in enumerate(_positive_experiments())]
+    report = BrainCohortAnalyzerV4(records).evaluate_portfolio_safety_gate()
+    assert report["challenger_post_cost_net_pnl_usd"] > 0
+    assert report["conditions"]["post_cost_expectancy_positive"] is True
+    assert report["challenger_dollar_rounding_error_bound_usd"] > report["challenger_post_cost_net_pnl_usd"]
+    assert report["conditions"]["dollar_profit_exceeds_rounding_uncertainty"] is False
+    assert report["promotion_evidence_ready"] is False
