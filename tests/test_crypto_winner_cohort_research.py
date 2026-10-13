@@ -25,6 +25,11 @@ class CohortResearchTests(unittest.TestCase):
     def test_no_data(self):
         self.assertEqual(analyze_completed_cohorts([]),[])
 
+    def test_conflicting_duplicate_outcomes_fail_closed_in_both_orders(self):
+        rows = [trade("same", 100), trade("same", -100)]
+        self.assertEqual(analyze_completed_cohorts(rows), [])
+        self.assertEqual(analyze_completed_cohorts(list(reversed(rows))), [])
+
 
 if __name__ == "__main__":
     unittest.main()

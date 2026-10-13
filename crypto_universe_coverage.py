@@ -9,7 +9,7 @@ from typing import Iterable
 
 
 def _symbols(values: Iterable[str]) -> set[str]:
-    return {str(v).strip().upper() for v in values if str(v).strip()}
+    return {v.strip().upper() for v in values if isinstance(v, str) and v.strip()}
 
 
 @dataclass(frozen=True)

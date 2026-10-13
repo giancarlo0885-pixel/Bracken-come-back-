@@ -29,10 +29,17 @@ def analyze_completed_cohorts(rows: Iterable[Mapping[str, object]], *, min_trade
     Missing identity, provenance, episode, or finite net P&L fails closed.
     No claims of a validated edge are made by this descriptive report.
     """
-    seen: set[str] = set()
-    groups: dict[str, list[tuple[str, float]]] = defaultdict(list)
+    identities: dict[str, list[Mapping[str, object]]] = defaultdict(list)
     for row in rows:
         trade_id = str(row.get("trade_id") or "").strip()
+        if trade_id:
+            identities[trade_id].append(row)
+    groups: dict[str, list[tuple[str, float]]] = defaultdict(list)
+    for trade_id, versions in identities.items():
+        row = versions[0]
+        # Conflicting outcomes for one identity cannot be resolved by input order.
+        if any(dict(version) != dict(row) for version in versions):
+            continue
         label = str(row.get("entry_phenotype") or "").strip()
         episode = str(row.get("market_episode_id") or "").strip()
         if not (trade_id and label and episode and row.get("entry_provenance_valid") is True):
@@ -43,9 +50,6 @@ def analyze_completed_cohorts(rows: Iterable[Mapping[str, object]], *, min_trade
             continue
         if not isfinite(net):
             continue
-        if trade_id in seen:
-            continue
-        seen.add(trade_id)
         groups[label].append((episode, net))
     result = []
     for label, items in sorted(groups.items()):

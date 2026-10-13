@@ -19,6 +19,11 @@ class CryptoUniverseCoverageTests(unittest.TestCase):
     def test_empty_universe(self):
         self.assertEqual(summarize_crypto_coverage([], [], []).as_dict()["discovered"], 0)
 
+    def test_missing_or_nonstring_symbols_are_not_invented(self):
+        x = summarize_crypto_coverage([None, 0, "", "BTC-USD"], [None], [None])
+        self.assertEqual((x.discovered, x.active_seed, x.analyzed, x.deferred), (1, 0, 0, 1))
+        self.assertEqual(x.unknown_analyzed, 0)
+
 
 if __name__ == "__main__":
     unittest.main()
