@@ -11,7 +11,7 @@ CUTOFF = "2026-10-05T00:00:00+00:00"
 
 
 def trade(episode, *, later=False, pnl=1.0, phenotype="breakout"):
-    return {"entry_time": LATER_ENTRY if later else ENTRY,
+    return {"trade_id": f"{episode}:{later}", "entry_time": LATER_ENTRY if later else ENTRY,
             "exit_time": LATER_EXIT if later else EXIT,
             "feature_observed_at": LATER_ENTRY if later else ENTRY,
             "episode_id": episode, "entry_signal_id": "123",
@@ -116,3 +116,11 @@ def test_matched_exits_deduplicate_canonical_trade_identity():
     assert result["matched_pairs"] == 1
     assert result["unqualified_pairs"] == 1
     assert result["average_net_delta"] == 3
+
+
+def test_holdout_duplicate_canonical_trade_rejected():
+    row = trade("original")
+    result = chronological_episode_holdout([row, {**row, "episode_id": "duplicate"}],
+                                           cutoff=CUTOFF, min_training_episodes=1)
+    assert result["excluded_unqualified_or_leaking"] == 1
+    assert result["phenotypes"]["breakout"]["training"]["trades"] == 1
