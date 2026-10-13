@@ -92,3 +92,13 @@ def test_shadow_logs_entry_and_current_forecasts_separately():
     assert "current_forecast_id=" in src
     assert "current_forecast_unavailable_reason=" in src
     assert 'if expected_edge_pct is None:\n        return reject("missing_expected_edge")' in src
+
+
+def test_shadow_distinguishes_missing_lots_from_missing_entry_ids():
+    src = (Path(__file__).resolve().parent / "paper_shadow_exit_challenger.py").read_text(encoding="utf-8")
+    ast.parse(src)
+    assert "entry_lot_count=%s" in src
+    assert "entry_lots_with_signal_id=%s" in src
+    assert "entry_lots_with_forecast_id=%s" in src
+    # Attribution must not substitute an entry-time forecast for a current edge.
+    assert 'if expected_edge_pct is None:\\n        return reject("missing_expected_edge")'.replace("\\n", "\n") in src
