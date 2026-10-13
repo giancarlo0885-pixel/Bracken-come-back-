@@ -168,7 +168,7 @@ def test_brain_map_is_anatomical_and_mobile_fitted():
     assert "controls.enableZoom=true" in html
     assert "controls.zoomToCursor=false" in html
     assert "controls.maxPolarAngle=Math.PI-.01" in html
-    assert "controls.touches.TWO=THREE.TOUCH.DOLLY_ROTATE" in html
+    assert "controls.touches.TWO=THREE.TOUCH.DOLLY_PAN" in html
     assert "camera.up.set(0,1,0)" in html
     assert "brainEnvelope" in html
     assert "brainCoreObjects" in html
