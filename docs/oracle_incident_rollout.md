@@ -1,14 +1,14 @@
 # Oracle inventory audit: staging-only rollout contract
 
 This change introduces **pure diagnostic and payload foundations only**.
-The placeholder audit query intentionally returns no rows and is NOT a valid
-production inventory audit. Do not schedule it or interpret its empty result as
-a clean bill of health.
+The production inventory adapter deliberately raises `NotImplementedError` and
+is NOT a valid production inventory audit. Do not schedule it or treat an
+unimplemented adapter as evidence that inventory is reconciled.
 
 Before deployment:
 1. Inspect the actual `positions`, `position_lots`, `trade_ledger` and
    `paper_fills` schema, including partial-close and fee semantics.
-2. Replace the placeholder query with a verified, read-only snapshot join.
+2. Implement the fail-closed adapter using a verified, read-only snapshot join.
    A missing table or ambiguous lot match must fail closed, never mean zero.
 3. Provision read-only and incident-writer roles without dropping roles or
    revoking shared schema grants; verify negative write-permission tests.
