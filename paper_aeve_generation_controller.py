@@ -544,10 +544,13 @@ def generation_research_report(conn: Any, generation: int, config_hash: str) -> 
         "window_trades": int(row.get("window_trades") or 0),
         "accepted_trades": int(row.get("accepted_trades") or 0),
         "generation_complete": int(row.get("window_trades") or 0) >= BATCH_SIZE,
-        "adaptation_eligible": int(row.get("accepted_trades") or 0) >= BATCH_SIZE,
+        # A full accepted trade count alone does not prove independent market episodes.
+        # Remain research-only until immutable episode evidence is validated.
+        "adaptation_eligible": False,
         "adaptation_block_reason": (
-            None if int(row.get("accepted_trades") or 0) >= BATCH_SIZE
-            else "accepted_sample_requirement_equals_full_generation_window"
+            "accepted_sample_requirement_equals_full_generation_window"
+            if int(row.get("accepted_trades") or 0) < BATCH_SIZE
+            else "independent_market_episodes_not_verified"
         ),
         "expectancy": _f(row.get("expectancy")),
         "net_pnl": _f(row.get("net_pnl")),
