@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import re
 
 import pandas as pd
 import streamlit as st
@@ -37,7 +38,8 @@ if not health.get("ok"):
 
 @st.cache_data(ttl=15, show_spinner=False)
 def _brain_rows(query, params=()):
-    if not query.lstrip().upper().startswith("SELECT"):
+    if (not query.lstrip().upper().startswith(("SELECT", "WITH"))
+            or re.search(r"\b(INSERT|UPDATE|DELETE|ALTER|DROP|CREATE|TRUNCATE|MERGE|CALL)\b", query, re.I)):
         raise ValueError("Brain display queries must be read-only")
     return rows(query, params)
 
@@ -220,13 +222,13 @@ if aeve_diag:
 
 # Lifecycle reconciliation makes the difference between a decision and a completed trade explicit.
 try:
-    lifecycle = _brain_rows("""
+    lifecycle = _brain_rows(f"""
         SELECT COUNT(*)::int AS closed_trades,
                COUNT(*) FILTER (WHERE m.entry_time IS NOT NULL AND m.exit_time IS NOT NULL)::int AS complete_lifecycle,
                COUNT(*) FILTER (WHERE t.entry_signal_id IS NOT NULL AND t.feature_snapshot IS NOT NULL)::int AS exact_entry_provenance
         FROM paper_regime_trade_metrics m
         LEFT JOIN trade_ledger t ON t.trade_id=m.trade_id
-        WHERE m.strategy='oracle_council_v3'
+        WHERE m.strategy='oracle_council_v3'{" AND m.market IN ('crypto','US_CRYPTO','us_crypto')" if market_scope else ""}
     """)
 except Exception:
     lifecycle = []
@@ -308,7 +310,8 @@ except Exception:
 
 if lv:
     v=lv[0]
-    st.subheader("Learning & validation")
+    st.subheader("Shared learning & validation")
+    st.caption("Shared retained research totals across markets; scoped trade evidence appears in the crypto reconciliation and setup views.")
     c1,c2,c3,c4=st.columns(4)
     c1.metric("Decision replays",int(v.get("decision_replays") or 0))
     c2.metric("Counterfactual avoided losses",int(v.get("avoided_losses") or 0))
