@@ -124,3 +124,12 @@ def test_holdout_duplicate_canonical_trade_rejected():
                                            cutoff=CUTOFF, min_training_episodes=1)
     assert result["excluded_unqualified_or_leaking"] == 1
     assert result["phenotypes"]["breakout"]["training"]["trades"] == 1
+
+
+def test_episode_risk_deduplicates_canonical_trade_id():
+    from paper_winner_episode_research import episode_risk_report
+    row = trade("one", pnl=-3)
+    result = episode_risk_report([row, {**row, "net_pnl_after_fees": -300}])
+    assert result["qualified_trades"] == 1
+    assert result["episodes"] == 1
+    assert result["max_closed_episode_drawdown"] == 3
