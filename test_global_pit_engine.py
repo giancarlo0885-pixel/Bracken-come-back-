@@ -323,3 +323,18 @@ def test_dashboard_activity_labels_match_actual_system_state():
     assert active["Researching"] == "Active"
     assert active["Learning"] == "Active"
     assert active["Allocating"] == "Paper planning only"
+
+
+def test_future_dated_quote_age_never_gets_live_or_delayed_label():
+    future = {"quote_verified": True, "quote_age_seconds": -16140, "interval": "5m"}
+    label = pit.quote_freshness_label(future)
+    assert label["label"] == "FRESHNESS UNKNOWN"
+    assert label["fresh"] is False
+    assert label["delayed"] is False
+    assert label["age_seconds"] is None
+
+
+def test_recent_verified_quote_age_can_still_get_live_label():
+    label = pit.quote_freshness_label({"quote_verified": True, "quote_age_seconds": 30, "interval": "5m"})
+    assert label["label"] == "LIVE DATA"
+    assert label["fresh"] is True
