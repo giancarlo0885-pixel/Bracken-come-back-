@@ -104,3 +104,15 @@ def test_matched_exits_reject_future_quotes_and_missing_pairs():
     assert result["avoided_losses"] == 1
     assert result["missed_winners"] == 0
     assert result["promotion_authorized"] is False
+
+
+def test_matched_exits_deduplicate_canonical_trade_identity():
+    from paper_winner_episode_research import matched_exit_comparison
+    row = {"matched_forward_observation": True, "fees_verified": True,
+           "decision_time": ENTRY, "quote_observed_at": ENTRY,
+           "champion_net_pnl": -2, "challenger_net_pnl": 1,
+           "episode_id": "episode1", "trade_id": "trade1"}
+    result = matched_exit_comparison([row, {**row, "challenger_net_pnl": 1000}])
+    assert result["matched_pairs"] == 1
+    assert result["unqualified_pairs"] == 1
+    assert result["average_net_delta"] == 3
