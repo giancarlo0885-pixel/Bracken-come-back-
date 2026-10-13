@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from oracle_learning_market_scope import learning_market_filter
+
 """Research-only validation for Oracle Brain and paper challengers.
 
 Measures rejected opportunities, forecast calibration, weak strategy/regime
@@ -56,18 +58,20 @@ def _deep_number(payload: dict[str, Any], keys: tuple[str, ...]) -> float | None
     return None
 
 
-def sync_counterfactuals(conn: Any, *, limit: int = 250) -> dict[str, int]:
+def sync_counterfactuals(conn: Any, *, limit: int = 250, market: str | None = None) -> dict[str, int]:
     """Evaluate mature rejected/abstained decisions using later persisted prices."""
+    scope, scope_params = learning_market_filter(market, "d.market")
     decisions = list(conn.execute(
-        """SELECT id,market,symbol,payload,created_at
+        f"""SELECT id,market,symbol,payload,created_at
            FROM oracle_decision_audit d
            WHERE approved=FALSE
              AND created_at::timestamptz <= NOW()-(%s * INTERVAL '1 minute')
              AND NOT EXISTS (
                  SELECT 1 FROM oracle_counterfactual_outcomes c WHERE c.decision_id=d.id
              )
+           {scope}
            ORDER BY created_at ASC LIMIT %s""",
-        (COUNTERFACTUAL_HORIZON_MINUTES, max(1, int(limit))),
+        (COUNTERFACTUAL_HORIZON_MINUTES, *scope_params, max(1, int(limit))),
     ).fetchall())
     counts = {"evaluated": 0, "avoided_losses": 0, "missed_winners": 0, "flat": 0, "skipped": 0}
     for decision in decisions:
@@ -118,12 +122,13 @@ def sync_counterfactuals(conn: Any, *, limit: int = 250) -> dict[str, int]:
     return counts
 
 
-def refresh_calibration(conn: Any) -> dict[str, int]:
+def refresh_calibration(conn: Any, *, market: str | None = None) -> dict[str, int]:
     """Compare entry-time probability/edge with exact realized paper outcomes."""
+    scope, scope_params = learning_market_filter(market, "market")
     rows = list(conn.execute(
-        """SELECT market,feature_snapshot,return_pct
+        f"""SELECT market,feature_snapshot,return_pct
            FROM oracle_brain_episodes
-           WHERE provenance_status='exact' AND return_pct IS NOT NULL"""
+           WHERE provenance_status='exact' AND return_pct IS NOT NULL{scope}""", scope_params
     ).fetchall())
     buckets: dict[tuple[str, float], list[tuple[float, float | None, float]]] = {}
     for row in rows:
@@ -166,18 +171,19 @@ def refresh_calibration(conn: Any) -> dict[str, int]:
     return {"buckets": written, "episodes_considered": len(rows)}
 
 
-def refresh_weaknesses(conn: Any) -> dict[str, int]:
+def refresh_weaknesses(conn: Any, *, market: str | None = None) -> dict[str, int]:
     """Detect mature negative strategy/regime combinations without changing gates."""
+    scope, scope_params = learning_market_filter(market, "market")
     rows = list(conn.execute(
-        """SELECT market,strategy,regime,COUNT(*)::int AS samples,
+        f"""SELECT market,strategy,regime,COUNT(*)::int AS samples,
                   AVG(net_pnl) AS expectancy,
                   SUM(CASE WHEN net_pnl>0 THEN net_pnl ELSE 0 END) AS gross_win,
                   ABS(SUM(CASE WHEN net_pnl<0 THEN net_pnl ELSE 0 END)) AS gross_loss,
                   AVG(mfe_pct) FILTER (WHERE mfe_pct IS NOT NULL) AS avg_mfe,
                   AVG(mae_pct) FILTER (WHERE mae_pct IS NOT NULL) AS avg_mae
            FROM oracle_brain_episodes
-           WHERE provenance_status='exact'
-           GROUP BY market,strategy,regime"""
+           WHERE provenance_status='exact'{scope}
+           GROUP BY market,strategy,regime""", scope_params
     ).fetchall())
     negative = 0
     for row in rows:
@@ -271,12 +277,16 @@ def evaluate_promotion_evidence(conn: Any, market: str) -> dict[str, Any]:
 
 
 def sync_learning_validation(conn: Any, market: str) -> dict[str, Any]:
-    counterfactuals = sync_counterfactuals(conn)
-    calibration = refresh_calibration(conn)
-    weaknesses = refresh_weaknesses(conn)
+    learning_market_filter(market)
+    if market is None:
+        raise ValueError("worker validation requires a market")
+    counterfactuals = sync_counterfactuals(conn, market=market)
+    calibration = refresh_calibration(conn, market=market)
+    weaknesses = refresh_weaknesses(conn, market=market)
     promotion = evaluate_promotion_evidence(conn, market)
     return {
         "status": "ok",
+        "market": market,
         "counterfactuals": counterfactuals,
         "calibration": calibration,
         "weaknesses": weaknesses,

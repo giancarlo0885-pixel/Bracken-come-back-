@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from oracle_learning_market_scope import learning_market_filter
+
 """Advanced research-only learning diagnostics for Oracle.
 
 Adds point-in-time decision replay, setup attribution, loss taxonomy, adaptive
@@ -88,11 +90,13 @@ def _compact_replay_snapshot(decision: dict[str,Any], observations: list[dict[st
     return snapshot,lineage_hash
 
 
-def build_decision_replays(conn: Any, *, limit: int=200) -> dict[str,int]:
+def build_decision_replays(conn: Any, *, limit: int=200, market: str | None=None) -> dict[str,int]:
+    scope, scope_params = learning_market_filter(market, "d.market")
     decisions=list(conn.execute(
-        """SELECT id,market,symbol,approved,payload,created_at FROM oracle_decision_audit d
+        f"""SELECT id,market,symbol,approved,payload,created_at FROM oracle_decision_audit d
            WHERE NOT EXISTS(SELECT 1 FROM oracle_decision_replays r WHERE r.decision_id=d.id)
-           ORDER BY created_at ASC LIMIT %s""",(max(1,int(limit)),)
+           {scope}
+           ORDER BY created_at ASC LIMIT %s""",(*scope_params,max(1,int(limit)))
     ).fetchall())
     written=0
     for d in decisions:
@@ -115,9 +119,10 @@ def build_decision_replays(conn: Any, *, limit: int=200) -> dict[str,int]:
     return {"replays":written}
 
 
-def refresh_setup_attribution(conn: Any) -> dict[str,int]:
+def refresh_setup_attribution(conn: Any, *, market: str | None=None) -> dict[str,int]:
+    scope, scope_params = learning_market_filter(market, "market")
     rows=list(conn.execute(
-        """SELECT market,strategy,regime,COUNT(*)::int samples,
+        f"""SELECT market,strategy,regime,COUNT(*)::int samples,
           SUM(CASE WHEN net_pnl>0 THEN 1 ELSE 0 END)::int wins,
           SUM(CASE WHEN net_pnl<0 THEN 1 ELSE 0 END)::int losses,
           AVG(net_pnl) expectancy,
@@ -125,8 +130,8 @@ def refresh_setup_attribution(conn: Any) -> dict[str,int]:
           ABS(SUM(CASE WHEN net_pnl<0 THEN net_pnl ELSE 0 END)) gross_loss,
           AVG(mfe_pct) FILTER(WHERE mfe_pct IS NOT NULL) avg_mfe,
           AVG(mae_pct) FILTER(WHERE mae_pct IS NOT NULL) avg_mae
-          FROM oracle_brain_episodes WHERE provenance_status='exact'
-          GROUP BY market,strategy,regime"""
+          FROM oracle_brain_episodes WHERE provenance_status='exact'{scope}
+          GROUP BY market,strategy,regime""", scope_params
     ).fetchall())
     for x in rows:
         loss=_f(x.get("gross_loss")); pf=_f(x.get("gross_win"))/loss if loss>0 else 0.0
@@ -143,12 +148,13 @@ def refresh_setup_attribution(conn: Any) -> dict[str,int]:
     return {"setup_cohorts":len(rows)}
 
 
-def classify_failures(conn: Any, *, limit:int=500) -> dict[str,int]:
+def classify_failures(conn: Any, *, limit:int=500, market: str | None=None) -> dict[str,int]:
+    scope, scope_params = learning_market_filter(market, "e.market")
     rows=list(conn.execute(
-        """SELECT episode_key,market,strategy,regime,net_pnl,fees,return_pct,mfe_pct,mae_pct,feature_snapshot
-           FROM oracle_brain_episodes e WHERE provenance_status='exact' AND net_pnl<0
+        f"""SELECT episode_key,market,strategy,regime,net_pnl,fees,return_pct,mfe_pct,mae_pct,feature_snapshot
+           FROM oracle_brain_episodes e WHERE provenance_status='exact' AND net_pnl<0{scope}
            AND NOT EXISTS(SELECT 1 FROM oracle_failure_taxonomy f WHERE f.episode_key=e.episode_key)
-           ORDER BY exit_time ASC LIMIT %s""",(max(1,int(limit)),)
+           ORDER BY exit_time ASC LIMIT %s""",(*scope_params,max(1,int(limit)))
     ).fetchall())
     counts={}
     for x in rows:
@@ -178,32 +184,35 @@ def adaptive_evidence_weight(samples:int, age_days:float, drift_score:float) -> 
     return depth*recency*drift
 
 
-def exit_diagnostics(conn: Any) -> dict[str,Any]:
+def exit_diagnostics(conn: Any, *, market: str | None=None) -> dict[str,Any]:
+    scope, scope_params = learning_market_filter(market, "market")
     row=conn.execute(
-        """SELECT COUNT(*)::int samples,
+        f"""SELECT COUNT(*)::int samples,
           AVG(CASE WHEN net_pnl<0 AND mfe_pct>0 THEN mfe_pct ELSE NULL END) avg_giveback_mfe,
           COUNT(*) FILTER(WHERE net_pnl<0 AND mfe_pct>=0.5)::int giveback_losses,
           AVG(mae_pct) FILTER(WHERE net_pnl<0) avg_loser_mae
-          FROM oracle_brain_episodes WHERE provenance_status='exact'"""
+          FROM oracle_brain_episodes WHERE provenance_status='exact'{scope}""", scope_params
     ).fetchone() or {}
     return dict(row)
 
 
-def portfolio_concentration(conn: Any) -> dict[str,Any]:
+def portfolio_concentration(conn: Any, *, market: str | None=None) -> dict[str,Any]:
+    scope, scope_params = learning_market_filter(market, "market")
     rows=list(conn.execute(
-        """SELECT symbol,SUM(ABS(COALESCE(net_pnl,0))) exposure_proxy
-           FROM oracle_brain_episodes WHERE provenance_status='exact'
-           GROUP BY symbol ORDER BY exposure_proxy DESC"""
+        f"""SELECT symbol,SUM(ABS(COALESCE(net_pnl,0))) exposure_proxy
+           FROM oracle_brain_episodes WHERE provenance_status='exact'{scope}
+           GROUP BY symbol ORDER BY exposure_proxy DESC""", scope_params
     ).fetchall())
     total=sum(_f(x.get("exposure_proxy")) for x in rows)
     top=sum(_f(x.get("exposure_proxy")) for x in rows[:3])
     return {"symbols":len(rows),"top3_concentration":top/total if total>0 else 0.0}
 
 
-def refresh_data_quality(conn: Any) -> dict[str,Any]:
+def refresh_data_quality(conn: Any, *, market: str | None=None) -> dict[str,Any]:
+    scope, scope_params = learning_market_filter(market, "market")
     rows=list(conn.execute(
-        """SELECT market,symbol,MAX(event_time::timestamptz) newest,COUNT(*)::int samples
-           FROM oracle_brain_observations GROUP BY market,symbol"""
+        f"""SELECT market,symbol,MAX(event_time::timestamptz) newest,COUNT(*)::int samples
+           FROM oracle_brain_observations WHERE TRUE{scope} GROUP BY market,symbol""", scope_params
     ).fetchall())
     now=datetime.now(timezone.utc); written=0
     for x in rows:
@@ -436,7 +445,10 @@ def walk_forward_challengers(conn: Any, market:str) -> dict[str,Any]:
 
 
 def sync_advanced_learning(conn:Any,market:str)->dict[str,Any]:
-    return {"replay":build_decision_replays(conn),"setups":refresh_setup_attribution(conn),
-            "failures":classify_failures(conn),"exit":exit_diagnostics(conn),
-            "portfolio":portfolio_concentration(conn),"data_quality":refresh_data_quality(conn),
+    learning_market_filter(market)
+    if market is None:
+        raise ValueError("worker learning requires a market")
+    return {"market":market,"replay":build_decision_replays(conn,market=market),"setups":refresh_setup_attribution(conn,market=market),
+            "failures":classify_failures(conn,market=market),"exit":exit_diagnostics(conn,market=market),
+            "portfolio":portfolio_concentration(conn,market=market),"data_quality":refresh_data_quality(conn,market=market),
             "walk_forward":walk_forward_challengers(conn,market),"execution_impact":"NONE"}
