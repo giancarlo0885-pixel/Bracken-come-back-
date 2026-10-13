@@ -101,4 +101,4 @@ def test_shadow_distinguishes_missing_lots_from_missing_entry_ids():
     assert "entry_lots_with_signal_id=%s" in src
     assert "entry_lots_with_forecast_id=%s" in src
     # Attribution must not substitute an entry-time forecast for a current edge.
-    assert 'if expected_edge_pct is None:\\n        return reject("missing_expected_edge")'.replace("\\n", "\n") in src
+    assert 'if expected_edge_pct is None:\\n        return reject("missing_expected_edge")' in src
