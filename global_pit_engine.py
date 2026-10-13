@@ -165,6 +165,8 @@ def quote_freshness_label(record: dict[str, Any], *, live_max_age_seconds: int =
     if age is None:
         return {"label": "FRESHNESS UNKNOWN", "fresh": False, "delayed": False, "age_seconds": None}
     age = _finite(age, 10**9)
+    if age < 0:
+        return {"label": "FRESHNESS UNKNOWN", "fresh": False, "delayed": False, "age_seconds": None}
     interval = str(record.get("interval") or record.get("source_interval") or "").lower()
     provider_mode = str(record.get("provider_mode") or record.get("mode") or "").lower()
     is_eod = "eod" in provider_mode or interval in {"1d", "daily", "day"}
