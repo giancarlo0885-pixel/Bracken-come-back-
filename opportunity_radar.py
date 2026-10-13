@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from typing import Any
 
+from fomo_intelligence import assess_fomo
+
 
 def _value(obj: Any, name: str, default: Any = 0.0) -> Any:
     return obj.get(name, default) if isinstance(obj, dict) else getattr(obj, name, default)
@@ -40,6 +42,7 @@ class RadarAssessment:
     reasons: list[str]
     warnings: list[str]
     summary: str
+    fomo_shadow: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -289,4 +292,5 @@ def assess_opportunity_radar(signal: Any, *, market: str = "cash") -> RadarAsses
         reasons=reasons,
         warnings=warnings,
         summary=summary,
+        fomo_shadow=assess_fomo(signal).to_dict(),
     )
