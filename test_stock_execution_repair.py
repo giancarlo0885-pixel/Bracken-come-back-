@@ -159,7 +159,7 @@ def test_paper_reference_stays_explicit_and_gets_correlation_id(monkeypatch):
 
     assert payload is not None
     assert payload["quote_verified"] is True
-    assert payload["verified"] is True
+    assert payload["verified"] is False
     assert payload["execution_quote_eligible"] is True
     assert payload["provider_quote_verified"] is False
     assert payload["paper_reference_verified"] is True

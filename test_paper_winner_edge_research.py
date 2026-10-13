@@ -72,6 +72,17 @@ def test_missing_posthoc_future_duplicate_and_conflicting_evidence():
     assert not prepare([row, {**row, "net_pnl": 2}], AS_OF)[0]
 
 
+@pytest.mark.parametrize("future_first", [False, True])
+def test_future_conflicting_outcome_cannot_change_historical_discovery(future_first):
+    rows = [trade(i) for i in range(60)]
+    future = {**trade(0, -1000, days=100), "strategy": "future_strategy"}
+    history = [future, *rows] if future_first else [*rows, future]
+    observed = report(history)
+    assert observed["candidates"] == report(rows)["candidates"]
+    assert observed["exclusions"]["future_or_open_outcome"] == 1
+    assert "missing_or_conflicting_identity" not in observed["exclusions"]
+
+
 def test_split_episode_and_timezone_validation():
     cutoff = CUTOFF + timedelta(hours=1)
     result = discover([trade(1, days=31)], cutoff=cutoff, as_of=AS_OF)
@@ -133,6 +144,59 @@ def test_partial_exits_count_as_one_completed_entry():
     assert not verified_ledger_inputs([opening, closes[0]], fills, as_of=EVENT + timedelta(days=1))[0]
 
 
+@pytest.mark.parametrize("missing_flag", [False, True])
+def test_every_partial_close_requires_verified_fill_fees(missing_flag):
+    from paper_exit_research import attach_fill_fee_evidence, reconcile_fifo
+    from paper_winner_edge_research import verified_ledger_inputs
+    from test_paper_exit_research import buy, sell, START as EVENT
+
+    opening = {**buy("buy", 2, 100, 0.2), "decision_timestamp": EVENT.isoformat(),
+               "feature_snapshot": {"regime": "trend_up", "entry_pattern": "dip_rebound"}}
+    ledger = [opening, sell("s1", 1, 100, 102, 0.1, 2),
+              sell("s2", 1, 100, 103, 0.1, 3, minute=30)]
+    fills = [dict(fill_id="b", market="crypto", symbol="TEST-USD", side="BUY",
+                  quantity=2, fill_price=100, fee_amount=0.2, created_at=EVENT),
+             dict(fill_id="s1", market="crypto", symbol="TEST-USD", side="SELL",
+                  quantity=1, fill_price=102, fee_amount=0.1,
+                  created_at=EVENT + timedelta(minutes=20))]
+    as_of = EVENT + timedelta(days=1)
+    # A caller may reuse a reconciled snapshot that did not require fill fees.
+    snapshot = reconcile_fifo(attach_fill_fee_evidence(ledger, fills), as_of=as_of)
+    assert all(close["fifo_complete"] for close in snapshot["closes"])
+    assert snapshot["closes"][0]["fill_fee_evidence_verified"] is True
+    assert snapshot["closes"][1]["fill_fee_evidence_verified"] is False
+    if missing_flag:
+        snapshot["closes"][1].pop("fill_fee_evidence_verified")
+    rows, coverage = verified_ledger_inputs(ledger, fills, as_of=as_of, fifo_report=snapshot)
+    assert not rows
+    assert coverage["adapter"]["unverified_canonical_fill_fees"] == 1
+
+
+@pytest.mark.parametrize("future_first", [False, True])
+def test_future_buy_correction_cannot_relabel_historical_entry(future_first):
+    from paper_winner_edge_research import verified_ledger_inputs
+    from test_paper_exit_research import buy, sell, START as EVENT
+
+    opening = {**buy("buy", 2, 100, 0.2), "decision_timestamp": EVENT.isoformat(),
+               "feature_snapshot": {"regime": "trend_up", "entry_pattern": "dip_rebound"}}
+    closing = sell("sell", 2, 100, 102, 0.1, 4)
+    fills = [dict(fill_id="b", market="crypto", symbol="TEST-USD", side="BUY",
+                  quantity=2, fill_price=100, fee_amount=0.2, created_at=EVENT),
+             dict(fill_id="s", market="crypto", symbol="TEST-USD", side="SELL",
+                  quantity=2, fill_price=102, fee_amount=0.1,
+                  created_at=EVENT + timedelta(minutes=20))]
+    as_of = EVENT + timedelta(hours=1)
+    baseline, _ = verified_ledger_inputs([opening, closing], fills, as_of=as_of)
+    correction = {**opening, "entry_time": EVENT + timedelta(hours=2),
+                  "entry_price": 999, "strategy": "future_strategy",
+                  "feature_snapshot": {"regime": "future_regime", "entry_pattern": "future_pattern"}}
+    ledger = [correction, opening, closing] if future_first else [opening, closing, correction]
+    rows, coverage = verified_ledger_inputs(ledger, fills, as_of=as_of)
+    assert rows == baseline
+    assert rows[0]["entry_notional"] == 200
+    assert coverage["fifo"]["future_fill"] == 1
+
+
 def test_runtime_freezes_discovery_before_later_outcomes_or_history_changes():
     from paper_winner_edge_research import runtime_report, FORWARD_CUTOFF
     rows = [trade(i) for i in range(60)]
@@ -147,6 +211,30 @@ def test_runtime_freezes_discovery_before_later_outcomes_or_history_changes():
     assert later["candidates"] == frozen["candidates"]
     assert later["forward"]["selected"]["net_pnl"] == 2
     assert later["promotion_action"] == "NONE"
+
+
+@pytest.mark.parametrize("market", ["cash", "crypto"])
+def test_frozen_runtime_preserves_boundary_episode_purge(monkeypatch, market):
+    import paper_winner_edge_research as research
+
+    cutoff = CUTOFF + timedelta(hours=1)
+    monkeypatch.setattr(research, "FORWARD_CUTOFF", cutoff)
+    training = [{**trade(i), "market": market} for i in range(60)]
+    boundary_entry = cutoff + timedelta(minutes=1)
+    boundary = {**trade(100, 100, days=31), "market": market,
+                "entry_time": boundary_entry.isoformat(),
+                "entry_evidence_time": boundary_entry.isoformat(),
+                "exit_time": (boundary_entry + timedelta(minutes=30)).isoformat()}
+    forward = {**trade(101, 2, days=32), "market": market}
+    frozen = research.runtime_report(training + [boundary, forward], as_of=AS_OF)
+    repeated = research.runtime_report(training + [boundary, forward],
+                                       as_of=AS_OF, previous=frozen)
+    assert frozen["discovery_frozen"] is True
+    assert frozen["candidates"][0]["research_candidate"] is True
+    assert repeated["forward"] == frozen["forward"]
+    assert repeated["forward"]["baseline"]["trades"] == 1
+    assert repeated["forward"]["selected"]["net_pnl"] == 2
+    assert repeated["exclusions"]["boundary_or_open_training_episode"] == 1
 
 
 def test_runtime_reuses_reconciled_snapshot_and_classifies_observed_entry_features():

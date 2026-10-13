@@ -7,6 +7,7 @@ for any trading decision.
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import math
 import os
 
 import pandas as pd
@@ -71,6 +72,11 @@ def iex_stock_history(symbol: str, period: str, interval: str) -> pd.DataFrame:
             if response.status_code != 200:
                 raise AlpacaDataError(f"Alpaca market-data HTTP {response.status_code}")
             payload = response.json()
+            if not isinstance(payload, dict):
+                raise AlpacaDataError("Alpaca returned malformed history response")
+            returned_symbol = payload.get("symbol")
+            if returned_symbol is not None and str(returned_symbol).upper().strip() != symbol:
+                raise AlpacaDataError("Alpaca response symbol mismatch")
             bars.extend(payload.get("bars") or [])
             token = payload.get("next_page_token")
             if not token:
@@ -86,9 +92,16 @@ def iex_stock_history(symbol: str, period: str, interval: str) -> pd.DataFrame:
     if not required.issubset(frame.columns):
         raise AlpacaDataError("Alpaca bars missing required OHLCV fields")
     frame.index = pd.to_datetime(frame["t"], utc=True, errors="coerce")
+    if frame.index.isna().any():
+        raise AlpacaDataError("Alpaca returned invalid candle timestamps")
     frame = frame.rename(columns={"o": "Open", "h": "High", "l": "Low", "c": "Close", "v": "Volume"})
-    frame = frame.loc[frame.index.notna(), ["Open", "High", "Low", "Close", "Volume"]]
-    frame = frame.apply(pd.to_numeric, errors="coerce").dropna()
+    frame = frame.loc[:, ["Open", "High", "Low", "Close", "Volume"]]
+    frame = frame.apply(pd.to_numeric, errors="coerce")
+    # Reject the complete response rather than silently dropping bad rows and
+    # presenting an incomplete history as provider-verified.
+    finite = frame.apply(lambda column: column.map(lambda value: math.isfinite(float(value))))
+    if not finite.all().all():
+        raise AlpacaDataError("Alpaca returned invalid candle values")
     frame = frame[~frame.index.duplicated(keep="last")].sort_index()
     if frame.empty or (frame[["Open", "High", "Low", "Close"]] <= 0).any().any():
         raise AlpacaDataError("Alpaca returned invalid candle values")

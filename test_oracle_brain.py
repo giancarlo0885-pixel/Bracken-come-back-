@@ -220,7 +220,7 @@ def test_brain_attributes_thesis_separately_from_realized_outcome(monkeypatch):
                     "probability_of_profit": 55,
                     "estimated_cost_pct": 0.08,
                 },
-                "outcome_snapshot": {"entry_signal_id": "sig-42"},
+                "outcome_snapshot": {"entry_signal_id": "sig-42", "accounting_version": "exact_round_trip_v1", "cost_provenance": "exact_lot"},
                 "tags": [],
             }]
         return []

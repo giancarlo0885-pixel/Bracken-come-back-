@@ -4,6 +4,7 @@ import unittest
 from unittest.mock import patch, Mock
 
 import pandas as pd
+import pytest
 
 from alpaca_iex_provider import AlpacaDataError, iex_stock_history
 
@@ -79,3 +80,66 @@ def test_router_reports_read_only_failure_without_credentials(monkeypatch, caplo
     assert "symbol=AMD | period=5d | interval=5m" in caplog.text
     assert "HTTP 401" in caplog.text
     assert "secret-key" not in caplog.text
+
+
+@pytest.mark.parametrize("bad_value", [float("inf"), float("-inf"), float("nan"), None, "invalid"])
+def test_nonfinite_or_missing_candle_cannot_leave_a_verified_partial_history(monkeypatch, bad_value):
+    monkeypatch.setenv("APCA_API_KEY_ID", "unit-key")
+    monkeypatch.setenv("APCA_API_SECRET_KEY", "unit-secret")
+    monkeypatch.setenv("ALPACA_DATA_FEED", "iex")
+    monkeypatch.setenv("ALPACA_DATA_URL", "https://data.alpaca.markets")
+    bars = [
+        {"t": "2026-10-13T15:00:00Z", "o": 100, "h": 102, "l": 99, "c": 101, "v": 200},
+        {"t": "2026-10-13T15:05:00Z", "o": 100, "h": 102, "l": 99, "c": bad_value, "v": 200},
+    ]
+    response = Mock(status_code=200)
+    response.json.return_value = {"symbol": "MSFT", "bars": bars}
+    monkeypatch.setattr("alpaca_iex_provider.requests.get", lambda *args, **kwargs: response)
+
+    with pytest.raises(AlpacaDataError, match="invalid candle values"):
+        iex_stock_history("MSFT", "5d", "5m")
+
+
+def test_invalid_timestamp_cannot_leave_a_verified_partial_history(monkeypatch):
+    monkeypatch.setenv("APCA_API_KEY_ID", "unit-key")
+    monkeypatch.setenv("APCA_API_SECRET_KEY", "unit-secret")
+    monkeypatch.setenv("ALPACA_DATA_FEED", "iex")
+    monkeypatch.setenv("ALPACA_DATA_URL", "https://data.alpaca.markets")
+    response = Mock(status_code=200)
+    response.json.return_value = {"bars": [
+        {"t": "2026-10-13T15:00:00Z", "o": 100, "h": 102, "l": 99, "c": 101, "v": 200},
+        {"t": "invalid", "o": 100, "h": 102, "l": 99, "c": 101, "v": 200},
+    ]}
+    monkeypatch.setattr("alpaca_iex_provider.requests.get", lambda *args, **kwargs: response)
+    with pytest.raises(AlpacaDataError, match="invalid candle timestamps"):
+        iex_stock_history("MSFT", "5d", "5m")
+
+
+def test_conflicting_response_symbol_is_not_relabelled_to_request(monkeypatch):
+    monkeypatch.setenv("APCA_API_KEY_ID", "unit-key")
+    monkeypatch.setenv("APCA_API_SECRET_KEY", "unit-secret")
+    monkeypatch.setenv("ALPACA_DATA_FEED", "iex")
+    monkeypatch.setenv("ALPACA_DATA_URL", "https://data.alpaca.markets")
+    response = Mock(status_code=200)
+    response.json.return_value = {"symbol": "GOOG", "bars": [
+        {"t": "2026-10-13T15:00:00Z", "o": 100, "h": 102, "l": 99, "c": 101, "v": 200},
+    ]}
+    monkeypatch.setattr("alpaca_iex_provider.requests.get", lambda *args, **kwargs: response)
+    with pytest.raises(AlpacaDataError, match="symbol mismatch"):
+        iex_stock_history("MSFT", "5d", "5m")
+
+
+def test_exhausted_pagination_rejects_partial_history(monkeypatch):
+    monkeypatch.setenv("APCA_API_KEY_ID", "unit-key")
+    monkeypatch.setenv("APCA_API_SECRET_KEY", "unit-secret")
+    monkeypatch.setenv("ALPACA_DATA_FEED", "iex")
+    monkeypatch.setenv("ALPACA_DATA_URL", "https://data.alpaca.markets")
+    response = Mock(status_code=200)
+    response.json.return_value = {"symbol": "MSFT", "bars": [
+        {"t": "2026-10-13T15:00:00Z", "o": 100, "h": 102, "l": 99, "c": 101, "v": 200},
+    ], "next_page_token": "more"}
+    get = Mock(return_value=response)
+    monkeypatch.setattr("alpaca_iex_provider.requests.get", get)
+    with pytest.raises(AlpacaDataError, match="pagination limit"):
+        iex_stock_history("MSFT", "1y", "1m")
+    assert get.call_count == 5

@@ -48,11 +48,32 @@ def _episode(row):
     return (row["market"], int(row["entry"].timestamp()) // seconds)
 
 
+def _split_episodes(rows, cutoff, exclusions):
+    """Use the same purged entry windows before and after discovery freezes."""
+    train, forward = defaultdict(list), []
+    for row in rows:
+        seconds = 86400 if row["market"] == "cash" else 14400
+        episode_start = _episode(row)[1] * seconds
+        if row["exit"] < cutoff and episode_start + seconds <= cutoff.timestamp():
+            train[_key(row)].append(row)
+        elif row["entry"] >= cutoff and episode_start >= cutoff.timestamp():
+            forward.append(row)
+        else:
+            reason = "boundary_or_open_training_episode"
+            exclusions[reason] = exclusions.get(reason, 0) + 1
+    return train, forward
+
+
 def prepare(rows, as_of):
     """Exclude incomplete, conflicting, future and post-hoc evidence explicitly."""
     counts = Counter()
     identities = defaultdict(list)
     for row in rows:
+        entered, exited = _time(row.get("entry_time")), _time(row.get("exit_time"))
+        if ((entered is not None and entered > as_of)
+                or (exited is not None and exited > as_of)):
+            counts["future_or_open_outcome"] += 1
+            continue
         identities[str(row.get("trade_id") or "")].append(row)
     valid = []
     for identity, versions in identities.items():
@@ -122,16 +143,7 @@ def discover(rows, *, cutoff, as_of):
     if cutoff.tzinfo is None or as_of.tzinfo is None:
         raise ValueError("cutoff and as_of must be timezone-aware")
     valid, exclusions = prepare(rows, as_of)
-    train, forward = defaultdict(list), []
-    for row in valid:
-        seconds = 86400 if row["market"] == "cash" else 14400
-        episode_end = (_episode(row)[1] + 1) * seconds
-        if row["exit"] < cutoff and episode_end <= cutoff.timestamp():
-            train[_key(row)].append(row)
-        elif row["entry"] >= cutoff and _episode(row)[1] * seconds >= cutoff.timestamp():
-            forward.append(row)
-        else:
-            exclusions["boundary_or_open_training_episode"] = exclusions.get("boundary_or_open_training_episode", 0) + 1
+    train, forward = _split_episodes(valid, cutoff, exclusions)
     # Correct discovery confidence for the number of cohorts searched.
     alpha = 0.05 / max(1, len(train))
     candidates, selected = [], set()
@@ -165,8 +177,19 @@ def verified_ledger_inputs(ledger, fills, *, as_of, fifo_report=None):
 
     report = fifo_report if fifo_report is not None else reconcile_fifo(
         attach_fill_fee_evidence(ledger, fills), as_of=as_of, require_fill_fee_evidence=True)
-    buys = {r["trade_id"]: r for r in ledger if r.get("side") == "BUY"}
     rows, exclusions = [], Counter()
+    buy_versions = defaultdict(list)
+    for buy in ledger:
+        if buy.get("side") != "BUY":
+            continue
+        entered = _time(buy.get("entry_time"))
+        if entered is not None and entered > as_of:
+            continue
+        buy_versions[buy.get("trade_id")].append(buy)
+    # Follow FIFO's as-of identity rules; future corrections cannot overwrite
+    # the entry-time snapshot of a historical lot.
+    buys = {identity: versions[0] for identity, versions in buy_versions.items()
+            if identity and all(version == versions[0] for version in versions)}
     grouped = defaultdict(list)
     for close in report["closes"]:
         if len(close["members"]) != 1:
@@ -174,13 +197,19 @@ def verified_ledger_inputs(ledger, fills, *, as_of, fifo_report=None):
             continue
         grouped[close["members"][0]["buy_trade_id"]].append(close)
     for buy_id, parts in grouped.items():
+        if buy_id not in buys:
+            exclusions["missing_or_conflicting_entry_identity"] += 1
+            continue
         opened = _finite(buys.get(buy_id, {}).get("quantity"))
         closed = sum(part["members"][0]["quantity"] for part in parts)
         if opened is None or opened <= 0 or not math.isclose(closed, opened, rel_tol=1e-9, abs_tol=1e-12):
             exclusions["open_or_partial_entry_lot"] += 1
             continue
-        if any(not part["fifo_complete"] for part in parts):
+        if any(part.get("fifo_complete") is not True for part in parts):
             exclusions["unreconciled_fifo"] += 1
+            continue
+        if any(part.get("fill_fee_evidence_verified") is not True for part in parts):
+            exclusions["unverified_canonical_fill_fees"] += 1
             continue
         close = {**parts[0], "trade_id": buy_id,
                  "exit_time": max(part["exit_time"] for part in parts),
@@ -252,7 +281,7 @@ def runtime_report(rows, *, as_of, previous=None, coverage=None):
         provisional["discovery_alpha"] = previous.get("discovery_alpha")
         selected = {_key(c["cohort"]) for c in candidates if c.get("research_candidate")}
         valid, _ = prepare(rows, as_of)
-        forward = [r for r in valid if r["entry"] >= FORWARD_CUTOFF]
+        _, forward = _split_episodes(valid, FORWARD_CUTOFF, {})
         accepted = [r for r in forward if _key(r) in selected]
         rejected = [r for r in forward if _key(r) not in selected]
         provisional["forward"] = {"baseline": summarize(forward), "selected": summarize(accepted),

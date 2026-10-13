@@ -106,6 +106,99 @@ def test_positive_evidence_across_enough_episodes_can_reach_shadow_only():
     assert evidence["episode_count"] >= a.MIN_CLUSTER_EPISODES
     assert all(evidence["gates"].values())
     assert evidence["split"] == "70/30_time_ordered_clustered"
+    assert params[6] is None  # No arbitrary 999 profit-factor claim without losses.
+    assert evidence["profit_factor_status"] == "no_losses"
+    assert evidence["accounting_version"] == "exact_round_trip_v1"
+    assert evidence["cost_provenance"] == "exact_lot"
+
+
+def test_walk_forward_splits_whole_episodes_before_train_test_partition():
+    conn = _ChallengerConn(_episode_rows(2, 30))
+    result = a.walk_forward_challengers(conn, "crypto")
+    assert result["shadow_qualified"] == 0
+    params = conn.insert_params[0]
+    evidence = __import__("json").loads(params[9])
+    assert evidence["train_samples"] == 30
+    assert evidence["test_samples"] == 30
+    assert evidence["train_episode_count"] == 1
+    assert evidence["episode_count"] == 1
+    assert params[3] > params[2] + timedelta(seconds=a.CLUSTER_GAP_SECONDS)
+
+
+def test_missing_or_reversed_entry_intervals_cannot_count_as_independent_episodes():
+    base = datetime(2026, 10, 1, tzinfo=timezone.utc)
+    rows = [
+        {"exit_time": base, "net_pnl": 1, "return_pct": 0.1},
+        {"entry_time": base, "exit_time": base - timedelta(minutes=1),
+         "net_pnl": 1, "return_pct": 0.1},
+        {"entry_time": base, "exit_time": base + timedelta(minutes=1),
+         "net_pnl": float("nan"), "return_pct": 0.1},
+    ]
+    metrics = a._cluster_validation_metrics(rows, market="crypto", candidate_key="invalid")
+    assert metrics["episodes"] == metrics["trades"] == 0
+    assert metrics["bootstrap_lower_expectancy"] is None
+    assert metrics["risk_metrics_ready"] is False
+
+
+class _EmptyConn:
+    def __init__(self):
+        self.queries = []
+
+    def execute(self, query, params=()):
+        self.queries.append(query)
+        return self
+
+    def fetchall(self):
+        return []
+
+    def fetchone(self):
+        return {}
+
+
+def test_all_advanced_outcome_readers_require_complete_round_trip_costs():
+    conn = _EmptyConn()
+    a.refresh_setup_attribution(conn, market="crypto")
+    a.classify_failures(conn, market="crypto")
+    a.exit_diagnostics(conn, market="crypto")
+    concentration = a.portfolio_concentration(conn, market="crypto")
+    a.walk_forward_challengers(conn, "crypto")
+    reads = [sql for sql in conn.queries if "FROM oracle_brain_episodes" in sql]
+    assert len(reads) == 5
+    for sql in reads:
+        assert "provenance_status='exact'" in sql
+        assert "outcome_snapshot->>'accounting_version'='exact_round_trip_v1'" in sql
+        assert "outcome_snapshot->>'cost_provenance'='exact_lot'" in sql
+    assert concentration["top3_concentration"] is None
+
+
+def test_walk_forward_cohort_and_sample_reads_both_require_complete_costs():
+    class Capture(_ChallengerConn):
+        def __init__(self, rows):
+            super().__init__(rows)
+            self.queries = []
+
+        def execute(self, query, params=None):
+            self.queries.append(query)
+            return super().execute(query, params)
+
+    conn = Capture(_episode_rows(30, 2))
+    a.walk_forward_challengers(conn, "crypto")
+    reads = [sql for sql in conn.queries if "FROM oracle_brain_episodes" in sql]
+    assert len(reads) == 2
+    assert all("outcome_snapshot->>'accounting_version'='exact_round_trip_v1'" in sql for sql in reads)
+    assert all("outcome_snapshot->>'cost_provenance'='exact_lot'" in sql for sql in reads)
+
+
+def test_walk_forward_drawdown_is_independent_of_simultaneous_exit_row_order():
+    rows = _episode_rows(100, 2)
+    for index, row in enumerate(rows):
+        row["exit_time"] = row["entry_time"] + timedelta(minutes=20)
+        row["net_pnl"] = 3 if index % 2 == 0 else -5
+    forward = _ChallengerConn(rows)
+    reversed_order = _ChallengerConn(list(reversed(rows)))
+    a.walk_forward_challengers(forward, "crypto")
+    a.walk_forward_challengers(reversed_order, "crypto")
+    assert forward.insert_params[0][7] == reversed_order.insert_params[0][7] == 60
 
 def test_advanced_schema_has_no_execution_authority():
     migration=Path("migrations/20260922_oracle_advanced_learning.sql").read_text(encoding="utf-8")

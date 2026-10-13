@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from contextlib import contextmanager
 from pathlib import Path
+from unittest.mock import patch
 import inspect
+import json
 
 import database
 import oracle_brain
@@ -88,6 +91,9 @@ def test_episode_requires_exact_entry_provenance():
         "net_pnl": 10.0,
         "gross_pnl": 11.0,
         "fees": 1.0,
+        "round_trip_net_pnl": 10.0,
+        "round_trip_fees": 1.0,
+        "cost_provenance": "exact_lot",
         "exit_price": 106.0,
         "mfe_pct": 8.0,
         "mae_pct": -3.0,
@@ -119,6 +125,223 @@ def test_episode_requires_exact_entry_provenance():
     assert episode["outcome_snapshot"]["holding_seconds"] == 7200.0
     assert episode["outcome_snapshot"]["mfe_pct"] == 8.0
     assert episode["outcome_snapshot"]["mae_pct"] == -3.0
+    assert episode["outcome_snapshot"]["accounting_version"] == "exact_round_trip_v1"
+    assert episode["outcome_snapshot"]["cost_provenance"] == "exact_lot"
+
+
+def _full_cost_trade():
+    return {
+        "trade_id": "full-cost-trade", "entry_signal_id": "entry-signal",
+        "feature_snapshot": {"entry_pattern": "dip_rebound"},
+        "market": "cash", "symbol": "MSFT", "strategy": "dip_rebound",
+        "regime": "range", "entry_time": "2026-09-19T00:00:00+00:00",
+        "exit_time": "2026-09-19T02:00:00+00:00",
+        "entry_price": 100.0, "exit_price": 100.3, "quantity": 1.0,
+        "net_pnl": 0.1, "fees": 0.2, "gross_pnl": 0.3,
+        "round_trip_net_pnl": -0.15, "round_trip_fees": 0.45,
+        "cost_provenance": "exact_lot",
+    }
+
+
+def test_episode_accounts_for_entry_fees_that_turn_exit_winner_into_loss():
+    episode = learning.episode_from_row(_full_cost_trade())
+    assert episode is not None
+    assert episode["net_pnl"] == -0.15
+    assert episode["fees"] == 0.45
+    assert episode["return_pct"] == -0.15
+    assert episode["outcome_snapshot"]["outcome"] == "negative"
+    assert abs(episode["outcome_snapshot"]["gross_pnl"] - 0.3) < 1e-10
+    assert "outcome:negative" in episode["tags"]
+    assert "outcome:positive" not in episode["tags"]
+
+
+def test_episode_rejects_missing_inexact_or_nonfinite_round_trip_accounting():
+    trade = _full_cost_trade()
+    for provenance in (None, "", "incomplete_entry_provenance", "ambiguous_or_missing_entry_lot"):
+        assert learning.episode_from_row({**trade, "cost_provenance": provenance}) is None
+    for field in ("round_trip_net_pnl", "round_trip_fees"):
+        for invalid in (None, "missing", float("nan"), float("inf"), float("-inf")):
+            assert learning.episode_from_row({**trade, field: invalid}) is None
+        absent = dict(trade)
+        absent.pop(field)
+        assert learning.episode_from_row(absent) is None
+    assert learning.episode_from_row({**trade, "round_trip_fees": -0.01}) is None
+    free = learning.episode_from_row({**trade, "round_trip_fees": 0, "round_trip_net_pnl": 0})
+    assert free is not None
+    assert free["outcome_snapshot"]["outcome"] == "flat"
+
+
+def test_episode_excursions_require_forward_samples_and_finite_measurements():
+    trade = {**_full_cost_trade(), "mfe_pct": 0.0, "mae_pct": 0.0}
+    for sample_count in (None, 0, -1, float("nan"), float("inf")):
+        episode = learning.episode_from_row({**trade, "excursion_sample_count": sample_count})
+        assert episode is not None
+        assert episode["mfe_pct"] is None
+        assert episode["mae_pct"] is None
+        assert episode["outcome_snapshot"]["mfe_pct"] is None
+        assert episode["outcome_snapshot"]["mae_pct"] is None
+    for invalid in (None, "missing", float("nan"), float("inf"), float("-inf")):
+        episode = learning.episode_from_row({
+            **trade, "excursion_sample_count": 3, "mfe_pct": invalid, "mae_pct": invalid,
+        })
+        assert episode is not None
+        assert episode["mfe_pct"] is None
+        assert episode["mae_pct"] is None
+    measured = learning.episode_from_row({**trade, "excursion_sample_count": 3})
+    assert measured["mfe_pct"] == 0.0
+    assert measured["mae_pct"] == 0.0
+
+
+def test_episode_requires_completed_valid_chronological_timestamps():
+    trade = _full_cost_trade()
+    now = datetime(2026, 9, 20, tzinfo=timezone.utc)
+    for field in ("entry_time", "exit_time"):
+        for invalid in (None, "", "invalid", "2026-09-21T00:00:00+00:00"):
+            assert learning.episode_from_row({**trade, field: invalid}, now=now) is None
+        absent = dict(trade)
+        absent.pop(field)
+        assert learning.episode_from_row(absent, now=now) is None
+    assert learning.episode_from_row({**trade, "exit_time": "2026-09-18T00:00:00+00:00"}, now=now) is None
+    assert learning.episode_from_row(trade, now=now) is not None
+
+
+def test_retrieved_brain_context_excludes_legacy_exit_only_cost_claims():
+    verified = {"episode_key": "trade:verified", "net_pnl": -0.15, "fees": 0.45}
+    legacy = {"episode_key": "trade:legacy", "net_pnl": 0.1, "fees": 0.2}
+    queries = []
+
+    class Conn:
+        def execute(self, query, params=()):
+            queries.append((query, params))
+            if "FROM oracle_brain_episodes" in query:
+                gated = (
+                    "outcome_snapshot->>'accounting_version'='exact_round_trip_v1'" in query
+                    and "outcome_snapshot->>'cost_provenance'='exact_lot'" in query
+                )
+                return _LearningResult([verified] if gated else [verified, legacy])
+            return _LearningResult()
+
+    @contextmanager
+    def connect():
+        yield Conn()
+
+    with patch.object(database, "connect", connect):
+        context = learning.retrieve_brain_context(
+            market="cash", symbol="msft", strategy="dip_rebound", regime="range", limit=2,
+        )
+    assert context["episodes"] == [verified]
+    assert context["execution_impact"] == "NONE"
+    assert queries[0][1] == ("cash", "MSFT", "dip_rebound", "range", 2)
+    assert all(query.strip().upper().startswith("SELECT") for query, _ in queries)
+
+
+class _LearningResult:
+    def __init__(self, rows=()):
+        self.rows = list(rows)
+
+    def fetchall(self):
+        return self.rows
+
+    def fetchone(self):
+        return self.rows[0] if self.rows else None
+
+
+class _TradeLearningConnection:
+    def __init__(self, trades, existing=None):
+        self.trades = trades
+        self.existing = existing
+        self.writes = []
+        self.queries = []
+
+    def execute(self, query, params=()):
+        self.queries.append((query, params))
+        if "FROM paper_regime_trade_metrics m" in query:
+            assert "m.round_trip_net_pnl,m.round_trip_fees" in query
+            assert "m.net_pnl,m.fees" not in query
+            assert params == ("cash", 1)
+            return _LearningResult(self.trades)
+        if query.startswith("SELECT net_pnl,fees,return_pct,outcome_snapshot"):
+            return _LearningResult([self.existing] if self.existing else [])
+        self.writes.append((query, params))
+        if "INSERT INTO oracle_brain_episodes(" in query:
+            self.existing = {
+                "net_pnl": params[8], "fees": params[9], "return_pct": params[10],
+                "outcome_snapshot": json.loads(params[17]),
+            }
+        return _LearningResult()
+
+
+def test_episode_sync_uses_canonical_costs_without_duplicate_links():
+    conn = _TradeLearningConnection([_full_cost_trade()])
+    assert learning._sync_trade_episodes(conn, "cash", limit=1) == (1, 0, 1)
+    assert conn.existing["net_pnl"] == -0.15
+    assert conn.existing["fees"] == 0.45
+    outcome_links = [params for query, params in conn.writes if "INSERT INTO oracle_brain_links(" in query]
+    assert len(outcome_links) == 3
+    produced = [params for params in outcome_links if params[2] == "produced"]
+    assert produced[0][1] == "outcome:negative"
+    assert learning._sync_trade_episodes(conn, "cash", limit=1) == (1, 0, 0)
+    assert len([1 for query, _ in conn.writes if "INSERT INTO oracle_brain_links(" in query]) == 3
+
+
+def test_bounded_episode_sync_preserves_prior_accounting_snapshot_on_correction():
+    previous = {"outcome": "positive", "net_pnl": 0.1, "fees": 0.2, "entry_signal_id": "entry-signal"}
+    conn = _TradeLearningConnection([_full_cost_trade()], {
+        "net_pnl": 0.1, "fees": 0.2, "return_pct": 0.1, "outcome_snapshot": previous,
+    })
+    assert learning._sync_trade_episodes(conn, "cash", limit=1) == (1, 0, 0)
+    revised = conn.existing["outcome_snapshot"]
+    revision = revised["accounting_revision"]
+    assert revised["outcome"] == "negative"
+    assert revision["previous_outcome_snapshot"] == previous
+    assert revision["previous_net_pnl"] == 0.1
+    assert revision["previous_fees"] == 0.2
+    assert revision["previous_return_pct"] == 0.1
+    assert revision["source_ref"] == "paper_regime_trade_metrics:full-cost-trade"
+    assert learning._sync_trade_episodes(conn, "cash", limit=1) == (1, 0, 0)
+    assert conn.existing["outcome_snapshot"]["accounting_revision"] == revision
+    assert not any("DELETE" in query for query, _ in conn.queries)
+    assert not any("INSERT INTO oracle_brain_links(" in query for query, _ in conn.writes)
+
+
+def test_episode_sync_does_not_publish_unknown_costs_as_exact():
+    conn = _TradeLearningConnection([{**_full_cost_trade(), "round_trip_net_pnl": None}])
+    assert learning._sync_trade_episodes(conn, "cash", limit=1) == (0, 1, 0)
+    assert conn.existing is None
+    assert not any("INSERT INTO oracle_brain_episodes(" in query for query, _ in conn.writes)
+
+
+def test_regime_lessons_exclude_unmarked_historical_exit_only_outcomes():
+    class Conn:
+        def execute(self, query, params=()):
+            assert "outcome_snapshot->>'accounting_version'='exact_round_trip_v1'" in query
+            assert "outcome_snapshot->>'cost_provenance'='exact_lot'" in query
+            return _LearningResult()
+
+    assert learning._sync_regime_lessons_and_queue(Conn(), "cash") == (0, 0)
+
+
+def test_mature_lesson_supersedes_old_exit_only_claim_without_erasing_it():
+    writes = []
+
+    class Conn:
+        def execute(self, query, params=()):
+            if "SELECT id,metadata,created_at FROM oracle_brain_entries" in query:
+                return _LearningResult([{"id": 7, "metadata": {"samples": 30, "claim_polarity": "positive"}}])
+            writes.append((query, params))
+            return _LearningResult([{"id": 8}]) if "RETURNING id" in query else _LearningResult()
+
+    summary = learning.regime_summary([
+        {"net_pnl": 1.0, "fees": 0.45, "freshness_score": 1.0}
+    ] * learning.MIN_MATURE_SAMPLES)
+    assert learning._insert_regime_lesson(Conn(), "cash", "dip_rebound", "range", summary) == 8
+    assert any("SET status='superseded'" in query and params == (7,) for query, params in writes)
+    entry = next(params for query, params in writes if "INSERT INTO oracle_brain_entries(" in query)
+    metadata = json.loads(entry[5])
+    assert entry[4] == 7
+    assert metadata["accounting_version"] == "exact_round_trip_v1"
+    assert metadata["cost_provenance"] == "exact_lot"
+    assert not any("DELETE" in query for query, _ in writes)
 
 
 def test_regime_summary_requires_mature_sample_depth():
@@ -163,7 +386,8 @@ def test_brain_snapshot_surfaces_learning_memory_select_only(monkeypatch):
                 "exit_time": "2026-09-20T00:00:00+00:00", "net_pnl": 5.0, "fees": 0.2,
                 "return_pct": 1.0, "mfe_pct": 2.0, "mae_pct": -0.5,
                 "provenance_status": "exact", "source_quality": 1.0,
-                "freshness_score": 0.95, "confidence": 0.98, "outcome_snapshot": {}, "tags": [],
+                "freshness_score": 0.95, "confidence": 0.98,
+                "outcome_snapshot": {"accounting_version": "exact_round_trip_v1", "cost_provenance": "exact_lot"}, "tags": [],
             }]
         if "from oracle_brain_links" in query.lower():
             return [{

@@ -19,6 +19,7 @@ from quant_trade_standard import assess_trade
 from oracle_intelligence import evaluate_opportunity
 from market_memory import feature_vector, record_closed_trade_memory
 from market_data import MarketSnapshot
+from quote_provenance import reference_allowed_in_mode
 from provider_router import normalize_symbol
 from risk_engine import ExecutionSwitches, pre_trade_risk_checks
 from market_sessions import (
@@ -495,6 +496,9 @@ def _quote_identity_metadata(signal: Any) -> dict[str, Any]:
         "timestamp",
         "interval",
         "quote_verified",
+        "provider_quote_verified",
+        "paper_reference_verified",
+        "verification_basis",
         "verified",
         "stale",
         "bid",
@@ -542,6 +546,8 @@ def _verified_quote_for(
         return None
     if payload.get("quote_verified") is not True:
         return None
+    if not reference_allowed_in_mode(payload, EXECUTION_MODE, PAPER_BROKER_MODE):
+        return None
     quote_timestamp = payload.get("quote_timestamp") or payload.get("timestamp")
     if _parse_utc(quote_timestamp) is None:
         return None
@@ -576,6 +582,8 @@ def _quote_rejection_reason(symbol: str, quotes: dict[str, Any] | None, market: 
         return "provider quote identity mismatch"
     if payload.get("quote_verified") is not True:
         return "quote is not provider verified"
+    if not reference_allowed_in_mode(payload, EXECUTION_MODE, PAPER_BROKER_MODE):
+        return "paper reference is ineligible outside paper execution"
     quote_timestamp = payload.get("quote_timestamp") or payload.get("timestamp")
     interval = safe_text(payload.get("interval"), "1d")
     if _parse_utc(quote_timestamp) is None:
@@ -646,6 +654,8 @@ def _execution_quote_guard(
         return False, f"provider quote identity mismatch ({requested}/{provider_symbol}/{symbol})"
     if metadata.get("quote_verified") is not True:
         return False, "quote is not provider verified"
+    if not reference_allowed_in_mode(metadata, EXECUTION_MODE, PAPER_BROKER_MODE):
+        return False, "paper reference is ineligible outside paper execution"
     quote_price = safe_float(metadata.get("price"))
     if quote_price <= 0:
         return False, "verified quote price is missing"
@@ -3605,3 +3615,4 @@ def snapshot(
         "excess_liquidity": safe_float(data.get("excess_liquidity")),
         "margin_interest_accrued": safe_float(data.get("margin_interest_accrued")),
     }
+

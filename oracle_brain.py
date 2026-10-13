@@ -7,6 +7,8 @@ import math
 import os
 from typing import Any, Callable
 
+from oracle_learning_validation import _calibration_buckets, _exact_cost_outcome_sql, WEAKNESS_MIN_SAMPLES
+
 
 FetchRows = Callable[[str, tuple[Any, ...]], list[dict[str, Any]]]
 
@@ -138,6 +140,34 @@ def runtime_safety_state() -> dict[str, Any]:
     }
 
 
+def build_learning_validation_snapshot(fetch_rows: FetchRows, *, market_scope: str | None = None) -> dict[str, Any]:
+    """Read current full-cost evidence instead of unversioned legacy rollups."""
+    if market_scope not in {None, "crypto"}:
+        raise ValueError("market_scope must be crypto or None")
+    scope = " AND market IN ('crypto','US_CRYPTO','us_crypto')" if market_scope else ""
+    setups = _safe_rows(fetch_rows, f"""SELECT market,strategy,regime,COUNT(*)::int AS samples,
+        COUNT(*) FILTER (WHERE net_pnl>0)::int AS wins,
+        COUNT(*) FILTER (WHERE net_pnl<0)::int AS losses,
+        AVG(net_pnl) AS expectancy,
+        SUM(net_pnl) FILTER (WHERE net_pnl>0) /
+            NULLIF(ABS(SUM(net_pnl) FILTER (WHERE net_pnl<0)),0) AS profit_factor,
+        AVG(mfe_pct) AS avg_mfe_pct,AVG(mae_pct) AS avg_mae_pct
+        FROM oracle_brain_episodes WHERE {_exact_cost_outcome_sql()}{scope}
+        GROUP BY market,strategy,regime ORDER BY samples DESC""")
+    rows = _safe_rows(fetch_rows, f"""SELECT market,feature_snapshot,return_pct
+        FROM oracle_brain_episodes WHERE {_exact_cost_outcome_sql()}{scope}
+        AND return_pct IS NOT NULL""")
+    buckets = _calibration_buckets(rows)
+    samples = sum(len(values) for values in buckets.values())
+    error = (sum(abs(sum(x[0] for x in values) - sum(x[2] > 0 for x in values))
+                 for values in buckets.values()) / samples if samples else None)
+    negative = sum(int(row.get("samples") or 0) >= WEAKNESS_MIN_SAMPLES
+                   and _num(row.get("expectancy"), float("inf")) <= 0 for row in setups)
+    return {"setups": setups, "setup_cohorts": len(setups), "negative_cohorts": negative,
+            "calibration_error": error, "calibration_samples": samples,
+            "accounting_version": "exact_round_trip_v1", "cost_provenance": "exact_lot"}
+
+
 def build_oracle_brain_snapshot(fetch_rows: FetchRows, *, market_scope: str | None = None) -> dict[str, Any]:
     if market_scope not in {None, "crypto"}:
         raise ValueError("market_scope must be crypto or None")
@@ -162,13 +192,18 @@ def build_oracle_brain_snapshot(fetch_rows: FetchRows, *, market_scope: str | No
         fetch_rows,
         f"""
         SELECT strategy, regime, COUNT(*)::int AS samples,
-               SUM(net_pnl) AS net_pnl,
-               SUM(fees) AS fees,
-               AVG(net_pnl) AS expectancy,
+               SUM(round_trip_net_pnl) AS net_pnl,
+               SUM(round_trip_fees) AS fees,
+               AVG(round_trip_net_pnl) AS expectancy,
                AVG(mfe_pct) FILTER (WHERE excursion_sample_count > 0) AS avg_mfe_pct,
                AVG(mae_pct) FILTER (WHERE excursion_sample_count > 0) AS avg_mae_pct,
                SUM(CASE WHEN excursion_sample_count > 0 THEN 1 ELSE 0 END)::int AS excursion_trades
-        FROM paper_regime_trade_metrics{scope_where}
+        FROM paper_regime_trade_metrics
+        WHERE cost_provenance='exact_lot'
+          AND round_trip_net_pnl > '-Infinity'::double precision
+          AND round_trip_net_pnl < 'Infinity'::double precision
+          AND round_trip_fees >= 0 AND round_trip_fees < 'Infinity'::double precision
+          AND entry_time <= exit_time AND exit_time <= NOW(){scope_and}
         GROUP BY strategy, regime
         ORDER BY samples DESC
         LIMIT 40
@@ -183,6 +218,8 @@ def build_oracle_brain_snapshot(fetch_rows: FetchRows, *, market_scope: str | No
                 "strategy": str(row.get("strategy") or "unknown"),
                 "regime": str(row.get("regime") or "unknown"),
                 "samples": samples,
+                "accounting_version": "exact_round_trip_v1",
+                "cost_provenance": "exact_lot",
                 "net_pnl": round(_num(row.get("net_pnl")), 6),
                 "fees": round(_num(row.get("fees")), 6),
                 "expectancy": round(expectancy, 8),
@@ -238,11 +275,18 @@ def build_oracle_brain_snapshot(fetch_rows: FetchRows, *, market_scope: str | No
                net_pnl,fees,return_pct,mfe_pct,mae_pct,provenance_status,
                source_quality,freshness_score,confidence,feature_snapshot,outcome_snapshot,tags
         FROM oracle_brain_episodes
-        WHERE provenance_status='exact'{scope_and}
+        WHERE {_exact_cost_outcome_sql()}{scope_and}
         ORDER BY exit_time DESC NULLS LAST
         LIMIT 120
         """,
     )
+    episodes = [item for item in episodes
+                if item.get("provenance_status") == "exact"
+                and _json_obj(item.get("outcome_snapshot")).get("accounting_version") == "exact_round_trip_v1"
+                and _json_obj(item.get("outcome_snapshot")).get("cost_provenance") == "exact_lot"
+                and math.isfinite(_num(item.get("net_pnl"), float("nan")))
+                and math.isfinite(_num(item.get("fees"), float("nan")))
+                and _num(item.get("fees"), -1.0) >= 0]
     links = _safe_rows(
         fetch_rows,
         """
@@ -448,7 +492,9 @@ def build_oracle_brain_snapshot(fetch_rows: FetchRows, *, market_scope: str | No
         "durable_lessons": retention_spans["entries"]["count"],
         "observations": retention_spans["observations"]["count"],
         "intelligence_sources": retention_spans["sources"]["count"],
-        "exact_outcomes": retention_spans["episodes"]["count"],
+        "exact_outcomes": int(_num((_safe_rows(fetch_rows,
+            f"SELECT COUNT(*)::int AS total FROM oracle_brain_episodes WHERE {_exact_cost_outcome_sql()}{scope_and}")
+            or [{}])[0].get("total"), 0.0)),
         "relationships": relationship_count,
         "oldest_observation": retention_spans["observations"]["oldest"],
         "newest_observation": retention_spans["observations"]["newest"],

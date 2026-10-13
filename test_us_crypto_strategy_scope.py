@@ -355,5 +355,6 @@ def test_unverified_primary_provider_cannot_bypass_quote_verification(monkeypatc
     routed = provider_router.route_history("GOOGL", "5d", "1d", lambda *args: pd.DataFrame())
 
     assert routed.provider == "EODHD"
-    assert [attempt.provider for attempt in routed.attempts[:2]] == ["Polygon", "EODHD"]
+    configured_attempts = [attempt for attempt in routed.attempts if attempt.status != "not_configured"]
+    assert [attempt.provider for attempt in configured_attempts[:2]] == ["Polygon", "EODHD"]
     assert routed.frame.attrs["quote_verified"] is True

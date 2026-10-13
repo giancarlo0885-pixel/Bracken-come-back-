@@ -5,6 +5,8 @@ import math
 import os
 from typing import Any
 
+from quote_provenance import provider_verified
+
 
 log = logging.getLogger("paper-broker-reference")
 PAPER_EXECUTION_MODEL_VERSION = "v2-robinhood-book"
@@ -55,7 +57,7 @@ def _verified_quote_as_broker_book(symbol: str, payload: dict[str, Any] | None) 
         or requested
     ).upper().strip()
     provider = str(payload.get("current_data_provider") or payload.get("provider") or "").strip()
-    verified = payload.get("provider_quote_verified") is True or payload.get("quote_verified") is True
+    verified = provider_verified(payload)
     bid = _finite(payload.get("execution_bid") if payload.get("execution_bid") is not None else payload.get("bid"))
     ask = _finite(payload.get("execution_ask") if payload.get("execution_ask") is not None else payload.get("ask"))
     if (

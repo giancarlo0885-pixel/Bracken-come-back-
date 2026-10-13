@@ -438,8 +438,10 @@ def symbol_is_unavailable(
     return any(_cooldown_active(_symbol_cooldowns, key) for key in keys)
 
 
-def _mark_provider_limited(provider: str) -> None:
-    _provider_cooldowns[provider] = time.time() + PROVIDER_RATE_LIMIT_COOLDOWN_SECONDS
+def _mark_provider_limited(provider: str, seconds: int = PROVIDER_RATE_LIMIT_COOLDOWN_SECONDS) -> None:
+    _provider_cooldowns[provider] = max(
+        _provider_cooldowns.get(provider, 0.0), time.time() + seconds,
+    )
 
 
 def _history_capability(symbol: str, interval: str) -> str:
@@ -468,8 +470,14 @@ def classify_provider_failure(exc: Exception | str, status_code: int | None = No
     code = status_code
     if code is None and isinstance(exc, Exception):
         code = _provider_status_from_exception(exc)
-    if code == 429 or "429" in text or "rate limit" in text or "too many requests" in text:
+    if (
+        code == 429 or "429" in text or "rate limit" in text or "too many requests" in text
+        or "yfratelimiterror" in text
+        or (isinstance(exc, Exception) and exc.__class__.__name__ == "YFRateLimitError")
+    ):
         return "rate_limited"
+    if code == 401:
+        return "authentication_failed"
     if code == 402 or "payment required" in text:
         return "payment_required"
     if code in {401, 403} and any(term in text for term in ("plan", "premium", "permission", "entitlement", "subscription")):
@@ -971,6 +979,7 @@ def route_history(
         ]
     else:
         routes = [
+            ("Alpaca IEX", "APCA_API_KEY_ID", _alpaca_iex),
             ("Polygon", "POLYGON_API_KEY", _polygon),
             ("EODHD", "EODHD_API_KEY", _eodhd),
             ("Finnhub", "FINNHUB_API_KEY", _finnhub),
@@ -1006,9 +1015,11 @@ def route_history(
             attempts.append(ProviderAttempt(provider, False, 0, "provider_budget_unknown", "provider capability budget is not configured"))
             continue
         try:
+            adjusted = provider != "Alpaca IEX"
+            extended_hours = intraday and provider != "Alpaca IEX"
             namespace = (
                 f"history_{provider.lower().replace(' ', '_')}_{symbol}_{period}_{interval}"
-                f"_adjusted_true_extended_{str(intraday).lower()}"
+                f"_adjusted_{str(adjusted).lower()}_extended_{str(extended_hours).lower()}"
             )
             cache_key = cache_make_key(namespace, symbol, period, interval)
             cached_frame = cache_get(cache_key)
@@ -1037,7 +1048,12 @@ def route_history(
                 frame.attrs.setdefault("source_identity", f"{provider}:{symbol}:{period}:{interval}")
                 frame.attrs["period"] = period
                 frame.attrs["interval"] = interval
-            if not frame.empty and frame.attrs.get("quote_verified") is True and verify_frame_symbol(frame, symbol):
+            if (
+                not frame.empty
+                and frame.attrs.get("provider") == provider
+                and frame.attrs.get("quote_verified") is True
+                and verify_frame_symbol(frame, symbol)
+            ):
                 frame = frame.copy(deep=True)
                 record_capability_result(provider, capability, True)
                 attempts.append(ProviderAttempt(provider, True, len(frame), "healthy"))
@@ -1053,7 +1069,7 @@ def route_history(
         except Exception as exc:
             text = _redact_url(str(exc))[:220]
             status_code = _provider_status_from_exception(exc)
-            if classify_plan_limited_status(status_code, text):
+            if status_code != 401 and classify_plan_limited_status(status_code, text):
                 disable_capability(
                     provider,
                     capability,
@@ -1070,6 +1086,16 @@ def route_history(
                     provider,
                     seconds=PROVIDER_RATE_LIMIT_COOLDOWN_SECONDS,
                     reason=text or "provider rate limited",
+                )
+            elif status == "authentication_failed":
+                # Invalid credentials affect every symbol and worker. Preserve
+                # the verified-provider fallbacks without repeatedly retrying
+                # the same rejected credentials on the rest of the universe.
+                _mark_provider_limited(provider, PROVIDER_PERMISSION_COOLDOWN_SECONDS)
+                mark_provider_cooldown_live(
+                    provider,
+                    seconds=PROVIDER_PERMISSION_COOLDOWN_SECONDS,
+                    reason="provider authentication failed (HTTP 401)",
                 )
             record_capability_result(provider, capability, False, status, status_code=status_code)
             attempts.append(ProviderAttempt(provider, False, 0, status, text))
