@@ -92,3 +92,18 @@ def test_shadow_logs_entry_and_current_forecasts_separately():
     assert "current_forecast_id=" in src
     assert "current_forecast_unavailable_reason=" in src
     assert 'if expected_edge_pct is None:\n        return reject("missing_expected_edge")' in src
+
+
+def test_shadow_missing_edge_logs_lot_identity_coverage_without_promotion():
+    from pathlib import Path
+    import ast
+    src = (Path(__file__).resolve().parent / "paper_shadow_exit_challenger.py").read_text(encoding="utf-8")
+    ast.parse(src)
+    assert "entry_lot_count = len(entry_lots)" in src
+    assert 'lot.get("entry_signal_id") is not None for lot in entry_lots' in src
+    assert 'lot.get("entry_forecast_id") is not None for lot in entry_lots' in src
+    assert "entry_lot_count=%s" in src
+    assert "entry_lots_with_signal_id=%s" in src
+    assert "entry_lots_with_forecast_id=%s" in src
+    assert 'exclusions["ineligible_telemetry"] += 1' in src
+    assert 'return reject("missing_expected_edge")' in src
