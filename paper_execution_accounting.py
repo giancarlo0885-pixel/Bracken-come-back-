@@ -273,126 +273,132 @@ def _fee_aware_fifo_close_lots(
     return rows
 
 
-def _latest_trade(market: str, symbol: str, side: str, since: str) -> dict[str, Any] | None:
-    try:
-        from database import connect
-
-        with connect() as conn:
-            return conn.execute(
-                """
-                SELECT * FROM trades
-                WHERE market=%s AND symbol=%s AND side=%s AND created_at >= %s
-                ORDER BY id DESC LIMIT 1
-                """,
-                (market, symbol, side, since),
-            ).fetchone()
-    except Exception as exc:
-        log.warning("Paper trade lookup failed for accounting: %s", exc)
-        return None
-
-
-def _finalize_trade_row(trade: dict[str, Any] | None, fee_pct: float) -> tuple[float, float, float]:
-    if not trade:
-        return 0.0, 0.0, 0.0
-    trade_id = trade.get("id")
-    notional = max(0.0, _finite(trade.get("value")))
-    fee_amount = notional * max(0.0, fee_pct)
-    gross = _finite(trade.get("realized_pnl"))
-    net = gross - fee_amount if str(trade.get("side") or "").upper() == "SELL" else gross
-    try:
-        from database import connect
-
-        with connect() as conn:
-            conn.execute(
-                """
-                UPDATE trades
-                SET fees=%s,
-                    gross_realized_pnl=%s,
-                    realized_pnl=%s
-                WHERE id=%s
-                """,
-                (fee_amount, gross, net, trade_id),
-            )
-    except Exception as exc:
-        log.warning("Paper trade fee finalization failed: %s", exc)
-    return notional, fee_amount, net
-
-
 def _record_order_and_fill(
+    conn: Any,
     *,
+    execution_trade_id: int,
     market: str,
     symbol: str,
     side: str,
-    requested_notional: float | None,
-    trade: dict[str, Any] | None,
-    fill: Any,
+    quantity: float,
+    price: float,
+    reference_price: float,
     fee_amount: float,
+    requested_notional: float | None,
+    lot_links: list[tuple[str, str, float]],
     quote: dict[str, Any] | None,
     reason: str,
 ) -> None:
-    if not trade:
-        return
-    filled_notional = max(0.0, _finite(trade.get("value")))
-    filled_quantity = max(0.0, _finite(trade.get("quantity")))
-    if filled_notional <= 0 or filled_quantity <= 0:
-        return
-    # This is an audit of a completed execution, not a second execution.
-    # The caller's reconstructed simulation can differ because its notional
-    # is the filled size rather than the originally requested size.
-    executed_price = _positive(trade.get("price"))
-    if executed_price is None:
-        log.warning("Paper fill audit unavailable: completed trade has no valid execution price")
-        return
+    """Persist an exact trade/order/fill/lot graph in the execution transaction.
+
+    No time-window or "latest trade" inference is permitted. The caller owns
+    the transaction; any failure must propagate and roll back the whole trade.
+    Existing historical fills with NULL canonical_trade_id remain unverified.
+    """
+    market = str(market).lower().strip()
+    symbol = str(symbol).upper().strip()
+    side = str(side).upper().strip()
+    qty = _positive(quantity)
+    executed_price = _positive(price)
+    reference = _positive(reference_price)
+    fee = _non_negative(fee_amount)
+    if not market or not symbol or side not in {"BUY", "SELL"}:
+        raise ValueError("paper audit requires an exact market, symbol, and side")
+    if not execution_trade_id or qty is None or executed_price is None or reference is None or fee is None:
+        raise ValueError("paper audit requires a valid committed execution ID, quantity, price, reference and fees")
+    if not lot_links or any(
+        not lot_id or not ledger_id or _positive(link_qty) is None
+        for lot_id, ledger_id, link_qty in lot_links
+    ):
+        raise ValueError("paper audit requires exact lot and ledger links")
+    if len({ledger_id for _, ledger_id, _ in lot_links}) != len(lot_links):
+        raise ValueError("paper audit contains duplicate ledger references")
+    linked_qty = sum(float(link_qty) for _, _, link_qty in lot_links)
+    if abs(linked_qty - qty) > max(1e-8, qty * 1e-8):
+        raise ValueError("paper audit lot quantities do not reconcile")
+
+    # Lock the exact row returned by the INSERT in this transaction. A matching
+    # symbol and timestamp are not an execution identifier.
+    trade = conn.execute(
+        """SELECT id,market,symbol,side,quantity,price,value
+           FROM trades WHERE id=%s FOR UPDATE""",
+        (execution_trade_id,),
+    ).fetchone()
+    if not trade or int(trade["id"]) != int(execution_trade_id):
+        raise ValueError("paper audit execution trade ID does not exist")
+    filled_notional = qty * executed_price
+    if (str(trade["market"]).lower() != market
+            or str(trade["symbol"]).upper() != symbol
+            or str(trade["side"]).upper() != side
+            or abs(_finite(trade["quantity"]) - qty) > max(1e-8, qty * 1e-8)
+            or abs(_finite(trade["price"]) - executed_price) > max(1e-8, executed_price * 1e-8)
+            or abs(_finite(trade["value"]) - filled_notional) > max(0.01, filled_notional * 1e-8)):
+        raise ValueError("paper audit canonical execution identity or economics mismatch")
+
+    fee_pct = fee / filled_notional
+    data = dict(quote or {})
+    fill = _simulate_fill_explicit_fee(
+        side=side, market=market, reference_price=reference, quote=data,
+        order_value=filled_notional, fee_pct=fee_pct,
+    )
     requested = max(filled_notional, _finite(requested_notional, filled_notional))
-    requested_qty = requested / fill.reference_price if fill.reference_price > 0 else filled_quantity
+    requested_qty = requested / reference
     remaining_notional = max(0.0, requested - filled_notional)
-    remaining_quantity = max(0.0, requested_qty - filled_quantity)
+    remaining_quantity = max(0.0, requested_qty - qty)
     status = "PARTIAL_CANCELLED" if remaining_notional > max(0.01, requested * 1e-6) else "FILLED"
     now = datetime.now(timezone.utc).isoformat()
     order_id = f"paper-order:{uuid.uuid4()}"
     fill_id = f"paper-fill:{uuid.uuid4()}"
-    data = dict(quote or {})
-    try:
-        from database import connect
 
-        with connect() as conn:
-            conn.execute(
-                """
-                INSERT INTO paper_orders(
-                    order_id,market,symbol,side,order_type,status,
-                    requested_quantity,requested_notional,filled_quantity,filled_notional,
-                    remaining_quantity,remaining_notional,reference_price,average_fill_price,
-                    fee_amount,fee_pct,liquidity_value,participation_rate,quote_provider,
-                    quote_timestamp,reason,created_at,updated_at
-                ) VALUES (%s,%s,%s,%s,'MARKET_IOC',%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                """,
-                (
-                    order_id, market, symbol, side, status,
-                    requested_qty, requested, filled_quantity, filled_notional,
-                    remaining_quantity, remaining_notional, fill.reference_price,
-                    executed_price, fee_amount, fill.fee_pct, fill.liquidity_value,
-                    fill.participation_rate, data.get("provider"),
-                    data.get("quote_timestamp") or data.get("timestamp"), reason, now, now,
-                ),
-            )
-            conn.execute(
-                """
-                INSERT INTO paper_fills(
-                    fill_id,order_id,market,symbol,side,quantity,reference_price,
-                    fill_price,notional,fee_amount,fee_pct,slippage_pct,spread_pct,
-                    market_impact_pct,latency_pct,quote_provider,quote_timestamp,created_at
-                ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                """,
-                (
-                    fill_id, order_id, market, symbol, side, filled_quantity,
-                    fill.reference_price, executed_price, filled_notional, fee_amount,
-                    fill.fee_pct, fill.slippage_pct, fill.spread_pct,
-                    fill.market_impact_pct, fill.latency_pct, data.get("provider"),
-                    data.get("quote_timestamp") or data.get("timestamp"), now,
-                ),
-            )
-    except Exception as exc:
-        log.warning("Paper order/fill audit persistence failed: %s", exc)
+    # The canonical trade fee and fill/lot links commit or roll back together.
+    # SELL initially stores gross realized P/L; charge the exit fee once here.
+    conn.execute(
+        """UPDATE trades SET fees=%s, gross_realized_pnl=realized_pnl,
+                  realized_pnl=CASE WHEN side='SELL' THEN realized_pnl-%s ELSE realized_pnl END
+           WHERE id=%s""",
+        (fee, fee, execution_trade_id),
+    )
+    conn.execute(
+        """
+        INSERT INTO paper_orders(
+            order_id,market,symbol,side,order_type,status,
+            requested_quantity,requested_notional,filled_quantity,filled_notional,
+            remaining_quantity,remaining_notional,reference_price,average_fill_price,
+            fee_amount,fee_pct,liquidity_value,participation_rate,quote_provider,
+            quote_timestamp,reason,created_at,updated_at
+        ) VALUES (%s,%s,%s,%s,'MARKET_IOC',%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+        """,
+        (
+            order_id, market, symbol, side, status, requested_qty, requested,
+            qty, filled_notional, remaining_quantity, remaining_notional, reference,
+            executed_price, fee, fee_pct, fill.liquidity_value,
+            fill.participation_rate, data.get("provider"),
+            data.get("quote_timestamp") or data.get("timestamp"), reason, now, now,
+        ),
+    )
+    conn.execute(
+        """
+        INSERT INTO paper_fills(
+            fill_id,order_id,canonical_trade_id,market,symbol,side,quantity,reference_price,
+            fill_price,notional,fee_amount,fee_pct,slippage_pct,spread_pct,
+            market_impact_pct,latency_pct,quote_provider,quote_timestamp,created_at
+        ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+        """,
+        (
+            fill_id, order_id, execution_trade_id, market, symbol, side, qty,
+            reference, executed_price, filled_notional, fee, fee_pct,
+            fill.slippage_pct, fill.spread_pct, fill.market_impact_pct,
+            fill.latency_pct, data.get("provider"),
+            data.get("quote_timestamp") or data.get("timestamp"), now,
+        ),
+    )
+    for lot_id, ledger_trade_id, link_qty in lot_links:
+        conn.execute(
+            """INSERT INTO paper_fill_lot_links(
+                   fill_id,lot_id,ledger_trade_id,quantity
+               ) VALUES (%s,%s,%s,%s)""",
+            (fill_id, lot_id, ledger_trade_id, link_qty),
+        )
 
 
 def _closed_lot_memory_outcome(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -543,7 +549,9 @@ def install_paper_execution_accounting(market_worker_module: Any | None = None) 
                 outgoing_quote = dict(rotation_candidate.get("_verified_rotation_quote") or {})
             sell_fee = _fee_pct(market, outgoing_quote, None)
 
-        token = _fee_context.set({"buy_fee_pct": buy_fee, "sell_fee_pct": sell_fee})
+        token = _fee_context.set({"buy_fee_pct": buy_fee, "sell_fee_pct": sell_fee,
+                                  "requested_notional": requested,
+                                  "buy_reason": "rotation_in" if rotation_candidate else "entry"})
         try:
             result = current_buy(
                 market,
@@ -559,52 +567,6 @@ def install_paper_execution_accounting(market_worker_module: Any | None = None) 
             if not result or not bool(result[0]):
                 return result
 
-            trade = _latest_trade(str(market).lower(), str(symbol).upper(), "BUY", started)
-            _, fee_amount, _ = _finalize_trade_row(trade, buy_fee)
-            fill = _simulate_fill_explicit_fee(
-                side="BUY",
-                market=market,
-                reference_price=price,
-                quote=verified_quote,
-                order_value=max(0.0, _finite(trade.get("value") if trade else capped_target)),
-                fee_pct=buy_fee,
-            )
-            _record_order_and_fill(
-                market=str(market).lower(),
-                symbol=str(symbol).upper(),
-                side="BUY",
-                requested_notional=requested,
-                trade=trade,
-                fill=fill,
-                fee_amount=fee_amount,
-                quote=verified_quote,
-                reason="entry" if not rotation_candidate else "rotation_in",
-            )
-
-            if rotation_symbol:
-                rotation_trade = _latest_trade(str(market).lower(), rotation_symbol, "SELL", started)
-                _, rotation_fee_amount, _ = _finalize_trade_row(rotation_trade, sell_fee)
-                reference = _positive(outgoing_quote.get("paper_reference_price")) or _positive(outgoing_quote.get("price"))
-                if reference is not None and rotation_trade:
-                    rotation_fill = _simulate_fill_explicit_fee(
-                        side="SELL",
-                        market=market,
-                        reference_price=reference,
-                        quote=outgoing_quote,
-                        order_value=_finite(rotation_trade.get("value")),
-                        fee_pct=sell_fee,
-                    )
-                    _record_order_and_fill(
-                        market=str(market).lower(),
-                        symbol=rotation_symbol,
-                        side="SELL",
-                        requested_notional=_finite(rotation_trade.get("value")),
-                        trade=rotation_trade,
-                        fill=rotation_fill,
-                        fee_amount=rotation_fee_amount,
-                        quote=outgoing_quote,
-                        reason="rotation_out",
-                    )
             return result
         finally:
             _fee_context.reset(token)
@@ -630,27 +592,6 @@ def install_paper_execution_accounting(market_worker_module: Any | None = None) 
             )
             if not result:
                 return False
-            trade = _latest_trade(str(market).lower(), symbol, "SELL", started)
-            _, fee_amount, _ = _finalize_trade_row(trade, sell_fee)
-            fill = _simulate_fill_explicit_fee(
-                side="SELL",
-                market=market,
-                reference_price=price,
-                quote=quote_metadata,
-                order_value=_finite(trade.get("value") if trade else 0.0),
-                fee_pct=sell_fee,
-            )
-            _record_order_and_fill(
-                market=str(market).lower(),
-                symbol=symbol,
-                side="SELL",
-                requested_notional=_finite(trade.get("value") if trade else 0.0),
-                trade=trade,
-                fill=fill,
-                fee_amount=fee_amount,
-                quote=quote_metadata,
-                reason=reason,
-            )
             return True
         finally:
             _fee_context.reset(token)
