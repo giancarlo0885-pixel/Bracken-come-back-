@@ -469,6 +469,14 @@ def _run_brain_learning_sync(market: str) -> dict[str, Any]:
             result.get("lessons_updated", 0),
             result.get("research_topics_queued", 0),
         )
+        # The sync's connection has committed before this independent read.
+        # Verification failures must not change a successful learning result.
+        try:
+            from trade_evidence_verification import emit_committed_trade_verification
+
+            emit_committed_trade_verification(market)
+        except Exception as exc:
+            log.warning("ORACLE COMMITTED TRADE EVIDENCE | market=%s | status=UNAVAILABLE | reason=%s | execution_impact=NONE", market, type(exc).__name__)
         return result
     except Exception as exc:
         log.warning("ORACLE BRAIN LEARNING | market=%s | status=UNAVAILABLE | reason=%s", market, exc.__class__.__name__)
