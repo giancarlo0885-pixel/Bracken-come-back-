@@ -248,10 +248,12 @@ def ensure_schema() -> None:
                 provenance_version SMALLINT NOT NULL DEFAULT 1,
                 cost_provenance TEXT NOT NULL DEFAULT 'legacy_unknown',
                 entry_evidence_complete BOOLEAN NOT NULL DEFAULT FALSE,
+                entry_time TIMESTAMPTZ,
                 UNIQUE(generation, trade_id)
             )
         """)
         conn.execute("ALTER TABLE paper_aeve_generations ADD COLUMN IF NOT EXISTS research_report JSONB")
+        conn.execute("ALTER TABLE paper_aeve_generation_outcomes ADD COLUMN IF NOT EXISTS entry_time TIMESTAMPTZ")
         conn.execute("""
             CREATE TABLE IF NOT EXISTS paper_aeve_provenance_epochs (
                 provenance_version SMALLINT PRIMARY KEY,
@@ -412,7 +414,7 @@ def record_generation_outcomes(limit: int = 250) -> int:
             }
             cfg, config_hash = _decode_generation_row(generation_row)
             config_snapshot = asdict(cfg)
-            entry_time = row.get("entry_time")
+            entry_time = _timestamp(row.get("entry_time"))
             prior = conn.execute("""
                 SELECT COUNT(*) AS samples,AVG(round_trip_net_pnl) AS expectancy,
                        SUM(CASE WHEN round_trip_net_pnl>0 THEN round_trip_net_pnl ELSE 0 END) AS gross_win,
@@ -455,7 +457,7 @@ def record_generation_outcomes(limit: int = 250) -> int:
             rebound = features.get("rebound_pct")
             # Fail closed when immutable entry-time AEVE evidence is absent. Never
             # substitute post-entry excursion or realized P&L for candidate inputs.
-            entry_evidence_complete = (edge is not None and entry_cost_pct is not None
+            entry_evidence_complete = (entry_time is not None and edge is not None and entry_cost_pct is not None
                 and math.isfinite(_f(dip_depth, float("nan")))
                 and math.isfinite(_f(rebound, float("nan"))))
             decision = score_entry(
@@ -477,15 +479,15 @@ def record_generation_outcomes(limit: int = 250) -> int:
                 INSERT INTO paper_aeve_generation_outcomes(
                     generation,trade_id,observed_at,net_pnl,mfe_pct,mae_pct,
                     excursion_sample_count,cost_pct,would_trade,score,config_json,config_hash,
-                    provenance_version,cost_provenance,entry_evidence_complete
-                ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s,%s,%s)
+                    provenance_version,cost_provenance,entry_evidence_complete,entry_time
+                ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s,%s,%s,%s,%s)
                 ON CONFLICT (generation,trade_id) DO NOTHING
             """, (
                 cfg.generation,row.get("trade_id"),row.get("exit_time"),_f(row.get("net_pnl")),
                 row.get("mfe_pct"),row.get("mae_pct"),int(row.get("excursion_sample_count") or 0),
                 cost_pct,(decision.would_trade if entry_evidence_complete else False),decision.score,
                 json.dumps(config_snapshot),config_hash,PROVENANCE_VERSION,"exact_lot",
-                entry_evidence_complete,
+                entry_evidence_complete,entry_time,
             ))
             log.info(
                 "AEVE SHADOW RESULT | trade_id=%s | generation=%s | config_hash=%s | provenance_version=%s | would_trade=%s | score=%.6f | input_schema=dip_depth_rebound_net_edge_entry_cost_v7 | dip_depth_pct=%s | rebound_from_low_pct=%s | entry_evidence_complete=%s | mode=shadow | execution_impact=NONE | broker_submission=NONE | live_trading=DISARMED",
