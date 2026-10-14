@@ -316,6 +316,7 @@ def test_evaluator_passes_independent_entry_inputs_and_persists_version(monkeypa
             if 'SELECT round_trip_net_pnl AS net_pnl' in sql:
                 return Result([])
             if 'INSERT INTO paper_aeve_generation_outcomes' in sql:
+                assert sql.count('%s') == len(params)
                 inserted.append(params)
                 return Result([])
             raise AssertionError(sql)
