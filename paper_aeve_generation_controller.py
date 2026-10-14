@@ -482,7 +482,7 @@ def record_generation_outcomes(limit: int = 250) -> int:
                     generation,trade_id,observed_at,net_pnl,mfe_pct,mae_pct,
                     excursion_sample_count,cost_pct,would_trade,score,config_json,config_hash,
                     provenance_version,cost_provenance,entry_evidence_complete,entry_time
-                ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s,%s,%s,%s,%s)
+                ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s,%s,%s,%s)
                 ON CONFLICT (generation,trade_id) DO NOTHING
             """, (
                 cfg.generation,row.get("trade_id"),row.get("exit_time"),_f(row.get("net_pnl")),
