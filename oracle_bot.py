@@ -1984,6 +1984,12 @@ def _record_sell_attribution(
         )
         for lot in lot_rows
     ]
+    # An exact paper execution must not invoke legacy reconciliation code that
+    # opens a separate connection while the SELL transaction is in flight.
+    if execution_trade_id is not None and globals().get("_paper_execution_accounting_installed", False):
+        available = sum(max(0.0, safe_float(lot.quantity_remaining)) for lot in lots)
+        if available + max(1e-9, quantity * 1e-9) < quantity:
+            raise ValueError("atomic paper SELL requires fully reconciled lots in its own transaction")
     # Record exact input-lot order before FIFO mutates remaining quantities.
     source_lot_ids = [lot.lot_id for lot in sorted(lots, key=lambda lot: lot.opened_at)
                       if lot.quantity_remaining > 0]
