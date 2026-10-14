@@ -306,7 +306,7 @@ def test_evaluator_passes_independent_entry_inputs_and_persists_version(monkeypa
                 return Result([dict(started_at='2026-09-22')])
             if 'JOIN trade_ledger' in sql:
                 return Result([dict(trade_id='entry-1', regime='range', entry_time='2026-09-23T00:00:00Z',
-                    exit_time='2026-09-24', net_pnl=0.85, round_trip_fees=realized_fees[0],
+                    exit_time='2026-09-24T00:00:00Z', net_pnl=0.85, round_trip_fees=realized_fees[0],
                     cost_provenance='exact_lot', quantity=1, entry_price=100,
                     feature_snapshot=dict(features), aeve_generation=cfg.generation,
                     aeve_config_json=cfg.__dict__, aeve_config_hash=identity)])
