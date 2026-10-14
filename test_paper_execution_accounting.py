@@ -103,42 +103,117 @@ def test_live_worker_does_not_install_paper_fill_layer():
         assert 'os.getenv("EXECUTION_MODE", "paper").strip().lower() == "paper"' in source
 
 
+class ExactTradeConn:
+    def __init__(self, rows=None, fail_on=None):
+        self.rows = rows or {}
+        self.fail_on = fail_on
+        self.statements = []
+
+    def execute(self, sql, params):
+        self.statements.append((sql, params))
+        if self.fail_on and self.fail_on in sql:
+            raise RuntimeError("forced atomic transaction failure")
+        class Result:
+            def __init__(self, value): self.value = value
+            def fetchone(self): return self.value
+        if "FROM trades WHERE id=%s FOR UPDATE" in sql:
+            return Result(self.rows.get(params[0]))
+        return Result(None)
+
+
+def _exact_trade(*, trade_id, side, price=100.05, quantity=2):
+    return {"id": trade_id, "market": "crypto", "symbol": "TEST-USD",
+            "side": side, "price": price, "quantity": quantity,
+            "value": price * quantity}
+
+
+def _exact_audit(conn, *, side="BUY", trade_id=42, price=100.05,
+                 quantity=2, lot_links=None):
+    from paper_execution_accounting import _record_order_and_fill
+    _record_order_and_fill(
+        conn, execution_trade_id=trade_id, market="crypto", symbol="TEST-USD",
+        side=side, quantity=quantity, price=price, reference_price=100,
+        fee_amount=price * quantity * 0.001, requested_notional=500,
+        lot_links=lot_links or [("lot-1", "ledger-1", quantity)],
+        quote={"provider": "quote-provider"}, reason="entry",
+    )
+
+
 @pytest.mark.parametrize("side", ["BUY", "SELL"])
-def test_persisted_fill_audit_uses_completed_trade_price(monkeypatch, side):
+def test_exact_fill_audit_uses_same_transaction_and_canonical_trade_id(monkeypatch, side):
     import database
-    from paper_execution_accounting import _record_order_and_fill
-    statements = []
-    class Conn:
-        def __enter__(self): return self
-        def __exit__(self, *args): return False
-        def execute(self, sql, params): statements.append((sql, params))
-    monkeypatch.setattr(database, "connect", lambda: Conn())
-    fill = _simulate_fill_explicit_fee(side=side, market="crypto", reference_price=100,
-                                      order_value=500, fee_pct=0.001)
-    actual_price = fill.fill_price + 0.05
-    trade = {"price": actual_price, "quantity": 2, "value": actual_price * 2}
-    _record_order_and_fill(market="crypto", symbol="TEST-USD", side=side,
-                          requested_notional=500, trade=trade, fill=fill,
-                          fee_amount=trade["value"] * 0.001, quote={}, reason="entry")
-    order, persisted = statements
-    assert "INSERT INTO paper_orders" in order[0]
-    assert order[1][12] == actual_price
-    assert "INSERT INTO paper_fills" in persisted[0]
-    assert persisted[1][7] == actual_price
-    assert persisted[1][8] == actual_price * persisted[1][5]
-    assert persisted[1][9] == trade["value"] * 0.001
+    monkeypatch.setattr(database, "connect", lambda: (_ for _ in ()).throw(
+        AssertionError("paper audit must never open a second connection")))
+    conn = ExactTradeConn({42: _exact_trade(trade_id=42, side=side)})
+    _exact_audit(conn, side=side)
+    order = next((sql, params) for sql, params in conn.statements
+                 if "INSERT INTO paper_orders" in sql)
+    persisted = next((sql, params) for sql, params in conn.statements
+                     if "INSERT INTO paper_fills" in sql)
+    fee_update = next((sql, params) for sql, params in conn.statements
+                      if "UPDATE trades SET fees" in sql)
+    link = next((sql, params) for sql, params in conn.statements
+                if "INSERT INTO paper_fill_lot_links" in sql)
+    assert "FOR UPDATE" in conn.statements[0][0]
+    assert conn.statements[0][1] == (42,)
+    assert order[1][12] == 100.05
+    assert persisted[1][2] == 42
+    assert persisted[1][8] == 100.05
+    assert persisted[1][9] == 100.05 * persisted[1][6]
+    assert persisted[1][10] == pytest.approx(0.2001)
+    assert fee_update[1][2] == 42
+    assert link[1][0] == persisted[1][0]
+    assert link[1][1:3] == ("lot-1", "ledger-1")
 
 
-def test_missing_completed_trade_price_cannot_invent_fill_audit(monkeypatch):
-    import database
+def test_concurrent_same_symbol_executions_cannot_select_wrong_trade():
+    one = ExactTradeConn({100: _exact_trade(trade_id=100, side="BUY"),
+                          101: _exact_trade(trade_id=101, side="BUY")})
+    _exact_audit(one, trade_id=100, lot_links=[("lot-a", "ledger-a", 2)])
+    _exact_audit(one, trade_id=101, lot_links=[("lot-b", "ledger-b", 2)])
+    checked_ids = [params[0] for sql, params in one.statements if "FROM trades WHERE id=%s FOR UPDATE" in sql]
+    filled_ids = [params[2] for sql, params in one.statements if "INSERT INTO paper_fills" in sql]
+    assert checked_ids == filled_ids == [100, 101]
+    assert all("ORDER BY id DESC" not in sql for sql, _ in one.statements)
+
+
+def test_failing_fill_lot_link_raises_to_roll_back_all_execution_writes():
+    conn = ExactTradeConn({42: _exact_trade(trade_id=42, side="SELL")},
+                          fail_on="INSERT INTO paper_fill_lot_links")
+    with pytest.raises(RuntimeError, match="forced atomic"):
+        _exact_audit(conn, side="SELL")
+
+
+def test_missing_or_conflicting_canonical_trade_cannot_invent_fill():
     from paper_execution_accounting import _record_order_and_fill
-    def forbidden(): raise AssertionError("missing execution price must not be simulated")
-    monkeypatch.setattr(database, "connect", forbidden)
-    fill = _simulate_fill_explicit_fee(side="SELL", market="crypto", reference_price=100)
-    for price in (None, 0, float("nan")):
-        _record_order_and_fill(market="crypto", symbol="TEST-USD", side="SELL",
-                              requested_notional=100, trade={"price": price, "quantity": 1, "value": 100},
-                              fill=fill, fee_amount=0.1, quote={}, reason="exit")
+    conn = ExactTradeConn({42: _exact_trade(trade_id=42, side="BUY")})
+    with pytest.raises(ValueError):
+        _exact_audit(conn, trade_id=99)
+    with pytest.raises(ValueError):
+        _exact_audit(conn, price=0)
+    with pytest.raises(ValueError, match="quantities"):
+        _exact_audit(conn, lot_links=[("lot-a", "ledger-a", 1)])
+    assert not any("INSERT INTO paper_fills" in sql for sql, _ in conn.statements)
+
+
+def test_forward_only_migration_preserves_unlinked_historical_fills():
+    sql = (Path(__file__).parent / "migrations" /
+           "20261014_atomic_paper_fill_execution_links.sql").read_text()
+    assert "canonical_trade_id BIGINT REFERENCES trades(id)" in sql
+    assert "CREATE TABLE IF NOT EXISTS paper_fill_lot_links" in sql
+    assert "REFERENCES position_lots(lot_id)" in sql
+    assert "REFERENCES trade_ledger(trade_id)" in sql
+    assert "UPDATE paper_fills" not in sql
+    assert "DELETE FROM" not in sql
+    code = (Path(__file__).parent / "paper_execution_accounting.py").read_text()
+    assert "_latest_trade(" not in code
+    assert "_finalize_trade_row(" not in code
+    assert "from database import connect" not in code
+    bot = (Path(__file__).parent / "oracle_bot.py").read_text()
+    assert bot.count("RETURNING id") >= 3
+    assert "execution_trade_id=executed_trade" in bot
+    assert "execution_trade_id=rotation_executed_trade" in bot
+    assert "execution_trade_id=bought_trade" in bot
 
 
 def test_brain_outcome_uses_round_trip_fifo_not_sell_ledger_net():
@@ -189,7 +264,6 @@ def test_runtime_brain_handoff_charges_entry_and_exit_fees_once(monkeypatch):
     monkeypatch.setenv("EXECUTION_MODE", "paper")
     monkeypatch.setattr(reality, "simulate_fill", reality.simulate_fill)
     monkeypatch.setattr(profit_attribution, "fifo_close_lots", profit_attribution.fifo_close_lots)
-    monkeypatch.setattr(accounting, "_latest_trade", lambda *args: None)
     accounting.install_paper_execution_accounting()
     assert fake._execute_close_position("crypto", {"symbol": "TEST-USD"}, 101, "exit",
                                         quote_metadata={"paper_fee_pct": 0.001}) is True
