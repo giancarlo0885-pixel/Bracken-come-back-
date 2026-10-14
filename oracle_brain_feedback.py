@@ -316,7 +316,7 @@ def outcome_memory_for_signal(
     min_samples: int = 30,
     max_rows: int = 0,
 ) -> dict[str, Any]:
-    """Return bounded Brain outcome feedback for the current paper opportunity."""
+    """Return bounded full-cost Brain feedback for the current paper opportunity."""
     normalized_market = _normalized_market(market)
     target_symbol = str(symbol or _value(signal, "symbol", "") or "").upper().strip()
     target_strategy = strategy_identity(signal)
@@ -353,18 +353,22 @@ def outcome_memory_for_signal(
                        confidence,freshness_score,exit_time,feature_snapshot
                 FROM oracle_brain_episodes
                 WHERE market=%s AND provenance_status='exact'
+                  AND outcome_snapshot->>'accounting_version'='exact_round_trip_v1'
+                  AND outcome_snapshot->>'cost_provenance'='exact_lot'
                 ORDER BY exit_time DESC
                 LIMIT %s
             """
             params = (normalized_market, limit)
         else:
-            # Learning defaults to the full exact-provenance history retained in
-            # durable Brain memory. A caller may still bound this for diagnostics.
+            # Retain legacy episodes as history, but ranking can consume only
+            # outcomes reconciled to canonical full round-trip costs.
             sql = """
                 SELECT market,symbol,strategy,regime,net_pnl,return_pct,
                        confidence,freshness_score,exit_time,feature_snapshot
                 FROM oracle_brain_episodes
                 WHERE market=%s AND provenance_status='exact'
+                  AND outcome_snapshot->>'accounting_version'='exact_round_trip_v1'
+                  AND outcome_snapshot->>'cost_provenance'='exact_lot'
                 ORDER BY exit_time DESC
             """
             params = (normalized_market,)

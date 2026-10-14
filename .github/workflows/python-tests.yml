@@ -119,3 +119,4 @@ jobs:
           test_oracle_learning_market_isolation.py::test_postgres_stock_outcomes_do_not_change_crypto_exit_or_concentration
           test_oracle_learning_market_isolation.py::test_postgres_legacy_or_incomplete_cost_outcomes_cannot_support_profitability_claims
           test_oracle_learning_market_isolation.py::test_postgres_brain_regime_display_uses_round_trip_costs
+          test_trade_evidence_verification_pg.py
