@@ -1763,6 +1763,7 @@ def _record_buy_attribution(
     quote_metadata: dict[str, Any] | None,
     now: str,
     risk_snapshot: dict[str, Any] | None = None,
+    execution_trade_id: int | None = None,
 ) -> None:
     bucket = _lot_bucket_from_signal(signal, market)
     strategy = safe_text(signal_value(signal, "strategy", signal_value(signal, "scan_type", "")))
@@ -1854,6 +1855,18 @@ def _record_buy_attribution(
             _json_snapshot(provenance["portfolio_snapshot"]),
         ),
     )
+    if execution_trade_id is not None and globals().get("_paper_execution_accounting_installed", False):
+        from paper_execution_accounting import _fee_context, _record_order_and_fill
+        audit_context = _fee_context.get()
+        quote = quote_metadata or {}
+        _record_order_and_fill(
+            conn, execution_trade_id=execution_trade_id,
+            market=market, symbol=symbol, side="BUY", quantity=quantity,
+            price=price, reference_price=safe_float(quote.get("paper_reference_price"), price) or price,
+            fee_amount=fees, requested_notional=audit_context.get("requested_notional"),
+            lot_links=[(lot_id, trade_id, quantity)], quote=quote,
+            reason=str(audit_context.get("buy_reason") or "entry"),
+        )
 
 
 def _record_sell_attribution(
@@ -1867,6 +1880,7 @@ def _record_sell_attribution(
     reason: str,
     quote_metadata: dict[str, Any] | None,
     now: str,
+    execution_trade_id: int | None = None,
 ) -> list[dict[str, Any]]:
     symbol = safe_text(position.get("symbol")).upper()
     lot_rows = conn.execute(
@@ -1970,6 +1984,9 @@ def _record_sell_attribution(
         )
         for lot in lot_rows
     ]
+    # Record exact input-lot order before FIFO mutates remaining quantities.
+    source_lot_ids = [lot.lot_id for lot in sorted(lots, key=lambda lot: lot.opened_at)
+                      if lot.quantity_remaining > 0]
     ledger_rows = fifo_close_lots(
         lots,
         quantity=quantity,
@@ -2049,6 +2066,20 @@ def _record_sell_attribution(
                 _json_snapshot(data.get("risk_snapshot")),
                 _json_snapshot(data.get("portfolio_snapshot")),
             ),
+        )
+    if execution_trade_id is not None and globals().get("_paper_execution_accounting_installed", False):
+        from paper_execution_accounting import _record_order_and_fill
+        if len(ledger_rows) > len(source_lot_ids):
+            raise ValueError("FIFO produced more ledger rows than exact source lots")
+        quote = quote_metadata or {}
+        _record_order_and_fill(
+            conn, execution_trade_id=execution_trade_id,
+            market=market, symbol=symbol, side="SELL", quantity=quantity,
+            price=price, reference_price=safe_float(quote.get("paper_reference_price"), price) or price,
+            fee_amount=fees, requested_notional=quantity * price,
+            lot_links=[(source_lot_ids[i], ledger.trade_id, ledger.quantity)
+                       for i, ledger in enumerate(ledger_rows)],
+            quote=quote, reason=reason,
         )
     return [ledger.to_dict() for ledger in ledger_rows]
 
@@ -2161,7 +2192,7 @@ def _execute_close_position(
                 ),
             )
 
-            conn.execute(
+            executed_trade = conn.execute(
                 """
                 INSERT INTO trades (
                     market,
@@ -2178,7 +2209,7 @@ def _execute_close_position(
                 VALUES (
                     %s, %s, 'SELL', %s, %s, %s,
                     %s, NULL, %s, %s
-                )
+                ) RETURNING id
                 """,
                 (
                     market,
@@ -2190,7 +2221,9 @@ def _execute_close_position(
                     reason,
                     now,
                 ),
-            )
+            ).fetchone()
+            if not executed_trade or executed_trade.get("id") is None:
+                raise ValueError("paper SELL did not return its canonical trade ID")
             sell_attribution = _record_sell_attribution(
                 conn,
                 market=market,
@@ -2201,6 +2234,7 @@ def _execute_close_position(
                 reason=reason,
                 quote_metadata=quote_metadata,
                 now=now,
+                execution_trade_id=executed_trade["id"],
             )
             _complete_execution_claim(conn, execution_key)
 
@@ -2975,11 +3009,11 @@ def _buy(
                     """,
                     (market, rotation_symbol),
                 )
-                conn.execute(
+                rotation_executed_trade = conn.execute(
                     """
                     INSERT INTO trades(
                         market,symbol,side,quantity,price,value,realized_pnl,score,reason,created_at
-                    ) VALUES (%s,%s,'SELL',%s,%s,%s,%s,NULL,%s,%s)
+                    ) VALUES (%s,%s,'SELL',%s,%s,%s,%s,NULL,%s,%s) RETURNING id
                     """,
                     (
                         market,
@@ -2991,7 +3025,9 @@ def _buy(
                         rotation_action.get("reason", f"continuous_rotation_to_{symbol}"),
                         now,
                     ),
-                )
+                ).fetchone()
+                if not rotation_executed_trade or rotation_executed_trade.get("id") is None:
+                    raise ValueError("paper rotation SELL did not return its canonical trade ID")
                 rotation_sell_attribution = _record_sell_attribution(
                     conn,
                     market=market,
@@ -3002,6 +3038,7 @@ def _buy(
                     reason=safe_text(rotation_action.get("reason"), f"continuous_rotation_to_{symbol}"),
                     quote_metadata=outgoing_quote,
                     now=now,
+                    execution_trade_id=rotation_executed_trade["id"],
                 )
                 _complete_execution_claim(conn, rotation_execution_key)
                 closed_memory = (
@@ -3060,14 +3097,16 @@ def _buy(
                 f"cash_used=${cash_used:,.2f}; margin_used=${borrowed:,.2f}; "
                 f"{getattr(quant_assessment, 'reason', 'legacy standard')}"
             )
-            conn.execute(
+            bought_trade = conn.execute(
                 """
                 INSERT INTO trades(
                     market,symbol,side,quantity,price,value,realized_pnl,score,reason,created_at
-                ) VALUES (%s,%s,'BUY',%s,%s,%s,0,%s,%s,%s)
+                ) VALUES (%s,%s,'BUY',%s,%s,%s,0,%s,%s,%s) RETURNING id
                 """,
                 (market, symbol, quantity, price, trade_value, score, reason_text, now),
-            )
+            ).fetchone()
+            if not bought_trade or bought_trade.get("id") is None:
+                raise ValueError("paper BUY did not return its canonical trade ID")
             stop_distance = (
                 price - stop_price
                 if stop_price > 0 and stop_price < price
@@ -3096,6 +3135,7 @@ def _buy(
                 quote_metadata=verified_quote,
                 now=now,
                 risk_snapshot=entry_risk_snapshot,
+                execution_trade_id=bought_trade["id"],
             )
             _complete_execution_claim(conn, execution_key)
 
