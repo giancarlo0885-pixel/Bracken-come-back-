@@ -306,7 +306,7 @@ def test_evaluator_passes_independent_entry_inputs_and_persists_version(monkeypa
                 return Result([dict(started_at='2026-09-22')])
             if 'JOIN trade_ledger' in sql:
                 return Result([dict(trade_id='entry-1', regime='range', entry_time='2026-09-23T00:00:00Z',
-                    exit_time='2026-09-24', net_pnl=0.85, round_trip_fees=realized_fees[0],
+                    exit_time='2026-09-24T00:00:00Z', net_pnl=0.85, round_trip_fees=realized_fees[0],
                     cost_provenance='exact_lot', quantity=1, entry_price=100,
                     feature_snapshot=dict(features), aeve_generation=cfg.generation,
                     aeve_config_json=cfg.__dict__, aeve_config_hash=identity)])
@@ -344,9 +344,9 @@ def test_evaluator_passes_independent_entry_inputs_and_persists_version(monkeypa
     assert rebound_changed[0]['rebound_from_low_pct'] == pytest.approx(0.20)
     assert rebound_changed[1].dip_quality == dip_changed[1].dip_quality
     assert rebound_changed[1].rebound_quality != dip_changed[1].rebound_quality
-    assert all(row[-3] == 7 for row in inserted)
-    assert all(row[-2] == "exact_lot" for row in inserted)
-    assert all(row[-1] is True for row in inserted)
+    assert all(row[12] == 7 for row in inserted)
+    assert all(row[13] == "exact_lot" for row in inserted)
+    assert all(row[14] is True for row in inserted)
     assert all(item[0]['config'] == cfg.__dict__ for item in captured)
     assert 'input_schema=dip_depth_rebound_net_edge_entry_cost_v7' in caplog.text
     assert 'dip_depth_pct=1.25 | rebound_from_low_pct=0.2' in caplog.text
@@ -358,7 +358,7 @@ def test_evaluator_passes_independent_entry_inputs_and_persists_version(monkeypa
     features.pop('dip_depth_pct')
     assert controller.record_generation_outcomes() == 1
     assert inserted[-1][8] is False
-    assert inserted[-1][-1] is False
+    assert inserted[-1][14] is False
 
 
 def test_aeve_v4_uses_durable_forward_epoch_and_exact_round_trip_costs():
