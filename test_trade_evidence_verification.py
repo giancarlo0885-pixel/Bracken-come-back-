@@ -375,6 +375,25 @@ def test_worker_emitter_reports_sql_failure_as_unavailable_without_sensitive_err
     assert "MISSING" not in caplog.text
 
 
+def test_cash_emitter_logs_source_counts_even_when_exact_id_selection_has_no_recent_trades(monkeypatch, caplog):
+    diagnostic = {"status": "ok", "reason": "NO_CANONICAL_CASH_PAPER_BUY_SELL_ROWS",
+                  "totals": {"ledger_rows": 17, "source_buy_rows": 0, "source_sell_rows": 0},
+                  "qualification_status": "NOT_EVALUATED_BY_INVENTORY", "execution_impact": "NONE"}
+    completed = {"status": "ok", "market": "cash", "checked_at": CHECKED.isoformat(),
+                 "snapshot": "700:705:702", "transaction_read_only": True, "records": [],
+                 "source_diagnostics": diagnostic, "execution_impact": "NONE"}
+    monkeypatch.delenv("ORACLE_VERIFY_TRADE_IDS", raising=False)
+    monkeypatch.setattr(verification, "verify_committed_trade_evidence", lambda ids, market: completed)
+    with caplog.at_level("INFO", logger=verification.__name__):
+        assert verification.emit_committed_trade_verification("cash") is completed
+    assert "status=NO_RECENT_TRADES" in caplog.text
+    messages = [record.getMessage() for record in caplog.records if "SOURCE DIAGNOSTICS |" in record.getMessage()]
+    assert len(messages) == 1
+    logged = json.loads(messages[0].split(" | ", 1)[1])
+    assert logged == {**diagnostic, "market": "cash", "checked_at": CHECKED.isoformat(),
+                      "snapshot": "700:705:702", "transaction_read_only": True}
+
+
 @pytest.mark.parametrize("raises", [True, False])
 def test_verification_hook_failure_cannot_downgrade_a_successful_worker_learning_sync(monkeypatch, raises):
     import market_worker

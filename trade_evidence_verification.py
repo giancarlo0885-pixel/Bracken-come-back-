@@ -15,6 +15,121 @@ from typing import Any
 
 log = logging.getLogger(__name__)
 MAX_TRADE_IDS = 12
+MAX_INVENTORY_GROUPS = 64
+
+
+def _cash_source_diagnostics(conn: Any, available: dict[str, bool], records: list[dict]) -> dict:
+    """Count source coverage without relabeling history or qualifying any trade.
+
+    Aggregates share the receipt's read-only snapshot and statement timeout.
+    Only allowlisted dimension labels leave the database; arbitrary historical
+    tags, account identifiers, symbols and payloads are never logged here.
+    """
+    groups = list(conn.execute("""SELECT market,side,broker_mode,account_environment,
+        COUNT(*) AS row_count,COUNT(*) OVER () AS group_count FROM (
+          SELECT CASE WHEN market=ANY(%s) THEN market WHEN market IS NULL THEN 'MISSING'
+              WHEN market='' THEN 'EMPTY' ELSE 'OTHER' END AS market,
+            CASE WHEN side=ANY(%s) THEN side WHEN side IS NULL THEN 'MISSING'
+              WHEN side='' THEN 'EMPTY' ELSE 'OTHER' END AS side,
+            CASE WHEN broker_mode=ANY(%s) THEN broker_mode WHEN broker_mode IS NULL THEN 'MISSING'
+              WHEN broker_mode='' THEN 'EMPTY' ELSE 'OTHER' END AS broker_mode,
+            CASE WHEN account_environment=ANY(%s) THEN account_environment
+              WHEN account_environment IS NULL THEN 'MISSING'
+              WHEN account_environment='' THEN 'EMPTY' ELSE 'OTHER' END AS account_environment
+          FROM trade_ledger) inventory
+        GROUP BY market,side,broker_mode,account_environment
+        ORDER BY market,side,broker_mode,account_environment LIMIT %s""", (
+            ["cash", "CASH", "Cash", "stock", "STOCK", "Stock", "stocks", "STOCKS",
+             "equity", "EQUITY", "equities", "EQUITIES", "crypto", "CRYPTO", "Crypto"],
+            ["BUY", "SELL", "buy", "sell", "Buy", "Sell"],
+            ["PAPER", "paper", "Paper", "LIVE", "live", "Live", "TEST", "test", "SIMULATION", "simulation"],
+            ["PAPER", "paper", "Paper", "LIVE", "live", "Live", "TEST", "test", "SIMULATION", "simulation"],
+            MAX_INVENTORY_GROUPS,
+        )).fetchall())
+    group_count = int(groups[0]["group_count"]) if groups else 0
+    totals = dict(conn.execute("""SELECT COUNT(*) AS ledger_rows,
+        COUNT(*) FILTER (WHERE market='cash') AS canonical_cash_rows,
+        COUNT(*) FILTER (WHERE LOWER(market) IN ('cash','stock','stocks','equity','equities')
+          AND market <> 'cash') AS noncanonical_stock_label_rows,
+        COUNT(*) FILTER (WHERE market IS DISTINCT FROM 'cash') AS excluded_noncanonical_market_rows,
+        COUNT(*) FILTER (WHERE market='cash' AND broker_mode IS DISTINCT FROM 'PAPER')
+          AS excluded_nonpaper_broker_rows,
+        COUNT(*) FILTER (WHERE market='cash' AND broker_mode='PAPER'
+          AND account_environment IS DISTINCT FROM 'PAPER') AS excluded_nonpaper_account_rows,
+        COUNT(*) FILTER (WHERE market='cash' AND broker_mode='PAPER' AND account_environment='PAPER'
+          AND (side IS NULL OR side NOT IN ('BUY','SELL'))) AS excluded_unsupported_side_rows,
+        COUNT(*) FILTER (WHERE market='cash' AND broker_mode='PAPER' AND account_environment='PAPER'
+          AND side='BUY') AS source_buy_rows,
+        COUNT(*) FILTER (WHERE market='cash' AND broker_mode='PAPER' AND account_environment='PAPER'
+          AND side='SELL') AS source_sell_rows
+        FROM trade_ledger""").fetchone())
+    totals = {key: int(value) for key, value in totals.items()}
+    coverage = {"status": "AVAILABLE" if available["fill_links"] else "UNAVAILABLE",
+                "source_rows_with_recorded_link": None, "source_rows_without_recorded_link": None,
+                "sell_rows_with_recorded_link": None, "sell_rows_without_recorded_link": None}
+    graph = {"status": "UNAVAILABLE", "link_rows": None,
+             "link_rows_missing_fill": None, "link_rows_missing_order": None,
+             "link_rows_missing_lot": None, "link_rows_missing_execution": None,
+             "sell_link_rows_missing_recorded_buy_link": None}
+    if available["fill_links"]:
+        coverage.update({key: int(value) for key, value in conn.execute("""SELECT
+            COUNT(*) FILTER (WHERE has_link) AS source_rows_with_recorded_link,
+            COUNT(*) FILTER (WHERE NOT has_link) AS source_rows_without_recorded_link,
+            COUNT(*) FILTER (WHERE side='SELL' AND has_link) AS sell_rows_with_recorded_link,
+            COUNT(*) FILTER (WHERE side='SELL' AND NOT has_link) AS sell_rows_without_recorded_link
+            FROM (SELECT ledger.side,EXISTS (SELECT 1 FROM paper_fill_lot_links link
+                WHERE link.ledger_trade_id=ledger.trade_id) AS has_link
+              FROM trade_ledger ledger WHERE ledger.market='cash' AND ledger.broker_mode='PAPER'
+                AND ledger.account_environment='PAPER' AND ledger.side IN ('BUY','SELL')) scoped""").fetchone().items()})
+        # These are persisted edge-presence counts, never validation of the
+        # accounting graph. Exact validation remains limited to requested IDs.
+        graph["link_rows"] = int(conn.execute("""SELECT COUNT(*) AS link_rows
+            FROM paper_fill_lot_links link JOIN trade_ledger ledger ON ledger.trade_id=link.ledger_trade_id
+            WHERE ledger.market='cash' AND ledger.broker_mode='PAPER'
+              AND ledger.account_environment='PAPER' AND ledger.side IN ('BUY','SELL')""").fetchone()["link_rows"])
+        if all(available[key] for key in ("fills", "orders", "lots", "executions")):
+            graph.update(status="AVAILABLE", **{key: int(value) for key, value in conn.execute("""SELECT
+                COUNT(*) FILTER (WHERE fill.fill_id IS NULL) AS link_rows_missing_fill,
+                COUNT(*) FILTER (WHERE fill.fill_id IS NOT NULL AND ord.order_id IS NULL)
+                  AS link_rows_missing_order,
+                COUNT(*) FILTER (WHERE lot.lot_id IS NULL) AS link_rows_missing_lot,
+                COUNT(*) FILTER (WHERE fill.fill_id IS NOT NULL AND execution.id IS NULL)
+                  AS link_rows_missing_execution,
+                COUNT(*) FILTER (WHERE fill.side='SELL' AND NOT EXISTS (
+                  SELECT 1 FROM paper_fill_lot_links entry JOIN paper_fills entry_fill
+                    ON entry_fill.fill_id=entry.fill_id AND entry_fill.side='BUY'
+                  WHERE entry.lot_id=link.lot_id)) AS sell_link_rows_missing_recorded_buy_link
+                FROM paper_fill_lot_links link JOIN trade_ledger ledger ON ledger.trade_id=link.ledger_trade_id
+                LEFT JOIN paper_fills fill ON fill.fill_id=link.fill_id
+                LEFT JOIN paper_orders ord ON ord.order_id=fill.order_id
+                LEFT JOIN position_lots lot ON lot.lot_id=link.lot_id
+                LEFT JOIN trades execution ON execution.id=fill.canonical_trade_id
+                WHERE ledger.market='cash' AND ledger.broker_mode='PAPER'
+                  AND ledger.account_environment='PAPER' AND ledger.side IN ('BUY','SELL')""").fetchone().items()})
+    if not totals["source_buy_rows"] and not totals["source_sell_rows"]:
+        reason = "NO_CANONICAL_CASH_PAPER_BUY_SELL_ROWS"
+    elif not totals["source_sell_rows"]:
+        reason = "NO_CANONICAL_CASH_PAPER_SELL_ROWS"
+    elif not available["fill_links"]:
+        reason = "EXACT_LINK_RELATION_UNAVAILABLE"
+    elif coverage["sell_rows_without_recorded_link"] == totals["source_sell_rows"]:
+        reason = "ALL_SOURCE_SELL_ROWS_LACK_RECORDED_LINKS"
+    else:
+        reason = "SOURCE_ROWS_PRESENT_QUALIFICATION_NOT_INFERRED"
+    return {"status": "ok", "reason": reason,
+            "source_filter": {"market": "cash", "broker_mode": "PAPER", "account_environment": "PAPER",
+                              "sides": ["BUY", "SELL"]},
+            "totals": totals,
+            "ledger_inventory": [{key: value for key, value in row.items() if key != "group_count"} for row in groups],
+            "inventory_group_count": group_count, "inventory_group_limit": MAX_INVENTORY_GROUPS,
+            "inventory_truncated": group_count > MAX_INVENTORY_GROUPS,
+            "relations_available": {key: available[key] for key in ("fill_links", "fills", "orders", "lots", "executions")},
+            "recorded_link_coverage": coverage, "recorded_graph_coverage": graph,
+            "qualification_status": "NOT_EVALUATED_BY_INVENTORY",
+            "bounded_receipt_records": len(records),
+            "bounded_exact_linked_sell_records": sum(row["canonical_fill_linkage"] == "EXACT_LINKED" for row in records),
+            "bounded_brain_materialized_exact_records": sum(row["brain_status"] == "MATERIALIZED_EXACT" for row in records),
+            "historical_link_inference": "NONE", "execution_impact": "NONE"}
 
 
 def _ids(values: Any) -> list[str]:
@@ -167,6 +282,8 @@ def verify_committed_trade_evidence(trade_ids=None, market: str = "crypto", *, c
             raise RuntimeError("verification transaction is not read only")
         tables = {"metrics": "paper_regime_trade_metrics", "brain": "oracle_brain_episodes", "aeve": "paper_aeve_generation_outcomes",
                   "fill_links": "paper_fill_lot_links"}
+        if market == "cash":
+            tables.update(fills="paper_fills", orders="paper_orders", lots="position_lots", executions="trades")
         available = {key: bool(conn.execute("SELECT to_regclass(%s) AS relation", (table,)).fetchone()["relation"])
                      for key, table in tables.items()}
         if requested is None:
@@ -192,7 +309,8 @@ def verify_committed_trade_evidence(trade_ids=None, market: str = "crypto", *, c
             rows["aeve"] = list(conn.execute("""SELECT trade_id,generation FROM paper_aeve_generation_outcomes
                 WHERE trade_id=ANY(%s)""", (requested,)).fetchall())
         records = [_receipt(trade_id, market, rows, available, snapshot["checked_at"]) for trade_id in requested]
-        if available["fill_links"]:
+        if available["fill_links"] and (market != "cash" or all(
+                available[key] for key in ("fills", "orders", "lots", "executions"))):
             from paper_fill_provenance import attach_exact_fill_lot_evidence, load_fill_lot_allocations, close
 
             allocations = load_fill_lot_allocations(conn, trade_ids=requested, market=market, as_of=snapshot["checked_at"])
@@ -215,10 +333,12 @@ def verify_committed_trade_evidence(trade_ids=None, market: str = "crypto", *, c
                 if receipt["brain_status"] == "MATERIALIZED_EXACT":
                     receipt["brain_fill_accounting_status"] = "MATCH" if (
                         close(fees, receipt["round_trip_fees"]) and close(net, receipt["round_trip_net_pnl"])) else "MISMATCH"
+        source_diagnostics = _cash_source_diagnostics(conn, available, records) if market == "cash" else None
     # No receipt is returned or logged until the independent transaction exits.
     return {"status": "ok", "market": market, "checked_at": snapshot["checked_at"].isoformat(),
             "snapshot": snapshot["snapshot"], "transaction_read_only": True,
-            "records": records, "execution_impact": "NONE"}
+            "records": records, "execution_impact": "NONE",
+            **({"source_diagnostics": source_diagnostics} if source_diagnostics is not None else {})}
 
 
 def emit_committed_trade_verification(market: str) -> dict:
@@ -232,6 +352,11 @@ def emit_committed_trade_verification(market: str) -> dict:
                 sort_keys=True, allow_nan=False))
         if not result["records"]:
             log.info("ORACLE COMMITTED TRADE EVIDENCE | market=%s | status=NO_RECENT_TRADES | execution_impact=NONE", market)
+        if "source_diagnostics" in result:
+            log.info("ORACLE COMMITTED TRADE SOURCE DIAGNOSTICS | %s", json.dumps(
+                {**result["source_diagnostics"], "market": market, "checked_at": result["checked_at"],
+                 "snapshot": result["snapshot"], "transaction_read_only": True},
+                sort_keys=True, allow_nan=False))
         return result
     except Exception as exc:
         log.warning("ORACLE COMMITTED TRADE EVIDENCE | market=%s | status=UNAVAILABLE | reason=%s | execution_impact=NONE", market, type(exc).__name__)

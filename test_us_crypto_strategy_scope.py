@@ -243,7 +243,7 @@ def test_provider_capabilities_do_not_advertise_international_history():
 def test_provider_capability_health_demotes_weak_route_and_uses_secondary(monkeypatch):
     _clear_router(monkeypatch)
     monkeypatch.setattr(provider_router, "get_api_settings", lambda: {"POLYGON_API_KEY": "key", "EODHD_API_KEY": "key"})
-    provider_capabilities.record_capability_result("Polygon", "us_history", False, "timeout")
+    provider_capabilities.record_capability_result("Polygon", "daily_history", False, "timeout")
 
     calls = []
 
@@ -278,7 +278,7 @@ def test_provider_capability_health_demotes_weak_route_and_uses_secondary(monkey
 
     assert routed.provider == "EODHD"
     assert calls == ["EODHD"]
-    assert provider_capabilities.capability_health("Polygon", "us_history").status == "degraded"
+    assert provider_capabilities.capability_health("Polygon", "daily_history").status == "degraded"
 
 
 def test_provider_capability_health_recovers_after_verified_successes(monkeypatch):

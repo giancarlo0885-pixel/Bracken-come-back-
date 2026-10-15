@@ -256,7 +256,7 @@ def record_capability_result(
         health.consecutive_successes = 0
         health.last_failure = iso
         health.reason = text
-        if status_code in {402, 403} or "plan" in text.lower() or "permission" in text.lower():
+        if classify_plan_limited_status(status_code, text):
             health.status = "last_resort"
             health.demoted_until = timestamp + PLAN_LIMIT_COOLDOWN_SECONDS
         elif status_code == 429 or "rate" in text.lower() or "quota" in text.lower():
@@ -296,7 +296,9 @@ def capability_priority_penalty(provider: str, capability: str, *, now: float | 
 
 def classify_plan_limited_status(status_code: int | None, message: str = "") -> bool:
     text = str(message or "").lower()
-    return status_code in {402, 403} or any(
+    if status_code is not None and status_code not in {200, 402, 403}:
+        return False
+    return status_code == 402 or any(
         phrase in text
         for phrase in (
             "subscription",
@@ -304,6 +306,7 @@ def classify_plan_limited_status(status_code: int | None, message: str = "") -> 
             "not entitled",
             "plan limit",
             "plan-limited",
+            "plan_limited",
             "plan not supported",
             "not available under your current plan",
             "available on your current plan",

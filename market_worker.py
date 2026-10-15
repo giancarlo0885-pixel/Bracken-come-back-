@@ -1232,7 +1232,7 @@ def _log_fast_history_provider_diagnostics(symbol: str, period: str, interval: s
             continue
         provider = str(attempt.get("provider") or "")
         status = str(attempt.get("status") or "")
-        allowed_providers = {"Polygon", "Finnhub", "EODHD", "Alpha Vantage", "Yahoo Finance", "all", "scope"}
+        allowed_providers = {"Alpaca IEX", "Polygon", "Finnhub", "EODHD", "Alpha Vantage", "Yahoo Finance", "all", "scope"}
         allowed_statuses = {
             "healthy", "not_configured", "provider_budget_unknown",
             "provider_budget_blocked", "provider_shared_cooldown",
@@ -1241,11 +1241,18 @@ def _log_fast_history_provider_diagnostics(symbol: str, period: str, interval: s
             "symbol_mismatch_or_no_data", "scope_rejected",
             "rate_limited", "payment_required", "plan_limited",
             "capability_plan_limited", "degraded", "strict_research_fallback",
+            "request_cooldown", "authentication_failed", "access_denied", "http_not_found",
+            "http_error", "timeout", "outage", "transport_error", "unsupported", "no_data",
+            "symbol_mismatch", "malformed_response",
         }
-        statuses.append(
+        outcome = (
             (provider if provider in allowed_providers else "other")
             + ":" + (status if status in allowed_statuses else "other")
         )
+        http_status = attempt.get("http_status")
+        if type(http_status) is int and 100 <= http_status <= 599:
+            outcome += f"(http={http_status})"
+        statuses.append(outcome)
     if not statuses:
         return
     if not hasattr(_log_fast_history_provider_diagnostics, "_last_logged"):

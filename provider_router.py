@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import logging
+import math
 import os
 import re
+from urllib.error import HTTPError as UrllibHTTPError
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
@@ -38,7 +40,6 @@ from global_adaptive_engine import (
 from provider_capabilities import (
     capability_available,
     capability_priority_penalty,
-    classify_plan_limited_status,
     disable_capability,
     record_capability_result,
 )
@@ -77,6 +78,7 @@ class ProviderAttempt:
     records: int = 0
     status: str = ""
     error: str = ""
+    http_status: int | None = None
 
 
 @dataclass
@@ -392,6 +394,22 @@ def _interval_family(interval: str) -> str:
     return "intraday" if _is_intraday(interval) else "daily"
 
 
+def _request_cooldown_key(provider: str, symbol: str, period: str, interval: str) -> str:
+    # Request failures do not establish that the symbol is unavailable at a
+    # different provider, lookback or candle interval.
+    return "|".join(("request", str(provider).lower(), normalize_symbol(symbol), str(period), str(interval)))
+
+
+def _mark_request_unavailable(provider: str, symbol: str, period: str, interval: str) -> None:
+    _symbol_cooldowns[_request_cooldown_key(provider, symbol, period, interval)] = (
+        time.time() + max(1, int(UNAVAILABLE_SYMBOL_COOLDOWN_SECONDS))
+    )
+
+
+def _request_is_unavailable(provider: str, symbol: str, period: str, interval: str) -> bool:
+    return _cooldown_active(_symbol_cooldowns, _request_cooldown_key(provider, symbol, period, interval))
+
+
 def _symbol_cooldown_key(symbol: str, provider: str = "all", capability: str = "all", interval_family: str = "all") -> str:
     return "|".join(
         [
@@ -453,43 +471,77 @@ def _history_capability(symbol: str, interval: str) -> str:
     return "us_history"
 
 
-def _provider_status_from_exception(exc: Exception) -> int | None:
+def _provider_status_from_exception(exc: Exception | str) -> int | None:
     response = getattr(exc, "response", None)
-    status_code = getattr(response, "status_code", None)
-    if isinstance(status_code, int):
-        return status_code
-    text = str(exc)
-    for code in (402, 403, 401, 429, 404, 500, 503):
-        if str(code) in text:
-            return code
+    for status_code in (
+        getattr(response, "status_code", None),
+        getattr(exc, "status_code", None),
+        exc.code if isinstance(exc, UrllibHTTPError) else None,
+    ):
+        if isinstance(status_code, int) and not isinstance(status_code, bool) and 100 <= status_code <= 599:
+            return status_code
+    # Legacy adapters expose only a safe HTTP message. Do not interpret an
+    # arbitrary number in a response body, URL or symbol as an HTTP status.
+    matched = re.search(r"\bHTTP(?:\s+Error)?(?:\s*[:=]\s*|\s+)([45]\d{2})\b|\b([45]\d{2})\s+(?:Client|Server)\s+Error\b", str(exc), re.IGNORECASE)
+    if matched:
+        return int(matched.group(1) or matched.group(2))
     return None
 
 
 def classify_provider_failure(exc: Exception | str, status_code: int | None = None) -> str:
     text = _redact_url(str(exc)).lower()
     code = status_code
-    if code is None and isinstance(exc, Exception):
+    if code is None:
         code = _provider_status_from_exception(exc)
-    if (
-        code == 429 or "429" in text or "rate limit" in text or "too many requests" in text
-        or "yfratelimiterror" in text
-        or (isinstance(exc, Exception) and exc.__class__.__name__ == "YFRateLimitError")
-    ):
+    entitlement = any(term in text for term in (
+        "not entitled", "entitlement", "subscription", "premium", "plan limit",
+        "plan-limited", "plan not supported", "not available under your current plan",
+        "available on your current plan",
+    ))
+    # Structured HTTP outcomes take precedence over incidental body text.
+    if code == 429:
         return "rate_limited"
     if code == 401:
         return "authentication_failed"
-    if code == 402 or "payment required" in text:
+    if code == 402:
         return "payment_required"
-    if code in {401, 403} and any(term in text for term in ("plan", "premium", "permission", "entitlement", "subscription")):
+    if code == 403:
+        return "plan_limited" if entitlement else "access_denied"
+    if code == 404:
+        return "http_not_found"
+    if code is not None and code >= 500:
+        return "outage"
+    if code == 408:
+        return "timeout"
+    if code is not None and code >= 400:
+        return "unsupported" if "unsupported" in text or "not supported" in text else "http_error"
+    if isinstance(exc, requests.Timeout) or getattr(exc, "timed_out", False):
+        return "timeout"
+    if isinstance(exc, requests.exceptions.JSONDecodeError):
+        return "malformed_response"
+    if isinstance(exc, requests.RequestException):
+        return "transport_error"
+    if (
+        "rate limit" in text or "too many requests" in text or "yfratelimiterror" in text
+        or (isinstance(exc, Exception) and exc.__class__.__name__ == "YFRateLimitError")
+    ):
+        return "rate_limited"
+    if "payment required" in text:
+        return "payment_required"
+    if entitlement:
         return "plan_limited"
+    if "unsupported" in text or "not supported" in text:
+        return "unsupported"
     if "timeout" in text or "timed out" in text:
         return "timeout"
+    if isinstance(exc, AlpacaDataError) and "request failed" in text:
+        return "transport_error"
     if "symbol" in text and ("mismatch" in text or "not found" in text or "invalid" in text):
         return "symbol_mismatch"
     if "malformed" in text or "json" in text or "parse" in text:
         return "malformed_response"
-    if code and code >= 500:
-        return "outage"
+    if "no data" in text or "no_data" in text:
+        return "no_data"
     return "degraded"
 
 
@@ -506,15 +558,16 @@ def provider_supports_capability(provider: str, capability: str) -> bool:
     return budget is not None and int(budget or 0) > 0
 
 
-def _history_route_priority(provider: str, capability: str) -> int:
-    return HISTORY_ROUTE_STRENGTH.get((provider, capability), 100) + capability_priority_penalty(provider, capability)
+def _history_route_priority(provider: str, capability: str, request_capability: str | None = None) -> int:
+    return HISTORY_ROUTE_STRENGTH.get((provider, capability), 100) + capability_priority_penalty(provider, request_capability or capability)
 
 
 def _ranked_history_routes(
     routes: list[tuple[str, str, Callable[[str, str, str, str], pd.DataFrame]]],
     capability: str,
+    request_capability: str | None = None,
 ) -> list[tuple[str, str, Callable[[str, str, str, str], pd.DataFrame]]]:
-    return sorted(routes, key=lambda route: (_history_route_priority(route[0], capability), route[0]))
+    return sorted(routes, key=lambda route: (_history_route_priority(route[0], capability, request_capability), route[0]))
 
 
 def crypto_execution_provider_redundancy(settings: dict[str, str] | None = None) -> dict[str, Any]:
@@ -945,6 +998,7 @@ def route_history(
     intraday = _is_intraday(interval)
     asset_class = infer_asset_class(symbol)
     capability = _history_capability(symbol, interval)
+    request_capability = capability if asset_class == "crypto" else ("intraday_history" if intraday else "daily_history")
     ttl = REALTIME_CACHE_TTL_SECONDS if intraday else API_CACHE_TTL_SECONDS
     symbol = str(symbol or "").upper().strip()
     interval_family = _interval_family(interval)
@@ -989,8 +1043,12 @@ def route_history(
     if asset_class == "international_equity":
         routes = [route for route in routes if route[0] != "Alpaca IEX"]
 
-    for provider, key_name, function in _ranked_history_routes(routes, capability):
-        if not capability_available(provider, capability):
+    for provider, key_name, function in _ranked_history_routes(routes, capability, request_capability):
+        if (
+            not capability_available(provider, capability)
+            or not capability_available(provider, request_capability)
+            or (provider == "Alpha Vantage" and intraday and not ALPHA_VANTAGE_PREMIUM)
+        ):
             attempts.append(ProviderAttempt(provider, False, 0, "capability_cooldown_or_unsupported"))
             continue
         shared_cooldown = provider_cooldown_active_live(provider)
@@ -1002,6 +1060,9 @@ def route_history(
             continue
         if symbol_is_unavailable(symbol, provider, capability, interval_family):
             attempts.append(ProviderAttempt(provider, False, 0, "symbol_capability_cooldown", "temporarily skipped after scoped provider/capability failure"))
+            continue
+        if _request_is_unavailable(provider, symbol, period, interval):
+            attempts.append(ProviderAttempt(provider, False, 0, "request_cooldown", "temporarily skipped after this provider request failed"))
             continue
         key = os.getenv("APCA_API_KEY_ID", "").strip() if provider == "Alpaca IEX" else settings.get(key_name)
         if provider == "Alpaca IEX" and not os.getenv("APCA_API_SECRET_KEY", "").strip():
@@ -1055,31 +1116,26 @@ def route_history(
                 and verify_frame_symbol(frame, symbol)
             ):
                 frame = frame.copy(deep=True)
-                record_capability_result(provider, capability, True)
+                record_capability_result(provider, request_capability, True)
                 attempts.append(ProviderAttempt(provider, True, len(frame), "healthy"))
                 return RoutedHistory(frame, provider, attempts, datetime.now(timezone.utc).isoformat())
-            attempts.append(ProviderAttempt(provider, False, 0, "symbol_mismatch_or_no_data"))
-            record_capability_result(provider, capability, False, "symbol_mismatch_or_no_data")
-            mark_symbol_unavailable(
-                symbol,
-                provider=provider,
-                capability=capability,
-                interval_family=interval_family,
-            )
+            status = "no_data" if frame.empty else "symbol_mismatch"
+            attempts.append(ProviderAttempt(provider, False, 0, status))
+            record_capability_result(provider, request_capability, False, status)
+            _mark_request_unavailable(provider, symbol, period, interval)
         except Exception as exc:
             text = _redact_url(str(exc))[:220]
             status_code = _provider_status_from_exception(exc)
-            if status_code != 401 and classify_plan_limited_status(status_code, text):
+            status = classify_provider_failure(exc, status_code)
+            if status in {"payment_required", "plan_limited"}:
                 disable_capability(
                     provider,
-                    capability,
+                    request_capability,
                     text,
                     status_code=status_code,
                     seconds=PROVIDER_PERMISSION_COOLDOWN_SECONDS,
                 )
                 status = "capability_plan_limited"
-            else:
-                status = classify_provider_failure(exc, status_code)
             if status == "rate_limited":
                 _mark_provider_limited(provider)
                 mark_provider_cooldown_live(
@@ -1097,37 +1153,50 @@ def route_history(
                     seconds=PROVIDER_PERMISSION_COOLDOWN_SECONDS,
                     reason="provider authentication failed (HTTP 401)",
                 )
-            record_capability_result(provider, capability, False, status, status_code=status_code)
-            attempts.append(ProviderAttempt(provider, False, 0, status, text))
+            record_capability_result(provider, request_capability, False, status, status_code=status_code)
+            attempts.append(ProviderAttempt(provider, False, 0, status, text, status_code))
             _record_failure(provider, status, symbol)
-            mark_symbol_unavailable(
-                symbol,
-                provider=provider,
-                capability=capability,
-                interval_family=interval_family,
-            )
+            if status not in {"rate_limited", "authentication_failed", "capability_plan_limited"}:
+                _mark_request_unavailable(provider, symbol, period, interval)
 
     yahoo_provider = "Yahoo Finance"
     if _cooldown_active(_provider_cooldowns, yahoo_provider):
         attempts.append(ProviderAttempt(yahoo_provider, False, 0, "provider_cooldown"))
     elif provider_cooldown_active_live(yahoo_provider).get("active"):
         attempts.append(ProviderAttempt(yahoo_provider, False, 0, "provider_shared_cooldown"))
+    elif _request_is_unavailable(yahoo_provider, symbol, period, interval):
+        attempts.append(ProviderAttempt(yahoo_provider, False, 0, "request_cooldown", "temporarily skipped after this provider request failed"))
     else:
         try:
-            frame = _strict_yahoo_history(yahoo_loader(symbol, period, interval), symbol, period, interval)
+            source_frame = yahoo_loader(symbol, period, interval)
+            remaining = getattr(source_frame, "attrs", {}).get("yahoo_request_cooldown_remaining_seconds")
+            if (
+                isinstance(source_frame, pd.DataFrame) and source_frame.empty
+                and type(remaining) in {int, float} and math.isfinite(remaining)
+                and 0 < remaining <= max(60, int(UNAVAILABLE_SYMBOL_COOLDOWN_SECONDS))
+            ):
+                # A suppressed helper request is not a new empty response. Keep
+                # its original expiration instead of restarting the backoff.
+                attempts.append(ProviderAttempt(yahoo_provider, False, 0, "request_cooldown"))
+                return RoutedHistory(pd.DataFrame(), "none", attempts, datetime.now(timezone.utc).isoformat())
+            frame = _strict_yahoo_history(source_frame, symbol, period, interval)
             # Yahoo is research-only; never upgrade its bars to verified broker execution data.
             if not frame.empty and verify_frame_symbol(frame, symbol):
                 frame.attrs["source_identity"] = f"Yahoo Finance:{symbol}:{period}:{interval}"
                 frame.attrs["period"] = period
                 frame.attrs["interval"] = interval
-                record_capability_result(yahoo_provider, capability, True)
+                record_capability_result(yahoo_provider, request_capability, True)
                 attempts.append(ProviderAttempt(yahoo_provider, True, len(frame), "strict_research_fallback"))
                 return RoutedHistory(frame, yahoo_provider, attempts, datetime.now(timezone.utc).isoformat())
+            attempts.append(ProviderAttempt(yahoo_provider, False, 0, "no_data"))
+            record_capability_result(yahoo_provider, request_capability, False, "no_data")
+            _mark_request_unavailable(yahoo_provider, symbol, period, interval)
         except Exception as exc:
             status = classify_provider_failure(exc)
             detail = _redact_url(str(exc))[:220]
-            attempts.append(ProviderAttempt(yahoo_provider, False, 0, status, detail))
-            record_capability_result(yahoo_provider, capability, False, status)
+            status_code = _provider_status_from_exception(exc)
+            attempts.append(ProviderAttempt(yahoo_provider, False, 0, status, detail, status_code))
+            record_capability_result(yahoo_provider, request_capability, False, status)
             _record_failure(yahoo_provider, status, symbol)
             if status == "rate_limited":
                 _mark_provider_limited(yahoo_provider)
@@ -1136,6 +1205,7 @@ def route_history(
                     seconds=PROVIDER_RATE_LIMIT_COOLDOWN_SECONDS,
                     reason="Yahoo Finance rate limited",
                 )
+            if status != "rate_limited":
+                _mark_request_unavailable(yahoo_provider, symbol, period, interval)
 
-    mark_symbol_unavailable(symbol, provider="all", capability=capability, interval_family=interval_family)
     return RoutedHistory(pd.DataFrame(), "none", attempts, datetime.now(timezone.utc).isoformat())

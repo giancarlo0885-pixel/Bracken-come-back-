@@ -19,7 +19,10 @@ from quant_trade_standard import assess_trade
 from oracle_intelligence import evaluate_opportunity
 from market_memory import feature_vector, record_closed_trade_memory
 from market_data import MarketSnapshot
-from quote_provenance import reference_allowed_in_mode
+from quote_provenance import (
+    quote_quality_rejection_reason as _quote_quality_rejection_reason,
+    reference_allowed_in_mode,
+)
 from provider_router import normalize_symbol
 from risk_engine import ExecutionSwitches, pre_trade_risk_checks
 from market_sessions import (
@@ -524,31 +527,6 @@ def _quote_payload(value: Any, symbol: str = "") -> dict[str, Any]:
     if isinstance(value, dict):
         return dict(value)
     return {}
-
-
-def _quote_quality_rejection_reason(payload: dict[str, Any]) -> str | None:
-    """Honor explicit quality vetoes without inventing missing book sides."""
-    if isinstance(payload.get("price"), bool):
-        return "quote price is invalid"
-    if payload.get("stale") is True:
-        return "quote explicitly marked stale"
-    if payload.get("execution_quote_eligible") is False:
-        return "quote explicitly ineligible for execution"
-    bid_value, ask_value = payload.get("bid"), payload.get("ask")
-    if bid_value is None and ask_value is None:
-        # A paper-reference mark may legitimately have no measured bid/ask.
-        return None
-    if isinstance(bid_value, bool) or isinstance(ask_value, bool):
-        return "quote bid/ask book is invalid"
-    try:
-        bid, ask = float(bid_value), float(ask_value)
-    except (TypeError, ValueError, OverflowError):
-        return "quote bid/ask book is invalid"
-    if not all(math.isfinite(value) and value > 0 for value in (bid, ask)):
-        return "quote bid/ask book is invalid"
-    if ask < bid:
-        return "quote bid/ask book is crossed"
-    return None
 
 
 def _verified_quote_for(
