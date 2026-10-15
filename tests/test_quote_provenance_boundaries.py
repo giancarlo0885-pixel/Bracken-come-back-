@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+import pytest
+
 from quote_provenance import provider_verified, reference_allowed_in_mode
 
 
@@ -156,3 +158,73 @@ def test_default_yahoo_download_uses_raising_history_helper(monkeypatch):
     monkeypatch.setattr(runtime_provider_reliability, "yahoo_reference_history", retrieve)
     market_data._download_yahoo("MSFT", "1d", "1m")
     assert calls == [(market_data, "MSFT", "1d", "1m")]
+
+
+@pytest.mark.parametrize("market,symbol", [("cash", "MSFT"), ("crypto", "BTC-USD")])
+@pytest.mark.parametrize("changes,reason", [({"stale": True}, "stale"),
+    ({"execution_quote_eligible": False}, "ineligible"),
+    ({"bid": 402, "ask": 401}, "crossed"), ({"bid": None, "ask": 401}, "invalid"),
+    ({"bid": 399, "ask": None}, "invalid"), ({"bid": "NaN", "ask": 401}, "invalid"),
+    ({"bid": 399, "ask": "Infinity"}, "invalid"), ({"bid": True, "ask": 401}, "invalid"),
+    ({"price": True}, "invalid")])
+def test_final_quote_boundaries_honor_explicit_quality_rejection(monkeypatch, market, symbol, changes, reason):
+    import oracle_bot
+    monkeypatch.setattr(oracle_bot, "EXECUTION_MODE", "paper")
+    monkeypatch.setattr(oracle_bot, "PAPER_BROKER_MODE", True)
+    quote = {**_quote(), "symbol": symbol, "requested_symbol": symbol,
+             "provider_symbol": symbol, **changes}
+    assert oracle_bot._verified_quote_for(symbol, {symbol: quote}, market) is None
+    assert reason in oracle_bot._quote_rejection_reason(symbol, {symbol: quote}, market)
+    # Both handoffs must reject: explicit quote metadata and signal metadata.
+    for signal, metadata in (({"symbol": symbol}, quote), (quote, None)):
+        allowed, actual_reason = oracle_bot._execution_quote_guard(market, symbol, 400, signal,
+                                                                  quote_metadata=metadata)
+        assert allowed is False
+        assert reason in actual_reason
+
+
+@pytest.mark.parametrize("book", [{}, {"bid": None, "ask": None}, {"bid": 399.9, "ask": 400.1}])
+def test_final_paper_reference_accepts_unknown_or_coherent_book_without_inventing_sides(monkeypatch, book):
+    import oracle_bot
+    monkeypatch.setattr(oracle_bot, "EXECUTION_MODE", "paper")
+    monkeypatch.setattr(oracle_bot, "PAPER_BROKER_MODE", True)
+    quote = {**_quote(), "execution_quote_eligible": True, **book}
+    accepted = oracle_bot._verified_quote_for("MSFT", {"MSFT": quote}, "cash")
+    assert accepted == quote
+    assert provider_verified(accepted) is False
+    allowed, _ = oracle_bot._execution_quote_guard("cash", "MSFT", 400, quote)
+    assert allowed is True
+    assert {key: accepted[key] for key in ("bid", "ask") if key in accepted} == book
+
+
+def test_signal_execution_eligibility_false_survives_metadata_extraction():
+    import oracle_bot
+    assert oracle_bot._quote_identity_metadata({"execution_quote_eligible": False})["execution_quote_eligible"] is False
+
+
+def test_final_execution_rejects_boolean_execution_price(monkeypatch):
+    import oracle_bot
+    monkeypatch.setattr(oracle_bot, "EXECUTION_MODE", "paper")
+    monkeypatch.setattr(oracle_bot, "PAPER_BROKER_MODE", True)
+    allowed, reason = oracle_bot._execution_quote_guard("cash", "MSFT", True,
+        {**_quote(), "price": 1})
+    assert allowed is False
+    assert "invalid" in reason
+
+
+def test_final_quote_metadata_cannot_fill_missing_side_from_an_earlier_signal_book(monkeypatch):
+    import oracle_bot
+    monkeypatch.setattr(oracle_bot, "EXECUTION_MODE", "paper")
+    monkeypatch.setattr(oracle_bot, "PAPER_BROKER_MODE", True)
+    signal = {**_quote(), "bid": 399, "ask": 401}
+    current = {**_quote(), "bid": None, "ask": 401}
+    allowed, reason = oracle_bot._execution_quote_guard("cash", "MSFT", 400, signal,
+                                                       quote_metadata=current)
+    assert allowed is False
+    assert "invalid" in reason
+    # Explicitly unknown sides remain unknown; old signal sides cannot supply
+    # a fabricated book for a legitimate current paper-reference mark.
+    current["ask"] = None
+    allowed, _ = oracle_bot._execution_quote_guard("cash", "MSFT", 400, signal,
+                                                 quote_metadata=current)
+    assert allowed is True

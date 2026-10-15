@@ -15,6 +15,8 @@ from crypto_execution_guard import (
     _symbol,
 )
 from shadow_forward_sampler import maintain_passive_shadow_evidence
+from market_sessions import quote_is_fresh
+from quote_provenance import provider_verified
 
 
 _LAST_SHADOW_STATUS_LOG = 0.0
@@ -63,9 +65,11 @@ def _emit_shadow_status(worker: Any, result: dict[str, Any]) -> None:
 
 
 def _finite_positive(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
     try:
         number = float(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
     if not math.isfinite(number) or number <= 0:
         return None
@@ -73,7 +77,7 @@ def _finite_positive(value: Any) -> float | None:
 
 
 def _snapshot_payload(snapshot: Any, symbol: str) -> dict[str, Any] | None:
-    """Convert a validated broker snapshot into generic quote-evidence payload."""
+    """Normalize eligible quote evidence without upgrading its source grade."""
     if snapshot is None:
         return None
     if isinstance(snapshot, dict):
@@ -88,20 +92,28 @@ def _snapshot_payload(snapshot: Any, symbol: str) -> dict[str, Any] | None:
             return None
 
     normalized = str(symbol or "").upper().strip()
-    actual_symbol = str(payload.get("symbol") or normalized).upper().strip()
-    provider_symbol = str(payload.get("provider_symbol") or actual_symbol).upper().strip()
-    requested_symbol = str(payload.get("requested_symbol") or normalized).upper().strip()
+    actual_symbol = str(payload.get("symbol") or "").upper().strip()
+    provider_symbol = str(payload.get("provider_symbol") or "").upper().strip()
+    requested_symbol = str(payload.get("requested_symbol") or "").upper().strip()
     price = _finite_positive(payload.get("price"))
     if price is None or actual_symbol != normalized or provider_symbol != normalized or requested_symbol != normalized:
         return None
-
+    if (payload.get("quote_verified") is not True or not str(payload.get("provider") or "").strip()
+            or oracle_bot._quote_quality_rejection_reason(payload) is not None):
+        return None
+    if not quote_is_fresh(
+        payload.get("quote_timestamp") or payload.get("timestamp"),
+        str(payload.get("interval") or ""),
+        max_intraday_age_seconds=oracle_bot.DECISION_CRYPTO_MAX_AGE_MINUTES * 60,
+        symbol=normalized,
+    ):
+        return None
     payload["symbol"] = normalized
     payload["requested_symbol"] = normalized
     payload["provider_symbol"] = normalized
     payload["price"] = price
-    payload["provider"] = str(payload.get("provider") or "Robinhood Crypto")
-    payload["provider_quote_verified"] = True
-    payload["quote_verified"] = True
+    payload["provider_quote_verified"] = provider_verified(payload)
+    payload["verified"] = payload["provider_quote_verified"]
     payload["execution_quote_eligible"] = True
     payload.setdefault("stale", False)
     return payload
@@ -124,11 +136,11 @@ def _primary_quote(worker: Any, symbol: str, quote_map: dict[str, Any]) -> dict[
     quote = oracle_bot._verified_quote_for(symbol, quote_map, "crypto")
     if quote is None:
         return None
-    payload = dict(quote)
+    payload = _snapshot_payload(quote, symbol)
+    if payload is None:
+        return None
     provider_name = str(payload.get("provider") or "").strip().lower()
     if provider_name == "yahoo finance" and not _paper_yahoo_reference(payload):
-        return None
-    if _finite_positive(payload.get("price")) is None:
         return None
     return payload
 

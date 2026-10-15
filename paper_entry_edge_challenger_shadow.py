@@ -8,7 +8,7 @@ import threading
 from typing import Any
 
 log = logging.getLogger("paper-entry-edge-challenger")
-_VERSION = "entry-edge-challenger-v2-round-trip-cost"
+_VERSION = "entry-edge-challenger-v3-market-scoped"
 _THREAD: threading.Thread | None = None
 _STOP = threading.Event()
 
@@ -107,7 +107,7 @@ def _prior_loss_streak(conn: Any, strategy: str, regime: str, entry_time: dateti
     rows = list(conn.execute("""
         SELECT m.round_trip_net_pnl AS net_pnl
         FROM paper_regime_trade_metrics m
-        WHERE m.strategy=%s AND m.regime=%s AND m.exit_time < %s
+        WHERE m.market='crypto' AND m.strategy=%s AND m.regime=%s AND m.exit_time < %s
           AND m.cost_provenance='exact_lot' AND m.round_trip_net_pnl IS NOT NULL
         ORDER BY m.exit_time DESC LIMIT 6
     """, (strategy, regime, entry_time)).fetchall())
@@ -139,8 +139,8 @@ def evaluate_new_closes(limit: int = 250) -> int:
                    m.round_trip_net_pnl,m.round_trip_fees,m.cost_provenance,
                    l.quantity,l.entry_price
             FROM paper_regime_trade_metrics m
-            JOIN trade_ledger l ON l.trade_id=m.trade_id
-            WHERE m.exit_time >= %s AND m.strategy='oracle_council_v3'
+            JOIN trade_ledger l ON l.trade_id=m.trade_id AND l.market=m.market
+            WHERE m.entry_time >= %s AND m.market='crypto' AND m.strategy='oracle_council_v3'
               AND m.cost_provenance='exact_lot'
               AND m.round_trip_net_pnl IS NOT NULL AND m.round_trip_fees IS NOT NULL
               AND m.entry_time IS NOT NULL AND m.exit_time IS NOT NULL
@@ -164,8 +164,8 @@ def evaluate_new_closes(limit: int = 250) -> int:
                        AVG(CASE WHEN l.quantity>0 AND l.entry_price>0
                            THEN (m.round_trip_fees/(l.quantity*l.entry_price))*100.0 END) AS cost_pct
                 FROM paper_regime_trade_metrics m
-                JOIN trade_ledger l ON l.trade_id=m.trade_id
-                WHERE m.strategy=%s AND m.regime=%s AND m.exit_time < %s
+                JOIN trade_ledger l ON l.trade_id=m.trade_id AND l.market=m.market
+                WHERE m.market='crypto' AND m.strategy=%s AND m.regime=%s AND m.exit_time < %s
                   AND m.cost_provenance='exact_lot'
                   AND m.round_trip_net_pnl IS NOT NULL AND m.round_trip_fees IS NOT NULL
             """, (strategy, regime, entry_time)).fetchone() or {}
