@@ -2244,6 +2244,9 @@ def _execute_close_position(
             )
             _complete_execution_claim(conn, execution_key)
 
+        # Trade DNA uses its own connection, so publish it only after the
+        # canonical close, explicit fill, and lot links have committed.
+        try:
             record_closed_trade_memory(
                 market=market,
                 symbol=symbol,
@@ -2253,6 +2256,11 @@ def _execute_close_position(
                 exit_reason=reason,
                 quantity=quantity,
                 entry_provenance=sell_attribution[0] if sell_attribution else None,
+            )
+        except Exception as exc:
+            log.warning(
+                "Committed paper SELL memory unavailable | market=%s | symbol=%s | reason=%s",
+                market, symbol, type(exc).__name__,
             )
         log.info(
             "%s SELL %s quantity=%.8f price=%.6f margin_repaid=%.2f reason=%s",

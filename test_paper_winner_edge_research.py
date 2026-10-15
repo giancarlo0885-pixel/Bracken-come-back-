@@ -16,7 +16,7 @@ def trade(i, pnl=1.0, *, days=None):
                 exit_time=(entry + timedelta(minutes=30)).isoformat(),
                 entry_evidence_time=entry.isoformat(), entry_notional=100,
                 net_pnl=pnl, fifo_complete=True, fill_fee_evidence_verified=True,
-                entry_cohort_verified=True)
+                exact_fill_lot_linkage_verified=True, entry_cohort_verified=True)
 
 
 def report(rows):
@@ -93,6 +93,7 @@ def test_split_episode_and_timezone_validation():
 
 def test_adapter_uses_allocated_notional_and_buy_snapshot_only():
     from paper_winner_edge_research import verified_ledger_inputs
+    from test_paper_exact_fill_research import exact_allocations
     from test_paper_exit_research import buy, sell, START as EVENT
     opening = {**buy("buy", 2, 100, 0.2),
                "decision_timestamp": EVENT.isoformat(),
@@ -104,14 +105,17 @@ def test_adapter_uses_allocated_notional_and_buy_snapshot_only():
              dict(fill_id="s", market="crypto", symbol="TEST-USD", side="SELL",
                   quantity=2, fill_price=102, fee_amount=0.1,
                   created_at=EVENT + timedelta(minutes=20))]
-    rows, coverage = verified_ledger_inputs([opening, closing], fills, as_of=EVENT + timedelta(days=1))
+    ledger = [opening, closing]
+    rows, coverage = verified_ledger_inputs(ledger, fills, allocations=exact_allocations(ledger, {"sell": "buy"}),
+                                           as_of=EVENT + timedelta(days=1))
     assert coverage["exported_trades"] == 1
     assert rows[0]["strategy"] == "council"
     assert rows[0]["entry_pattern"] == "dip_rebound"
     assert rows[0]["entry_notional"] == 200
     assert rows[0]["net_pnl"] == pytest.approx(3.7)
     opening["decision_timestamp"] = (EVENT + timedelta(minutes=1)).isoformat()
-    rows, coverage = verified_ledger_inputs([opening, closing], fills, as_of=EVENT + timedelta(days=1))
+    rows, coverage = verified_ledger_inputs(ledger, fills, allocations=exact_allocations(ledger, {"sell": "buy"}),
+                                           as_of=EVENT + timedelta(days=1))
     assert not rows
     assert coverage["adapter"]["unverified_or_mixed_entry_snapshot"] == 1
 
@@ -125,6 +129,7 @@ def test_nonfinite_normalized_return_is_excluded():
 
 def test_partial_exits_count_as_one_completed_entry():
     from paper_winner_edge_research import verified_ledger_inputs
+    from test_paper_exact_fill_research import exact_allocations
     from test_paper_exit_research import buy, sell, START as EVENT
     opening = {**buy("buy", 2, 100, 0.2), "decision_timestamp": EVENT.isoformat(),
                "feature_snapshot": {"regime": "trend_up", "entry_pattern": "dip_rebound"}}
@@ -136,12 +141,14 @@ def test_partial_exits_count_as_one_completed_entry():
         fills.append(dict(fill_id=f"s{i}", market="crypto", symbol="TEST-USD", side="SELL",
                           quantity=1, fill_price=price, fee_amount=0.1,
                           created_at=EVENT + timedelta(minutes=20 + 10*i)))
-    rows, _ = verified_ledger_inputs([opening, *closes], fills, as_of=EVENT + timedelta(days=1))
+    ledger = [opening, *closes]
+    links = exact_allocations(ledger, {"s1": "buy", "s2": "buy"})
+    rows, _ = verified_ledger_inputs(ledger, fills, allocations=links, as_of=EVENT + timedelta(days=1))
     assert len(rows) == 1
     assert rows[0]["trade_id"] == "buy"
     assert rows[0]["net_pnl"] == pytest.approx(4.6)
     assert rows[0]["entry_notional"] == 200
-    assert not verified_ledger_inputs([opening, closes[0]], fills, as_of=EVENT + timedelta(days=1))[0]
+    assert not verified_ledger_inputs([opening, closes[0]], fills, allocations=links, as_of=EVENT + timedelta(days=1))[0]
 
 
 @pytest.mark.parametrize("missing_flag", [False, True])
@@ -149,6 +156,7 @@ def test_every_partial_close_requires_verified_fill_fees(missing_flag):
     from paper_exit_research import attach_fill_fee_evidence, reconcile_fifo
     from paper_winner_edge_research import verified_ledger_inputs
     from test_paper_exit_research import buy, sell, START as EVENT
+    from test_paper_exact_fill_research import exact_allocations
 
     opening = {**buy("buy", 2, 100, 0.2), "decision_timestamp": EVENT.isoformat(),
                "feature_snapshot": {"regime": "trend_up", "entry_pattern": "dip_rebound"}}
@@ -160,10 +168,13 @@ def test_every_partial_close_requires_verified_fill_fees(missing_flag):
                   quantity=1, fill_price=102, fee_amount=0.1,
                   created_at=EVENT + timedelta(minutes=20))]
     as_of = EVENT + timedelta(days=1)
-    # A caller may reuse a reconciled snapshot that did not require fill fees.
-    snapshot = reconcile_fifo(attach_fill_fee_evidence(ledger, fills), as_of=as_of)
+    # A reused FIFO snapshot may still carry an old aggregate complete flag
+    # after an individual allocation's fee proof becomes unavailable.
+    links = exact_allocations(ledger, {"s1": "buy", "s2": "buy"})
+    snapshot = reconcile_fifo(attach_fill_fee_evidence(ledger, fills, links), as_of=as_of)
     assert all(close["fifo_complete"] for close in snapshot["closes"])
     assert snapshot["closes"][0]["fill_fee_evidence_verified"] is True
+    snapshot["closes"][1]["fill_fee_evidence_verified"] = False
     assert snapshot["closes"][1]["fill_fee_evidence_verified"] is False
     if missing_flag:
         snapshot["closes"][1].pop("fill_fee_evidence_verified")
@@ -175,6 +186,7 @@ def test_every_partial_close_requires_verified_fill_fees(missing_flag):
 @pytest.mark.parametrize("future_first", [False, True])
 def test_future_buy_correction_cannot_relabel_historical_entry(future_first):
     from paper_winner_edge_research import verified_ledger_inputs
+    from test_paper_exact_fill_research import exact_allocations
     from test_paper_exit_research import buy, sell, START as EVENT
 
     opening = {**buy("buy", 2, 100, 0.2), "decision_timestamp": EVENT.isoformat(),
@@ -186,12 +198,13 @@ def test_future_buy_correction_cannot_relabel_historical_entry(future_first):
                   quantity=2, fill_price=102, fee_amount=0.1,
                   created_at=EVENT + timedelta(minutes=20))]
     as_of = EVENT + timedelta(hours=1)
-    baseline, _ = verified_ledger_inputs([opening, closing], fills, as_of=as_of)
+    links = exact_allocations([opening, closing], {"sell": "buy"})
+    baseline, _ = verified_ledger_inputs([opening, closing], fills, allocations=links, as_of=as_of)
     correction = {**opening, "entry_time": EVENT + timedelta(hours=2),
                   "entry_price": 999, "strategy": "future_strategy",
                   "feature_snapshot": {"regime": "future_regime", "entry_pattern": "future_pattern"}}
     ledger = [correction, opening, closing] if future_first else [opening, closing, correction]
-    rows, coverage = verified_ledger_inputs(ledger, fills, as_of=as_of)
+    rows, coverage = verified_ledger_inputs(ledger, fills, allocations=links, as_of=as_of)
     assert rows == baseline
     assert rows[0]["entry_notional"] == 200
     assert coverage["fifo"]["future_fill"] == 1
@@ -245,8 +258,9 @@ def test_runtime_reuses_reconciled_snapshot_and_classifies_observed_entry_featur
                                     "schwager_pattern_tag": "resistance_test"}}
     close = dict(trade_id="s", market="crypto", entry_time=START.isoformat(),
                  exit_time=(START+timedelta(hours=1)).isoformat(), fifo_complete=True,
-                 fill_fee_evidence_verified=True, net_pnl=2,
-                 members=[dict(buy_trade_id="b", quantity=2)])
+                 fill_fee_evidence_verified=True, exact_fill_lot_linkage_verified=True, net_pnl=2,
+                 exit_fill_id="sell-fill", members=[dict(buy_trade_id="b", quantity=2,
+                 buy_fill_id="buy-fill", sell_fill_id="sell-fill", lot_id="lot:b")])
     snapshot = dict(closes=[close], diagnostics={}, observed_closes=1)
     rows, _ = verified_ledger_inputs([opening], [], as_of=AS_OF, fifo_report=snapshot)
     assert rows[0]["regime"] == "trend_up__high_vol"
@@ -282,3 +296,73 @@ def test_forward_diagnostics_report_post_cost_economics_and_counterfactual_scope
     assert "selection=COUNTERFACTUAL" in line
     assert "execution_impact=NONE" in line and "promotion_action=NONE" in line
     assert "must-not-be-logged" not in caplog.text
+
+
+def test_legacy_fill_fee_flag_without_exact_lot_linkage_cannot_enter_discovery():
+    row = trade(1)
+    row.pop("exact_fill_lot_linkage_verified")
+    valid, exclusions = prepare([row], AS_OF)
+    assert valid == []
+    assert exclusions["unverified_accounting_or_cohort"] == 1
+
+
+@pytest.mark.parametrize("missing", ["lot_id", "buy_fill_id", "sell_fill_id", "exit_fill_id"])
+def test_reused_fifo_snapshot_requires_explicit_identity_receipts_not_only_boolean_flag(missing):
+    from paper_winner_edge_research import verified_ledger_inputs
+    opening = {"trade_id": "b", "side": "BUY", "quantity": 2, "entry_price": 100,
+               "strategy": "council", "decision_timestamp": START.isoformat(),
+               "feature_snapshot": {"regime": "trend_up", "entry_pattern": "dip_rebound"}}
+    close = dict(trade_id="s", market="crypto", entry_time=START.isoformat(),
+                 exit_time=(START+timedelta(hours=1)).isoformat(), fifo_complete=True,
+                 fill_fee_evidence_verified=True, exact_fill_lot_linkage_verified=True,
+                 exit_fill_id="sell-fill", net_pnl=2,
+                 members=[dict(buy_trade_id="b", quantity=2, lot_id="lot:b",
+                               buy_fill_id="buy-fill", sell_fill_id="sell-fill")])
+    if missing == "exit_fill_id":
+        close.pop(missing)
+    else:
+        close["members"][0].pop(missing)
+    rows, coverage = verified_ledger_inputs([opening], [], as_of=AS_OF,
+        fifo_report=dict(closes=[close], diagnostics={}, observed_closes=1))
+    assert rows == []
+    assert coverage["adapter"]["unverified_exact_fill_lot_linkage"] == 1
+
+
+def test_tiny_partly_closed_entry_is_not_a_completed_winner():
+    from paper_winner_edge_research import verified_ledger_inputs
+    from test_paper_exit_research import buy, sell, START as EVENT
+    from test_paper_exact_fill_research import exact_allocations
+
+    opening = {**buy("buy", 1e-13, 100, 0), "decision_timestamp": EVENT.isoformat(),
+               "feature_snapshot": {"regime": "trend_up", "entry_pattern": "dip_rebound"}}
+    ledger = [opening, sell("partial", 5e-14, 100, 102, 0, 1e-13)]
+    rows, coverage = verified_ledger_inputs(ledger, [], as_of=EVENT+timedelta(days=1),
+        allocations=exact_allocations(ledger, {"partial": "buy"}))
+    assert rows == []
+    assert coverage["adapter"]["open_or_partial_entry_lot"] == 1
+
+
+def test_legacy_frozen_candidates_are_archived_without_reusing_or_reranking_holdout():
+    import paper_winner_edge_research as research
+    rows = [trade(i) for i in range(60)]
+    legacy = research.runtime_report(rows, as_of=research.FORWARD_CUTOFF+timedelta(days=1))
+    assert legacy["candidates"][0]["research_candidate"] is True
+    legacy["version"] = "winner-edge-research-v1"
+    legacy.pop("accounting_provenance")
+    legacy_copy = dict(legacy)
+    days = (research.FORWARD_CUTOFF-START).days+1
+    current = research.runtime_report(rows+[trade(100, 2, days=days)],
+        as_of=research.FORWARD_CUTOFF+timedelta(days=2), previous=legacy)
+    assert current["candidates"] == []
+    assert current["forward"]["baseline"]["net_pnl"] == 2
+    assert current["forward"]["selected"]["net_pnl"] is None
+    for field in ("avoided_loss_pnl", "rejected_winner_pnl", "rejected_winners", "selection_pnl_delta"):
+        assert current["forward"][field] is None  # No validated frozen strategy exists for this comparison.
+    assert current["historical_discovery_reference"]["candidates"] == legacy["candidates"]
+    assert current["historical_discovery_reference"]["qualified_current_evidence"] is False
+    assert current["cutoff"] == legacy["cutoff"]
+    assert legacy == legacy_copy
+    repeated = research.runtime_report(rows, as_of=research.FORWARD_CUTOFF+timedelta(days=3), previous=current)
+    assert repeated["candidates"] == []
+    assert repeated["research_blocker"] == current["research_blocker"]
+    assert repeated["historical_discovery_reference"] == current["historical_discovery_reference"]

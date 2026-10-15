@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 import hashlib
 import json
+import logging
 import math
 import os
 import re
@@ -38,6 +39,7 @@ MAX_RESPONSE_BYTES = 256_000
 MAX_ERROR_BYTES = 4096
 _REPOSITORY_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 _JSON_FENCE_RE = re.compile(r"```json\s*(\{.*?\})\s*```", re.IGNORECASE | re.DOTALL)
+log = logging.getLogger("github-market-intelligence-inbox")
 
 
 class GitHubInboxHTTPError(RuntimeError):
@@ -73,12 +75,27 @@ def _retry_after_seconds(headers: Any) -> float | None:
         return None
 
 
+def _github_response_diagnostics(status: int | None, headers: Any) -> dict[str, Any]:
+    status = status if type(status) is int and 100 <= status <= 599 else None
+    request_id = str(headers.get("X-GitHub-Request-Id", "") or "") if headers else ""
+    if not re.fullmatch(r"[A-Za-z0-9:-]{1,100}", request_id):
+        request_id = None
+    return {
+        "http_status": status,
+        "rate_limit_limit": _numeric_header(headers, "X-RateLimit-Limit"),
+        "rate_limit_remaining": _numeric_header(headers, "X-RateLimit-Remaining"),
+        "rate_limit_reset_epoch": _numeric_header(headers, "X-RateLimit-Reset"),
+        "retry_after_seconds": _retry_after_seconds(headers),
+        "github_request_id": request_id,
+    }
+
+
 def _github_http_error(error: HTTPError) -> GitHubInboxHTTPError:
     """Classify without retaining response bodies, request URLs, or raw headers."""
-    headers = error.headers
     status = error.code
-    remaining = _numeric_header(headers, "X-RateLimit-Remaining")
-    retry_after = _retry_after_seconds(headers)
+    diagnostics = _github_response_diagnostics(status, error.headers)
+    remaining = diagnostics["rate_limit_remaining"]
+    retry_after = diagnostics["retry_after_seconds"]
     rate_limited = status == 429 or (
         status == 403 and (remaining == 0 or retry_after is not None)
     )
@@ -105,18 +122,8 @@ def _github_http_error(error: HTTPError) -> GitHubInboxHTTPError:
         "upstream_error" if 500 <= status <= 599 else
         "http_error"
     )
-    request_id = str(headers.get("X-GitHub-Request-Id", "") or "") if headers else ""
-    if not re.fullmatch(r"[A-Za-z0-9:-]{1,100}", request_id):
-        request_id = None
-    return GitHubInboxHTTPError({
-        "http_status": status,
-        "failure_class": failure_class,
-        "rate_limit_limit": _numeric_header(headers, "X-RateLimit-Limit"),
-        "rate_limit_remaining": remaining,
-        "rate_limit_reset_epoch": _numeric_header(headers, "X-RateLimit-Reset"),
-        "retry_after_seconds": retry_after,
-        "github_request_id": request_id,
-    })
+    diagnostics["failure_class"] = failure_class
+    return GitHubInboxHTTPError(diagnostics)
 
 
 def market_brief_failure_diagnostics(error: Exception) -> dict[str, Any]:
@@ -187,6 +194,22 @@ def _fetch_issue(repository: str, issue_number: int) -> dict[str, Any]:
     )
     try:
         with urlopen(request, timeout=12) as response:  # noqa: S310 - fixed HTTPS host and validated repository path
+            diagnostics = _github_response_diagnostics(
+                getattr(response, "status", None), getattr(response, "headers", None),
+            )
+            # This proves receipt of an HTTP response, before packet validation
+            # or ingestion. An unchanged brief must still leave this receipt.
+            log.info(
+                "GITHUB MARKET INTELLIGENCE HTTP | status=RECEIVED | http_status=%s | "
+                "rate_limit_limit=%s | rate_limit_remaining=%s | rate_limit_reset_epoch=%s | "
+                "retry_after_seconds=%s | github_request_id=%s | execution_impact=NONE",
+                diagnostics["http_status"],
+                diagnostics["rate_limit_limit"],
+                diagnostics["rate_limit_remaining"],
+                diagnostics["rate_limit_reset_epoch"],
+                diagnostics["retry_after_seconds"],
+                diagnostics["github_request_id"],
+            )
             payload = response.read(MAX_RESPONSE_BYTES + 1)
     except HTTPError as exc:
         try:

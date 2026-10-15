@@ -263,41 +263,60 @@ def repair_excursion_anchors() -> int:
         return max(0, int(getattr(result, "rowcount", 0) or 0))
 
 
-def _round_trip_accounting(conn: Any, trade: dict[str, Any]) -> tuple[float | None,float | None,str]:
-    """Recover exact round-trip costs from the immutable entry lot when unique."""
-    market = _normalize_market(trade.get("market"))
-    symbol = str(trade.get("symbol") or "").upper()
-    entry_time = trade.get("entry_time")
-    entry_price = _num(trade.get("entry_price"))
-    quantity = abs(_num(trade.get("quantity")))
-    signal_id = str(trade.get("entry_signal_id") or "").strip()
-    decision_id = str(trade.get("entry_decision_id") or "").strip()
-    if not symbol or entry_time is None or entry_price <= 0 or quantity <= 0 or not signal_id:
-        return None,None,"incomplete_entry_provenance"
-    rows=list(conn.execute(
-        """
-        SELECT entry_fees,quantity_opened
-        FROM position_lots
-        WHERE market=%s AND symbol=%s
-          AND NULLIF(opened_at,'')::timestamptz=%s
-          AND entry_signal_id=%s
-          AND (%s='' OR COALESCE(entry_decision_id,'')=%s)
-          AND ABS(entry_price-%s) <= GREATEST(1e-10,ABS(%s)*1e-9)
-        ORDER BY id ASC LIMIT 2
-        """,
-        (market,symbol,entry_time,signal_id,decision_id,decision_id,entry_price,entry_price),
-    ).fetchall())
-    if len(rows) != 1:
-        return None,None,"ambiguous_or_missing_entry_lot"
-    lot=rows[0]
-    opened_qty=abs(_num(lot.get("quantity_opened")))
-    if opened_qty <= 0 or quantity-opened_qty > max(1e-10,opened_qty*1e-9):
-        return None,None,"invalid_entry_lot_quantity"
-    entry_fee=max(0.0,_num(lot.get("entry_fees"))) * (quantity/opened_qty)
-    exit_fee=max(0.0,_num(trade.get("fees")))
-    gross=_num(trade.get("gross_pnl"))
-    total_fee=entry_fee+exit_fee
-    return gross-total_fee,total_fee,"exact_lot"
+def _cost_number(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _round_trip_accounting(
+    conn: Any,
+    trade: dict[str, Any],
+    *,
+    allocations: list[dict[str, Any]] | None = None,
+) -> tuple[float | None, float | None, str]:
+    """Use durable original-lot and fill IDs; leave unlinked history unverified."""
+    from paper_fill_provenance import load_fill_lot_allocations, attach_exact_fill_lot_evidence
+
+    unknown = (None, None, "legacy_unverified_fill_lot")
+    trade_id = trade.get("trade_id")
+    if not isinstance(trade_id, str) or not trade_id.strip() or trade.get("side") != "SELL":
+        return unknown
+    if allocations is None:
+        allocations = load_fill_lot_allocations(
+            conn, trade_ids=[trade_id], market=_normalize_market(trade.get("market")),
+        )
+    linked_rows = attach_exact_fill_lot_evidence([trade], allocations)
+    if len(linked_rows) != 1:
+        return unknown
+    linked = linked_rows[0]
+    identities = (
+        "_canonical_fill_id", "_canonical_lot_id", "_canonical_entry_trade_id",
+        "_canonical_entry_fill_id",
+    )
+    if (linked.get("_fill_accounting_provenance") != "exact_fill_lot_v1"
+            or not all(isinstance(linked.get(key), str) and linked[key].strip() for key in identities)):
+        return unknown
+
+    quantity = _cost_number(linked.get("quantity"))
+    opened_qty = _cost_number(linked.get("_canonical_entry_quantity"))
+    entry_fee = _cost_number(linked.get("_canonical_entry_fill_fee"))
+    exit_fee = _cost_number(linked.get("_canonical_fill_fee"))
+    ledger_fee = _cost_number(linked.get("fees"))
+    gross = _cost_number(linked.get("gross_pnl"))
+    if (any(value is None for value in (quantity, opened_qty, entry_fee, exit_fee, ledger_fee, gross))
+            or quantity <= 0 or opened_qty <= 0 or quantity > opened_qty * (1.0 + 1e-9)
+            or entry_fee < 0 or exit_fee < 0 or ledger_fee < 0):
+        return unknown
+    total_fee = entry_fee * (quantity / opened_qty) + exit_fee
+    net = gross - total_fee
+    if not math.isfinite(total_fee) or not math.isfinite(net):
+        return unknown
+    return net, total_fee, "exact_lot"
 
 
 def sample_open_positions(market: str = "crypto") -> int:
@@ -366,8 +385,9 @@ def finalize_closed_trades(limit: int = 250, market: str = "crypto") -> int:
         trades = list(
             conn.execute(
                 """
-                SELECT trade_id, market, symbol, strategy, quantity, gross_pnl, net_pnl, fees,
-                       entry_signal_id,entry_decision_id,
+                SELECT trade_id, market, symbol, strategy, side, quantity, gross_pnl, net_pnl, fees,
+                       broker_mode,account_environment,
+                       entry_signal_id,entry_decision_id,entry_forecast_id,entry_quote_id,
                        NULLIF(entry_time,'')::timestamptz AS entry_time,
                        NULLIF(exit_time,'')::timestamptz AS exit_time,
                        entry_price, exit_price, feature_snapshot
@@ -379,6 +399,15 @@ def finalize_closed_trades(limit: int = 250, market: str = "crypto") -> int:
                 (normalized_market, max(1, int(limit))),
             ).fetchall()
         )
+        from paper_fill_provenance import load_fill_lot_allocations
+
+        allocations = load_fill_lot_allocations(
+            conn, trade_ids=[str(trade.get("trade_id") or "") for trade in trades],
+            market=normalized_market,
+        ) if trades else []
+        allocations_by_trade: dict[str, list[dict[str, Any]]] = {}
+        for allocation in allocations:
+            allocations_by_trade.setdefault(str(allocation.get("trade_id") or ""), []).append(allocation)
         for trade in trades:
             trade_id = str(trade.get("trade_id") or "").strip()
             if not trade_id:
@@ -421,7 +450,9 @@ def finalize_closed_trades(limit: int = 250, market: str = "crypto") -> int:
             mfe_pct, mae_pct, mfe_observed_at, mae_observed_at, time_to_mfe_sec, time_to_mae_sec = _excursion_temporal_metrics(
                 entry_price, entry_time, valid_samples
             )
-            round_trip_net,round_trip_fees,cost_provenance=_round_trip_accounting(conn,dict(trade))
+            round_trip_net,round_trip_fees,cost_provenance=_round_trip_accounting(
+                conn, dict(trade), allocations=allocations_by_trade.get(trade_id, []),
+            )
             if existing:
                 updates: list[str] = []
                 params: list[Any] = []

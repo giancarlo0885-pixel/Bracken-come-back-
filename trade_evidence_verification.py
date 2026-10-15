@@ -165,7 +165,8 @@ def verify_committed_trade_evidence(trade_ids=None, market: str = "crypto", *, c
             current_setting('transaction_read_only') AS read_only""").fetchone())
         if snapshot["read_only"] != "on":
             raise RuntimeError("verification transaction is not read only")
-        tables = {"metrics": "paper_regime_trade_metrics", "brain": "oracle_brain_episodes", "aeve": "paper_aeve_generation_outcomes"}
+        tables = {"metrics": "paper_regime_trade_metrics", "brain": "oracle_brain_episodes", "aeve": "paper_aeve_generation_outcomes",
+                  "fill_links": "paper_fill_lot_links"}
         available = {key: bool(conn.execute("SELECT to_regclass(%s) AS relation", (table,)).fetchone()["relation"])
                      for key, table in tables.items()}
         if requested is None:
@@ -177,8 +178,7 @@ def verify_committed_trade_evidence(trade_ids=None, market: str = "crypto", *, c
             evaluated = conn.execute("""SELECT trade_id FROM paper_aeve_generation_outcomes
                 GROUP BY trade_id ORDER BY MAX(observed_at) DESC,trade_id LIMIT 10""").fetchall() if available["aeve"] and market == "crypto" else []
             requested = _ids([row["trade_id"] for row in recent + evaluated])
-        rows = {"ledger": list(conn.execute("""SELECT trade_id,market,symbol,side,entry_time,exit_time,
-            entry_signal_id,feature_snapshot,broker_mode,account_environment FROM trade_ledger
+        rows = {"ledger": list(conn.execute("""SELECT * FROM trade_ledger
             WHERE trade_id=ANY(%s)""", (requested,)).fetchall()), "metrics": [], "brain": [], "aeve": []}
         if available["metrics"]:
             rows["metrics"] = list(conn.execute("""SELECT trade_id,market,symbol,entry_time,exit_time,
@@ -192,6 +192,29 @@ def verify_committed_trade_evidence(trade_ids=None, market: str = "crypto", *, c
             rows["aeve"] = list(conn.execute("""SELECT trade_id,generation FROM paper_aeve_generation_outcomes
                 WHERE trade_id=ANY(%s)""", (requested,)).fetchall())
         records = [_receipt(trade_id, market, rows, available, snapshot["checked_at"]) for trade_id in requested]
+        if available["fill_links"]:
+            from paper_fill_provenance import attach_exact_fill_lot_evidence, load_fill_lot_allocations, close
+
+            allocations = load_fill_lot_allocations(conn, trade_ids=requested, market=market, as_of=snapshot["checked_at"])
+            linked = attach_exact_fill_lot_evidence(rows["ledger"], allocations, as_of=snapshot["checked_at"])
+            by_id = {row["trade_id"]: row for row in linked}
+            for receipt in records:
+                row = by_id.get(receipt["trade_id"], {})
+                if (receipt["ledger_status"] != "COMMITTED" or row.get("side") != "SELL"
+                        or row.get("_fill_accounting_provenance") != "exact_fill_lot_v1"):
+                    continue
+                entry_fee = float(row["_canonical_entry_fill_fee"]) * float(row["quantity"]) / float(row["_canonical_entry_quantity"])
+                fees = entry_fee + float(row["_canonical_fill_fee"])
+                net = (float(row["exit_price"]) - float(row["entry_price"])) * float(row["quantity"]) - fees
+                receipt.update(canonical_fill_linkage="EXACT_LINKED", canonical_lot_id=row["_canonical_lot_id"],
+                               entry_fill_id=row["_canonical_entry_fill_id"], exit_fill_id=row["_canonical_fill_id"],
+                               entry_ledger_trade_id=row["_canonical_entry_trade_id"],
+                               fill_accounting_provenance=row["_fill_accounting_provenance"],
+                               linked_round_trip_fees=fees, linked_round_trip_net_pnl=net,
+                               brain_fill_accounting_status="UNAVAILABLE")
+                if receipt["brain_status"] == "MATERIALIZED_EXACT":
+                    receipt["brain_fill_accounting_status"] = "MATCH" if (
+                        close(fees, receipt["round_trip_fees"]) and close(net, receipt["round_trip_net_pnl"])) else "MISMATCH"
     # No receipt is returned or logged until the independent transaction exits.
     return {"status": "ok", "market": market, "checked_at": snapshot["checked_at"].isoformat(),
             "snapshot": snapshot["snapshot"], "transaction_read_only": True,

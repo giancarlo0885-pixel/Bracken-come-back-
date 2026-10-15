@@ -24,6 +24,15 @@ decision used that episode. `ranking_decision_consumption` and
 exists. These receipts do not establish strategy profitability or independent
 market episodes.
 
+When explicit persisted fill/lot links exist, the same read-only snapshot now
+reconciles the original BUY and each SELL to their actual execution, order,
+fill, ledger row and lot. It checks quantities, proportional fees, gross/net
+arithmetic, cumulative closes, entry identity and the observation cutoff.
+`canonical_fill_linkage=EXACT_LINKED` exposes those IDs and recorded round-trip
+costs; `brain_fill_accounting_status` separately reports whether durable Brain
+accounting matches. Historical proximity never creates a missing link, and
+stored historical metrics are not reclassified merely by this diagnostic.
+
 `PENDING` means the Brain table exists but has no row for that exact closed
 trade ID; it does not assert that the trade qualifies for ingestion.
 
