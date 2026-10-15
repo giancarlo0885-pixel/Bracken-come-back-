@@ -29,7 +29,7 @@ INTERVAL_MINUTES = {
 }
 
 CRYPTO_CAUSAL_MODEL = "crypto selective sign transition"
-CRYPTO_CAUSAL_MODEL_VERSION = "v43-selective-transition"
+CRYPTO_CAUSAL_MODEL_VERSION = "v43-selective-transition-data-v2"
 
 
 @dataclass

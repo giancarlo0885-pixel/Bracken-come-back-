@@ -496,6 +496,7 @@ def _quote_identity_metadata(signal: Any) -> dict[str, Any]:
         "timestamp",
         "interval",
         "quote_verified",
+        "execution_quote_eligible",
         "provider_quote_verified",
         "paper_reference_verified",
         "verification_basis",
@@ -525,6 +526,31 @@ def _quote_payload(value: Any, symbol: str = "") -> dict[str, Any]:
     return {}
 
 
+def _quote_quality_rejection_reason(payload: dict[str, Any]) -> str | None:
+    """Honor explicit quality vetoes without inventing missing book sides."""
+    if isinstance(payload.get("price"), bool):
+        return "quote price is invalid"
+    if payload.get("stale") is True:
+        return "quote explicitly marked stale"
+    if payload.get("execution_quote_eligible") is False:
+        return "quote explicitly ineligible for execution"
+    bid_value, ask_value = payload.get("bid"), payload.get("ask")
+    if bid_value is None and ask_value is None:
+        # A paper-reference mark may legitimately have no measured bid/ask.
+        return None
+    if isinstance(bid_value, bool) or isinstance(ask_value, bool):
+        return "quote bid/ask book is invalid"
+    try:
+        bid, ask = float(bid_value), float(ask_value)
+    except (TypeError, ValueError, OverflowError):
+        return "quote bid/ask book is invalid"
+    if not all(math.isfinite(value) and value > 0 for value in (bid, ask)):
+        return "quote bid/ask book is invalid"
+    if ask < bid:
+        return "quote bid/ask book is crossed"
+    return None
+
+
 def _verified_quote_for(
     symbol: str,
     quotes: dict[str, Any] | None,
@@ -547,6 +573,8 @@ def _verified_quote_for(
     if payload.get("quote_verified") is not True:
         return None
     if not reference_allowed_in_mode(payload, EXECUTION_MODE, PAPER_BROKER_MODE):
+        return None
+    if _quote_quality_rejection_reason(payload) is not None:
         return None
     quote_timestamp = payload.get("quote_timestamp") or payload.get("timestamp")
     if _parse_utc(quote_timestamp) is None:
@@ -584,6 +612,9 @@ def _quote_rejection_reason(symbol: str, quotes: dict[str, Any] | None, market: 
         return "quote is not provider verified"
     if not reference_allowed_in_mode(payload, EXECUTION_MODE, PAPER_BROKER_MODE):
         return "paper reference is ineligible outside paper execution"
+    quality_reason = _quote_quality_rejection_reason(payload)
+    if quality_reason is not None:
+        return quality_reason
     quote_timestamp = payload.get("quote_timestamp") or payload.get("timestamp")
     interval = safe_text(payload.get("interval"), "1d")
     if _parse_utc(quote_timestamp) is None:
@@ -637,11 +668,12 @@ def _execution_quote_guard(
         position_symbol = _normalized_symbol(position.get("symbol"))
         if position_symbol != symbol:
             return False, f"position/quote symbol mismatch ({position_symbol}/{symbol})"
-    if price <= 0 or not math.isfinite(price):
+    if isinstance(price, bool) or price <= 0 or not math.isfinite(price):
         return False, "quote price is invalid"
     metadata = _quote_identity_metadata(signal)
     if quote_metadata:
-        metadata.update({key: value for key, value in quote_metadata.items() if value not in (None, "", [])})
+        metadata.update({key: value for key, value in quote_metadata.items()
+                         if key in {"bid", "ask"} or value not in (None, "", [])})
     if not metadata:
         return False, "verified quote identity metadata is missing"
     requested = _normalized_symbol(metadata.get("requested_symbol") or metadata.get("quote_symbol"))
@@ -656,6 +688,9 @@ def _execution_quote_guard(
         return False, "quote is not provider verified"
     if not reference_allowed_in_mode(metadata, EXECUTION_MODE, PAPER_BROKER_MODE):
         return False, "paper reference is ineligible outside paper execution"
+    quality_reason = _quote_quality_rejection_reason(metadata)
+    if quality_reason is not None:
+        return False, quality_reason
     quote_price = safe_float(metadata.get("price"))
     if quote_price <= 0:
         return False, "verified quote price is missing"

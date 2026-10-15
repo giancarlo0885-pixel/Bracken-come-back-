@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import math
 import re
 
 import pandas as pd
@@ -10,6 +11,19 @@ from database import database_ready, rows
 from oracle_brain import build_learning_validation_snapshot, build_oracle_brain_snapshot
 from oracle_brain_component import render_oracle_brain_component
 from paper_exit_research import REPORT_VERSION
+from paper_aeve_generation_controller import PROVENANCE_VERSION
+
+
+def _format_research_number(value, places=3, *, prefix="", suffix=""):
+    if isinstance(value, bool):
+        return "Unavailable"
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return "Unavailable"
+    if not math.isfinite(number):
+        return "Unavailable"
+    return f"{prefix}{number:,.{places}f}{suffix}"
 
 
 st.set_page_config(
@@ -119,7 +133,7 @@ with st.expander("Paper fill reconciliation"):
         st.write(f"**{str(item.get('market') or '').upper()}** · updated {item.get('updated_at')}")
         left, center, right = st.columns(3)
         left.metric("Reconciled FIFO closes", report.get("qualified_fifo_closes", 0))
-        center.metric("Reconciled net P&L", f"${float(report.get('net_pnl') or 0):,.2f}")
+        center.metric("Reconciled net P&L", _format_research_number(report.get('net_pnl'), 2, prefix="$"))
         right.metric("Cost-metric discrepancies", report.get("metric_discrepancies", 0))
         st.caption("Persisted paper prices and explicit fees. Missing observations remain unavailable. These totals do not certify a profitable model or premature exits.")
         if report.get("cohorts"):
@@ -142,30 +156,30 @@ try:
     aeve_rows = _brain_rows("""
         SELECT g.generation,g.started_at,g.config_hash,g.status,
                COUNT(o.id)::int AS observed_outcomes,
-               COUNT(o.id) FILTER (WHERE o.entry_evidence_complete AND o.would_trade AND o.provenance_version = 7)::int AS accepted_trades,
+               COUNT(o.id) FILTER (WHERE o.entry_evidence_complete AND o.would_trade AND o.provenance_version = %s)::int AS accepted_trades,
                COUNT(o.id) FILTER (
-                   WHERE o.entry_evidence_complete AND o.provenance_version = 7
+                   WHERE o.entry_evidence_complete AND o.provenance_version = %s
                      AND o.config_hash = g.config_hash
                )::int AS verified_trades,
                COUNT(o.id) FILTER (
                    WHERE o.entry_evidence_complete AND o.would_trade AND o.net_pnl > 0
-                     AND o.provenance_version = 7 AND o.config_hash = g.config_hash
+                     AND o.provenance_version = %s AND o.config_hash = g.config_hash
                )::int AS winners,
                COUNT(o.id) FILTER (
                    WHERE o.entry_evidence_complete AND o.would_trade AND o.net_pnl <= 0
-                     AND o.provenance_version = 7 AND o.config_hash = g.config_hash
+                     AND o.provenance_version = %s AND o.config_hash = g.config_hash
                )::int AS non_winners,
-               COALESCE(SUM(o.net_pnl) FILTER (
-                   WHERE o.entry_evidence_complete AND o.would_trade AND o.provenance_version = 7
+               SUM(o.net_pnl) FILTER (
+                   WHERE o.entry_evidence_complete AND o.would_trade AND o.provenance_version = %s
                      AND o.config_hash = g.config_hash
-               ),0)::double precision AS net_pnl
+               )::double precision AS net_pnl
         FROM paper_aeve_generations g
         LEFT JOIN paper_aeve_generation_outcomes o
           ON o.generation=g.generation AND o.config_hash=g.config_hash
         WHERE g.status='ACTIVE'
         GROUP BY g.generation,g.started_at,g.config_hash,g.status
         ORDER BY g.generation DESC LIMIT 1
-    """)
+    """, (PROVENANCE_VERSION,) * 5)
 except Exception:
     aeve_rows = []
 
@@ -179,10 +193,10 @@ if aeve_rows:
     p1.metric("Generation", int(aeve.get("generation") or 1))
     p2.metric("Verified outcomes", f"{completed:,} / {target:,}")
     p3.metric("Remaining", f"{max(0, target-completed):,}")
-    p4.metric("Accepted shadow P&L", f"${float(aeve.get('net_pnl') or 0.0):,.2f}")
+    p4.metric("Accepted shadow P&L", _format_research_number(aeve.get('net_pnl'), 2, prefix="$"))
     st.progress(min(1.0, completed / target))
     st.caption(
-        f"Forward outcomes only · provenance v7 · active config hash matched · complete entry evidence {completed:,} · accepted by AEVE {accepted:,} · "
+        f"Forward crypto outcomes only · provenance v{PROVENANCE_VERSION} · active config hash matched · complete entry evidence {completed:,} · accepted by AEVE {accepted:,} · "
         f"winners {int(aeve.get('winners') or 0):,} · "
         f"non-winners {int(aeve.get('non_winners') or 0):,}. "
         "Incomplete, legacy, or incompatible outcomes remain auditable but do not increment the 1,000-outcome window."
@@ -205,19 +219,19 @@ try:
         FROM paper_aeve_generation_outcomes o
         JOIN paper_aeve_generations g
           ON g.generation=o.generation AND g.config_hash=o.config_hash
-        WHERE g.status='ACTIVE' AND o.provenance_version=7 AND o.entry_evidence_complete
-    """)
+        WHERE g.status='ACTIVE' AND o.provenance_version=%s AND o.entry_evidence_complete
+    """, (PROVENANCE_VERSION,))
 except Exception:
     aeve_diag = []
 if aeve_diag:
     d = aeve_diag[0]
     st.caption(
         "Generation economics · accepted shadow · "
-        f"expectancy {float(d.get('expectancy') or 0):.6f} · "
-        f"PF {float(d.get('profit_factor') or 0):.3f} · "
-        f"avg MFE {float(d.get('avg_mfe_pct') or 0):.3f}% · "
-        f"avg MAE {float(d.get('avg_mae_pct') or 0):.3f}% · "
-        f"avg measured cost {float(d.get('avg_cost_pct') or 0):.4f}%"
+        f"expectancy {_format_research_number(d.get('expectancy'), 6)} · "
+        f"PF {_format_research_number(d.get('profit_factor'))} · "
+        f"avg MFE {_format_research_number(d.get('avg_mfe_pct'), suffix='%')} · "
+        f"avg MAE {_format_research_number(d.get('avg_mae_pct'), suffix='%')} · "
+        f"avg measured cost {_format_research_number(d.get('avg_cost_pct'), 4, suffix='%')}"
     )
 
 # Lifecycle reconciliation makes the difference between a decision and a completed trade explicit.
@@ -245,18 +259,20 @@ if lifecycle:
 try:
     cockpit = _brain_rows("""
         WITH active AS (
-          SELECT generation,config_hash,started_at FROM paper_aeve_generations
-          WHERE status='ACTIVE' ORDER BY generation DESC LIMIT 1
+          SELECT g.generation,g.config_hash,GREATEST(g.started_at,p.started_at) AS started_at
+          FROM paper_aeve_generations g
+          JOIN paper_aeve_provenance_epochs p ON p.provenance_version=%s
+          WHERE g.status='ACTIVE' ORDER BY g.generation DESC LIMIT 1
         )
         SELECT
           a.generation,a.config_hash,a.started_at,
-          COUNT(o.id) FILTER (WHERE o.entry_evidence_complete AND o.provenance_version=7)::int AS aeve_trades,
-          COUNT(o.id) FILTER (WHERE o.entry_evidence_complete AND o.would_trade AND o.provenance_version=7)::int AS accepted_outcomes,
-          COUNT(o.id) FILTER (WHERE o.provenance_version<7)::int AS legacy_provenance
+          COUNT(o.id) FILTER (WHERE o.entry_evidence_complete AND o.provenance_version=%s)::int AS aeve_trades,
+          COUNT(o.id) FILTER (WHERE o.entry_evidence_complete AND o.would_trade AND o.provenance_version=%s)::int AS accepted_outcomes,
+          COUNT(o.id) FILTER (WHERE o.provenance_version<%s)::int AS legacy_provenance
         FROM active a LEFT JOIN paper_aeve_generation_outcomes o
           ON o.generation=a.generation AND o.config_hash=a.config_hash
         GROUP BY a.generation,a.config_hash,a.started_at
-    """)
+    """, (PROVENANCE_VERSION,) * 4)
 except Exception:
     cockpit=[]
 if cockpit:
@@ -268,9 +284,9 @@ if cockpit:
     c1,c2,c3,c4=st.columns(4)
     c1.metric("Verified AEVE", f"{completed:,} / 1,000")
     c2.metric("Learning velocity", f"{tph:.2f}/hr")
-    c3.metric("Provenance v7", completed)
+    c3.metric(f"Provenance v{PROVENANCE_VERSION}", completed)
     c4.metric("Accepted by AEVE", int(cp.get("accepted_outcomes") or 0))
-    st.caption("The authoritative generation counter uses complete forward entry evidence under provenance v7 and the active config hash. Shadow acceptance is separate; rejected valid outcomes still teach the next generation.")
+    st.caption(f"The authoritative generation counter uses complete forward crypto entry evidence under provenance v{PROVENANCE_VERSION} and the active config hash. Shadow acceptance is separate; rejected valid outcomes still teach the next generation.")
 
 try:
     source_health=_brain_rows("""

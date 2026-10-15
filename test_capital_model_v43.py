@@ -46,7 +46,7 @@ def test_v43_active_identity_and_known_reversal() -> None:
     forecast = forecast_price(history, None, market="crypto", source_interval="5m", horizon_minutes=15)
     assert forecast is not None
     assert forecast.model == CRYPTO_CAUSAL_MODEL == "crypto selective sign transition"
-    assert forecast.model_version == CRYPTO_CAUSAL_MODEL_VERSION == "v43-selective-transition"
+    assert forecast.model_version == CRYPTO_CAUSAL_MODEL_VERSION == "v43-selective-transition-data-v2"
     assert active_crypto_model_identity() == (CRYPTO_CAUSAL_MODEL, CRYPTO_CAUSAL_MODEL_VERSION)
 
 
