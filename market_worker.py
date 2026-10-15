@@ -66,7 +66,11 @@ from global_adaptive_engine import (
 )
 from intelligence_hub import collect_all
 from github_market_intelligence_inbox import market_brief_failure_diagnostics, sync_market_brief_inbox
-from market_data import get_history, get_many_snapshots
+from market_data import (
+    _log_stock_history_provider_diagnostics as _log_fast_history_provider_diagnostics,
+    get_history,
+    get_many_snapshots,
+)
 from market_intelligence_bridge import ingest_monitor_record
 from news_intelligence import get_news_sentiment
 from opportunity_engine import rank_opportunities
@@ -1212,65 +1216,6 @@ def _fast_candidate_batch(market: str) -> list[tuple[str, str]]:
     selected = [(symbol, name) for symbol, name in candidates.items() if symbol in held]
     selected.extend((symbol, name) for symbol, name in candidates.items() if symbol not in held)
     return selected[: max(limit, len(held))]
-
-
-def _log_fast_history_provider_diagnostics(symbol: str, period: str, interval: str, history: Any) -> None:
-    """Bounded, non-secret provider outcome summary for empty stock history.
-
-    Only provider and enumerated status are logged. Never log provider errors,
-    URLs, tokens, request headers, or credentials.
-    """
-    import time
-
-    route = dict(getattr(history, "attrs", {}).get("provider_route") or {})
-    attempts = route.get("attempts") or []
-    if not attempts:
-        return
-    statuses = []
-    for attempt in attempts[:12]:
-        if not isinstance(attempt, dict):
-            continue
-        provider = str(attempt.get("provider") or "")
-        status = str(attempt.get("status") or "")
-        allowed_providers = {"Alpaca IEX", "Polygon", "Finnhub", "EODHD", "Alpha Vantage", "Yahoo Finance", "all", "scope"}
-        allowed_statuses = {
-            "healthy", "not_configured", "provider_budget_unknown",
-            "provider_budget_blocked", "provider_shared_cooldown",
-            "provider_cooldown", "symbol_capability_cooldown",
-            "capability_cooldown_or_unsupported", "symbol_cooldown",
-            "symbol_mismatch_or_no_data", "scope_rejected",
-            "rate_limited", "payment_required", "plan_limited",
-            "capability_plan_limited", "degraded", "strict_research_fallback",
-            "request_cooldown", "authentication_failed", "access_denied", "http_not_found",
-            "http_error", "timeout", "outage", "transport_error", "unsupported", "no_data",
-            "symbol_mismatch", "malformed_response",
-        }
-        outcome = (
-            (provider if provider in allowed_providers else "other")
-            + ":" + (status if status in allowed_statuses else "other")
-        )
-        http_status = attempt.get("http_status")
-        if type(http_status) is int and 100 <= http_status <= 599:
-            outcome += f"(http={http_status})"
-        statuses.append(outcome)
-    if not statuses:
-        return
-    if not hasattr(_log_fast_history_provider_diagnostics, "_last_logged"):
-        _log_fast_history_provider_diagnostics._last_logged = {}
-    last_logged = _log_fast_history_provider_diagnostics._last_logged
-    key = (str(symbol).upper(), str(period), str(interval), tuple(statuses))
-    now = time.monotonic()
-    if now - last_logged.get(key, float("-inf")) < 300:
-        return
-    last_logged[key] = now
-    if len(last_logged) > 512:
-        for old_key, when in list(last_logged.items()):
-            if now - when > 300:
-                del last_logged[old_key]
-    log.warning(
-        "STOCK HISTORY PROVIDER DIAGNOSTIC | symbol=%s | period=%s | interval=%s | outcomes=%s | execution_authority=NONE",
-        symbol, period, interval, ",".join(statuses),
-    )
 
 
 def _fast_discover_symbol(market: str, symbol: str, name: str) -> tuple[Any, Any] | None:
