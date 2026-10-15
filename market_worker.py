@@ -65,7 +65,7 @@ from global_adaptive_engine import (
     record_invalid_symbol_failure,
 )
 from intelligence_hub import collect_all
-from github_market_intelligence_inbox import sync_market_brief_inbox
+from github_market_intelligence_inbox import market_brief_failure_diagnostics, sync_market_brief_inbox
 from market_data import get_history, get_many_snapshots
 from market_intelligence_bridge import ingest_monitor_record
 from news_intelligence import get_news_sentiment
@@ -1745,10 +1745,20 @@ def _collect_stock_intelligence() -> None:
             # The regular provider collectors must continue if the external
             # weekly brief is absent, malformed, stale, or temporarily
             # unavailable.
+            diagnostics = market_brief_failure_diagnostics(exc)
             log.warning(
                 "MONDAY MARKET INTELLIGENCE INBOX | status=UNAVAILABLE | reason=%s | "
-                "execution_impact=NONE",
-                exc.__class__.__name__,
+                "http_status=%s | failure_class=%s | rate_limit_limit=%s | "
+                "rate_limit_remaining=%s | rate_limit_reset_epoch=%s | retry_after_seconds=%s | "
+                "github_request_id=%s | execution_impact=NONE",
+                diagnostics["reason"],
+                diagnostics["http_status"],
+                diagnostics["failure_class"],
+                diagnostics["rate_limit_limit"],
+                diagnostics["rate_limit_remaining"],
+                diagnostics["rate_limit_reset_epoch"],
+                diagnostics["retry_after_seconds"],
+                diagnostics["github_request_id"],
             )
         intelligence_results = collect_all()
         for category, result in intelligence_results.items():
