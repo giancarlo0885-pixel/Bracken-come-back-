@@ -168,20 +168,24 @@ def yahoo_reference_history(market_data_module: Any, symbol: str, period: str, i
             )
         except Exception as exc:
             _mark_unavailable(key)
+            # Report a bounded, credential-free classification. HTTPError
+            # alone does not establish unsupported symbol coverage.
+            from provider_router import classify_provider_failure, _provider_status_from_exception
+
+            failure_class = classify_provider_failure(exc)
+            http_status = _provider_status_from_exception(exc)
             log.info(
-                "YAHOO REFERENCE UNAVAILABLE | symbol=%s | provider_native_symbol=%s | period=%s | interval=%s | reason=%s | cooldown=active",
+                "YAHOO REFERENCE FAILURE | symbol=%s | provider_native_symbol=%s | period=%s | interval=%s | exception=%s | failure_class=%s | http_status=%s | coverage=UNVERIFIED | cooldown=active",
                 requested,
                 provider_native,
                 period,
                 interval,
                 exc.__class__.__name__,
+                failure_class,
+                http_status if isinstance(http_status, int) else "UNKNOWN",
             )
-            # The router must see rate limits to protect all symbols and all
-            # workers. Returning an empty frame here bypasses the shared Yahoo
-            # cooldown and repeats the same throttled request on other symbols.
-            from provider_router import classify_provider_failure
-
-            if classify_provider_failure(exc) == "rate_limited":
+            # Preserve the shared provider-wide rate-limit cooldown.
+            if failure_class == "rate_limited":
                 raise
             return pd.DataFrame()
 
