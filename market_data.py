@@ -5,7 +5,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import logging
 import math
-from typing import Iterable
+from threading import Lock
+from typing import Any, Iterable
 
 import pandas as pd
 import yfinance as yf
@@ -24,6 +25,7 @@ from market_sessions import latest_valid_bar_timestamp, quote_is_fresh
 from quote_provenance import provider_verified, quote_quality_rejection_reason, reference_allowed_in_mode
 
 log = logging.getLogger("market-data")
+_STOCK_HISTORY_DIAGNOSTIC_LOCK = Lock()
 
 
 @dataclass
@@ -270,6 +272,77 @@ def _download_yahoo(symbol: str, period: str, interval: str) -> pd.DataFrame:
     return yahoo_reference_history(sys.modules[__name__], symbol, period, interval)
 
 
+def _log_stock_history_provider_diagnostics(symbol: str, period: str, interval: str, history: Any) -> None:
+    """Bounded, non-secret provider outcomes for missing or fallback stock history.
+
+    Only allowlisted providers/statuses and typed HTTP codes are logged. Never
+    log provider errors, URLs, tokens, request headers, or credentials.
+    """
+    import time
+
+    attrs = getattr(history, "attrs", {})
+    route = attrs.get("provider_route") if isinstance(attrs, dict) else None
+    if not isinstance(route, dict):
+        return
+    attempts = route.get("attempts")
+    if not isinstance(attempts, (list, tuple)) or not attempts:
+        return
+    safe_symbol = normalize_symbol(symbol) if isinstance(symbol, str) else ""
+    if not 1 <= len(safe_symbol) <= 20 or any(char not in "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-" for char in safe_symbol):
+        safe_symbol = "other"
+    allowed_periods = {"1d", "5d", "1mo", "3mo", "6mo", "1y", "2y", "5y", "10y", "ytd", "max"}
+    allowed_intervals = {"1m", "2m", "5m", "15m", "30m", "60m", "90m", "1h", "1d", "5d", "1wk", "1mo", "3mo"}
+    safe_period = period if isinstance(period, str) and period in allowed_periods else "other"
+    safe_interval = interval if isinstance(interval, str) and interval in allowed_intervals else "other"
+    statuses = []
+    allowed_providers = {"Alpaca IEX", "Polygon", "Finnhub", "EODHD", "Alpha Vantage", "Yahoo Finance", "all", "scope"}
+    selected = route.get("provider")
+    selected_provider = selected if isinstance(selected, str) and selected in allowed_providers else "other"
+    for attempt in attempts[:12]:
+        if not isinstance(attempt, dict):
+            continue
+        provider = str(attempt.get("provider") or "")
+        status = str(attempt.get("status") or "")
+        allowed_statuses = {
+            "healthy", "not_configured", "provider_budget_unknown",
+            "provider_budget_blocked", "provider_shared_cooldown",
+            "provider_cooldown", "symbol_capability_cooldown",
+            "capability_cooldown_or_unsupported", "symbol_cooldown",
+            "symbol_mismatch_or_no_data", "scope_rejected",
+            "rate_limited", "payment_required", "plan_limited",
+            "capability_plan_limited", "degraded", "strict_research_fallback",
+            "request_cooldown", "authentication_failed", "access_denied", "http_not_found",
+            "http_error", "timeout", "outage", "transport_error", "unsupported", "no_data",
+            "symbol_mismatch", "malformed_response",
+        }
+        outcome = (
+            (provider if provider in allowed_providers else "other")
+            + ":" + (status if status in allowed_statuses else "other")
+        )
+        http_status = attempt.get("http_status")
+        if type(http_status) is int and 100 <= http_status <= 599:
+            outcome += f"(http={http_status})"
+        statuses.append(outcome)
+    if not statuses:
+        return
+    key = (safe_symbol, safe_period, safe_interval, selected_provider, tuple(statuses))
+    now = time.monotonic()
+    with _STOCK_HISTORY_DIAGNOSTIC_LOCK:
+        if not hasattr(_log_stock_history_provider_diagnostics, "_last_logged"):
+            _log_stock_history_provider_diagnostics._last_logged = {}
+        last_logged = _log_stock_history_provider_diagnostics._last_logged
+        for old_key, when in list(last_logged.items()):
+            if now - when >= 300:
+                del last_logged[old_key]
+        if key in last_logged or len(last_logged) >= 512:
+            return
+        last_logged[key] = now
+    log.warning(
+        "STOCK HISTORY PROVIDER DIAGNOSTIC | symbol=%s | period=%s | interval=%s | selected_provider=%s | outcomes=%s | execution_authority=NONE",
+        safe_symbol, safe_period, safe_interval, selected_provider, ",".join(statuses),
+    )
+
+
 def get_history(symbol: str, period: str = "1y", interval: str = "1d") -> pd.DataFrame:
     routed = route_history(symbol, period, interval, _download_yahoo)
     frame = routed.frame.copy(deep=True)
@@ -341,6 +414,22 @@ def get_history(symbol: str, period: str = "1y", interval: str = "1d") -> pd.Dat
         frame.attrs["verification_basis"] = route_metadata["verification_basis"]
 
     frame.attrs["provider_route"] = route_metadata
+    try:
+        if (
+            not frame.empty
+            and route_metadata.get("provider") == "Yahoo Finance"
+            and infer_asset_class(symbol) in {"stock", "etf"}
+            and any(
+                isinstance(attempt, dict)
+                and attempt.get("provider") != "Yahoo Finance"
+                and attempt.get("ok") is False
+                for attempt in route_metadata.get("attempts", [])
+            )
+        ):
+            _log_stock_history_provider_diagnostics(symbol, period, interval, frame)
+    except Exception:
+        # Observability must not change history or quote availability.
+        pass
     return frame
 
 
