@@ -15,7 +15,7 @@ import math
 from typing import Any
 
 log = logging.getLogger("paper-exit-research")
-REPORT_VERSION = "canonical-fifo-exit-research-v2-fill-fees"
+REPORT_VERSION = "canonical-fifo-exit-research-v3-exact-fill-lots"
 POST_EXIT_MINUTES = (15, 60, 240)
 REPORT_DETAIL_LIMIT = 250
 TOLERANCE = Decimal("0.000001")
@@ -157,6 +157,7 @@ def reconcile_fifo(fills: list[dict[str, Any]], metrics: dict[str, dict[str, Any
         remaining, gross, entry_fees, members = qty, Decimal(0), Decimal(0), []
         identity_matches = True
         entry_fees_verified = True
+        exact_linkage_verified = True
         while remaining > 0 and lots[key]:
             lot = lots[key][0]
             matched = min(remaining, lot["remaining"])
@@ -166,8 +167,28 @@ def reconcile_fifo(fills: list[dict[str, Any]], metrics: dict[str, dict[str, Any
             declared_price = number(row.get("entry_price"))
             declared_time = timestamp(row.get("entry_time"))
             identity_matches &= declared_price == lot["price"] and declared_time == lot["time"]
+            # Scalar prices and times cannot establish a durable lot identity.
+            # Contradictory entry IDs must fail even when those scalars match.
+            for field in ("entry_signal_id", "entry_decision_id", "entry_forecast_id", "entry_quote_id"):
+                declared_id, original_id = row.get(field), lot["row"].get(field)
+                if declared_id or original_id:
+                    identity_matches &= declared_id == original_id
+            exact_member = bool(
+                row.get("_fill_accounting_provenance") == "exact_fill_lot_v1"
+                and lot["row"].get("_fill_accounting_provenance") == "exact_fill_lot_v1"
+                and row.get("_canonical_lot_id")
+                and row.get("_canonical_lot_id") == lot["row"].get("_canonical_lot_id")
+                and row.get("_canonical_entry_trade_id") == lot["identity"]
+                and row.get("_canonical_entry_fill_id") == lot["row"].get("_canonical_fill_id")
+                and row.get("_canonical_fill_id") and lot["row"].get("_canonical_fill_id")
+            )
+            exact_linkage_verified &= exact_member
+            if row.get("_canonical_lot_id") or lot["row"].get("_canonical_lot_id"):
+                identity_matches &= exact_member
             members.append({"buy_trade_id": lot["identity"], "sell_trade_id": identity,
                             "buy_fill_id": lot["row"].get("_canonical_fill_id"),
+                            "sell_fill_id": row.get("_canonical_fill_id"),
+                            "lot_id": lot["row"].get("_canonical_lot_id") if exact_member else None,
                             "quantity": float(matched), "entry_time": lot["time"].isoformat(),
                             "opened_quantity": float(lot["opened"]),
                             "decision_timestamp": timestamp(lot["row"].get("decision_timestamp")).isoformat() if timestamp(lot["row"].get("decision_timestamp")) else None,
@@ -183,7 +204,8 @@ def reconcile_fifo(fills: list[dict[str, Any]], metrics: dict[str, dict[str, Any
             tainted.add(key)  # Do not qualify later trades after an unknown inventory gap.
         confirmed_exit_fee = number(row.get("_canonical_fill_fee"))
         exit_fee = confirmed_exit_fee if confirmed_exit_fee is not None else fee
-        fee_evidence_verified = entry_fees_verified and confirmed_exit_fee is not None
+        fee_evidence_verified = (entry_fees_verified and confirmed_exit_fee is not None
+                                 and exact_linkage_verified and remaining == 0)
         fee_semantics = ("exit_only" if abs(fee-exit_fee) <= TOLERANCE else
                          "round_trip" if abs(fee-entry_fees-exit_fee) <= TOLERANCE else "unreconciled")
         net = gross - entry_fees - exit_fee if remaining == 0 else None
@@ -214,6 +236,7 @@ def reconcile_fifo(fills: list[dict[str, Any]], metrics: dict[str, dict[str, Any
         closes.append({"trade_id": identity, "ledger_id": int(row.get("id") or 0), "market": key[0], "symbol": key[1],
                        "fifo_complete": complete, "entry_identity_matches": bool(identity_matches),
                        "fill_fee_evidence_verified": bool(fee_evidence_verified),
+                       "exact_fill_lot_linkage_verified": bool(exact_linkage_verified and remaining == 0 and identity_matches),
                        "exit_fill_id": row.get("_canonical_fill_id"),
                        "ledger_fee_semantics": fee_semantics,
                        "unmatched_quantity": float(remaining), "members": members,
@@ -221,7 +244,7 @@ def reconcile_fifo(fills: list[dict[str, Any]], metrics: dict[str, dict[str, Any
                        "hold_minutes": (when - entry).total_seconds() / 60 if entry else None,
                        "strategy": row.get("strategy") or "unknown", "regime": metric.get("regime") or "unknown",
                        "exit_reason": row.get("order_id") or "unknown",
-                       "net_pnl": float(net) if net is not None else None,
+                       "net_pnl": float(net) if net is not None and complete else None,
                        "entry_fees": float(entry_fees), "exit_fees": float(exit_fee),
                        "gross_difference": float(gross_delta) if gross_delta is not None else None,
                        "exit_net_difference": float(exit_net_delta) if exit_net_delta is not None else None,
@@ -250,58 +273,25 @@ def reconcile_fifo(fills: list[dict[str, Any]], metrics: dict[str, dict[str, Any
             "source": "persisted PAPER trade_ledger execution prices; no extra slippage deduction",
             "observed_closes": len(closes), "qualified_fifo_closes": len(eligible),
             "fill_fee_validation_required": require_fill_fee_evidence,
-            "net_pnl": sum(r["net_pnl"] for r in eligible),
+            "net_pnl": sum(r["net_pnl"] for r in eligible) if eligible else None,
             "sell_signal_losses": sum(r["exit_reason"] == "sell_signal" and r["net_pnl"] < 0 for r in eligible),
             "metric_discrepancies": sum(r["round_trip_metric_difference"] is not None and abs(r["round_trip_metric_difference"]) > float(TOLERANCE) for r in eligible),
             "diagnostics": dict(diagnostics), "cohorts": summaries, "closes": closes,
             "premature_exit_verdict": "insufficient_data", "execution_impact": "NONE"}
 
 
-def attach_fill_fee_evidence(ledger: list[dict[str, Any]], paper_fills: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Require a unique persisted fill matching an entire execution's split closes.
+def attach_fill_fee_evidence(
+    ledger: list[dict[str, Any]], paper_fills: list[dict[str, Any]],
+    allocations: list[dict[str, Any]] | None = None,
+    *, as_of: datetime | None = None,
+) -> list[dict[str, Any]]:
+    """Use durable exact fill/lot allocations; legacy coincidences stay unknown.
 
-    The legacy ledger lacks a paper fill ID. Ambiguous time/price/quantity matches
-    remain unverified; a fill may never be reused across separate executions.
+    The paper_fills argument is retained for caller compatibility. Matching its
+    prices, timestamps or quantities cannot create an explicit execution link.
     """
-    groups = defaultdict(list)
-    for raw in ledger:
-        row = dict(raw)
-        row.pop("_canonical_fill_fee", None)
-        event = timestamp(row.get("entry_time") if row["side"] == "BUY" else row.get("exit_time"))
-        price = number(row.get("entry_price") if row["side"] == "BUY" else row.get("exit_price"))
-        groups[(row["market"], row["symbol"], row["side"], event, price)].append(row)
-    fill_index = defaultdict(list)
-    for fill in paper_fills:
-        price = number(fill.get("fill_price"))
-        if price is not None:
-            fill_index[(fill.get("market"), fill.get("symbol"), fill.get("side"), price)].append(fill)
-    assignments, usage = {}, defaultdict(int)
-    for key, rows in groups.items():
-        market, symbol, side, event, price = key
-        quantities = [number(r.get("quantity")) for r in rows]
-        if event is None or price is None or any(q is None or q <= 0 for q in quantities):
-            continue
-        total = sum(quantities)
-        candidates = []
-        for fill in fill_index[(market, symbol, side, price)]:
-            observed = timestamp(fill.get("created_at"))
-            qty, fee = number(fill.get("quantity")), number(fill.get("fee_amount"))
-            if (fill.get("fill_id") and observed is not None and 0 <= (observed-event).total_seconds() <= 60
-                    and number(fill.get("fill_price")) == price and qty is not None
-                    and abs(qty-total) <= max(Decimal("1e-18"), total*Decimal("1e-9"))
-                    and fee is not None and fee >= 0):
-                candidates.append(fill)
-        if len(candidates) == 1:
-            assignments[key] = candidates[0]
-            usage[candidates[0]["fill_id"]] += 1
-    for key, fill in assignments.items():
-        if usage[fill["fill_id"]] != 1:
-            continue
-        total = sum(number(r["quantity"]) for r in groups[key])
-        for row in groups[key]:
-            row["_canonical_fill_fee"] = str(number(fill["fee_amount"]) * number(row["quantity"]) / total)
-            row["_canonical_fill_id"] = fill["fill_id"]
-    return [row for group in groups.values() for row in group]
+    from paper_fill_provenance import attach_exact_fill_lot_evidence
+    return attach_exact_fill_lot_evidence(ledger, allocations or [], as_of=as_of)
 
 
 def chronological_oos_report(experiments: list[dict[str, Any]], cutoff: datetime) -> dict[str, Any]:
@@ -396,13 +386,21 @@ def emit_reconciliation(market: str) -> dict[str, Any]:
         conn.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (f"paper_exit_research:{market}",))
         previous = conn.execute("SELECT report FROM paper_exit_research_reports WHERE market=%s AND version=%s",
                                 (market, REPORT_VERSION)).fetchone() or {}
+        if not previous:
+            # Older reports remain durable history. Their frozen selections
+            # must be archived, rather than silently reranked after upgrading
+            # the accounting contract.
+            previous = conn.execute("""SELECT report FROM paper_exit_research_reports
+                WHERE market=%s ORDER BY updated_at DESC,version DESC LIMIT 1""", (market,)).fetchone() or {}
         previous_report = previous.get("report") or {}
         if isinstance(previous_report, str):
             previous_report = json.loads(previous_report)
         # Full per-market FIFO history is required. An arbitrary row limit would
         # drop opening lots and manufacture reconciliation failures.
         fills = list(conn.execute("""SELECT id,trade_id,market,symbol,side,quantity,entry_price,
-            exit_price,entry_time,exit_time,fees,gross_pnl,net_pnl,strategy,order_id,decision_timestamp,feature_snapshot
+            exit_price,entry_time,exit_time,fees,gross_pnl,net_pnl,strategy,order_id,
+            decision_timestamp,feature_snapshot,entry_signal_id,entry_decision_id,
+            entry_forecast_id,entry_quote_id,broker_mode,account_environment
             FROM trade_ledger WHERE market=%s AND broker_mode='PAPER' AND account_environment='PAPER'
             AND side IN ('BUY','SELL')""", (market,)).fetchall())
         metrics = {r["trade_id"]: dict(r) for r in conn.execute(
@@ -426,26 +424,29 @@ def emit_reconciliation(market: str) -> dict[str, Any]:
                 prices[key].extend(observations)
         else:
             samples = []
-        factual_fills = list(conn.execute("SELECT fill_id,market,symbol,side,quantity,fill_price,fee_amount,created_at FROM paper_fills WHERE market=%s", (market,)).fetchall())
-        fee_verified_ledger = attach_fill_fee_evidence([dict(r) for r in fills], [dict(r) for r in factual_fills])
-        report = reconcile_fifo(fee_verified_ledger, metrics, prices, require_fill_fee_evidence=True)
+        from paper_fill_provenance import load_fill_lot_allocations
+        as_of = datetime.now(timezone.utc)
+        allocations = load_fill_lot_allocations(conn, market=market, as_of=as_of)
+        fee_verified_ledger = attach_fill_fee_evidence([dict(r) for r in fills], [], allocations, as_of=as_of)
+        report = reconcile_fifo(fee_verified_ledger, metrics, prices, as_of=as_of, require_fill_fee_evidence=True)
         from paper_winner_memory import winner_entry_memory
         report["winner_entry_memory"] = winner_entry_memory(report["closes"])
         # Reuse the verified FIFO snapshot; do not query or modify execution state.
         from paper_winner_edge_research import verified_ledger_inputs, runtime_report
         winner_rows, winner_coverage = verified_ledger_inputs(
-            [dict(r) for r in fills], [], as_of=datetime.now(timezone.utc), fifo_report=report)
+            [dict(r) for r in fills], [], as_of=as_of, fifo_report=report)
         report["winner_edge_research"] = json_safe(runtime_report(
-            winner_rows, as_of=datetime.now(timezone.utc),
+            winner_rows, as_of=as_of,
             previous=previous_report.get("winner_edge_research"), coverage=winner_coverage))
         report["snapshot_semantics"] = "repeatable_read"
         watermark = max((int(r["id"]) for r in fills), default=0)
         previous_watermark = previous_report.get("ledger_watermark")
         newly_observed = [r for r in report["closes"] if previous_watermark is not None and r["ledger_id"] > previous_watermark]
+        new_qualified = [r for r in newly_observed if r["fifo_complete"]]
         report["ledger_watermark"] = watermark
         report["since_previous_report"] = {"baseline_available": previous_watermark is not None,
             "new_closes": len(newly_observed) if previous_watermark is not None else None,
-            "qualified_net_pnl": sum(r["net_pnl"] for r in newly_observed if r["fifo_complete"]) if previous_watermark is not None else None}
+            "qualified_net_pnl": sum(r["net_pnl"] for r in new_qualified) if new_qualified else None}
         report["price_sample_limit_reached"] = len(samples) > 50000
         report["source_query_diagnostics"] = source_query_diagnostics(conn, market, MODEL_VERSION)
         epoch = conn.execute("SELECT started_at FROM garibaldi_shadow_exit_epochs WHERE model_version=%s", (MODEL_VERSION,)).fetchone() or {}
@@ -465,7 +466,7 @@ def emit_reconciliation(market: str) -> dict[str, Any]:
         conn.execute("""INSERT INTO paper_exit_research_reports(market,version,report) VALUES (%s,%s,%s::jsonb)
             ON CONFLICT(market,version) DO UPDATE SET report=EXCLUDED.report,updated_at=NOW()""",
             (market, REPORT_VERSION, json.dumps(report, allow_nan=False)))
-    log.info("PAPER FIFO RECONCILIATION | market=%s | closes=%s | qualified=%s | net_pnl=%.6f | sell_signal_losses=%s | metric_discrepancies=%s | diagnostics=%s | verdict=INSUFFICIENT_DATA | execution_impact=NONE",
+    log.info("PAPER FIFO RECONCILIATION | market=%s | closes=%s | qualified=%s | net_pnl=%s | sell_signal_losses=%s | metric_discrepancies=%s | diagnostics=%s | verdict=INSUFFICIENT_DATA | execution_impact=NONE",
              market, report["observed_closes"], report["qualified_fifo_closes"], report["net_pnl"],
              report["sell_signal_losses"], report["metric_discrepancies"], json.dumps(report["diagnostics"], sort_keys=True))
     memory = report["winner_entry_memory"]

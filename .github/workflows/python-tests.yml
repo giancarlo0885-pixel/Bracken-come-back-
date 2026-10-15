@@ -121,3 +121,4 @@ jobs:
           test_oracle_learning_market_isolation.py::test_postgres_brain_regime_display_uses_round_trip_costs
           test_trade_evidence_verification_pg.py
           test_paper_fill_atomic_pg.py
+          test_paper_fill_provenance_pg.py

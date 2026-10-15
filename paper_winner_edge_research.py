@@ -17,7 +17,7 @@ from pathlib import Path
 
 import numpy as np
 
-VERSION = "winner-edge-research-v1"
+VERSION = "winner-edge-research-v2-exact-fill-lots"
 COHORT_FIELDS = ("market", "strategy", "regime", "entry_pattern")
 # Predeclared before prospective outcomes; no automatically rolling holdout.
 FORWARD_CUTOFF = datetime(2026, 10, 11, tzinfo=timezone.utc)
@@ -92,6 +92,7 @@ def prepare(rows, as_of):
             counts["future_or_open_outcome"] += 1
         elif (row.get("fifo_complete") is not True
               or row.get("fill_fee_evidence_verified") is not True
+              or row.get("exact_fill_lot_linkage_verified") is not True
               or row.get("entry_cohort_verified") is not True):
             counts["unverified_accounting_or_cohort"] += 1
         elif (net is None or notional is None or notional <= 0
@@ -130,7 +131,7 @@ def summarize(rows, *, alpha=0.05):
             "mean_win_return": float(wins.mean()) if len(wins) else None,
             "mean_loss_return": float(losses.mean()) if len(losses) else None,
             "mean_net_return": float(values.mean()) if len(values) else None,
-            "net_pnl": sum(row["net_pnl"] for row in rows),
+            "net_pnl": sum(row["net_pnl"] for row in rows) if rows else None,
             "score_lower_bound": bound}
 
 
@@ -171,12 +172,12 @@ def discover(rows, *, cutoff, as_of):
             "limitations": "Observed completed trades only; unexecuted signals and continuous price paths are not measured. Four-hour/day windows are dependence proxies, not certified independent episodes. Requires separate chronological validation and risk review before promotion."}
 
 
-def verified_ledger_inputs(ledger, fills, *, as_of, fifo_report=None):
+def verified_ledger_inputs(ledger, fills, *, as_of, fifo_report=None, allocations=None):
     """Reconcile full history, then use BUY-side snapshots for entry labels only."""
     from paper_exit_research import attach_fill_fee_evidence, reconcile_fifo
 
     report = fifo_report if fifo_report is not None else reconcile_fifo(
-        attach_fill_fee_evidence(ledger, fills), as_of=as_of, require_fill_fee_evidence=True)
+        attach_fill_fee_evidence(ledger, fills, allocations, as_of=as_of), as_of=as_of, require_fill_fee_evidence=True)
     rows, exclusions = [], Counter()
     buy_versions = defaultdict(list)
     for buy in ledger:
@@ -200,9 +201,12 @@ def verified_ledger_inputs(ledger, fills, *, as_of, fifo_report=None):
         if buy_id not in buys:
             exclusions["missing_or_conflicting_entry_identity"] += 1
             continue
-        opened = _finite(buys.get(buy_id, {}).get("quantity"))
-        closed = sum(part["members"][0]["quantity"] for part in parts)
-        if opened is None or opened <= 0 or not math.isclose(closed, opened, rel_tol=1e-9, abs_tol=1e-12):
+        from paper_fill_provenance import number
+        opened = number(buys.get(buy_id, {}).get("quantity"))
+        quantities = [number(part["members"][0].get("quantity")) for part in parts]
+        closed = sum(quantities) if all(q is not None and q > 0 for q in quantities) else None
+        if (opened is None or opened <= 0 or closed is None
+                or abs(closed-opened) > abs(opened)*number("1e-9")):
             exclusions["open_or_partial_entry_lot"] += 1
             continue
         if any(part.get("fifo_complete") is not True for part in parts):
@@ -211,10 +215,18 @@ def verified_ledger_inputs(ledger, fills, *, as_of, fifo_report=None):
         if any(part.get("fill_fee_evidence_verified") is not True for part in parts):
             exclusions["unverified_canonical_fill_fees"] += 1
             continue
+        if any(part.get("exact_fill_lot_linkage_verified") is not True
+               or not part.get("exit_fill_id")
+               or not part["members"][0].get("lot_id")
+               or not part["members"][0].get("buy_fill_id")
+               or part["members"][0].get("sell_fill_id") != part.get("exit_fill_id")
+               for part in parts):
+            exclusions["unverified_exact_fill_lot_linkage"] += 1
+            continue
         close = {**parts[0], "trade_id": buy_id,
                  "exit_time": max(part["exit_time"] for part in parts),
                  "net_pnl": sum(part["net_pnl"] for part in parts),
-                 "members": [{**parts[0]["members"][0], "quantity": closed}],
+                 "members": [{**parts[0]["members"][0], "quantity": float(closed)}],
                  "sell_trade_ids": [part["trade_id"] for part in parts]}
         if not close["fifo_complete"]:
             exclusions["unreconciled_fifo"] += 1
@@ -271,8 +283,11 @@ def runtime_report(rows, *, as_of, previous=None, coverage=None):
     provisional = discover(rows, cutoff=FORWARD_CUTOFF, as_of=as_of)
     previous = previous if isinstance(previous, dict) else {}
     matching = (previous.get("version") == VERSION
-                and previous.get("cutoff") == FORWARD_CUTOFF.isoformat())
-    if matching and previous.get("discovery_frozen") is True:
+                and previous.get("cutoff") == FORWARD_CUTOFF.isoformat()
+                and previous.get("accounting_provenance") == "exact_fill_lot_v1")
+    blocked = (previous.get("research_blocker") == "legacy_frozen_discovery_lacks_exact_fill_lot_provenance"
+               or (previous.get("discovery_frozen") is True and not matching))
+    if matching and not blocked and previous.get("discovery_frozen") is True:
         # A schema/version change requires a new declared experiment, never an
         # implicit replacement of the existing holdout's selection manifest.
         candidates = previous.get("candidates", [])
@@ -290,6 +305,26 @@ def runtime_report(rows, *, as_of, previous=None, coverage=None):
             "rejected_winners": sum(r["net_pnl"] > 0 for r in rejected),
             "selection_pnl_delta": -sum(r["net_pnl"] for r in rejected)}
     provisional["discovery_frozen"] = as_of >= FORWARD_CUTOFF
+    provisional["accounting_provenance"] = "exact_fill_lot_v1"
+    if blocked:
+        provisional["historical_discovery_reference"] = previous.get("historical_discovery_reference") or {
+            "version": previous.get("version"), "cutoff": previous.get("cutoff"),
+            "candidates": previous.get("candidates", []),
+            "qualified_current_evidence": False,
+            "reason": "unverified_exact_fill_lot_provenance",
+        }
+        # Neither retaining an unsupported candidate nor rediscovering it on
+        # the same holdout is valid. Keep the declared cutoff and preserve the
+        # old manifest for audit; a new experiment requires a declared design.
+        provisional["candidates"] = []
+        provisional["search_cohorts"] = 0
+        provisional["discovery_alpha"] = None
+        valid, _ = prepare(rows, as_of)
+        _, forward = _split_episodes(valid, FORWARD_CUTOFF, {})
+        provisional["forward"] = {"baseline": summarize(forward), "selected": summarize([]),
+            "avoided_loss_pnl": None, "rejected_winner_pnl": None,
+            "rejected_winners": None, "selection_pnl_delta": None}
+        provisional["research_blocker"] = "legacy_frozen_discovery_lacks_exact_fill_lot_provenance"
     provisional["phase"] = "forward_validation" if provisional["discovery_frozen"] else "training_only"
     provisional["history_coverage"] = coverage or {}
     return provisional
@@ -305,14 +340,14 @@ def read_verified_history(market, *, as_of):
         ledger = [dict(r) for r in conn.execute(
             """SELECT id,trade_id,market,symbol,side,quantity,entry_price,exit_price,
                       entry_time,exit_time,fees,gross_pnl,net_pnl,strategy,order_id,
-                      feature_snapshot,decision_timestamp
+                      feature_snapshot,decision_timestamp,entry_signal_id,entry_decision_id,
+                      entry_forecast_id,entry_quote_id,broker_mode,account_environment
                FROM trade_ledger WHERE market=%s AND broker_mode='PAPER'
                  AND account_environment='PAPER' AND side IN ('BUY','SELL')""",
             (market,)).fetchall()]
-        fills = [dict(r) for r in conn.execute(
-            """SELECT fill_id,market,symbol,side,quantity,fill_price,fee_amount,created_at
-               FROM paper_fills WHERE market=%s""", (market,)).fetchall()]
-    return verified_ledger_inputs(ledger, fills, as_of=as_of)
+        from paper_fill_provenance import load_fill_lot_allocations
+        allocations = load_fill_lot_allocations(conn, market=market, as_of=as_of)
+    return verified_ledger_inputs(ledger, [], as_of=as_of, allocations=allocations)
 
 
 if __name__ == "__main__":

@@ -284,6 +284,74 @@ def test_successful_http_fetch_keeps_request_and_size_contract(monkeypatch):
     assert response.closed
 
 
+def test_unchanged_brief_logs_actual_http_receipt_without_reingestion(monkeypatch, caplog):
+    _enable(monkeypatch)
+    packet = _packet()
+    packet["developments"][0]["fact"] = "hidden-token must not enter transport logs"
+    receipt = {"brief_id": packet["brief_id"], "payload_hash": inbox._payload_hash(packet)}
+    monkeypatch.setattr(inbox, "_last_receipt", lambda: dict(receipt))
+    monkeypatch.setattr(inbox, "_record_receipt", lambda *_: pytest.fail("unchanged evidence must be preserved"))
+    monkeypatch.setattr(inbox, "ingest_market_brief", lambda *_args, **_kwargs: pytest.fail("unchanged brief cannot be reingested"))
+    response = BytesIO(json.dumps(_issue(packet)).encode())
+    response.status = 200
+    response.headers = Message()
+    for key, value in {
+        "X-RateLimit-Limit": "60", "X-RateLimit-Remaining": "44",
+        "X-RateLimit-Reset": "1792032692", "X-GitHub-Request-Id": "ABCD:1234:EF56",
+        "Authorization": "Bearer hidden-token", "Set-Cookie": "hidden-token",
+    }.items():
+        response.headers[key] = value
+    requests = []
+
+    def available(request, *, timeout):
+        requests.append(request)
+        return response
+
+    monkeypatch.setattr(inbox, "urlopen", available)
+    with caplog.at_level("INFO", logger="github-market-intelligence-inbox"):
+        result = inbox.sync_market_brief_inbox()
+    assert result["status"] == "no_change"
+    assert result["payload_hash"] == receipt["payload_hash"]
+    assert result["events_persisted"] == 0
+    assert len(requests) == 1
+    assert "status=RECEIVED | http_status=200" in caplog.text
+    assert "rate_limit_limit=60 | rate_limit_remaining=44 | rate_limit_reset_epoch=1792032692" in caplog.text
+    assert "github_request_id=ABCD:1234:EF56" in caplog.text
+    assert "execution_impact=NONE" in caplog.text
+    assert "hidden-token" not in caplog.text
+    assert "api.github.com" not in caplog.text
+    assert "INGESTED" not in caplog.text
+    assert inbox._last_receipt() == receipt
+
+
+@pytest.mark.parametrize("headers", [None, {
+    "X-RateLimit-Limit": "hidden-token", "X-RateLimit-Remaining": "NaN",
+    "X-RateLimit-Reset": "Infinity", "X-GitHub-Request-Id": "hidden-token?secret=123",
+}])
+def test_success_receipt_does_not_invent_missing_or_malformed_quota(monkeypatch, caplog, headers):
+    response = BytesIO(json.dumps(_issue()).encode())
+    response.status = 200
+    response.headers = headers
+    monkeypatch.setattr(inbox, "urlopen", lambda *_args, **_kwargs: response)
+    with caplog.at_level("INFO", logger="github-market-intelligence-inbox"):
+        inbox._fetch_issue(inbox.DEFAULT_REPOSITORY, 338)
+    assert "http_status=200" in caplog.text
+    assert "rate_limit_limit=None | rate_limit_remaining=None | rate_limit_reset_epoch=None" in caplog.text
+    assert "github_request_id=None" in caplog.text
+    assert "hidden-token" not in caplog.text
+
+
+def test_success_receipt_does_not_claim_packet_acceptance(monkeypatch, caplog):
+    response = BytesIO(b"not JSON; hidden-token")
+    response.status = 200
+    response.headers = None
+    monkeypatch.setattr(inbox, "urlopen", lambda *_args, **_kwargs: response)
+    with caplog.at_level("INFO", logger="github-market-intelligence-inbox"), pytest.raises(ValueError):
+        inbox._fetch_issue(inbox.DEFAULT_REPOSITORY, 338)
+    assert "status=RECEIVED | http_status=200" in caplog.text
+    assert "hidden-token" not in caplog.text
+
+
 def test_secondary_limit_body_inspection_is_bounded():
     class ErrorBody(BytesIO):
         sizes = []

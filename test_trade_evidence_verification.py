@@ -283,7 +283,7 @@ class _ReadSnapshot:
         if "pg_current_snapshot()" in normalized:
             return _Cursor([{"checked_at": CHECKED, "snapshot": "700:705:702", "read_only": self.read_only}])
         if "to_regclass" in normalized:
-            return _Cursor([{"relation": None if params[0] in self.missing_tables else params[0]}])
+            return _Cursor([{"relation": None if params[0] in self.missing_tables or params[0] == "paper_fill_lot_links" else params[0]}])
         if "WHERE trade_id=ANY(%s)" in normalized:
             for table, name in (("ledger", "trade_ledger"), ("metrics", "paper_regime_trade_metrics"), ("brain", "oracle_brain_episodes"), ("aeve", "paper_aeve_generation_outcomes")):
                 if f"FROM {name} " in normalized:
@@ -406,3 +406,43 @@ def test_failed_learning_sync_does_not_emit_a_successful_commit_verification(mon
     monkeypatch.setattr(verification, "emit_committed_trade_verification", lambda *args: (_ for _ in ()).throw(AssertionError("verification must follow successful sync")))
     result = market_worker._run_brain_learning_sync("crypto")
     assert result["status"] == "unavailable"
+
+
+@pytest.mark.parametrize("historical_cost_drift,expected", [(0.0, "MATCH"), (0.01, "MISMATCH")])
+def test_committed_brain_accounting_must_reconcile_with_exact_recorded_fills(monkeypatch, historical_cost_drift, expected):
+    import paper_fill_provenance as provenance
+    from test_paper_exact_fill_research import exact_allocations
+
+    rows = _exact_rows()
+    close = rows["ledger"][0]
+    close.update(quantity=1.0, entry_price=100.0, exit_price=99.42,
+                 fees=0.23, gross_pnl=-0.58, net_pnl=-0.81, entry_time=ENTRY, exit_time=EXIT)
+    opening = {**close, "trade_id": "unit-original-buy", "side": "BUY", "exit_time": None,
+               "exit_price": None, "fees": 0.0, "gross_pnl": 0.0, "net_pnl": 0.0}
+    allocations = exact_allocations([opening, close], {TRADE_ID: opening["trade_id"]})
+    for row in (rows["brain"][0], rows["brain"][0]["outcome_snapshot"]):
+        row["net_pnl"] += historical_cost_drift
+    rows["metrics"][0]["round_trip_net_pnl"] += historical_cost_drift
+
+    class LinkedSnapshot(_ReadSnapshot):
+        def execute(self, sql, params=()):
+            if "to_regclass" in sql and params == ("paper_fill_lot_links",):
+                self.statements.append((sql, params))
+                return _Cursor([{"relation": "paper_fill_lot_links"}])
+            return super().execute(sql, params)
+
+    conn = LinkedSnapshot(rows=rows)
+    scopes = []
+    def load(_conn, **scope):
+        scopes.append(scope)
+        return allocations
+    monkeypatch.setattr(provenance, "load_fill_lot_allocations", load)
+    receipt = verification.verify_committed_trade_evidence([TRADE_ID], connect_factory=lambda: conn)["records"][0]
+    assert receipt["brain_status"] == "MATERIALIZED_EXACT"
+    assert receipt["canonical_fill_linkage"] == "EXACT_LINKED"
+    assert receipt["entry_ledger_trade_id"] == opening["trade_id"]
+    assert receipt["linked_round_trip_fees"] == pytest.approx(0.23)
+    assert receipt["linked_round_trip_net_pnl"] == pytest.approx(-0.81)
+    assert receipt["brain_fill_accounting_status"] == expected
+    assert receipt["ranking_decision_consumption"] == "UNAVAILABLE"
+    assert scopes == [{"trade_ids": [TRADE_ID], "market": "crypto", "as_of": CHECKED}]
