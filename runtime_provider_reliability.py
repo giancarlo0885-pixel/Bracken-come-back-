@@ -115,13 +115,27 @@ def _cooldown_active(key: str) -> bool:
         return True
 
 
-def _mark_unavailable(key: str) -> None:
+def _unavailable_seconds() -> int:
     try:
-        seconds = max(60, int(UNAVAILABLE_SYMBOL_COOLDOWN_SECONDS))
+        return max(60, int(UNAVAILABLE_SYMBOL_COOLDOWN_SECONDS))
     except (TypeError, ValueError):
-        seconds = 900
+        return 900
+
+
+def _cooldown_frame(key: str) -> pd.DataFrame | None:
     with _LOCK:
-        _UNAVAILABLE_UNTIL[key] = time.monotonic() + seconds
+        remaining = float(_UNAVAILABLE_UNTIL.get(key) or 0.0) - time.monotonic()
+        if remaining <= 0:
+            _UNAVAILABLE_UNTIL.pop(key, None)
+            return None
+    frame = pd.DataFrame()
+    frame.attrs["yahoo_request_cooldown_remaining_seconds"] = min(remaining, _unavailable_seconds())
+    return frame
+
+
+def _mark_unavailable(key: str) -> None:
+    with _LOCK:
+        _UNAVAILABLE_UNTIL[key] = time.monotonic() + _unavailable_seconds()
 
 
 def _clear_unavailable(key: str) -> None:
@@ -135,8 +149,9 @@ def yahoo_reference_history(market_data_module: Any, symbol: str, period: str, i
     yfinance's bulk ``download`` helper logs missing symbols at ERROR before the
     caller can classify the result. ``Ticker.history(..., raise_errors=True)``
     instead raises the provider exception to us. Ordinary unavailable results
-    become empty frames, while rate limits propagate to the router's shared
-    provider cooldown. Both place the exact symbol/period/interval on a cooldown.
+    become empty frames, while HTTP and transport failures propagate for router
+    classification. Rate limits reach the shared provider cooldown. Failures
+    place the exact symbol/period/interval on a cooldown.
     A per-key lock prevents concurrent fast/deep scans from issuing the same doomed request.
 
     Yahoo provider-native aliases are resolved only at this boundary. The returned
@@ -150,13 +165,17 @@ def yahoo_reference_history(market_data_module: Any, symbol: str, period: str, i
     requested = str(symbol or "").upper().strip()
     provider_native = yahoo_native_symbol(requested)
     key = _key(requested, period, interval)
-    if not requested or _cooldown_active(key):
+    if not requested:
         return pd.DataFrame()
+    suppressed = _cooldown_frame(key)
+    if suppressed is not None:
+        return suppressed
 
     lock = _key_lock(key)
     with lock:
-        if _cooldown_active(key):
-            return pd.DataFrame()
+        suppressed = _cooldown_frame(key)
+        if suppressed is not None:
+            return suppressed
         try:
             ticker = market_data_module.yf.Ticker(provider_native)
             data = ticker.history(
@@ -176,12 +195,15 @@ def yahoo_reference_history(market_data_module: Any, symbol: str, period: str, i
                 interval,
                 exc.__class__.__name__,
             )
-            # The router must see rate limits to protect all symbols and all
-            # workers. Returning an empty frame here bypasses the shared Yahoo
-            # cooldown and repeats the same throttled request on other symbols.
-            from provider_router import classify_provider_failure
+            # Preserve typed HTTP/transport outcomes so the router can distinguish
+            # them from an actual empty market-data response. Rate limits must
+            # still reach its shared cooldown across all symbols and workers.
+            from provider_router import _provider_status_from_exception, classify_provider_failure
 
-            if classify_provider_failure(exc) == "rate_limited":
+            if (
+                _provider_status_from_exception(exc) is not None
+                or classify_provider_failure(exc) in {"rate_limited", "timeout", "transport_error", "malformed_response"}
+            ):
                 raise
             return pd.DataFrame()
 

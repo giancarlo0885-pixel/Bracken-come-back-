@@ -18,7 +18,12 @@ _PERIOD_DAYS = {"1d": 2, "5d": 7, "1mo": 35, "3mo": 100, "6mo": 190, "1y": 370}
 
 
 class AlpacaDataError(RuntimeError):
-    """Market-data request failed; never includes credential values."""
+    """Credential-free failure with only the transport details needed to route it."""
+
+    def __init__(self, message: str, *, status_code: int | None = None, timed_out: bool = False):
+        super().__init__(message)
+        self.status_code: int | None = status_code if type(status_code) is int and 100 <= status_code <= 599 else None
+        self.timed_out: bool = timed_out
 
 
 def iex_stock_history(symbol: str, period: str, interval: str) -> pd.DataFrame:
@@ -59,6 +64,7 @@ def iex_stock_history(symbol: str, period: str, interval: str) -> pd.DataFrame:
     headers = {"APCA-API-KEY-ID": key, "APCA-API-SECRET-KEY": secret}
     bars = []
     token = None
+    request_error = None
     try:
         for _ in range(5):
             if token:
@@ -70,7 +76,9 @@ def iex_stock_history(symbol: str, period: str, interval: str) -> pd.DataFrame:
                 timeout=15,
             )
             if response.status_code != 200:
-                raise AlpacaDataError(f"Alpaca market-data HTTP {response.status_code}")
+                status_code = response.status_code if type(response.status_code) is int else None
+                message = f"Alpaca market-data HTTP {status_code}" if status_code is not None else "Alpaca market-data HTTP error"
+                raise AlpacaDataError(message, status_code=status_code)
             payload = response.json()
             if not isinstance(payload, dict):
                 raise AlpacaDataError("Alpaca returned malformed history response")
@@ -83,8 +91,19 @@ def iex_stock_history(symbol: str, period: str, interval: str) -> pd.DataFrame:
                 break
         else:
             raise AlpacaDataError("Alpaca pagination limit reached")
-    except (requests.RequestException, ValueError, TypeError) as exc:
-        raise AlpacaDataError("Alpaca market-data request failed") from None
+    except requests.exceptions.JSONDecodeError:
+        request_error = AlpacaDataError("Alpaca returned malformed history response")
+    except requests.RequestException as exc:
+        status_code = getattr(getattr(exc, "response", None), "status_code", None)
+        timed_out = isinstance(exc, requests.Timeout)
+        message = "Alpaca market-data request timed out" if timed_out else "Alpaca market-data request failed"
+        request_error = AlpacaDataError(message, status_code=status_code, timed_out=timed_out)
+    except (ValueError, TypeError):
+        request_error = AlpacaDataError("Alpaca returned malformed history response")
+    # Raise outside the handler so exception chaining cannot expose the original
+    # request/response, whose headers, URL or body may contain credentials.
+    if request_error is not None:
+        raise request_error
     if not bars:
         return pd.DataFrame()
     frame = pd.DataFrame(bars)

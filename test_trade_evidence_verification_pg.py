@@ -284,3 +284,162 @@ def test_postgres_one_receipt_uses_one_snapshot_during_concurrent_commit(committ
             _reader_factory(dsn, options, []))
         assert second["records"][0]["brain_status"] == "MISMATCH"
         assert first["snapshot"] != second["snapshot"]
+
+
+def _write_source_row(conn, trade_id, *, market="cash", side="SELL", broker="PAPER", account="PAPER"):
+    conn.execute("""INSERT INTO trade_ledger
+        (trade_id,market,side,broker_mode,account_environment,entry_time,exit_time)
+        VALUES (%s,%s,%s,%s,%s,'2026-01-01T00:00:00+00:00','2026-01-01T01:00:00+00:00')""",
+        (trade_id, market, side, broker, account))
+
+
+def test_postgres_cash_no_recent_trades_does_not_claim_empty_historical_ledger(committed_evidence_db):
+    import psycopg
+    from psycopg.rows import dict_row
+    from trade_evidence_verification import verify_committed_trade_evidence
+
+    dsn, options = committed_evidence_db
+    private_tag = "private-account-secret-must-not-leave-database"
+    with psycopg.connect(dsn, options=options, row_factory=dict_row) as writer:
+        _write_source_row(writer, "stock-history", market="stock")
+        _write_source_row(writer, "uppercase-history", market="CASH")
+        _write_source_row(writer, "crypto-history", market="crypto")
+        _write_source_row(writer, "broker-tag-history", broker="paper")
+        _write_source_row(writer, "account-tag-history", account="paper")
+        _write_source_row(writer, "side-tag-history", side="sell")
+        _write_source_row(writer, "private-tag-history", market=private_tag)
+        writer.commit()
+    observations = []
+    report = verify_committed_trade_evidence(market="cash", connect_factory=
+        _reader_factory(dsn, options, observations, reject_write=True))
+    assert report["records"] == []
+    diagnostic = report["source_diagnostics"]
+    totals = diagnostic["totals"]
+    assert totals == {"ledger_rows": 7, "canonical_cash_rows": 3,
+        "noncanonical_stock_label_rows": 2, "excluded_noncanonical_market_rows": 4,
+        "excluded_nonpaper_broker_rows": 1, "excluded_nonpaper_account_rows": 1,
+        "excluded_unsupported_side_rows": 1, "source_buy_rows": 0, "source_sell_rows": 0}
+    assert diagnostic["reason"] == "NO_CANONICAL_CASH_PAPER_BUY_SELL_ROWS"
+    labels = {(row["market"], row["side"], row["broker_mode"], row["account_environment"])
+              for row in diagnostic["ledger_inventory"]}
+    assert ("stock", "SELL", "PAPER", "PAPER") in labels
+    assert ("CASH", "SELL", "PAPER", "PAPER") in labels
+    assert ("cash", "SELL", "paper", "PAPER") in labels
+    assert ("cash", "SELL", "PAPER", "paper") in labels
+    assert ("OTHER", "SELL", "PAPER", "PAPER") in labels
+    assert private_tag not in json.dumps(report)
+    assert diagnostic["qualification_status"] == "NOT_EVALUATED_BY_INVENTORY"
+    assert diagnostic["bounded_exact_linked_sell_records"] == 0
+    assert diagnostic["historical_link_inference"] == "NONE"
+    assert observations and all(read_only == "on" and isolation == "repeatable read"
+                                for _, read_only, isolation in observations)
+
+
+def test_postgres_cash_unlinked_history_remains_visible_and_unqualified_without_repairs(committed_evidence_db):
+    import psycopg
+    from psycopg.rows import dict_row
+    from trade_evidence_verification import verify_committed_trade_evidence
+
+    dsn, options = committed_evidence_db
+    with psycopg.connect(dsn, options=options, row_factory=dict_row) as writer:
+        writer.execute("CREATE TABLE paper_fill_lot_links (ledger_trade_id text,fill_id text,lot_id text)")
+        _write_source_row(writer, "old-cash-buy", side="BUY")
+        _write_source_row(writer, "old-cash-sell")
+        writer.commit()
+    report = verify_committed_trade_evidence(market="cash", connect_factory=
+        _reader_factory(dsn, options, [], reject_write=True))
+    diagnostic = report["source_diagnostics"]
+    assert diagnostic["totals"]["ledger_rows"] == 2
+    assert diagnostic["totals"]["source_buy_rows"] == diagnostic["totals"]["source_sell_rows"] == 1
+    assert diagnostic["recorded_link_coverage"] == {"status": "AVAILABLE",
+        "source_rows_with_recorded_link": 0, "source_rows_without_recorded_link": 2,
+        "sell_rows_with_recorded_link": 0, "sell_rows_without_recorded_link": 1}
+    assert diagnostic["reason"] == "ALL_SOURCE_SELL_ROWS_LACK_RECORDED_LINKS"
+    assert diagnostic["recorded_graph_coverage"]["status"] == "UNAVAILABLE"
+    assert diagnostic["bounded_receipt_records"] == 1
+    assert diagnostic["bounded_exact_linked_sell_records"] == 0
+    assert report["records"][0]["canonical_fill_linkage"] == "UNAVAILABLE"
+    assert report["records"][0]["brain_status"] == "PENDING"
+    with psycopg.connect(dsn, options=options, row_factory=dict_row) as audit:
+        assert audit.execute("SELECT COUNT(*) AS n FROM trade_ledger").fetchone()["n"] == 2
+        assert audit.execute("SELECT COUNT(*) AS n FROM paper_fill_lot_links").fetchone()["n"] == 0
+        assert audit.execute("SELECT COUNT(*) AS n FROM oracle_brain_episodes").fetchone()["n"] == 0
+        assert audit.execute("SELECT COUNT(*) AS n FROM paper_regime_trade_metrics").fetchone()["n"] == 0
+
+
+def test_postgres_cash_recorded_edges_are_coverage_not_exact_graph_validation(committed_evidence_db):
+    import psycopg
+    from psycopg.rows import dict_row
+    from trade_evidence_verification import verify_committed_trade_evidence
+
+    dsn, options = committed_evidence_db
+    with psycopg.connect(dsn, options=options, row_factory=dict_row) as writer:
+        writer.execute("CREATE TABLE paper_fill_lot_links (ledger_trade_id text,fill_id text,lot_id text)")
+        writer.execute("CREATE TABLE paper_fills (fill_id text,order_id text,canonical_trade_id bigint,side text)")
+        writer.execute("CREATE TABLE paper_orders (order_id text)")
+        writer.execute("CREATE TABLE position_lots (lot_id text)")
+        writer.execute("CREATE TABLE trades (id bigint)")
+        _write_source_row(writer, "unlinked-buy", side="BUY")
+        _write_source_row(writer, "dangling-sell")
+        _write_source_row(writer, "incomplete-sell")
+        writer.execute("""INSERT INTO paper_fill_lot_links VALUES
+            ('dangling-sell','missing-fill','missing-lot-a'),
+            ('incomplete-sell','known-fill','missing-lot-b')""")
+        writer.execute("INSERT INTO paper_fills VALUES ('known-fill','missing-order',999,'SELL')")
+        writer.commit()
+    # Empty exact-ID selection requests only inventory; no historical ID is
+    # inferred and the aggregate cannot award an exact receipt to any edge.
+    report = verify_committed_trade_evidence([], market="cash", connect_factory=
+        _reader_factory(dsn, options, [], reject_write=True))
+    diagnostic = report["source_diagnostics"]
+    assert report["records"] == []
+    assert diagnostic["recorded_link_coverage"] == {"status": "AVAILABLE",
+        "source_rows_with_recorded_link": 2, "source_rows_without_recorded_link": 1,
+        "sell_rows_with_recorded_link": 2, "sell_rows_without_recorded_link": 0}
+    assert diagnostic["recorded_graph_coverage"] == {"status": "AVAILABLE", "link_rows": 2,
+        "link_rows_missing_fill": 1, "link_rows_missing_order": 1, "link_rows_missing_lot": 2,
+        "link_rows_missing_execution": 1, "sell_link_rows_missing_recorded_buy_link": 1}
+    assert diagnostic["reason"] == "SOURCE_ROWS_PRESENT_QUALIFICATION_NOT_INFERRED"
+    assert diagnostic["qualification_status"] == "NOT_EVALUATED_BY_INVENTORY"
+    assert diagnostic["bounded_exact_linked_sell_records"] == 0
+
+
+def test_postgres_cash_inventory_uses_receipt_snapshot_during_concurrent_commit(committed_evidence_db):
+    import psycopg
+    from psycopg.rows import dict_row
+    from trade_evidence_verification import verify_committed_trade_evidence
+
+    dsn, options = committed_evidence_db
+    with psycopg.connect(dsn, options=options, row_factory=dict_row) as writer:
+        _write_source_row(writer, "old-stock-label", market="stocks")
+        writer.commit()
+        _write_source_row(writer, "later-cash-history")
+        first = verify_committed_trade_evidence([], market="cash", connect_factory=
+            _reader_factory(dsn, options, [], after_snapshot=writer.commit))
+        second = verify_committed_trade_evidence([], market="cash", connect_factory=
+            _reader_factory(dsn, options, []))
+    assert first["source_diagnostics"]["totals"]["ledger_rows"] == 1
+    assert first["source_diagnostics"]["totals"]["source_sell_rows"] == 0
+    assert second["source_diagnostics"]["totals"]["ledger_rows"] == 2
+    assert second["source_diagnostics"]["totals"]["source_sell_rows"] == 1
+    assert first["snapshot"] != second["snapshot"]
+
+
+def test_postgres_cash_inventory_output_is_bounded_without_truncating_totals(committed_evidence_db):
+    import psycopg
+    from psycopg.rows import dict_row
+    from trade_evidence_verification import MAX_INVENTORY_GROUPS, verify_committed_trade_evidence
+
+    dsn, options = committed_evidence_db
+    with psycopg.connect(dsn, options=options, row_factory=dict_row) as writer:
+        for market in ("cash", "stock", "CASH", "crypto"):
+            for side in ("BUY", "SELL", "buy", "sell"):
+                for broker in ("PAPER", "paper", "LIVE", "TEST", "SIMULATION"):
+                    _write_source_row(writer, f"inventory-{market}-{side}-{broker}", market=market, side=side, broker=broker)
+        writer.commit()
+    diagnostic = verify_committed_trade_evidence([], market="cash", connect_factory=
+        _reader_factory(dsn, options, []))["source_diagnostics"]
+    assert diagnostic["totals"]["ledger_rows"] == diagnostic["inventory_group_count"] == 80
+    assert diagnostic["inventory_truncated"] is True
+    assert len(diagnostic["ledger_inventory"]) == diagnostic["inventory_group_limit"] == MAX_INVENTORY_GROUPS
+    assert diagnostic["totals"]["source_buy_rows"] == diagnostic["totals"]["source_sell_rows"] == 1

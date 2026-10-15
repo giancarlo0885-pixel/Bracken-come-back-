@@ -22,6 +22,7 @@ def _snapshot(symbol: str, price: float, *, verified: bool, provider: str) -> Ma
         provider_symbol=symbol,
         provider_native_symbol=symbol,
         quote_verified=verified,
+        provider_quote_verified=verified and provider != "Yahoo Finance",
         stale=not verified,
     )
 
