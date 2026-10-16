@@ -26,7 +26,7 @@ class AlpacaDataError(RuntimeError):
         self.timed_out: bool = timed_out
 
 
-def iex_stock_history(symbol: str, period: str, interval: str) -> pd.DataFrame:
+def iex_stock_history(symbol: str, period: str, interval: str, *, max_pages: int = 5) -> pd.DataFrame:
     """Retrieve timestamped US equity bars from Alpaca's IEX feed.
 
     Returns an empty frame for an empty market-data result, not for auth,
@@ -36,6 +36,8 @@ def iex_stock_history(symbol: str, period: str, interval: str) -> pd.DataFrame:
     secret = os.getenv("APCA_API_SECRET_KEY", "").strip()
     if not key or not secret:
         raise AlpacaDataError("Alpaca data credentials are not configured")
+    if type(max_pages) is not int or not 1 <= max_pages <= 5:
+        raise AlpacaDataError("Invalid Alpaca history page limit")
     if os.getenv("ALPACA_DATA_FEED", "iex").lower().strip() != "iex":
         raise AlpacaDataError("Only the Alpaca IEX feed is supported")
     url = os.getenv("ALPACA_DATA_URL", "https://data.alpaca.markets").rstrip("/")
@@ -66,7 +68,7 @@ def iex_stock_history(symbol: str, period: str, interval: str) -> pd.DataFrame:
     token = None
     request_error = None
     try:
-        for _ in range(5):
+        for _ in range(max_pages):
             if token:
                 params["page_token"] = token
             response = requests.get(
