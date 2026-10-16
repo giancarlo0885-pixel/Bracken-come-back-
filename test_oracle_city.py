@@ -266,7 +266,7 @@ def test_oracle_city_page_uses_v2_read_only_architecture():
 def test_oracle_city_uses_supported_streamlit_iframe_in_both_routes():
     page = Path("pages/2_Oracle_City.py").read_text(encoding="utf-8")
     app = Path("app.py").read_text(encoding="utf-8")
-    city_block = app[app.index('if page == "Oracle City":'):app.index('elif page == "Oracle Brain":')]
+    city_block = app[app.index('if page == "Oracle City":'):app.index('if page == "Oracle Brain":')]
 
     assert "streamlit.components.v1" not in page
     assert "components.html(" not in page
