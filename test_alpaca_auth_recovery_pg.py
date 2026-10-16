@@ -244,3 +244,26 @@ def test_older_masked_rate_update_remains_ambiguous_even_after_rate_wait(db):
     with db() as conn:
         conn.execute("UPDATE provider_budget_ledger SET updated_at=%s", ((NOW - timedelta(hours=1)).isoformat(),))
     assert run(db, lambda *a, **k: pytest.fail('ambiguous rate history cannot be cleared'))['status'] == 'COOLDOWN_PRESERVED'
+
+
+def test_replaced_credentials_can_recover_with_legacy_trading_endpoint_and_feed(db, monkeypatch, caplog):
+    import alpaca_iex_provider as alpaca
+    from types import SimpleNamespace
+    seed(db)
+    monkeypatch.setenv('ALPACA_DATA_URL', 'https://paper-api.alpaca.markets/?token=private-value')
+    monkeypatch.setenv('ALPACA_DATA_FEED', 'sip')
+    calls = []
+    def get(url, **kwargs):
+        calls.append((url, kwargs))
+        return SimpleNamespace(status_code=200, json=lambda: {'symbol': 'MSFT', 'bars': [
+            {'t': (NOW-timedelta(days=1)).isoformat(), 'o': 100, 'h': 102, 'l': 99, 'c': 101, 'v': 1000}]})
+    monkeypatch.setattr(alpaca.requests, 'get', get)
+    with caplog.at_level('INFO'):
+        result = run(db, alpaca.iex_stock_history)
+    assert result['status'] == 'AUTHENTICATED_IEX'
+    assert len(calls) == 1
+    assert calls[0][0] == 'https://data.alpaca.markets/v2/stocks/MSFT/bars'
+    assert calls[0][1]['params']['feed'] == 'iex'
+    assert calls[0][1]['allow_redirects'] is False
+    assert 'legacy_endpoint_ignored=True' in caplog.text and 'legacy_feed_ignored=True' in caplog.text
+    assert 'private-value' not in caplog.text

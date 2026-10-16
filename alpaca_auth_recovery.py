@@ -94,9 +94,11 @@ def recover_alpaca_authentication(*, connect_factory=None, fetch_history=None, n
     key, secret = (os.getenv(name, "").strip() for name in ("APCA_API_KEY_ID", "APCA_API_SECRET_KEY"))
     if not key or not secret:
         return _result("NOT_CONFIGURED")
-    if (os.getenv("ALPACA_DATA_URL", "https://data.alpaca.markets").rstrip("/") != "https://data.alpaca.markets"
-            or os.getenv("ALPACA_DATA_FEED", "iex").strip().lower() != "iex"):
-        return _result("CONFIGURATION_BLOCKED")
+    log.info(
+        "ALPACA IEX CONNECTION | endpoint=CANONICAL | feed=iex | legacy_endpoint_ignored=%s | legacy_feed_ignored=%s | execution_impact=NONE",
+        os.getenv("ALPACA_DATA_URL", "https://data.alpaca.markets").rstrip("/") != "https://data.alpaca.markets",
+        os.getenv("ALPACA_DATA_FEED", "iex").strip().lower() != "iex",
+    )
     if (os.getenv("EXECUTION_MODE", "paper").strip().lower() != "paper"
             or any(os.getenv(name, "false").strip().lower() == "true"
                    for name in ("ENABLE_BROKER_SUBMISSION", "LIVE_TRADING_ARMED"))):

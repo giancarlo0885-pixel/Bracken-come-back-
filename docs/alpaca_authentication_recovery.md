@@ -4,6 +4,9 @@ Alpaca account API keys authenticate IEX data at `https://data.alpaca.markets` u
 `APCA_API_KEY_ID` and `APCA_API_SECRET_KEY`. Paper and live account keys use this
 same market-data host. The paper trading host is not a market-data endpoint.
 Broker OAuth/client credentials are not interchangeable with account API keys.
+The IEX adapter pins that host and feed, ignores legacy URL/feed overrides and
+does not follow HTTP redirects. Configuration diagnostics expose only whether
+those overrides were ignored, never their potentially sensitive values.
 
 An HTTP401 starts the existing shared authentication cooldown. Previously a
 replacement pair inherited that cooldown and could not demonstrate recovery.
@@ -13,7 +16,7 @@ performs a bounded recovery check when an old authentication cooldown exists.
 The check:
 
 - Requires paper mode, broker submission disabled and live trading disarmed.
-- Requires the canonical data host, IEX feed, configured credentials and supported
+- Uses the pinned canonical data host and IEX feed, with configured credentials and supported
   daily-history capability.
 - Accepts only the exact persisted legacy HTTP401 reason. It preserves unknown,
   rate-limit and recently updated cooldowns. A recent update can hide a shorter

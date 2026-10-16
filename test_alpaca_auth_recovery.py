@@ -9,8 +9,6 @@ import alpaca_auth_recovery as recovery
 @pytest.mark.parametrize('name,value,status', [
     ('APCA_API_KEY_ID', '', 'NOT_CONFIGURED'),
     ('APCA_API_SECRET_KEY', '', 'NOT_CONFIGURED'),
-    ('ALPACA_DATA_URL', 'https://paper-api.alpaca.markets', 'CONFIGURATION_BLOCKED'),
-    ('ALPACA_DATA_FEED', 'sip', 'CONFIGURATION_BLOCKED'),
     ('EXECUTION_MODE', 'live', 'SAFETY_BLOCKED'),
     ('ENABLE_BROKER_SUBMISSION', 'true', 'SAFETY_BLOCKED'),
     ('LIVE_TRADING_ARMED', 'true', 'SAFETY_BLOCKED'),
@@ -63,3 +61,27 @@ def test_recovery_page_limit_rejects_incomplete_response_after_one_request(monke
     with pytest.raises(alpaca.AlpacaDataError, match='pagination limit'):
         alpaca.iex_stock_history('MSFT', '5d', '1d', max_pages=1)
     assert len(calls) == 1
+
+
+@pytest.mark.parametrize('endpoint', ['https://paper-api.alpaca.markets', 'https://api.alpaca.markets', 'https://untrusted.invalid/?token=private-token', ''])
+@pytest.mark.parametrize('feed', ['sip', 'iex'])
+def test_iex_connection_is_pinned_despite_legacy_overrides(monkeypatch, endpoint, feed):
+    import alpaca_iex_provider as alpaca
+    from types import SimpleNamespace
+    monkeypatch.setenv('APCA_API_KEY_ID', 'unit-key')
+    monkeypatch.setenv('APCA_API_SECRET_KEY', 'unit-secret')
+    monkeypatch.setenv('ALPACA_DATA_URL', endpoint)
+    monkeypatch.setenv('ALPACA_DATA_FEED', feed)
+    calls = []
+    def get(url, **kwargs):
+        calls.append((url, kwargs))
+        return SimpleNamespace(status_code=200, json=lambda: {'symbol': 'MSFT', 'bars': [
+            {'t': '2026-10-15T04:00:00Z', 'o': 100, 'h': 102, 'l': 99, 'c': 101, 'v': 1000}]})
+    monkeypatch.setattr(alpaca.requests, 'get', get)
+    frame = alpaca.iex_stock_history('MSFT', '5d', '1d', max_pages=1)
+    assert len(calls) == 1
+    url, kwargs = calls[0]
+    assert url == 'https://data.alpaca.markets/v2/stocks/MSFT/bars'
+    assert kwargs['params']['feed'] == frame.attrs['feed'] == 'iex'
+    assert kwargs['allow_redirects'] is False
+    assert kwargs['headers'] == {'APCA-API-KEY-ID': 'unit-key', 'APCA-API-SECRET-KEY': 'unit-secret'}

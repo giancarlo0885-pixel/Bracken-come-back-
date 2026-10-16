@@ -15,6 +15,8 @@ import requests
 
 _ALLOWED_INTERVALS = {"1m": "1Min", "5m": "5Min", "15m": "15Min", "30m": "30Min", "1h": "1Hour", "1d": "1Day"}
 _PERIOD_DAYS = {"1d": 2, "5d": 7, "1mo": 35, "3mo": 100, "6mo": 190, "1y": 370}
+DATA_URL = "https://data.alpaca.markets"
+DATA_FEED = "iex"
 
 
 class AlpacaDataError(RuntimeError):
@@ -38,11 +40,10 @@ def iex_stock_history(symbol: str, period: str, interval: str, *, max_pages: int
         raise AlpacaDataError("Alpaca data credentials are not configured")
     if type(max_pages) is not int or not 1 <= max_pages <= 5:
         raise AlpacaDataError("Invalid Alpaca history page limit")
-    if os.getenv("ALPACA_DATA_FEED", "iex").lower().strip() != "iex":
-        raise AlpacaDataError("Only the Alpaca IEX feed is supported")
-    url = os.getenv("ALPACA_DATA_URL", "https://data.alpaca.markets").rstrip("/")
-    if url != "https://data.alpaca.markets":
-        raise AlpacaDataError("Unexpected Alpaca market-data endpoint")
+    # This adapter implements IEX market data, regardless of whether the account
+    # keys originated in a paper or live dashboard. Legacy trading-host/feed
+    # variables cannot redirect credentials or silently request SIP entitlement.
+    url = DATA_URL
     symbol = str(symbol).upper().strip()
     if not symbol or not all(ch.isalnum() or ch in ".-" for ch in symbol):
         raise AlpacaDataError("Invalid stock symbol")
@@ -58,7 +59,7 @@ def iex_stock_history(symbol: str, period: str, interval: str, *, max_pages: int
         "timeframe": timeframe,
         "start": start.isoformat(),
         "end": now.isoformat(),
-        "feed": "iex",
+        "feed": DATA_FEED,
         "adjustment": "raw",
         "limit": 10000,
         "sort": "asc",
@@ -76,6 +77,7 @@ def iex_stock_history(symbol: str, period: str, interval: str, *, max_pages: int
                 headers=headers,
                 params=params,
                 timeout=15,
+                allow_redirects=False,
             )
             if response.status_code != 200:
                 status_code = response.status_code if type(response.status_code) is int else None
@@ -131,5 +133,5 @@ def iex_stock_history(symbol: str, period: str, interval: str, *, max_pages: int
     frame.attrs["provider"] = "Alpaca IEX"
     frame.attrs["requested_symbol"] = symbol
     frame.attrs["provider_symbol"] = symbol
-    frame.attrs["feed"] = "iex"
+    frame.attrs["feed"] = DATA_FEED
     return frame
