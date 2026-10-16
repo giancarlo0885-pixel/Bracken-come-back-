@@ -1754,6 +1754,16 @@ def run_worker(market: str) -> None:
     if not _bootstrap_worker_database(label):
         log.info("%s worker stopped before database bootstrap completed.", label)
         return
+    if market == "cash":
+        try:
+            from alpaca_auth_recovery import recover_alpaca_authentication
+
+            recover_alpaca_authentication()
+        except Exception as exc:
+            log.warning(
+                "ALPACA AUTH RECOVERY | status=UNAVAILABLE | reason=%s | execution_impact=NONE",
+                type(exc).__name__,
+            )
     initial = cadence_for(market)
     log.info(
         "Starting %s always-on worker | pulse=%ss fast=%ss deep=%ss session=%s mode=%s",
