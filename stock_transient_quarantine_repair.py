@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any
 
 
@@ -32,6 +33,8 @@ def install_stock_transient_quarantine_repair(worker: Any) -> None:
     quarantine path unchanged.
     """
     original = worker._v39_quarantine_symbol
+    last_logged: dict[tuple[str, str], float] = {}
+    log_interval_seconds = 300.0
     if getattr(original, "_oracle_stock_transient_aware", False):
         return
 
@@ -39,11 +42,17 @@ def install_stock_transient_quarantine_repair(worker: Any) -> None:
         failure = str(failure_type or "").strip()
         provider_name = str(provider or "").strip()
         if provider_name == "market_data" and failure in _TRANSIENT_FAILURES:
-            log.info(
-                "STOCK TRANSIENT DATA COOLDOWN | symbol=%s | failure=%s | invalid_symbol_quarantine=SKIPPED",
-                str(symbol or "").upper().strip(),
-                failure,
-            )
+            normalized_symbol = str(symbol or "").upper().strip()
+            key = (normalized_symbol, failure)
+            now = time.monotonic()
+            previous = last_logged.get(key)
+            if previous is None or now - previous >= log_interval_seconds:
+                log.info(
+                    "STOCK TRANSIENT DATA COOLDOWN | symbol=%s | failure=%s | invalid_symbol_quarantine=SKIPPED | provider_cooldown=UNCHANGED",
+                    normalized_symbol,
+                    failure,
+                )
+                last_logged[key] = now
             return
         original(symbol, provider, failure_type)
 
