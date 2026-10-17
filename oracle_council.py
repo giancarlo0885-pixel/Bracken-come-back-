@@ -2,9 +2,13 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from typing import Any
 
+from setup_attribution import attach_setup_attribution
+
+
 @dataclass
 class CouncilVote:
     specialist: str; score: float; weight: float; reason: str
+
 
 def _v(s:Any,n:str,d=0.0): return s.get(n,d) if isinstance(s,dict) else getattr(s,n,d)
 def _f(v,d=0.0):
@@ -13,6 +17,7 @@ def _f(v,d=0.0):
 def _clip(v,a=0,b=1): return max(a,min(b,v))
 def _norm(v):
     x=_f(v,.5); return _clip(x/100 if x>1 else x)
+
 
 def deliberate(signal: Any, news_headlines: list[str] | None=None) -> dict[str,Any]:
     news_headlines=news_headlines or []
@@ -40,5 +45,23 @@ def deliberate(signal: Any, news_headlines: list[str] | None=None) -> dict[str,A
     if weighted>=.59 and risk>=.43: decision="BUY"
     elif weighted<=.41: decision="SELL"
     else: decision="HOLD"
+
+    # Attribution is observational only. It never changes Council scoring, action,
+    # risk approval, position sizing, or execution policy.
+    setup = attach_setup_attribution(signal)
+
     top=sorted(votes,key=lambda v:v.score*v.weight,reverse=True)[:3]
-    return {"version":"V3","action":decision,"score":round(weighted,4),"score_100":round(weighted*100,2),"confidence":round(confidence,4),"agreement":round(1-dispersion,4),"risk_approval":round(risk,4),"votes":[asdict(v) for v in votes],"explanation":"Oracle Council V3: "+"; ".join(f"{v.specialist} {v.score:.0%}" for v in top)}
+    return {
+        "version":"V3",
+        "action":decision,
+        "score":round(weighted,4),
+        "score_100":round(weighted*100,2),
+        "confidence":round(confidence,4),
+        "agreement":round(1-dispersion,4),
+        "risk_approval":round(risk,4),
+        "setup_tag":setup.tag,
+        "setup_confidence":setup.confidence,
+        "setup_scores":dict(setup.scores),
+        "votes":[asdict(v) for v in votes],
+        "explanation":"Oracle Council V3: "+"; ".join(f"{v.specialist} {v.score:.0%}" for v in top)+f"; setup={setup.tag}",
+    }
