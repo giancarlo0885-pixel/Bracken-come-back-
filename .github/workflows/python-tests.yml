@@ -126,3 +126,4 @@ jobs:
           test_paper_fill_provenance_pg.py
           test_alpaca_auth_recovery_pg.py
           test_kraken_reference_pg.py
+          test_paper_persisted_lineage_audit_pg.py
