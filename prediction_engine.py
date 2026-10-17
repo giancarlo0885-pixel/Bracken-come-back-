@@ -12,7 +12,12 @@ from config import (
     MIN_ACTIONABLE_MOVE_STOCK_PCT,
     REQUIRE_TARGET_FOR_BUY,
 )
-from probability_evidence import probability_metadata
+from probability_evidence import (
+    UNVALIDATED,
+    normalize_legacy_display_score,
+    normalize_probability_value,
+    probability_metadata,
+)
 
 
 def _f(v: Any, default: float = 0.0) -> float:
@@ -231,9 +236,13 @@ def build_decisions(
         payload = _payload(op.get("payload"))
         payload_route = _payload(payload.get("market_data_route"))
         hybrid = _payload(payload.get("hybrid"))
-        confidence = _f(sig.get("confidence"), _f(payload.get("confidence"), score))
-        if confidence <= 1:
-            confidence *= 100
+        raw_confidence = sig.get("confidence")
+        if raw_confidence is None:
+            raw_confidence = payload.get("confidence")
+        if raw_confidence is None:
+            raw_confidence = score
+        scaled_confidence = normalize_legacy_display_score(raw_confidence)
+        confidence = scaled_confidence * 100.0 if scaled_confidence is not None else 0.0
 
         # The signal price is analysis provenance.  When ranking persisted an
         # independently verified execution quote, use that price and timestamp
@@ -246,31 +255,47 @@ def build_decisions(
         low = _f(fc.get("low_price"), _f(payload.get("low_price")))
         high = _f(fc.get("high_price"), _f(payload.get("high_price")))
         raw_probability_up = fc.get("probability_up")
+        invalid_forecast_probability = False
         if raw_probability_up is not None:
-            prob_up = _f(raw_probability_up)
-            if prob_up <= 1:
-                prob_up *= 100
-            probability_info = probability_metadata(
-                field_name="probability_up",
-                value=raw_probability_up,
-                source="prediction_engine.forecast",
-                calibrated=False,
-                model_backed=bool(fc),
-                sample_count=fc.get("validation_sample_count") or 0,
-                model=str(fc.get("model") or ""),
-                model_version=str(fc.get("model_version") or ""),
-                notes="Forecast probability_up is a model estimate unless linked calibration evidence explicitly upgrades it.",
-            )
+            try:
+                verified_probability = normalize_probability_value(raw_probability_up)
+            except ValueError:
+                # Reject malformed model evidence; never substitute signal confidence.
+                invalid_forecast_probability = True
+                prob_up = None
+                probability_info = {
+                    "field_name": "probability_up",
+                    "value": None,
+                    "classification": UNVALIDATED,
+                    "source": "prediction_engine.forecast",
+                    "calibrated": False,
+                    "notes": "Invalid forecast probability: strict 0..1 verification failed.",
+                }
+            else:
+                prob_up = verified_probability * 100.0
+                probability_info = probability_metadata(
+                    field_name="probability_up",
+                    value=verified_probability,
+                    source="prediction_engine.forecast",
+                    calibrated=False,
+                    model_backed=bool(fc),
+                    sample_count=fc.get("validation_sample_count") or 0,
+                    model=str(fc.get("model") or ""),
+                    model_version=str(fc.get("model_version") or ""),
+                    notes="Model estimate only; calibration requires independently verified evidence.",
+                )
         else:
             prob_up = None
-            probability_info = probability_metadata(
-                field_name="confidence",
-                value=confidence,
-                source="prediction_engine.signal_confidence",
-                calibrated=False,
-                model_backed=False,
-                sample_count=0,
-                notes="No forecast probability_up was supplied; signal confidence remains a heuristic score.",
+            probability_info = (
+                probability_metadata(
+                    field_name="confidence",
+                    value=scaled_confidence,
+                    source="prediction_engine.signal_confidence",
+                    calibrated=False,
+                    model_backed=False,
+                    notes="No forecast probability supplied; confidence is a heuristic score only.",
+                )
+                if scaled_confidence is not None else {}
             )
         expected = ((target / price) - 1) * 100 if _positive(price) and _positive(target) else _f(payload.get("expected_return"))
         requested_action = normalize_action(sig.get("action") or payload.get("action"), score)
@@ -286,6 +311,10 @@ def build_decisions(
             forecast_time=forecast_time,
             reference_time=as_of,
         )
+        if invalid_forecast_probability and requested_action == "BUY":
+            action = "WAIT"
+            trade_eligible = False
+            data_status = "Invalid forecast probability; waiting for verified model evidence"
         details = _payload(sig.get("details"))
         reason = str(payload.get("reason") or details.get("reason") or sig.get("details") or "Ranked by the Oracle's combined market evidence.")
         reason = reason[:280]

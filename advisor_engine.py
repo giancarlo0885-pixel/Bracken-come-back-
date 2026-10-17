@@ -15,7 +15,7 @@ from oracle_decision_identity import (
     build_oracle_judgment,
     guard_oracle_action,
 )
-from probability_evidence import probability_metadata
+from probability_evidence import normalize_legacy_display_score, probability_metadata
 from portfolio_optimizer import PortfolioConstraints, portfolio_fit_score
 from provider_router import normalize_symbol
 from strategy_engine import StrategySignal, ensemble_score, evaluate_strategies
@@ -171,12 +171,20 @@ def generate_recommendation(
     )
     ensemble = ensemble_score(strategies, portfolio_fit=fit, data_quality=data_quality)
     opportunity = max(0.0, min(100.0, float(candidate.get("opportunity_score") or ensemble["expected_return"])))
-    confidence = max(0.0, min(100.0, float(candidate.get("confidence") or ensemble["overall_confidence"])))
+    raw_confidence = candidate.get("confidence")
+    if raw_confidence is None:
+        raw_confidence = ensemble["overall_confidence"]
+    normalized_confidence = normalize_legacy_display_score(raw_confidence)
+    # Preserve the advisor's existing 0..100 decision scale. Metadata alone
+    # uses normalized display scoring; it must not increase trade confidence.
+    confidence = float(raw_confidence) if normalized_confidence is not None else 0.0
     expected_return = float(candidate.get("expected_return") or candidate.get("expected_move_pct") or 0.0)
     downside = abs(float(candidate.get("expected_downside") or candidate.get("volatility") or 0.0))
     risk_reward = expected_return / downside if downside > 0 else 0.0
     restricted = symbol in {normalize_symbol(item) for item in profile.restricted_assets}
     missing = list(quote_missing)
+    if normalized_confidence is None:
+        missing.append("confidence evidence is invalid or unavailable")
     if data_quality < 50:
         missing.append("data quality is low")
     liquidity_available = bool(
@@ -286,16 +294,19 @@ def generate_recommendation(
         relative_rank=candidate.get("relative_rank"),
         alternatives_count=candidate.get("alternatives_count"),
     )
-    probability_info = probability_metadata(
-        field_name="confidence",
-        value=confidence,
-        source="advisor_engine.generate_recommendation",
-        calibrated=False,
-        model_backed=approved_forecast,
-        sample_count=_nonnegative_int(candidate.get("validation_sample_count")),
-        model=str(candidate.get("model") or ""),
-        model_version=str(candidate.get("model_version") or ""),
-        notes="Advisor confidence is a heuristic confidence score unless a separate calibrated probability field is supplied.",
+    probability_info = (
+        probability_metadata(
+            field_name="confidence",
+            value=normalized_confidence,
+            source="advisor_engine.generate_recommendation",
+            calibrated=False,
+            model_backed=False,
+            sample_count=_nonnegative_int(candidate.get("validation_sample_count")),
+            model=str(candidate.get("model") or ""),
+            model_version=str(candidate.get("model_version") or ""),
+            notes="Heuristic display confidence only; not a calibrated probability or Kelly input.",
+        )
+        if normalized_confidence is not None else {}
     )
     return AdvisorRecommendation(
         recommendation_id=rec_id,
