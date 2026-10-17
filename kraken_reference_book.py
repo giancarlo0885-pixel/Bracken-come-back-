@@ -118,7 +118,7 @@ class ReferenceBooks:
                 raise BookIntegrityError("invalid_book_message")
             for item in data:
                 self._apply(item, kind, received)
-        except (ValueError, KeyError, TypeError, AttributeError, OverflowError) as exc:
+        except (ValueError, KeyError, IndexError, TypeError, AttributeError, OverflowError) as exc:
             reason = str(exc) if isinstance(exc, BookIntegrityError) else "malformed_message"
             self.counts[reason] += 1
             self.invalidate(reason)

@@ -12,7 +12,7 @@ import time
 import websocket
 
 from kraken_reference_book import (BookIntegrityError, ReferenceBooks, SYMBOLS, SOURCE,
-                                   MAX_AGE, compare_reference, fresh, timestamp)
+                                   MAX_AGE, MAX_ALIGNMENT, compare_reference, fresh, timestamp)
 
 log = logging.getLogger("kraken-reference")
 URL = "wss://ws.kraken.com/v2"
@@ -42,6 +42,24 @@ def write_state(conn, payload, now):
         SET updated_at=EXCLUDED.updated_at,payload=EXCLUDED.payload""", (now, json.dumps(payload)))
 
 
+def comparison_current(symbol, comparison, quote, now):
+    try:
+        if not 0 <= (now - timestamp(comparison["checked_at"])).total_seconds() <= MAX_AGE:
+            return False
+        if comparison.get("status") != "ALIGNED_VENUE_COMPARISON":
+            return True  # Unavailability/invalid-book diagnostics contain no divergence.
+        primary_time = timestamp(comparison["primary_timestamp"])
+        reference_time = timestamp(comparison["reference_timestamp"])
+        return (comparison.get("symbol") == symbol
+                and comparison.get("reference_provider") == SOURCE
+                and reference_time == timestamp(quote["quote_timestamp"])
+                and -2 <= (now - primary_time).total_seconds() <= MAX_AGE
+                and -2 <= (now - reference_time).total_seconds() <= MAX_AGE
+                and abs((reference_time - primary_time).total_seconds()) <= MAX_ALIGNMENT)
+    except (ValueError, TypeError, KeyError, AttributeError):
+        return False
+
+
 def display_state(payload, published_at, now):
     """Revalidate at read time. A dead publisher or old book is never live."""
     result = json.loads(json.dumps(payload))
@@ -69,7 +87,7 @@ def display_state(payload, published_at, now):
             result["status"] = "STALE_OR_AWAITING_SNAPSHOT"
         result["comparisons"] = {
             s: v for s, v in result.get("comparisons", {}).items()
-            if s in result["quotes"] and 0 <= (now - timestamp(v["checked_at"])).total_seconds() <= MAX_AGE
+            if s in result["quotes"] and comparison_current(s, v, result["quotes"][s], now)
         }
     except (ValueError, TypeError, KeyError):
         result.update(status="PUBLISHER_STALE", connected=False, quotes={}, comparisons={})

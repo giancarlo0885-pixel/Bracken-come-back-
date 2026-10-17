@@ -200,3 +200,41 @@ def test_bounded_jitter_and_backoff():
     assert reconnect_delay(1, lambda a,b: a) == 8
     for attempt in (2, 10, 100000):
         assert 5 <= reconnect_delay(attempt) <= 60
+
+
+def test_reader_expires_comparison_using_both_original_quote_timestamps():
+    state = ready()
+    payload = state.health(NOW)
+    comparison = compare_reference(payload['quotes']['BTC-USD'], primary(
+        quote_timestamp=(NOW-timedelta(seconds=2)).isoformat()), NOW)
+    assert comparison['status'] == 'ALIGNED_VENUE_COMPARISON'
+    payload['comparisons'] = {'BTC-USD': {**comparison, 'checked_at': NOW.isoformat()}}
+    assert 'BTC-USD' in display_state(payload, NOW, NOW)['comparisons']
+    # Nine seconds later Kraken is still fresh, but the primary quote is 11s old.
+    later = NOW+timedelta(seconds=9)
+    displayed = display_state(payload, NOW, later)
+    assert 'BTC-USD' in displayed['quotes']
+    assert 'BTC-USD' not in displayed['comparisons']
+
+
+def test_malformed_status_invalidates_existing_book():
+    state = ready()
+    with pytest.raises(BookIntegrityError, match='malformed_message'):
+        state.ingest('{"channel":"status","data":[]}', NOW)
+    assert not state.books and not state.connected
+
+
+@pytest.mark.parametrize('changes', [
+    {'primary_timestamp': 'invalid'},
+    {'primary_timestamp': (NOW+timedelta(seconds=3)).isoformat()},
+    {'reference_timestamp': (NOW-timedelta(seconds=1)).isoformat()},
+    {'symbol': 'ETH-USD'},
+    {'reference_provider': 'different venue'},
+])
+def test_reader_discards_malformed_or_mismatched_comparison_without_dropping_quote(changes):
+    payload = ready().health(NOW)
+    comparison = compare_reference(payload['quotes']['BTC-USD'], primary(), NOW)
+    payload['comparisons'] = {'BTC-USD': {**comparison, 'checked_at': NOW.isoformat(), **changes}}
+    displayed = display_state(payload, NOW, NOW)
+    assert 'BTC-USD' in displayed['quotes']
+    assert not displayed['comparisons']

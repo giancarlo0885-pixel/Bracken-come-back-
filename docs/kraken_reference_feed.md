@@ -76,8 +76,11 @@ unavailable; Kraken's health is evaluated independently.
 `KRAKEN REFERENCE HEALTH` structured logs (30-second cadence) and the dashboard's
 existing DATA STATUS details show connection state, last valid updates, reconnects,
 checksum failures, stale/crossed rejection counts, current references and comparisons.
-The reader rechecks publisher age and both quote timestamps. Old data is removed
-from current quotes and labeled stale/unavailable; last-valid timestamps remain
+The reader rechecks publisher age and both quote timestamps. Comparisons are removed
+when either original venue timestamp expires, even if the
+comparison was published recently. Comparison identity must match its current
+Kraken reference; malformed comparisons are omitted without hiding valid quotes.
+Expired current quotes are removed and labeled stale/unavailable; last-valid timestamps remain
 historical diagnostics. Five-second publication means displayed references can
 expire between publications. No cached value is represented as live after expiry.
 

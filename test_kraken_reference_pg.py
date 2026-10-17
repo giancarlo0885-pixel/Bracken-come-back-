@@ -68,3 +68,22 @@ def test_singleton_constraint_prevents_tick_history_growth(pg):
     with pg() as conn:
         with pytest.raises(psycopg.errors.CheckViolation):
             conn.execute("INSERT INTO kraken_reference_state VALUES (2,%s,'{}')", (NOW,))
+
+
+def test_reader_expires_persisted_primary_comparison_without_changing_evidence(pg):
+    from kraken_reference_book import compare_reference
+    from test_kraken_reference_book import primary
+    payload = ready().health(NOW)
+    comparison = compare_reference(payload['quotes']['BTC-USD'], primary(
+        quote_timestamp=(NOW-timedelta(seconds=2)).isoformat()), NOW)
+    payload['comparisons'] = {'BTC-USD': {**comparison, 'checked_at': NOW.isoformat()}}
+    with pg() as conn:
+        write_state(conn, payload, NOW)
+    with pg() as reader:
+        reader.execute('BEGIN READ ONLY')
+        row = reader.execute('SELECT * FROM kraken_reference_state').fetchone()
+        displayed = display_state(row['payload'], row['updated_at'], NOW+timedelta(seconds=9))
+        assert 'BTC-USD' in displayed['quotes']
+        assert not displayed['comparisons']
+        assert row['payload']['comparisons'] == payload['comparisons']
+        reader.execute('ROLLBACK')
