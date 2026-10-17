@@ -5,6 +5,12 @@ import math
 from typing import Any
 
 
+def is_shadow_reference(payload: dict[str, Any]) -> bool:
+    return (payload.get("reference_only") is True
+            or any(str(payload.get(key) or "").strip().lower() == "kraken websocket v2 reference"
+                   for key in ("provider", "source")))
+
+
 def is_paper_reference(payload: dict[str, Any]) -> bool:
     return bool(
         payload.get("paper_reference_verified") is True
@@ -14,6 +20,8 @@ def is_paper_reference(payload: dict[str, Any]) -> bool:
 
 def provider_verified(payload: dict[str, Any]) -> bool:
     """Explicit negative provenance overrides the legacy eligibility alias."""
+    if is_shadow_reference(payload):
+        return False
     if is_paper_reference(payload):
         return False
     if "provider_quote_verified" in payload:
@@ -23,6 +31,8 @@ def provider_verified(payload: dict[str, Any]) -> bool:
 
 def reference_allowed_in_mode(payload: dict[str, Any], mode: str, paper_enabled: bool) -> bool:
     """A paper mark cannot cross into a broker/live execution context."""
+    if is_shadow_reference(payload):
+        return False
     paper_context = str(mode or "").strip().lower() == "paper" and paper_enabled is True
     paper_eligible = (payload.get("paper_reference_verified") is True
                       if "paper_reference_verified" in payload else is_paper_reference(payload))
