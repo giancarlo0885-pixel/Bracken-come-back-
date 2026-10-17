@@ -682,6 +682,38 @@ except Exception as exc:
             st.rerun()
         st.stop()
     raise
+# Select lightweight visualization pages before dashboard-wide data collection.
+# Their snapshot builders use bounded read-only queries; they do not require
+# the full opportunity/forecast/portfolio decision pipeline on every rerun.
+ORACLE_NAV_PAGES = [
+    "Dashboard", "Oracle City", "Oracle Brain", "Market Focus", "Crypto",
+    "Markets", "Portfolios", "Oracle", "Intelligence", "Professional",
+]
+with st.sidebar:
+    st.markdown("## GARIBALDI ORACLE")
+    st.caption("The AI Chief Investment Officer")
+    page = st.radio("Main navigation", ORACLE_NAV_PAGES, label_visibility="collapsed")
+
+if page == "Oracle City":
+    from oracle_city_component import render_oracle_city_component
+    from oracle_city_model import build_oracle_city_snapshot
+
+    st.subheader("Oracle City — Cinematic Metropolis")
+    city_snapshot = build_oracle_city_snapshot(rows)
+    if city_snapshot.get("warnings"):
+        st.warning("Partial Oracle City feeds: " + "; ".join(city_snapshot["warnings"]))
+    st.iframe(render_oracle_city_component(city_snapshot), height=980)
+    st.stop()
+
+if page == "Oracle Brain":
+    from oracle_brain import build_oracle_brain_snapshot
+    from oracle_brain_component import render_oracle_brain_component
+
+    st.subheader("Oracle Brain — Living Learning Map")
+    brain_snapshot = build_oracle_brain_snapshot(rows)
+    st.iframe(render_oracle_brain_component(brain_snapshot), height=610)
+    st.stop()
+
 stock_portfolio, stock_positions, stock_metrics = get_portfolio("cash")
 crypto_portfolio, crypto_positions, crypto_metrics = get_portfolio("crypto")
 all_positions = stock_positions + crypto_positions
@@ -724,13 +756,6 @@ waiting_for_data = decision_buckets["waiting"]
 professional_decisions = professional_decision_views(decisions, all_positions)
 
 with st.sidebar:
-    st.markdown("## GARIBALDI ORACLE")
-    st.caption("The AI Chief Investment Officer")
-    page = st.radio(
-        "Main navigation",
-        ["Dashboard", "Oracle City", "Oracle Brain", "Market Focus", "Crypto", "Markets", "Portfolios", "Oracle", "Intelligence", "Professional"],
-        label_visibility="collapsed",
-    )
     st.divider()
     st.caption("Live worker status")
     for market in ("cash", "crypto"):
@@ -801,25 +826,7 @@ if show_advanced_chrome:
     )
     status_cols[3].metric("Auto recovery", "Ready" if error_total == 0 else "Recovering", f"Cycle errors: {error_total}")
 
-if page == "Oracle City":
-    from oracle_city_component import render_oracle_city_component
-    from oracle_city_model import build_oracle_city_snapshot
-
-    st.subheader("Oracle City — Cinematic Metropolis")
-    city_snapshot = build_oracle_city_snapshot(rows)
-    if city_snapshot.get("warnings"):
-        st.warning("Partial Oracle City feeds: " + "; ".join(city_snapshot["warnings"]))
-    st.iframe(render_oracle_city_component(city_snapshot), height=980)
-
-elif page == "Oracle Brain":
-    from oracle_brain import build_oracle_brain_snapshot
-    from oracle_brain_component import render_oracle_brain_component
-
-    st.subheader("Oracle Brain — Living Learning Map")
-    brain_snapshot = build_oracle_brain_snapshot(rows)
-    st.iframe(render_oracle_brain_component(brain_snapshot), height=610)
-
-elif page == "Market Focus":
+if page == "Market Focus":
     render_global_pit_section()
 
 elif page == "Crypto":

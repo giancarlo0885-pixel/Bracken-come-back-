@@ -26,10 +26,35 @@ def _finite(value: Any, default: float = 0.0) -> float:
 
 
 def normalize_probability_value(value: Any) -> float:
-    number = _finite(value)
+    """Verify a true 0..1 probability; never coerce percentages or missing evidence."""
+    if value is None:
+        raise ValueError("Probability evidence cannot be None.")
+    if isinstance(value, bool):
+        raise ValueError("Invalid numeric format for probability: boolean")
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("Invalid numeric format for probability") from exc
+    if not math.isfinite(number):
+        raise ValueError("Probability cannot be an infinite value or NaN")
+    if not 0.0 <= number <= 1.0:
+        raise ValueError("Probability out of strict bounds [0.0, 1.0]")
+    return number
+
+
+def normalize_legacy_display_score(value: Any) -> float | None:
+    """Compatibility-only heuristic score, never a calibrated forecast or Kelly input."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not math.isfinite(number) or number < 0.0 or number > 100.0:
+        return None
     if number > 1.0:
         number /= 100.0
-    return max(0.0, min(1.0, number))
+    return number
 
 
 def classify_probability_field(name: str, *, calibrated: bool = False, model_backed: bool = False) -> str:
@@ -46,7 +71,7 @@ def classify_probability_field(name: str, *, calibrated: bool = False, model_bac
 @dataclass(frozen=True)
 class ProbabilityEvidence:
     field_name: str
-    value: float
+    value: float | None
     classification: str
     source: str
     calibrated: bool
@@ -76,9 +101,17 @@ def probability_metadata(
         calibrated=calibrated,
         model_backed=model_backed,
     )
+    # A heuristic is never a probability. Unknown fields cannot silently
+    # acquire a normalized value or a calibrated classification.
+    if classification == HEURISTIC_SCORE:
+        normalized = normalize_legacy_display_score(value)
+    elif classification in {CALIBRATED_PROBABILITY, MODEL_ESTIMATE}:
+        normalized = normalize_probability_value(value)
+    else:
+        normalized = None
     evidence = ProbabilityEvidence(
         field_name=field_name,
-        value=normalize_probability_value(value),
+        value=normalized,
         classification=classification,
         source=source,
         calibrated=bool(calibrated and classification == CALIBRATED_PROBABILITY),
