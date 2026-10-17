@@ -5,7 +5,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import logging
 import math
-from typing import Iterable
+from threading import Lock
+from typing import Any, Iterable
 
 import pandas as pd
 import yfinance as yf
@@ -21,9 +22,10 @@ from config import (
 )
 from provider_router import normalize_symbol, route_history, verify_frame_symbol
 from market_sessions import latest_valid_bar_timestamp, quote_is_fresh
-from quote_provenance import provider_verified, reference_allowed_in_mode
+from quote_provenance import provider_verified, quote_quality_rejection_reason, reference_allowed_in_mode
 
 log = logging.getLogger("market-data")
+_STOCK_HISTORY_DIAGNOSTIC_LOCK = Lock()
 
 
 @dataclass
@@ -52,9 +54,10 @@ class MarketSnapshot:
     provider_quote_verified: bool = False
     paper_reference_verified: bool = False
     verification_basis: str | None = None
+    execution_quote_eligible: bool | None = None
 
     def to_quote_payload(self) -> dict[str, object]:
-        return {
+        payload = {
             "symbol": self.symbol,
             "requested_symbol": self.requested_symbol,
             "provider_symbol": self.provider_symbol,
@@ -72,7 +75,7 @@ class MarketSnapshot:
                 "provider_quote_verified": self.provider_quote_verified,
                 "paper_reference_verified": self.paper_reference_verified,
             }),
-            "execution_quote_eligible": self.quote_verified is True and self.stale is False,
+            "execution_quote_eligible": self.quote_verified is True and self.stale is False and self.execution_quote_eligible is not False,
             "stale": self.stale,
             "spread_pct": self.spread_pct,
             "source_capability": self.source_capability,
@@ -85,6 +88,10 @@ class MarketSnapshot:
             "paper_reference_verified": self.paper_reference_verified,
             "verification_basis": self.verification_basis,
         }
+        if (not reference_allowed_in_mode(payload, EXECUTION_MODE, PAPER_BROKER_MODE)
+                or quote_quality_rejection_reason(payload) is not None):
+            payload["execution_quote_eligible"] = False
+        return payload
 
 
 def _select_multiindex_symbol(frame: pd.DataFrame, symbol: str) -> pd.DataFrame:
@@ -265,10 +272,95 @@ def _download_yahoo(symbol: str, period: str, interval: str) -> pd.DataFrame:
     return yahoo_reference_history(sys.modules[__name__], symbol, period, interval)
 
 
+def _log_stock_history_provider_diagnostics(symbol: str, period: str, interval: str, history: Any) -> None:
+    """Bounded, non-secret provider outcomes for missing or fallback stock history.
+
+    Only allowlisted providers/statuses and typed HTTP codes are logged. Never
+    log provider errors, URLs, tokens, request headers, or credentials.
+    """
+    import time
+
+    attrs = getattr(history, "attrs", {})
+    route = attrs.get("provider_route") if isinstance(attrs, dict) else None
+    if not isinstance(route, dict):
+        return
+    attempts = route.get("attempts")
+    if not isinstance(attempts, (list, tuple)) or not attempts:
+        return
+    safe_symbol = normalize_symbol(symbol) if isinstance(symbol, str) else ""
+    if not 1 <= len(safe_symbol) <= 20 or any(char not in "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-" for char in safe_symbol):
+        safe_symbol = "other"
+    allowed_periods = {"1d", "5d", "1mo", "3mo", "6mo", "1y", "2y", "5y", "10y", "ytd", "max"}
+    allowed_intervals = {"1m", "2m", "5m", "15m", "30m", "60m", "90m", "1h", "1d", "5d", "1wk", "1mo", "3mo"}
+    safe_period = period if isinstance(period, str) and period in allowed_periods else "other"
+    safe_interval = interval if isinstance(interval, str) and interval in allowed_intervals else "other"
+    statuses = []
+    allowed_providers = {"Alpaca IEX", "Polygon", "Finnhub", "EODHD", "Alpha Vantage", "Yahoo Finance", "all", "scope"}
+    selected = route.get("provider")
+    selected_provider = selected if isinstance(selected, str) and selected in allowed_providers else "other"
+    for attempt in attempts[:12]:
+        if not isinstance(attempt, dict):
+            continue
+        provider = str(attempt.get("provider") or "")
+        status = str(attempt.get("status") or "")
+        allowed_statuses = {
+            "healthy", "not_configured", "provider_budget_unknown",
+            "provider_budget_blocked", "provider_shared_cooldown",
+            "provider_cooldown", "symbol_capability_cooldown",
+            "capability_cooldown_or_unsupported", "symbol_cooldown",
+            "symbol_mismatch_or_no_data", "scope_rejected",
+            "rate_limited", "payment_required", "plan_limited",
+            "capability_plan_limited", "degraded", "strict_research_fallback",
+            "request_cooldown", "authentication_failed", "access_denied", "http_not_found",
+            "http_error", "timeout", "outage", "transport_error", "unsupported", "no_data",
+            "symbol_mismatch", "malformed_response",
+        }
+        outcome = (
+            (provider if provider in allowed_providers else "other")
+            + ":" + (status if status in allowed_statuses else "other")
+        )
+        http_status = attempt.get("http_status")
+        if type(http_status) is int and 100 <= http_status <= 599:
+            outcome += f"(http={http_status})"
+        statuses.append(outcome)
+    if not statuses:
+        return
+    key = (safe_symbol, safe_period, safe_interval, selected_provider, tuple(statuses))
+    now = time.monotonic()
+    with _STOCK_HISTORY_DIAGNOSTIC_LOCK:
+        if not hasattr(_log_stock_history_provider_diagnostics, "_last_logged"):
+            _log_stock_history_provider_diagnostics._last_logged = {}
+        last_logged = _log_stock_history_provider_diagnostics._last_logged
+        for old_key, when in list(last_logged.items()):
+            if now - when >= 300:
+                del last_logged[old_key]
+        if key in last_logged or len(last_logged) >= 512:
+            return
+        last_logged[key] = now
+    log.warning(
+        "STOCK HISTORY PROVIDER DIAGNOSTIC | symbol=%s | period=%s | interval=%s | selected_provider=%s | outcomes=%s | execution_authority=NONE",
+        safe_symbol, safe_period, safe_interval, selected_provider, ",".join(statuses),
+    )
+
+
 def get_history(symbol: str, period: str = "1y", interval: str = "1d") -> pd.DataFrame:
     routed = route_history(symbol, period, interval, _download_yahoo)
     frame = routed.frame.copy(deep=True)
     route_metadata = routed.metadata()
+    previous_route = dict(frame.attrs.get("provider_route") or {})
+    # Rebuilding routing diagnostics must not erase provider quality vetoes or
+    # turn an invalid measured book into an apparently valid book-free mark.
+    book_source = frame.attrs if any(key in frame.attrs for key in ("bid", "ask")) else previous_route
+    for key in ("bid", "ask", "spread_pct"):
+        if key in book_source:
+            route_metadata[key] = book_source[key]
+    if frame.attrs.get("stale") is True or previous_route.get("stale") is True:
+        route_metadata["stale"] = True
+    if (frame.attrs.get("execution_quote_eligible") is False
+            or previous_route.get("execution_quote_eligible") is False):
+        route_metadata["execution_quote_eligible"] = False
+    if not route_metadata.get("quote_timestamp") and previous_route.get("quote_timestamp"):
+        route_metadata["quote_timestamp"] = previous_route["quote_timestamp"]
     latest_close = finite_scalar(_column(frame, "Close")) if "Close" in frame.columns else None
     provider_is_verified = provider_verified({**frame.attrs, "provider": routed.provider})
     route_metadata.update(
@@ -290,8 +382,13 @@ def get_history(symbol: str, period: str = "1y", interval: str = "1d") -> pd.Dat
         }
     )
     quote_time = latest_bar_timestamp(frame, interval, symbol=symbol)
-    if quote_time is not None and not route_metadata.get("quote_timestamp"):
-        route_metadata["quote_timestamp"] = quote_time.isoformat()
+    if quote_time is not None:
+        # Bar-close time is analytical provenance, not necessarily a live quote.
+        # Preserve a genuine provider timestamp, but never synthesize one from
+        # daily candles (whose session boundary may be 23:59 UTC).
+        route_metadata["latest_bar_timestamp"] = quote_time.isoformat()
+        if _is_intraday_interval(interval) and not route_metadata.get("quote_timestamp"):
+            route_metadata["quote_timestamp"] = quote_time.isoformat()
 
     if _paper_market_reference_eligible(
         symbol=symbol,
@@ -322,6 +419,22 @@ def get_history(symbol: str, period: str = "1y", interval: str = "1d") -> pd.Dat
         frame.attrs["verification_basis"] = route_metadata["verification_basis"]
 
     frame.attrs["provider_route"] = route_metadata
+    try:
+        if (
+            not frame.empty
+            and route_metadata.get("provider") == "Yahoo Finance"
+            and infer_asset_class(symbol) in {"stock", "etf"}
+            and any(
+                isinstance(attempt, dict)
+                and attempt.get("provider") != "Yahoo Finance"
+                and attempt.get("ok") is False
+                for attempt in route_metadata.get("attempts", [])
+            )
+        ):
+            _log_stock_history_provider_diagnostics(symbol, period, interval, frame)
+    except Exception:
+        # Observability must not change history or quote availability.
+        pass
     return frame
 
 
@@ -345,8 +458,14 @@ def _snapshot_from_history(symbol: str, history: pd.DataFrame, interval: str) ->
         return None
     if "Close" not in history.columns:
         return None
+    raw_closes = history["Close"]
+    if isinstance(raw_closes, pd.DataFrame):
+        raw_closes = raw_closes.iloc[:, 0] if len(raw_closes.columns) == 1 else raw_closes.iloc[:, -1]
+    if raw_closes.empty or pd.api.types.is_bool(raw_closes.iloc[-1]):
+        return None
     closes = _column(history, "Close")
-    price = finite_scalar(closes)
+    # A previous finite close must not acquire the latest bar's timestamp.
+    price = finite_scalar(closes.iloc[-1])
     if price is None:
         return None
     valid_closes = closes[closes.map(lambda item: item is not None and math.isfinite(float(item)) if pd.notna(item) else False)]
@@ -388,7 +507,7 @@ def _snapshot_from_history(symbol: str, history: pd.DataFrame, interval: str) ->
         provider_symbol=provider_symbol,
         provider_native_symbol=provider_native_symbol,
         quote_verified=verified,
-        stale=not fresh,
+        stale=not fresh or route.get("stale") is True,
         spread_pct=finite_scalar(route.get("spread_pct")),
         source_capability=str(route.get("source_capability") or route.get("capability") or ("history_intraday" if interval not in {"1d", "daily"} else "history_daily")),
         correlation_id=str(route.get("correlation_id") or route.get("decision_correlation_id") or ""),
@@ -398,6 +517,7 @@ def _snapshot_from_history(symbol: str, history: pd.DataFrame, interval: str) ->
         provider_quote_verified=route.get("provider_quote_verified") is True,
         paper_reference_verified=route.get("paper_reference_verified") is True,
         verification_basis=str(route.get("verification_basis") or ""),
+        execution_quote_eligible=False if quote_quality_rejection_reason(route) is not None else None,
     )
 
 
@@ -444,14 +564,15 @@ def _alpha_vantage_delayed_snapshot(symbol: str) -> MarketSnapshot | None:
 
 
 def get_live_snapshot(symbol: str) -> MarketSnapshot | None:
-    """Return the freshest verified quote available, with a safe research fallback.
+    """Prefer provider-verified data, retaining eligible paper references.
 
-    A provider route may legitimately return an unverified research-only snapshot
-    (for example Yahoo Finance). Do not let that result short-circuit later
-    intervals that can still produce a verified execution-grade quote.
+    A Yahoo paper mark can remain eligible for simulation while later intervals
+    are checked for data verified by a provider. Research-only snapshots remain
+    available to callers that enforce their own eligibility checks.
     """
     attempts = (("1d", "1m"), ("5d", "5m"), ("1mo", "1h"), ("5d", "1d"))
     research_fallback: MarketSnapshot | None = None
+    paper_fallback: MarketSnapshot | None = None
     for period, interval in attempts:
         try:
             history = get_history(symbol, period, interval)
@@ -461,7 +582,10 @@ def get_live_snapshot(symbol: str) -> MarketSnapshot | None:
         if snapshot is None:
             continue
         if snapshot_is_verified(snapshot, symbol):
-            return snapshot
+            if provider_verified(snapshot.to_quote_payload()):
+                return snapshot
+            if paper_fallback is None:
+                paper_fallback = snapshot
         if research_fallback is None:
             research_fallback = snapshot
 
@@ -469,6 +593,8 @@ def get_live_snapshot(symbol: str) -> MarketSnapshot | None:
     # still enforce snapshot_is_verified() in get_many_snapshots, so this does
     # not weaken identity/freshness gates. Alpha's delayed quote is only used
     # when every history route failed to produce a snapshot at all.
+    if paper_fallback is not None:
+        return paper_fallback
     if research_fallback is not None:
         return research_fallback
     try:
@@ -494,7 +620,10 @@ def snapshot_is_verified(snapshot: MarketSnapshot | None, symbol: str) -> bool:
         return False
     if snapshot.quote_verified is not True:
         return False
-    if not reference_allowed_in_mode(snapshot.to_quote_payload(), EXECUTION_MODE, PAPER_BROKER_MODE):
+    payload = snapshot.to_quote_payload()
+    if not reference_allowed_in_mode(payload, EXECUTION_MODE, PAPER_BROKER_MODE):
+        return False
+    if quote_quality_rejection_reason(payload) is not None:
         return False
     price = finite_scalar(snapshot.price)
     if price is None or price <= 0:

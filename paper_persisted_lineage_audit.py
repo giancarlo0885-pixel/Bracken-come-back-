@@ -21,7 +21,8 @@ def summarize_persisted_lineage(conn: Any, *, market: str = "crypto") -> dict:
         """SELECT COUNT(*)::bigint AS total,
                   COUNT(*) FILTER (WHERE canonical_trade_id IS NOT NULL)::bigint AS linked,
                   COUNT(*) FILTER (WHERE canonical_trade_id IS NULL)::bigint AS isolated,
-                  COUNT(*) FILTER (WHERE fee_amount IS NULL OR fee_amount < 0)::bigint AS invalid_fee
+                  COUNT(*) FILTER (WHERE fee_amount IS NULL OR fee_amount < 0
+                    OR fee_amount >= 'Infinity'::double precision)::bigint AS invalid_fee
            FROM paper_fills WHERE market=%s""", (market,)
     ).fetchone()
     # These replay snapshots are created retrospectively from historical
@@ -39,6 +40,9 @@ def summarize_persisted_lineage(conn: Any, *, market: str = "crypto") -> dict:
     return {
         "market": market,
         "paper_fills": dict(fills),
+        "verification_scope": "aggregate_counts_only",
+        "fill_link_scope": "recorded_canonical_trade_id_only",
+        "brain_episode_scope": "persisted_provenance_labels_only",
         "exact_brain_episodes": int(exact["total"]),
         "retrospective_decision_replays": int(replays["total"]),
         "verified_decision_consumption": "UNAVAILABLE",

@@ -18,6 +18,9 @@ def test_persisted_audit_is_read_only_and_replays_are_not_consumption():
     assert result["retrospective_decision_replays"] == 9
     assert result["verified_decision_consumption"] == "UNAVAILABLE"
     assert result["execution_impact"] == "NONE"
+    assert result["verification_scope"] == "aggregate_counts_only"
+    assert result["fill_link_scope"] == "recorded_canonical_trade_id_only"
+    assert result["brain_episode_scope"] == "persisted_provenance_labels_only"
     sql = [call.args[0].strip().upper() for call in conn.execute.call_args_list]
     assert all(statement.startswith(("SELECT", "SET")) for statement in sql)
     assert all(not statement.startswith(("INSERT", "UPDATE", "DELETE")) for statement in sql)

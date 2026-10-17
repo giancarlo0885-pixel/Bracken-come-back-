@@ -21,7 +21,7 @@ log = logging.getLogger("paper-aeve-generation-controller")
 _THREAD: threading.Thread | None = None
 _STOP = threading.Event()
 BATCH_SIZE = 1000
-PROVENANCE_VERSION = 7
+PROVENANCE_VERSION = 8
 _REQUIRED_RESEARCH_RELATIONS = ("paper_aeve_generation_outcomes",)
 
 
@@ -264,7 +264,7 @@ def ensure_schema() -> None:
         conn.execute(
             """INSERT INTO paper_aeve_provenance_epochs(
                    provenance_version,input_schema,cost_semantics
-               ) VALUES (%s,'dip_depth_rebound_net_edge_entry_cost_v7','pre_entry_estimate_scoring_exact_lot_outcomes')
+               ) VALUES (%s,'dip_depth_rebound_net_edge_entry_cost_crypto_v8','pre_entry_estimate_scoring_exact_lot_outcomes_crypto_only')
                ON CONFLICT (provenance_version) DO NOTHING""",
             (PROVENANCE_VERSION,),
         )
@@ -370,7 +370,7 @@ def record_generation_outcomes(limit: int = 250) -> int:
         if provenance_started_at is None:
             return 0
         log.info(
-            "AEVE EVALUATOR HANDSHAKE | generation=%s | config_hash=%s | provenance_version=%s | input_schema=dip_depth_rebound_net_edge_entry_cost_v7 | config=%s | mode=shadow | execution_impact=NONE | broker_submission=NONE | live_trading=DISARMED",
+            "AEVE EVALUATOR HANDSHAKE | generation=%s | config_hash=%s | provenance_version=%s | input_schema=dip_depth_rebound_net_edge_entry_cost_crypto_v8 | market=crypto | config=%s | mode=shadow | execution_impact=NONE | broker_submission=NONE | live_trading=DISARMED",
             active_cfg.generation,
             active_generation_row.get("config_hash"),
             PROVENANCE_VERSION,
@@ -384,7 +384,7 @@ def record_generation_outcomes(limit: int = 250) -> int:
                    g.generation AS aeve_generation,g.config_json AS aeve_config_json,
                    g.config_hash AS aeve_config_hash
             FROM paper_regime_trade_metrics m
-            JOIN trade_ledger l ON l.trade_id=m.trade_id
+            JOIN trade_ledger l ON l.trade_id=m.trade_id AND l.market=m.market
             JOIN LATERAL (
                 SELECT generation,config_json,config_hash
                 FROM paper_aeve_generations
@@ -392,7 +392,7 @@ def record_generation_outcomes(limit: int = 250) -> int:
                 ORDER BY started_at DESC,generation DESC
                 LIMIT 1
             ) g ON TRUE
-            WHERE m.strategy='oracle_council_v3'
+            WHERE m.market='crypto' AND m.strategy='oracle_council_v3'
               AND m.entry_time IS NOT NULL AND m.exit_time IS NOT NULL
               AND m.entry_time >= %s
               AND m.cost_provenance='exact_lot'
@@ -424,7 +424,7 @@ def record_generation_outcomes(limit: int = 250) -> int:
                        AVG(mfe_pct) FILTER (WHERE excursion_sample_count>0) AS mfe,
                        AVG(mae_pct) FILTER (WHERE excursion_sample_count>0) AS mae
                 FROM paper_regime_trade_metrics
-                WHERE strategy='oracle_council_v3' AND regime=%s AND exit_time < %s
+                WHERE market='crypto' AND strategy='oracle_council_v3' AND regime=%s AND exit_time < %s
                   AND cost_provenance='exact_lot' AND round_trip_net_pnl IS NOT NULL
             """, (row.get("regime"), entry_time)).fetchone() or {}
             samples = int(prior.get("samples") or 0)
@@ -434,7 +434,7 @@ def record_generation_outcomes(limit: int = 250) -> int:
             prior_results = list(conn.execute("""
                 SELECT round_trip_net_pnl AS net_pnl
                 FROM paper_regime_trade_metrics
-                WHERE strategy='oracle_council_v3' AND exit_time < %s
+                WHERE market='crypto' AND strategy='oracle_council_v3' AND exit_time < %s
                   AND cost_provenance='exact_lot' AND round_trip_net_pnl IS NOT NULL
                 ORDER BY exit_time DESC
                 LIMIT %s
@@ -492,7 +492,7 @@ def record_generation_outcomes(limit: int = 250) -> int:
                 entry_evidence_complete,entry_time if valid_entry_time else None,
             ))
             log.info(
-                "AEVE SHADOW RESULT | trade_id=%s | generation=%s | config_hash=%s | provenance_version=%s | would_trade=%s | score=%.6f | input_schema=dip_depth_rebound_net_edge_entry_cost_v7 | dip_depth_pct=%s | rebound_from_low_pct=%s | entry_evidence_complete=%s | mode=shadow | execution_impact=NONE | broker_submission=NONE | live_trading=DISARMED",
+                "AEVE SHADOW RESULT | trade_id=%s | generation=%s | config_hash=%s | provenance_version=%s | would_trade=%s | score=%.6f | input_schema=dip_depth_rebound_net_edge_entry_cost_crypto_v8 | dip_depth_pct=%s | rebound_from_low_pct=%s | entry_evidence_complete=%s | market=crypto | mode=shadow | execution_impact=NONE | broker_submission=NONE | live_trading=DISARMED",
                 row.get("trade_id"), cfg.generation, config_hash, PROVENANCE_VERSION,
                 bool(decision.would_trade if entry_evidence_complete else False), decision.score,
                 max(0.0, _f(dip_depth)) * 100.0 if entry_evidence_complete else None,
@@ -540,13 +540,19 @@ def generation_research_report(conn: Any, generation: int, config_hash: str) -> 
     """, (generation, config_hash, PROVENANCE_VERSION, BATCH_SIZE)).fetchone() or {}
     gross_loss = _f(row.get("gross_loss"))
     gross_win = _f(row.get("gross_win"))
+    accepted_trades = int(row.get("accepted_trades") or 0)
+
+    def observed_metric(name: str) -> float | None:
+        value = _f(row.get(name), float("nan"))
+        return value if accepted_trades > 0 and math.isfinite(value) else None
+
     return {
         "generation": generation,
         "config_hash": config_hash,
         "provenance_version": PROVENANCE_VERSION,
         "outcome_ids": list(row.get("outcome_ids") or []),
         "window_trades": int(row.get("window_trades") or 0),
-        "accepted_trades": int(row.get("accepted_trades") or 0),
+        "accepted_trades": accepted_trades,
         "generation_complete": int(row.get("window_trades") or 0) >= BATCH_SIZE,
         # A full accepted trade count alone does not prove independent market episodes.
         # Remain research-only until immutable episode evidence is validated.
@@ -556,12 +562,12 @@ def generation_research_report(conn: Any, generation: int, config_hash: str) -> 
             if int(row.get("accepted_trades") or 0) < BATCH_SIZE
             else "independent_market_episodes_not_verified"
         ),
-        "expectancy": _f(row.get("expectancy")),
-        "net_pnl": _f(row.get("net_pnl")),
+        "expectancy": observed_metric("expectancy"),
+        "net_pnl": observed_metric("net_pnl"),
         "profit_factor": (gross_win / gross_loss) if gross_loss > 0 else None,
-        "avg_mfe_pct": _f(row.get("avg_mfe_pct")),
-        "avg_mae_pct": _f(row.get("avg_mae_pct")),
-        "avg_cost_pct": _f(row.get("avg_cost_pct")),
+        "avg_mfe_pct": observed_metric("avg_mfe_pct"),
+        "avg_mae_pct": observed_metric("avg_mae_pct"),
+        "avg_cost_pct": observed_metric("avg_cost_pct"),
         "rejected_candidates": int(row.get("rejected_candidates") or 0),
         "avoided_losses": int(row.get("avoided_losses") or 0),
         "missed_winners": int(row.get("missed_winners") or 0),

@@ -1,17 +1,34 @@
 from __future__ import annotations
 
 import math
+from numbers import Real
 from typing import Any
 
 import pandas as pd
 
 
-def _finite(value: Any, default: float = 0.0) -> float:
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
-        return default
-    return number if math.isfinite(number) else default
+_PROBE_FIELDS = ("target_price", "low_price", "high_price", "probability_up", "expected_move_pct", "spot_price")
+
+
+def _forecast_values(forecast: Any) -> dict[str, float] | None:
+    """Missing or invalid forecasts are unavailable evidence, never numeric zero."""
+    values = {}
+    for field in _PROBE_FIELDS:
+        value = getattr(forecast, field, None)
+        if isinstance(value, bool) or not isinstance(value, Real):
+            return None
+        try:
+            number = float(value)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if not math.isfinite(number):
+            return None
+        values[field] = number
+    if (any(values[field] <= 0 for field in ("target_price", "low_price", "high_price", "spot_price"))
+            or not 0 <= values["probability_up"] <= 1
+            or not values["low_price"] <= values["target_price"] <= values["high_price"]):
+        return None
+    return values
 
 
 def install_selective_model_leakage_fix() -> None:
@@ -61,6 +78,7 @@ def install_selective_model_leakage_fix() -> None:
         lower_bound = max(40, requested_position - 240)
         selected_position: int | None = None
         original = None
+        original_values = None
         for candidate_position in range(requested_position, lower_bound - 1, -1):
             past = history.iloc[: candidate_position + 1].copy()
             try:
@@ -76,6 +94,13 @@ def install_selective_model_leakage_fix() -> None:
             except Exception:
                 candidate = None
             if candidate is not None:
+                original_values = _forecast_values(candidate)
+                if original_values is None:
+                    return {
+                        "ok": False, "status": "FAIL_CLOSED",
+                        "reason": "original forecast contains invalid or inconsistent numeric fields",
+                        "decision_position": candidate_position, "model": model, "model_version": model_version,
+                    }
                 selected_position = candidate_position
                 original = candidate
                 break
@@ -128,11 +153,19 @@ def install_selective_model_leakage_fix() -> None:
                 "model_version": model_version,
             }
 
-        fields = ("target_price", "low_price", "high_price", "probability_up", "expected_move_pct", "spot_price")
-        differences = {
-            field: abs(_finite(getattr(original, field, None)) - _finite(getattr(after, field, None)))
-            for field in fields
-        }
+        after_values = _forecast_values(after)
+        if after_values is None:
+            return {
+                "ok": False, "status": "FAIL_CLOSED",
+                "reason": "mutated forecast contains invalid or inconsistent numeric fields",
+                "decision_position": selected_position, "model": model, "model_version": model_version,
+            }
+        differences = {field: abs(original_values[field] - after_values[field]) for field in _PROBE_FIELDS}
+        if not all(math.isfinite(value) for value in differences.values()):
+            return {
+                "ok": False, "status": "FAIL_CLOSED", "reason": "nonfinite forecast comparison",
+                "decision_position": selected_position, "model": model, "model_version": model_version,
+            }
         ok = all(value <= 1e-12 for value in differences.values())
         return {
             "ok": ok,

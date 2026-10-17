@@ -112,6 +112,8 @@ jobs:
           test_paper_regime_entry_signal_fallback.py
           test_paper_regime_fifo_provenance.py
           test_paper_aeve_generation_controller.py::test_postgres_generation_report_freezes_exact_membership
+          test_paper_research_market_isolation.py::test_postgres_shadow_producers_isolate_crypto_priors_and_preserve_history
+          test_aeve_generation_progress_ui.py::test_postgres_progress_displays_current_provenance_and_unknown_profit_only
           test_paper_kelly_postgres.py::test_postgres_kelly_schema_and_immutable_forward_epoch
           test_paper_shadow_exit_challenger.py::test_postgres_forecast_cutoff_and_timestamp_order
           test_paper_shadow_exit_challenger.py::test_postgres_partial_close_keeps_durable_trigger_until_original_inventory_closes
@@ -121,3 +123,7 @@ jobs:
           test_oracle_learning_market_isolation.py::test_postgres_brain_regime_display_uses_round_trip_costs
           test_trade_evidence_verification_pg.py
           test_paper_fill_atomic_pg.py
+          test_paper_fill_provenance_pg.py
+          test_alpaca_auth_recovery_pg.py
+          test_kraken_reference_pg.py
+          test_paper_persisted_lineage_audit_pg.py

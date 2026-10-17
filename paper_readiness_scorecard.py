@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from typing import Any
 
+from forecasting import CRYPTO_CAUSAL_MODEL, CRYPTO_CAUSAL_MODEL_VERSION
 from model_registry import model_status
 from paper_lifecycle_readiness import paper_lifecycle_health
 from shadow_broker import shadow_readiness_summary
@@ -11,8 +12,8 @@ from shadow_broker import shadow_readiness_summary
 def build_paper_readiness_scorecard(
     *,
     market: str = "crypto",
-    active_model: str = "crypto selective sign transition",
-    active_model_version: str = "v43-selective-transition",
+    active_model: str = CRYPTO_CAUSAL_MODEL,
+    active_model_version: str = CRYPTO_CAUSAL_MODEL_VERSION,
 ) -> dict[str, Any]:
     """Return a read-only paper/live-readiness scorecard.
 

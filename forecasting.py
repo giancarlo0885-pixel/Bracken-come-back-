@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import hashlib
 import math
 from typing import Any
@@ -29,7 +29,7 @@ INTERVAL_MINUTES = {
 }
 
 CRYPTO_CAUSAL_MODEL = "crypto selective sign transition"
-CRYPTO_CAUSAL_MODEL_VERSION = "v43-selective-transition"
+CRYPTO_CAUSAL_MODEL_VERSION = "v43-selective-transition-data-v2"
 
 
 @dataclass
@@ -173,6 +173,7 @@ def forecast_price(
     model: str = "log-return diffusion",
     model_version: str = FORECAST_MODEL_VERSION,
     diagnostics: dict[str, str] | None = None,
+    require_live_quote: bool = False,
 ) -> Forecast | None:
     """Optionally record why no forecast was available; never change abstentions."""
     if diagnostics is not None:
@@ -218,6 +219,27 @@ def forecast_price(
     causal_prediction = None
     short_horizon_crypto = asset == "crypto" and interval_minutes(interval) <= 15.0 and minutes <= 30.0
     causal_requested = selected_model == CRYPTO_CAUSAL_MODEL
+    # Any crypto forecast explicitly used for a live decision must have a
+    # verified, recent provider quote, regardless of bar interval or horizon.
+    # Daily-bar close timestamps are not evidence of an executable live quote.
+    if require_live_quote and asset == "crypto":
+        if route.get("quote_verified") is not True:
+            return unavailable("unverified_live_quote")
+        raw_quote_time = route.get("quote_timestamp")
+        if not raw_quote_time:
+            return unavailable("missing_live_quote_timestamp")
+        try:
+            quote_time = datetime.fromisoformat(str(raw_quote_time).replace("Z", "+00:00"))
+            if quote_time.tzinfo is None:
+                return unavailable("unverified_live_quote_timezone")
+            quote_time = quote_time.astimezone(timezone.utc)
+        except (ValueError, TypeError, OverflowError):
+            return unavailable("invalid_live_quote_timestamp")
+        now = datetime.now(timezone.utc)
+        if quote_time > now + timedelta(seconds=5):
+            return unavailable("future_live_quote_timestamp")
+        if now - quote_time > timedelta(seconds=90):
+            return unavailable("stale_live_quote_timestamp")
     if asset == "crypto" and (causal_requested or short_horizon_crypto):
         if not short_horizon_crypto:
             return unavailable("unsupported_causal_horizon")

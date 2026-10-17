@@ -8,6 +8,7 @@ import provider_router as router
 @pytest.fixture(autouse=True)
 def reset_yahoo_cooldown(monkeypatch):
     monkeypatch.setattr(router, "_provider_cooldowns", {})
+    monkeypatch.setattr(router, "_symbol_cooldowns", {})
     monkeypatch.setattr(router, "mark_provider_cooldown_live", lambda *args, **kwargs: None)
     monkeypatch.setattr(router, "provider_cooldown_active_live", lambda provider: {"active": False})
     monkeypatch.setattr(router, "get_api_settings", lambda: {})

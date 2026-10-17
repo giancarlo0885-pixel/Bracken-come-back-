@@ -195,7 +195,9 @@ def test_unsupported_provider_capability_enters_cooldown(monkeypatch):
     monkeypatch.setattr(provider_router, "_alpha", lambda *args, **kwargs: pd.DataFrame())
     monkeypatch.setattr(provider_router, "mark_symbol_unavailable", lambda *args, **kwargs: None)
     provider_router.route_history("ZZZV36", "5d", "1d", lambda *args: pd.DataFrame())
-    assert provider_capabilities.capability_available("Polygon", "us_history") is False
+    assert provider_capabilities.capability_available("Polygon", "daily_history") is False
+    assert provider_capabilities.capability_available("Polygon", "intraday_history") is True
+    assert provider_capabilities.capability_available("Polygon", "us_history") is True
     assert provider_capabilities.capability_available("Polygon", "movers") is True
 
 

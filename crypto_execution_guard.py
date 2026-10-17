@@ -13,6 +13,7 @@ import requests
 
 from database import connect, utc_now
 from market_sessions import parse_utc
+from quote_provenance import is_paper_reference, provider_verified
 
 log = logging.getLogger("crypto-execution-guard")
 
@@ -69,9 +70,11 @@ def _paper_yahoo_reference(quote: dict[str, Any]) -> bool:
 
 
 def _finite_float(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
     try:
         number = float(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
     if number != number or number in (float("inf"), float("-inf")):
         return None
@@ -111,6 +114,18 @@ def _quote_verification_record(
             "spread_pct": _finite_float(validation.get("spread_pct")),
             "age_seconds": _finite_float(validation.get("age_seconds")),
             "attempted_secondary_provider": "Coinbase Exchange",
+            # Independent price agreement does not confer broker verification
+            # on the primary source, including legitimate Yahoo paper marks.
+            "primary_provider_quote_verified": provider_verified(oracle_quote),
+            "primary_paper_reference_verified": is_paper_reference(oracle_quote),
+            "primary_quote_verified": oracle_quote.get("quote_verified") is True,
+            "primary_execution_quote_eligible": bool(
+                oracle_quote.get("quote_verified") is True
+                and oracle_quote.get("execution_quote_eligible") is not False
+                and oracle_quote.get("stale") is not True
+            ),
+            "primary_verification_basis": oracle_quote.get("verification_basis"),
+            "primary_source_capability": oracle_quote.get("source_capability"),
         },
     }
 
@@ -256,14 +271,21 @@ def _coinbase_reference_validation(symbol: str, oracle_price: Any) -> dict[str, 
     if quote is None:
         return {"ok": False, "reason": error or "COINBASE_QUOTE_MISSING"}
 
+    bid, ask = _finite_float(quote.get("bid")), _finite_float(quote.get("ask"))
+    reference = _finite_float(oracle_price)
+    if bid is None or ask is None:
+        return {"ok": False, "reason": "COINBASE_QUOTE_INVALID_NUMERIC"}
+    if reference is None:
+        return {"ok": False, "reason": "COINBASE_ORACLE_PRICE_INVALID"}
+
     try:
-        bid = float(quote.get("bid") or 0)
-        ask = float(quote.get("ask") or 0)
-        reference = float(oracle_price or 0)
-        max_diff_pct = max(0.0, float(os.getenv("COINBASE_REFERENCE_MAX_DIFF_PCT", "1.00")))
-        max_spread_pct = max(0.0, float(os.getenv("COINBASE_REFERENCE_MAX_SPREAD_PCT", "1.50")))
+        diff_limit = _finite_float(os.getenv("COINBASE_REFERENCE_MAX_DIFF_PCT", "1.00"))
+        spread_limit = _finite_float(os.getenv("COINBASE_REFERENCE_MAX_SPREAD_PCT", "1.50"))
+        if diff_limit is None or spread_limit is None:
+            return {"ok": False, "reason": "COINBASE_REFERENCE_CONFIG_INVALID"}
+        max_diff_pct, max_spread_pct = max(0.0, diff_limit), max(0.0, spread_limit)
         max_age_seconds = max(30, int(os.getenv("COINBASE_REFERENCE_MAX_AGE_SECONDS", "300")))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return {"ok": False, "reason": "COINBASE_REFERENCE_CONFIG_INVALID"}
 
     if bid <= 0 or ask <= 0 or ask < bid or reference <= 0:
@@ -273,9 +295,11 @@ def _coinbase_reference_validation(symbol: str, oracle_price: Any) -> dict[str, 
     if timestamp is None:
         return {"ok": False, "reason": "COINBASE_TIMESTAMP_INVALID"}
 
-    mid = (bid + ask) / 2.0
+    mid = bid / 2.0 + ask / 2.0
     spread_pct = ((ask - bid) / mid) * 100.0 if mid > 0 else 100.0
     difference_pct = abs(reference - mid) / mid * 100.0 if mid > 0 else 100.0
+    if mid <= 0 or any(_finite_float(value) is None for value in (mid, spread_pct, difference_pct)):
+        return {"ok": False, "reason": "COINBASE_QUOTE_INVALID_NUMERIC"}
     context = {
         "reference_provider": "Coinbase Exchange",
         "reference_price": mid,
@@ -284,7 +308,9 @@ def _coinbase_reference_validation(symbol: str, oracle_price: Any) -> dict[str, 
         "difference_pct": difference_pct,
     }
 
-    age_seconds = max(0.0, (datetime.now(timezone.utc) - timestamp).total_seconds())
+    age_seconds = (datetime.now(timezone.utc) - timestamp).total_seconds()
+    if age_seconds < 0:
+        return {"ok": False, "reason": "COINBASE_TIMESTAMP_FUTURE", "age_seconds": age_seconds, **context}
     if age_seconds > max_age_seconds:
         return {"ok": False, "reason": "COINBASE_QUOTE_STALE", "age_seconds": age_seconds, **context}
     if spread_pct > max_spread_pct:

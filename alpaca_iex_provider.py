@@ -15,13 +15,20 @@ import requests
 
 _ALLOWED_INTERVALS = {"1m": "1Min", "5m": "5Min", "15m": "15Min", "30m": "30Min", "1h": "1Hour", "1d": "1Day"}
 _PERIOD_DAYS = {"1d": 2, "5d": 7, "1mo": 35, "3mo": 100, "6mo": 190, "1y": 370}
+DATA_URL = "https://data.alpaca.markets"
+DATA_FEED = "iex"
 
 
 class AlpacaDataError(RuntimeError):
-    """Market-data request failed; never includes credential values."""
+    """Credential-free failure with only the transport details needed to route it."""
+
+    def __init__(self, message: str, *, status_code: int | None = None, timed_out: bool = False):
+        super().__init__(message)
+        self.status_code: int | None = status_code if type(status_code) is int and 100 <= status_code <= 599 else None
+        self.timed_out: bool = timed_out
 
 
-def iex_stock_history(symbol: str, period: str, interval: str) -> pd.DataFrame:
+def iex_stock_history(symbol: str, period: str, interval: str, *, max_pages: int = 5) -> pd.DataFrame:
     """Retrieve timestamped US equity bars from Alpaca's IEX feed.
 
     Returns an empty frame for an empty market-data result, not for auth,
@@ -31,11 +38,12 @@ def iex_stock_history(symbol: str, period: str, interval: str) -> pd.DataFrame:
     secret = os.getenv("APCA_API_SECRET_KEY", "").strip()
     if not key or not secret:
         raise AlpacaDataError("Alpaca data credentials are not configured")
-    if os.getenv("ALPACA_DATA_FEED", "iex").lower().strip() != "iex":
-        raise AlpacaDataError("Only the Alpaca IEX feed is supported")
-    url = os.getenv("ALPACA_DATA_URL", "https://data.alpaca.markets").rstrip("/")
-    if url != "https://data.alpaca.markets":
-        raise AlpacaDataError("Unexpected Alpaca market-data endpoint")
+    if type(max_pages) is not int or not 1 <= max_pages <= 5:
+        raise AlpacaDataError("Invalid Alpaca history page limit")
+    # This adapter implements IEX market data, regardless of whether the account
+    # keys originated in a paper or live dashboard. Legacy trading-host/feed
+    # variables cannot redirect credentials or silently request SIP entitlement.
+    url = DATA_URL
     symbol = str(symbol).upper().strip()
     if not symbol or not all(ch.isalnum() or ch in ".-" for ch in symbol):
         raise AlpacaDataError("Invalid stock symbol")
@@ -51,7 +59,7 @@ def iex_stock_history(symbol: str, period: str, interval: str) -> pd.DataFrame:
         "timeframe": timeframe,
         "start": start.isoformat(),
         "end": now.isoformat(),
-        "feed": "iex",
+        "feed": DATA_FEED,
         "adjustment": "raw",
         "limit": 10000,
         "sort": "asc",
@@ -59,8 +67,9 @@ def iex_stock_history(symbol: str, period: str, interval: str) -> pd.DataFrame:
     headers = {"APCA-API-KEY-ID": key, "APCA-API-SECRET-KEY": secret}
     bars = []
     token = None
+    request_error = None
     try:
-        for _ in range(5):
+        for _ in range(max_pages):
             if token:
                 params["page_token"] = token
             response = requests.get(
@@ -68,9 +77,12 @@ def iex_stock_history(symbol: str, period: str, interval: str) -> pd.DataFrame:
                 headers=headers,
                 params=params,
                 timeout=15,
+                allow_redirects=False,
             )
             if response.status_code != 200:
-                raise AlpacaDataError(f"Alpaca market-data HTTP {response.status_code}")
+                status_code = response.status_code if type(response.status_code) is int else None
+                message = f"Alpaca market-data HTTP {status_code}" if status_code is not None else "Alpaca market-data HTTP error"
+                raise AlpacaDataError(message, status_code=status_code)
             payload = response.json()
             if not isinstance(payload, dict):
                 raise AlpacaDataError("Alpaca returned malformed history response")
@@ -83,8 +95,19 @@ def iex_stock_history(symbol: str, period: str, interval: str) -> pd.DataFrame:
                 break
         else:
             raise AlpacaDataError("Alpaca pagination limit reached")
-    except (requests.RequestException, ValueError, TypeError) as exc:
-        raise AlpacaDataError("Alpaca market-data request failed") from None
+    except requests.exceptions.JSONDecodeError:
+        request_error = AlpacaDataError("Alpaca returned malformed history response")
+    except requests.RequestException as exc:
+        status_code = getattr(getattr(exc, "response", None), "status_code", None)
+        timed_out = isinstance(exc, requests.Timeout)
+        message = "Alpaca market-data request timed out" if timed_out else "Alpaca market-data request failed"
+        request_error = AlpacaDataError(message, status_code=status_code, timed_out=timed_out)
+    except (ValueError, TypeError):
+        request_error = AlpacaDataError("Alpaca returned malformed history response")
+    # Raise outside the handler so exception chaining cannot expose the original
+    # request/response, whose headers, URL or body may contain credentials.
+    if request_error is not None:
+        raise request_error
     if not bars:
         return pd.DataFrame()
     frame = pd.DataFrame(bars)
@@ -110,5 +133,5 @@ def iex_stock_history(symbol: str, period: str, interval: str) -> pd.DataFrame:
     frame.attrs["provider"] = "Alpaca IEX"
     frame.attrs["requested_symbol"] = symbol
     frame.attrs["provider_symbol"] = symbol
-    frame.attrs["feed"] = "iex"
+    frame.attrs["feed"] = DATA_FEED
     return frame

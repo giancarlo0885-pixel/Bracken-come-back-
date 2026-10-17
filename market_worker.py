@@ -65,8 +65,12 @@ from global_adaptive_engine import (
     record_invalid_symbol_failure,
 )
 from intelligence_hub import collect_all
-from github_market_intelligence_inbox import sync_market_brief_inbox
-from market_data import get_history, get_many_snapshots
+from github_market_intelligence_inbox import market_brief_failure_diagnostics, sync_market_brief_inbox
+from market_data import (
+    _log_stock_history_provider_diagnostics as _log_fast_history_provider_diagnostics,
+    get_history,
+    get_many_snapshots,
+)
 from market_intelligence_bridge import ingest_monitor_record
 from news_intelligence import get_news_sentiment
 from opportunity_engine import rank_opportunities
@@ -1214,58 +1218,6 @@ def _fast_candidate_batch(market: str) -> list[tuple[str, str]]:
     return selected[: max(limit, len(held))]
 
 
-def _log_fast_history_provider_diagnostics(symbol: str, period: str, interval: str, history: Any) -> None:
-    """Bounded, non-secret provider outcome summary for empty stock history.
-
-    Only provider and enumerated status are logged. Never log provider errors,
-    URLs, tokens, request headers, or credentials.
-    """
-    import time
-
-    route = dict(getattr(history, "attrs", {}).get("provider_route") or {})
-    attempts = route.get("attempts") or []
-    if not attempts:
-        return
-    statuses = []
-    for attempt in attempts[:12]:
-        if not isinstance(attempt, dict):
-            continue
-        provider = str(attempt.get("provider") or "")
-        status = str(attempt.get("status") or "")
-        allowed_providers = {"Polygon", "Finnhub", "EODHD", "Alpha Vantage", "Yahoo Finance", "all", "scope"}
-        allowed_statuses = {
-            "healthy", "not_configured", "provider_budget_unknown",
-            "provider_budget_blocked", "provider_shared_cooldown",
-            "provider_cooldown", "symbol_capability_cooldown",
-            "capability_cooldown_or_unsupported", "symbol_cooldown",
-            "symbol_mismatch_or_no_data", "scope_rejected",
-            "rate_limited", "payment_required", "plan_limited",
-            "capability_plan_limited", "degraded", "strict_research_fallback",
-        }
-        statuses.append(
-            (provider if provider in allowed_providers else "other")
-            + ":" + (status if status in allowed_statuses else "other")
-        )
-    if not statuses:
-        return
-    if not hasattr(_log_fast_history_provider_diagnostics, "_last_logged"):
-        _log_fast_history_provider_diagnostics._last_logged = {}
-    last_logged = _log_fast_history_provider_diagnostics._last_logged
-    key = (str(symbol).upper(), str(period), str(interval), tuple(statuses))
-    now = time.monotonic()
-    if now - last_logged.get(key, float("-inf")) < 300:
-        return
-    last_logged[key] = now
-    if len(last_logged) > 512:
-        for old_key, when in list(last_logged.items()):
-            if now - when > 300:
-                del last_logged[old_key]
-    log.warning(
-        "STOCK HISTORY PROVIDER DIAGNOSTIC | symbol=%s | period=%s | interval=%s | outcomes=%s | execution_authority=NONE",
-        symbol, period, interval, ",".join(statuses),
-    )
-
-
 def _fast_discover_symbol(market: str, symbol: str, name: str) -> tuple[Any, Any] | None:
     """Build a low-latency intraday signal without the expensive news pass."""
     if stop_event.is_set():
@@ -1339,6 +1291,7 @@ def fast_scan_market(market: str) -> list[Any]:
                     market=market,
                     source_interval=route.get("interval", "1d"),
                     diagnostics=forecast_diagnostics,
+                    require_live_quote=(market == "crypto"),
                 )
                 if forecast:
                     setattr(signal, "forecast_id", getattr(forecast, "forecast_id", None))
@@ -1535,6 +1488,7 @@ def scan_market(market: str) -> list[Any]:
                 market=market,
                 source_interval=route.get("interval", "1d"),
                 diagnostics=forecast_diagnostics,
+                require_live_quote=(market == "crypto"),
             )
             if forecast is None:
                 log.warning("DEEP_FORECAST_MISSING | market=%s | symbol=%s | scan=deep | unavailable_reason=%s",
@@ -1745,10 +1699,20 @@ def _collect_stock_intelligence() -> None:
             # The regular provider collectors must continue if the external
             # weekly brief is absent, malformed, stale, or temporarily
             # unavailable.
+            diagnostics = market_brief_failure_diagnostics(exc)
             log.warning(
                 "MONDAY MARKET INTELLIGENCE INBOX | status=UNAVAILABLE | reason=%s | "
-                "execution_impact=NONE",
-                exc.__class__.__name__,
+                "http_status=%s | failure_class=%s | rate_limit_limit=%s | "
+                "rate_limit_remaining=%s | rate_limit_reset_epoch=%s | retry_after_seconds=%s | "
+                "github_request_id=%s | execution_impact=NONE",
+                diagnostics["reason"],
+                diagnostics["http_status"],
+                diagnostics["failure_class"],
+                diagnostics["rate_limit_limit"],
+                diagnostics["rate_limit_remaining"],
+                diagnostics["rate_limit_reset_epoch"],
+                diagnostics["retry_after_seconds"],
+                diagnostics["github_request_id"],
             )
         intelligence_results = collect_all()
         for category, result in intelligence_results.items():
@@ -1792,6 +1756,16 @@ def run_worker(market: str) -> None:
     if not _bootstrap_worker_database(label):
         log.info("%s worker stopped before database bootstrap completed.", label)
         return
+    if market == "cash":
+        try:
+            from alpaca_auth_recovery import recover_alpaca_authentication
+
+            recover_alpaca_authentication()
+        except Exception as exc:
+            log.warning(
+                "ALPACA AUTH RECOVERY | status=UNAVAILABLE | reason=%s | execution_impact=NONE",
+                type(exc).__name__,
+            )
     initial = cadence_for(market)
     log.info(
         "Starting %s always-on worker | pulse=%ss fast=%ss deep=%ss session=%s mode=%s",

@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from datetime import timedelta
+
+import pytest
+
 import logging
 from types import SimpleNamespace
 
@@ -141,6 +145,62 @@ def test_coinbase_reference_validation_checks_freshness_spread_and_price(monkeyp
     divergent = guard._coinbase_reference_validation("BTC-USD", 103.0)
     assert divergent["ok"] is False
     assert divergent["reason"] == "COINBASE_PRICE_DIVERGENCE"
+
+
+@pytest.mark.parametrize("field,value", [("bid", "NaN"), ("ask", "NaN"),
+    ("bid", "Infinity"), ("ask", "Infinity"), ("reference", float("nan")),
+    ("reference", float("inf"))])
+def test_coinbase_consensus_rejects_nonfinite_values(monkeypatch, field, value):
+    quote = dict(symbol="BTC-USD", bid="99.9", ask="100.1",
+                 timestamp=guard.datetime.now(guard.timezone.utc).isoformat())
+    reference = value if field == "reference" else 100
+    if field != "reference":
+        quote[field] = value
+    monkeypatch.setattr(guard, "_coinbase_quote", lambda symbol: (quote, None))
+    assert guard._coinbase_reference_validation("BTC-USD", reference)["ok"] is False
+
+
+def test_coinbase_consensus_rejects_future_timestamp(monkeypatch):
+    quote = dict(symbol="BTC-USD", bid="99.9", ask="100.1",
+                 timestamp=(guard.datetime.now(guard.timezone.utc)+timedelta(days=1)).isoformat())
+    monkeypatch.setattr(guard, "_coinbase_quote", lambda symbol: (quote, None))
+    assert guard._coinbase_reference_validation("BTC-USD", 100)["ok"] is False
+
+
+@pytest.mark.parametrize("name", ["COINBASE_REFERENCE_MAX_DIFF_PCT", "COINBASE_REFERENCE_MAX_SPREAD_PCT"])
+@pytest.mark.parametrize("limit", ["NaN", "Infinity", "-Infinity"])
+def test_coinbase_consensus_rejects_nonfinite_limits(monkeypatch, name, limit):
+    quote = dict(symbol="BTC-USD", bid="99.9", ask="100.1",
+                 timestamp=guard.datetime.now(guard.timezone.utc).isoformat())
+    monkeypatch.setattr(guard, "_coinbase_quote", lambda symbol: (quote, None))
+    monkeypatch.setenv(name, limit)
+    assert guard._coinbase_reference_validation("BTC-USD", 100) == {
+        "ok": False, "reason": "COINBASE_REFERENCE_CONFIG_INVALID"}
+
+
+@pytest.mark.parametrize("failure", ["future", "nonfinite"])
+def test_installed_binance_fallback_cannot_bypass_coinbase_quality_rejection(monkeypatch, failure):
+    import binance_us_adapter as adapter
+    import crypto_quote_readiness_sampler as sampler
+
+    quote = dict(symbol="BTC-USD", bid="99.9", ask="100.1",
+                 timestamp=guard.datetime.now(guard.timezone.utc).isoformat())
+    if failure == "future":
+        quote["timestamp"] = (guard.datetime.now(guard.timezone.utc)+timedelta(days=1)).isoformat()
+    else:
+        quote["ask"] = "Infinity"
+    monkeypatch.setattr(guard, "_coinbase_quote", lambda symbol: (quote, None))
+    monkeypatch.setattr(adapter, "validate_binance_us_reference", lambda *args: pytest.fail("quality rejection must not trigger availability fallback"))
+    # Track runtime-installed attributes so this integration test restores the
+    # original guard and sampler functions after exercising the real wrapper.
+    for module, names in ((guard, ("_coinbase_reference_validation", "_quote_verification_record")),
+                          (sampler, ("_coinbase_reference_validation", "_quote_verification_record"))):
+        for name in names:
+            monkeypatch.setattr(module, name, getattr(module, name))
+    monkeypatch.setattr(guard, "_binance_us_reference_fallback_installed", False, raising=False)
+    adapter.install_binance_us_reference_fallback()
+    assert guard._coinbase_reference_validation("BTC-USD", 100)["ok"] is False
+    assert sampler._coinbase_reference_validation("BTC-USD", 100)["ok"] is False
 
 
 def test_live_mode_requires_robinhood_price_agreement(monkeypatch):

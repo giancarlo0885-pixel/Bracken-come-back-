@@ -132,7 +132,7 @@ def test_generation_window_counts_all_valid_outcomes_and_tracks_acceptance_separ
     assert "WHERE generation=%s" in source
     assert "config_hash=%s" in source
     assert "provenance_version=%s" in source
-    assert PROVENANCE_VERSION == 7
+    assert PROVENANCE_VERSION == 8
 
 
 def test_completed_window_with_insufficient_acceptance_advances_identity_without_tuning():
@@ -173,9 +173,9 @@ def test_aeve_v6_accepts_resolved_expected_edge_from_immutable_entry_snapshot():
     producer = inspect.getsource(controller.record_generation_outcomes)
     assert 'entry_scoring_evidence(features, entry_time)' in producer
     assert "expected_edge_pct" in provenance._AEVE_ENTRY_FIELDS
-    assert controller.PROVENANCE_VERSION == 7
+    assert controller.PROVENANCE_VERSION == 8
     schema = inspect.getsource(controller.ensure_schema)
-    assert "dip_depth_rebound_net_edge_entry_cost_v7" in schema
+    assert "dip_depth_rebound_net_edge_entry_cost_crypto_v8" in schema
 
 def test_aeve_entry_features_fail_closed_when_provenance_missing():
     import inspect
@@ -345,11 +345,11 @@ def test_evaluator_passes_independent_entry_inputs_and_persists_version(monkeypa
     assert rebound_changed[0]['rebound_from_low_pct'] == pytest.approx(0.20)
     assert rebound_changed[1].dip_quality == dip_changed[1].dip_quality
     assert rebound_changed[1].rebound_quality != dip_changed[1].rebound_quality
-    assert all(row[12] == 7 for row in inserted)
+    assert all(row[12] == 8 for row in inserted)
     assert all(row[13] == "exact_lot" for row in inserted)
     assert all(row[14] is True for row in inserted)
     assert all(item[0]['config'] == cfg.__dict__ for item in captured)
-    assert 'input_schema=dip_depth_rebound_net_edge_entry_cost_v7' in caplog.text
+    assert 'input_schema=dip_depth_rebound_net_edge_entry_cost_crypto_v8' in caplog.text
     assert 'dip_depth_pct=1.25 | rebound_from_low_pct=0.2' in caplog.text
     previous_inputs, previous_decision = captured[-1]
     realized_fees[0] = 50.0
@@ -375,7 +375,7 @@ def test_aeve_v4_uses_durable_forward_epoch_and_exact_round_trip_costs():
     assert "m.round_trip_fees" in producer
     assert "_f(row.get(\"round_trip_fees\"))" in producer
     assert "l.fees" not in producer
-    assert PROVENANCE_VERSION == 7
+    assert PROVENANCE_VERSION == 8
 
 
 def test_aeve_v4_prior_economics_are_exact_round_trip_only():
@@ -459,6 +459,34 @@ def test_completed_report_is_returned_without_reading_late_outcomes():
     assert controller.generation_research_report(Conn(), 1, "hash") == frozen
 
 
+def test_current_report_keeps_missing_accepted_economics_unavailable():
+    import paper_aeve_generation_controller as controller
+
+    class Result:
+        def __init__(self, row):
+            self.row = row
+        def fetchone(self):
+            return self.row
+
+    class Conn:
+        accepted = 0
+        def execute(self, sql, params):
+            if "SELECT research_report" in sql:
+                return Result({"research_report": None})
+            return Result(dict(window_trades=4, accepted_trades=self.accepted,
+                               expectancy=0, net_pnl=0, avg_mfe_pct=0,
+                               avg_mae_pct=0, avg_cost_pct=0))
+
+    conn = Conn()
+    report = controller.generation_research_report(conn, 1, "hash")
+    fields = ("expectancy", "net_pnl", "avg_mfe_pct", "avg_mae_pct", "avg_cost_pct")
+    assert all(report[field] is None for field in fields)
+    assert report["accepted_trades"] == 0
+    conn.accepted = 1
+    measured = controller.generation_research_report(conn, 1, "hash")
+    assert all(measured[field] == 0 for field in fields)
+
+
 def test_postgres_generation_report_freezes_exact_membership():
     import json
     import os
@@ -478,11 +506,25 @@ def test_postgres_generation_report_freezes_exact_membership():
             observed_at timestamptz, entry_evidence_complete boolean, would_trade boolean,
             net_pnl float8, mfe_pct float8, mae_pct float8, excursion_sample_count int, cost_pct float8)
         """)
+        empty = controller.generation_research_report(conn, 1, "test-hash")
+        assert empty["accepted_trades"] == 0
+        assert empty["expectancy"] is None
+        assert empty["net_pnl"] is None
+        assert empty["avg_mfe_pct"] is None
+        assert empty["avg_mae_pct"] is None
+        assert empty["avg_cost_pct"] is None
         conn.execute("""INSERT INTO paper_aeve_generation_outcomes(
             generation,config_hash,provenance_version,observed_at,entry_evidence_complete,
             would_trade,net_pnl,mfe_pct,mae_pct,excursion_sample_count,cost_pct)
             SELECT 1,'test-hash',%s,'2026-10-08T10:00:00Z',TRUE,i%%2=0,1.0,2.0,-1.0,1,0.1
             FROM generate_series(1,1002) AS i""", (controller.PROVENANCE_VERSION,))
+        # A formerly complete v7 window cannot be certified as the new v8
+        # crypto-only window, even if its results look much more profitable.
+        conn.execute("""INSERT INTO paper_aeve_generation_outcomes(
+            generation,config_hash,provenance_version,observed_at,entry_evidence_complete,
+            would_trade,net_pnl,mfe_pct,mae_pct,excursion_sample_count,cost_pct)
+            VALUES (1,'test-hash',7,'2026-10-08T08:00:00Z',TRUE,TRUE,99999,2,-1,1,0.1)
+        """)
         report = controller.generation_research_report(conn, 1, "test-hash")
         assert report["window_trades"] == 1000
         assert report["accepted_trades"] == 500

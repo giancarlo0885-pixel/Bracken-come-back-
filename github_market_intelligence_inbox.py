@@ -12,11 +12,15 @@ position size, approve Council decisions, or arm live trading.
 """
 
 from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 import hashlib
 import json
+import logging
+import math
 import os
 import re
 from typing import Any, Callable
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
@@ -32,8 +36,111 @@ DEFAULT_OWNER = "giancarlo0885-pixel"
 DEFAULT_ISSUE_TITLE = "Oracle Brain — Monday Market Intelligence Inbox"
 MAX_DEVELOPMENTS = 32
 MAX_RESPONSE_BYTES = 256_000
+MAX_ERROR_BYTES = 4096
 _REPOSITORY_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 _JSON_FENCE_RE = re.compile(r"```json\s*(\{.*?\})\s*```", re.IGNORECASE | re.DOTALL)
+log = logging.getLogger("github-market-intelligence-inbox")
+
+
+class GitHubInboxHTTPError(RuntimeError):
+    """A GitHub HTTP failure with an allowlist of safe diagnostic fields."""
+
+    def __init__(self, diagnostics: dict[str, Any]) -> None:
+        self.diagnostics = dict(diagnostics)
+        self.http_status = diagnostics["http_status"]
+        super().__init__(
+            f"GitHub inbox HTTP {self.http_status}: {diagnostics['failure_class']}"
+        )
+
+
+def _numeric_header(headers: Any, name: str) -> int | None:
+    raw = str(headers.get(name, "") or "").strip() if headers else ""
+    if not re.fullmatch(r"[0-9]{1,19}", raw):
+        return None
+    value = int(raw)
+    return value if value <= 2**63 - 1 else None
+
+
+def _retry_after_seconds(headers: Any) -> float | None:
+    raw = str(headers.get("Retry-After", "") or "").strip() if headers else ""
+    if re.fullmatch(r"[0-9]{1,10}(?:\.[0-9]{1,3})?", raw):
+        return float(raw)
+    try:
+        retry_at = parsedate_to_datetime(raw)
+        if retry_at.tzinfo is None:
+            return None
+        seconds = (retry_at - datetime.now(timezone.utc)).total_seconds()
+        return max(0.0, seconds) if math.isfinite(seconds) else None
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def _github_response_diagnostics(status: int | None, headers: Any) -> dict[str, Any]:
+    status = status if type(status) is int and 100 <= status <= 599 else None
+    request_id = str(headers.get("X-GitHub-Request-Id", "") or "") if headers else ""
+    if not re.fullmatch(r"[A-Za-z0-9:-]{1,100}", request_id):
+        request_id = None
+    return {
+        "http_status": status,
+        "rate_limit_limit": _numeric_header(headers, "X-RateLimit-Limit"),
+        "rate_limit_remaining": _numeric_header(headers, "X-RateLimit-Remaining"),
+        "rate_limit_reset_epoch": _numeric_header(headers, "X-RateLimit-Reset"),
+        "retry_after_seconds": _retry_after_seconds(headers),
+        "github_request_id": request_id,
+    }
+
+
+def _github_http_error(error: HTTPError) -> GitHubInboxHTTPError:
+    """Classify without retaining response bodies, request URLs, or raw headers."""
+    status = error.code
+    diagnostics = _github_response_diagnostics(status, error.headers)
+    remaining = diagnostics["rate_limit_remaining"]
+    retry_after = diagnostics["retry_after_seconds"]
+    rate_limited = status == 429 or (
+        status == 403 and (remaining == 0 or retry_after is not None)
+    )
+    if status == 403 and not rate_limited:
+        # GitHub also reports secondary limits as 403 with remaining quota.
+        # Inspect only its bounded JSON message; never log or retain the body.
+        try:
+            payload = error.read(MAX_ERROR_BYTES + 1)
+            decoded = json.loads(payload.decode("utf-8")) if len(payload) <= MAX_ERROR_BYTES else {}
+            message = decoded.get("message", "") if isinstance(decoded, dict) else ""
+            message = message.casefold() if isinstance(message, str) else ""
+            rate_limited = message.startswith((
+                "api rate limit exceeded",
+                "you have exceeded a secondary rate limit",
+                "you have triggered an abuse detection mechanism",
+            ))
+        except (OSError, ValueError, UnicodeError):
+            pass
+    failure_class = (
+        "rate_limited" if rate_limited else
+        "authentication_failed" if status == 401 else
+        "access_forbidden" if status == 403 else
+        "not_found_or_access_denied" if status == 404 else
+        "upstream_error" if 500 <= status <= 599 else
+        "http_error"
+    )
+    diagnostics["failure_class"] = failure_class
+    return GitHubInboxHTTPError(diagnostics)
+
+
+def market_brief_failure_diagnostics(error: Exception) -> dict[str, Any]:
+    """Return log-safe metadata, including unknown status for transport failures."""
+    result = {
+        "reason": error.__class__.__name__,
+        "http_status": None,
+        "failure_class": "transport_error" if isinstance(error, (URLError, OSError)) else "unclassified",
+        "rate_limit_limit": None,
+        "rate_limit_remaining": None,
+        "rate_limit_reset_epoch": None,
+        "retry_after_seconds": None,
+        "github_request_id": None,
+    }
+    if isinstance(error, GitHubInboxHTTPError):
+        result.update(error.diagnostics)
+    return result
 
 
 def _clean(value: Any, *, limit: int = 500) -> str:
@@ -85,8 +192,31 @@ def _fetch_issue(repository: str, issue_number: int) -> dict[str, Any]:
             "X-GitHub-Api-Version": "2022-11-28",
         },
     )
-    with urlopen(request, timeout=12) as response:  # noqa: S310 - fixed HTTPS host and validated repository path
-        payload = response.read(MAX_RESPONSE_BYTES + 1)
+    try:
+        with urlopen(request, timeout=12) as response:  # noqa: S310 - fixed HTTPS host and validated repository path
+            diagnostics = _github_response_diagnostics(
+                getattr(response, "status", None), getattr(response, "headers", None),
+            )
+            # This proves receipt of an HTTP response, before packet validation
+            # or ingestion. An unchanged brief must still leave this receipt.
+            log.info(
+                "GITHUB MARKET INTELLIGENCE HTTP | status=RECEIVED | http_status=%s | "
+                "rate_limit_limit=%s | rate_limit_remaining=%s | rate_limit_reset_epoch=%s | "
+                "retry_after_seconds=%s | github_request_id=%s | execution_impact=NONE",
+                diagnostics["http_status"],
+                diagnostics["rate_limit_limit"],
+                diagnostics["rate_limit_remaining"],
+                diagnostics["rate_limit_reset_epoch"],
+                diagnostics["retry_after_seconds"],
+                diagnostics["github_request_id"],
+            )
+            payload = response.read(MAX_RESPONSE_BYTES + 1)
+    except HTTPError as exc:
+        try:
+            failure = _github_http_error(exc)
+        finally:
+            exc.close()
+        raise failure from exc
     if len(payload) > MAX_RESPONSE_BYTES:
         raise ValueError("GitHub issue response exceeds the inbox size limit")
     decoded = json.loads(payload.decode("utf-8"))
@@ -246,6 +376,8 @@ def sync_market_brief_inbox(
 __all__ = [
     "BODY_MARKER",
     "SCHEMA_VERSION",
+    "GitHubInboxHTTPError",
     "extract_market_brief_packet",
+    "market_brief_failure_diagnostics",
     "sync_market_brief_inbox",
 ]

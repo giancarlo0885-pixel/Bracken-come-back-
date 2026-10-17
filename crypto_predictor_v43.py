@@ -11,7 +11,6 @@ from crypto_predictor_v42 import (
     _accuracy,
     _brier,
     _candidate_predictions,
-    _close,
     _recency_weights,
 )
 
@@ -21,19 +20,44 @@ MIN_INNER_DIRECTIONAL_ACCURACY = 0.52
 MIN_INNER_BRIER_SKILL = 0.0
 
 
+def _validated_close(history: pd.DataFrame) -> pd.Series:
+    """Reject an invalid bar without silently shortening the time horizon."""
+    if history is None or history.empty or "Close" not in history.columns:
+        return pd.Series(dtype=float)
+    close = history["Close"]
+    if isinstance(close, pd.DataFrame):
+        close = close.iloc[:, -1]
+    if close.map(pd.api.types.is_bool).any():
+        return pd.Series(dtype=float)
+    try:
+        close = pd.to_numeric(close, errors="coerce")
+        if pd.api.types.is_complex_dtype(close.dtype):
+            return pd.Series(dtype=float)
+        values = close.to_numpy(dtype=float, na_value=np.nan)
+    except (TypeError, ValueError, OverflowError):
+        return pd.Series(dtype=float)
+    if not np.isfinite(values).all() or not (values > 0).all():
+        return pd.Series(dtype=float)
+    return close
+
+
 def _resolved_transition_table(close: pd.Series, horizon: int) -> tuple[pd.DataFrame, pd.Series]:
-    log_close = np.log(close)
-    lag_return = log_close.diff(horizon)
-    forward_return = log_close.shift(-horizon) - log_close
+    # Comparisons turn NaN into False. Mask unknown/nonfinite returns before
+    # classifying direction, including the warm-up and unresolved future bars.
+    with np.errstate(invalid="ignore", divide="ignore", over="ignore"):
+        log_close = np.log(close.where(np.isfinite(close) & (close > 0)))
+        lag_return = log_close.diff(horizon)
+        forward_return = log_close.shift(-horizon) - log_close
+    lag_return = lag_return.where(np.isfinite(lag_return))
+    forward_return = forward_return.where(np.isfinite(forward_return))
     table = pd.DataFrame(
         {
-            "lag_up": (lag_return > 0.0).astype(float),
-            "target_up": (forward_return > 0.0).astype(float),
+            "lag_up": (lag_return > 0.0).astype(float).where(lag_return.notna() & (lag_return != 0.0)),
+            "target_up": (forward_return > 0.0).astype(float).where(forward_return.notna()),
             "forward_return": forward_return,
         },
         index=close.index,
     )
-    table.loc[lag_return == 0.0, "lag_up"] = np.nan
     return table, lag_return
 
 
@@ -126,8 +150,13 @@ def predict_crypto_direction(history: pd.DataFrame, horizon_bars: int) -> dict[s
     forecasts that would actually have been emitted at each historical timestamp.
     """
     horizon = max(1, int(horizon_bars))
-    close = _close(history)
+    close = _validated_close(history)
     if len(close) < max(180, horizon * 12):
+        return None
+
+    with np.errstate(invalid="ignore", divide="ignore", over="ignore"):
+        one_bar_returns = np.log(close / close.shift(1)).iloc[1:]
+    if not np.isfinite(one_bar_returns.to_numpy(dtype=float)).all():
         return None
 
     table, lag_return = _resolved_transition_table(close, horizon)
@@ -160,7 +189,7 @@ def predict_crypto_direction(history: pd.DataFrame, horizon_bars: int) -> dict[s
     if current_confidence + 1e-15 < float(selected["threshold"]):
         return None
 
-    one_bar_returns = np.log(close / close.shift(1)).dropna().tail(192)
+    one_bar_returns = one_bar_returns.tail(192)
     vol_per_bar = float(one_bar_returns.std(ddof=0)) if len(one_bar_returns) else 0.0
     if not math.isfinite(vol_per_bar) or vol_per_bar <= 0.0:
         return None

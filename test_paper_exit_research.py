@@ -11,14 +11,16 @@ START = datetime(2026, 10, 8, 12, tzinfo=timezone.utc)
 def buy(identity, qty, price, fees, minute=0):
     return dict(id=minute + 1, trade_id=identity, market="crypto", symbol="TEST-USD", side="BUY",
                 quantity=qty, entry_price=price, entry_time=START + timedelta(minutes=minute),
-                fees=fees, strategy="council", gross_pnl=0, net_pnl=-fees)
+                fees=fees, strategy="council", gross_pnl=0, net_pnl=-fees,
+                broker_mode="PAPER", account_environment="PAPER")
 
 
 def sell(identity, qty, entry, exit_price, fees, gross, minute=20, entry_minute=0):
     return dict(id=minute + 1, trade_id=identity, market="crypto", symbol="TEST-USD", side="SELL",
                 quantity=qty, entry_price=entry, exit_price=exit_price,
                 entry_time=START + timedelta(minutes=entry_minute), exit_time=START + timedelta(minutes=minute),
-                fees=fees, gross_pnl=gross, net_pnl=gross-fees, strategy="council", order_id="sell_signal")
+                fees=fees, gross_pnl=gross, net_pnl=gross-fees, strategy="council", order_id="sell_signal",
+                broker_mode="PAPER", account_environment="PAPER")
 
 
 def test_partial_fifo_cost_allocation_and_deduplication():
@@ -125,23 +127,26 @@ def test_post_exit_signal_samples_require_observed_identity_and_time():
 
 def test_fill_fee_evidence_is_required_and_ambiguous_matches_fail_closed():
     from paper_exit_research import attach_fill_fee_evidence
+    from test_paper_exact_fill_research import exact_allocations
     ledger = [buy("buy", 2, 100, 0.2), sell("sell", 2, 100, 101, 0.1, 2)]
     assert reconcile_fifo(ledger, require_fill_fee_evidence=True)["qualified_fifo_closes"] == 0
     factual = [dict(fill_id="buy-fill", market="crypto", symbol="TEST-USD", side="BUY", quantity=2,
                     fill_price=100, fee_amount=0.2, created_at=START + timedelta(seconds=1)),
                dict(fill_id="sell-fill", market="crypto", symbol="TEST-USD", side="SELL", quantity=2,
                     fill_price=101, fee_amount=0.1, created_at=START + timedelta(minutes=20, seconds=1))]
-    backed = attach_fill_fee_evidence(ledger, factual)
+    # A timestamp/price coincidence is insufficient, even with one candidate.
+    assert reconcile_fifo(attach_fill_fee_evidence(ledger, factual), require_fill_fee_evidence=True)["net_pnl"] is None
+    links = exact_allocations(ledger, {"sell": "buy"})
+    backed = attach_fill_fee_evidence(ledger, factual, links)
     assert reconcile_fifo(backed, require_fill_fee_evidence=True)["qualified_fifo_closes"] == 1
-    ambiguous = attach_fill_fee_evidence(ledger, factual + [{**factual[-1], "fill_id": "duplicate-candidate"}])
+    ambiguous = attach_fill_fee_evidence(ledger, factual, links + [{**links[-1], "fill_id": "duplicate-candidate"}])
     assert reconcile_fifo(ambiguous, require_fill_fee_evidence=True)["qualified_fifo_closes"] == 0
-    # Older SELL rows store total fees. Use the independently observed exit fee,
-    # rather than subtracting entry fees twice.
+    # An old aggregate-fee row cannot acquire the new exact fee contract merely
+    # because an unrelated cheaper fill has nearby scalar values.
     old = [{**ledger[0]}, {**ledger[1], "fees": 0.3, "net_pnl": 1.7}]
     report = reconcile_fifo(attach_fill_fee_evidence(old, factual), require_fill_fee_evidence=True)
-    assert report["qualified_fifo_closes"] == 1
-    assert report["net_pnl"] == pytest.approx(1.7)
-    assert report["closes"][0]["ledger_fee_semantics"] == "round_trip"
+    assert report["qualified_fifo_closes"] == 0
+    assert report["net_pnl"] is None
 
 
 def test_future_conflicting_identity_does_not_taint_asof_fifo():

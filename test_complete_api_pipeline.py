@@ -17,14 +17,14 @@ def test_router_falls_back_and_records_attempts(monkeypatch):
     assert routed.attempts[-1].status == "strict_research_fallback"
 
 
-def test_router_marks_unavailable_symbol_after_empty_routes(monkeypatch):
+def test_router_cools_only_exact_provider_requests_after_empty_routes(monkeypatch):
     provider_router._symbol_cooldowns.clear()
     monkeypatch.setattr(provider_router, "get_api_settings", lambda: type("S", (), {"get": lambda self, n: None})())
     routed = provider_router.route_history("UNI-USD", "1d", "1m", lambda *args: pd.DataFrame())
     assert routed.provider == "none"
-    assert provider_router.symbol_is_unavailable("UNI-USD") is True
+    assert provider_router.symbol_is_unavailable("UNI-USD") is False
     skipped = provider_router.route_history("UNI-USD", "1d", "1m", lambda *args: pd.DataFrame())
-    assert skipped.attempts[0].status == "symbol_cooldown"
+    assert any(attempt.provider == "Yahoo Finance" and attempt.status == "request_cooldown" for attempt in skipped.attempts)
 
 
 def test_intraday_symbol_cooldown_does_not_block_daily_history(monkeypatch):

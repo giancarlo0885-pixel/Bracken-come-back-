@@ -391,7 +391,7 @@ def reserve_provider_budget(ledger: dict[str, Any] | None, provider: str, capabi
     return {"reserved": True, "entry": entry}
 
 
-def reserve_provider_budget_db(conn: Any, provider: str, capability: str, *, daily_budget: int, entitlement: str = "configured", data_mode: str = "unknown", now: datetime | None = None) -> dict[str, Any]:
+def reserve_provider_budget_db(conn: Any, provider: str, capability: str, *, daily_budget: int, entitlement: str = "configured", data_mode: str = "unknown", now: datetime | None = None, auth_recheck_guard: dict[str, Any] | None = None) -> dict[str, Any]:
     now_dt = now or datetime.now(timezone.utc)
     utc_date = now_dt.date().isoformat()
     timestamp = now_dt.isoformat()
@@ -417,7 +417,24 @@ def reserve_provider_budget_db(conn: Any, provider: str, capability: str, *, dai
         return {"reserved": False, "reason": "provider budget row unavailable after atomic initialization"}
     cooldown_until = _parse_aware_datetime(existing.get("cooldown_until"))
     if cooldown_until and cooldown_until > now_dt.astimezone(timezone.utc):
-        return {"reserved": False, "reason": "provider capability in cooldown", "remaining": int(existing.get("remaining_budget") or 0)}
+        from config import PROVIDER_PERMISSION_COOLDOWN_SECONDS, PROVIDER_RATE_LIMIT_COOLDOWN_SECONDS
+
+        updated = _parse_aware_datetime(existing.get("updated_at"))
+        # Only the bounded Alpaca credential-recheck path supplies this exact
+        # locked snapshot. A fresh update may conceal a shorter 429 beneath a
+        # longer legacy 401, so it cannot be bypassed even if the reason is 401.
+        guarded_auth_recheck = (
+            provider == "Alpaca IEX" and capability == "__provider__"
+            and isinstance(auth_recheck_guard, dict)
+            and existing.get("last_failure") == "provider authentication failed (HTTP 401)"
+            and updated is not None
+            and (now_dt.astimezone(timezone.utc) - updated).total_seconds() >= PROVIDER_RATE_LIMIT_COOLDOWN_SECONDS
+            and (cooldown_until - updated).total_seconds() == PROVIDER_PERMISSION_COOLDOWN_SECONDS
+            and all(existing.get(key) == auth_recheck_guard.get(key)
+                    for key in ("utc_date", "last_failure", "cooldown_until", "updated_at"))
+        )
+        if not guarded_auth_recheck:
+            return {"reserved": False, "reason": "provider capability in cooldown", "remaining": int(existing.get("remaining_budget") or 0)}
     remaining = int(existing.get("remaining_budget") or 0)
     if remaining <= 0:
         return {"reserved": False, "reason": "provider capability budget exhausted", "remaining": 0}
