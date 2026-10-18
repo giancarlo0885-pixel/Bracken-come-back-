@@ -63,6 +63,49 @@ def test_heartbeats_cannot_replace_snapshot(monkeypatch):
     with pytest.raises(BookIntegrityError, match="snapshot_timeout"): service._session(Mock())
 
 
+@pytest.mark.parametrize("snapshot_count, expected_error", [
+    (4, "disconnected"),
+    (3, "snapshot_timeout"),
+])
+def test_expanded_four_market_snapshot_quorum(monkeypatch, snapshot_count, expected_error):
+    """Four valid books must remain live; a missing book still fails closed."""
+    monkeypatch.setattr(runtime, "utc_now", lambda: NOW)
+    clock = {"value": 0.0}
+    monkeypatch.setattr(runtime.time, "monotonic", lambda: clock["value"])
+    symbols = {
+        "BTC/USD": "BTC-USD",
+        "ETH/USD": "ETH-USD",
+        "AAVE/USD": "AAVE-USD",
+        "ADA/USD": "ADA-USD",
+    }
+    events = iter([
+        *(ack(symbol) for symbol in symbols),
+        *(message(symbol=symbol) for symbol in list(symbols)[:snapshot_count]),
+        '{"channel":"heartbeat"}',
+        "",
+    ])
+    def receive():
+        raw = next(events)
+        if raw == '{"channel":"heartbeat"}':
+            clock["value"] = 16.0
+        return raw
+
+    ws = Mock()
+    ws.recv.side_effect = receive
+    service = runtime.KrakenReferenceService(
+        connect_factory=Mock(), socket_factory=lambda *a, **k: ws)
+    service.symbols = symbols
+    service.state = runtime.ReferenceBooks(symbols)
+    service.reference_history = {s: runtime.deque(maxlen=128) for s in symbols.values()}
+    service.publish = Mock()
+
+    with pytest.raises(BookIntegrityError, match=expected_error):
+        service._session(Mock())
+    assert service.state.counts["snapshots"] == snapshot_count
+    assert not service.state.books
+    assert ws.close.called
+
+
 def test_standby_worker_opens_no_websocket(monkeypatch):
     conn = Mock()
     @contextmanager

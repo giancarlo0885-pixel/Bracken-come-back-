@@ -239,7 +239,7 @@ class KrakenReferenceService:
                     last_wire = now_mono
                 if now_mono - last_wire > 15:
                     raise BookIntegrityError("liveness_timeout")
-                if now_mono - opened > 15 and len(self.state.books) != 2:
+                if now_mono - opened > 15 and set(self.state.books) != set(self.symbols):
                     raise BookIntegrityError("snapshot_timeout")
                 # Heartbeats/pongs never refresh a book's exchange/receipt timestamps.
                 if any(self.state.quote(symbol, utc_now()) is None for symbol in self.state.books):
