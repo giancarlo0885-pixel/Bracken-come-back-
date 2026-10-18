@@ -63,3 +63,10 @@ def test_invalid_market_and_limit_fail_before_queries():
     with pytest.raises(ValueError):summarize_trade_evidence(conn,market='live')
     with pytest.raises(ValueError):summarize_trade_evidence(conn,market='crypto',limit=51)
     conn.execute.assert_not_called()
+
+
+@pytest.mark.parametrize('field,reason',[('entry_decision_id','missing_entry_decision_id'),
+    ('entry_quote_id','missing_entry_quote_id'),('feature_snapshot','missing_entry_features')])
+def test_missing_entry_evidence_is_not_made_complete_by_matching_nulls(field,reason):
+    e,lot,s,f=entry();e[field]=lot[field]=None
+    assert reason in entry_reference_reasons(e,lot,s,f)

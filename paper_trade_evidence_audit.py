@@ -25,6 +25,10 @@ def entry_reference_reasons(entry, lot, signals, forecasts):
         reasons.append('lot_entry_snapshot_mismatch')
     if _time(entry.get('decision_timestamp')) != _time(lot.get('decision_timestamp')):
         reasons.append('lot_entry_decision_time_mismatch')
+    for field in ('entry_decision_id','entry_quote_id'):
+        if not entry.get(field):reasons.append('missing_'+field)
+    if not isinstance(entry.get('feature_snapshot'),dict) or not entry['feature_snapshot']:
+        reasons.append('missing_entry_features')
     scope = (entry.get('market'),entry.get('symbol'))
     signal_id, forecast_id = entry.get('entry_signal_id'),entry.get('entry_forecast_id')
     matches = [r for r in signals if str(r.get('id')) == str(signal_id)
