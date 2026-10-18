@@ -260,3 +260,13 @@ def test_standby_research_process_performs_no_http_or_sampling(monkeypatch):
     runner.run()
     runner.cycle.assert_not_called()
     runner.data.history.assert_not_called()
+
+
+def test_coinbase_350_row_response_is_bounded_to_300_closed_bars(monkeypatch):
+    times=pd.date_range(end=NOW,periods=350,freq='5min')
+    r=[[int(t.timestamp()),99,101,100,100,2] for t in reversed(times)]
+    c,get,_=request_client(monkeypatch,[response(r)])
+    h=data.coinbase_history(c,'BTC-USD',NOW)
+    assert len(h)==300 and h.index[-1]==pd.Timestamp(NOW)-pd.Timedelta(minutes=5)
+    assert h.attrs['provider']=='Coinbase Exchange' and h.attrs['quote_verified'] is False
+    assert h.index.is_monotonic_increasing

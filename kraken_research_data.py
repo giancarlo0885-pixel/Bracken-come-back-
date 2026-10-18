@@ -121,11 +121,12 @@ def coinbase_quote(client, symbol, received=None):
 def coinbase_history(client, symbol, now):
     """Exact-venue research backup. Never mix Kraken returns with Coinbase marks."""
     data = client.request('Coinbase Public Research', 'products/'+symbol+'/candles', {'granularity':300})
-    if not isinstance(data, list) or not 40 <= len(data) <= 300:
+    if not isinstance(data, list) or not 40 <= len(data) <= 350:
         raise ResearchUnavailable('COINBASE_INVALID_HISTORY')
     frame = pd.DataFrame(data, columns=['time','Low','High','Open','Close','Volume'])
     frame.index = pd.to_datetime(frame.pop('time'), unit='s', utc=True)
-    frame = frame[frame.index <= pd.Timestamp(now)-pd.Timedelta(minutes=5)].sort_index()
+    # The public endpoint can return 350 rows. Keep only 300 closed bars.
+    frame = frame[frame.index <= pd.Timestamp(now)-pd.Timedelta(minutes=5)].sort_index().tail(300)
     frame = frame[['Open','High','Low','Close','Volume']].apply(pd.to_numeric,errors='coerce')
     validate_closed_history(frame,now)
     frame.attrs.update(provider='Coinbase Exchange',interval='5m',quote_verified=False,
