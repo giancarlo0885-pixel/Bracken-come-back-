@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from collections import deque
 import json
 import logging
 import os
@@ -50,9 +51,16 @@ def comparison_current(symbol, comparison, quote, now):
             return True  # Unavailability/invalid-book diagnostics contain no divergence.
         primary_time = timestamp(comparison["primary_timestamp"])
         reference_time = timestamp(comparison["reference_timestamp"])
+        paired = comparison.get("reference_quote", quote)
         return (comparison.get("symbol") == symbol
                 and comparison.get("reference_provider") == SOURCE
-                and reference_time == timestamp(quote["quote_timestamp"])
+                and paired.get("symbol") == symbol and paired.get("provider") == SOURCE
+                and paired.get("checksum_status") == "VALID" and paired.get("reference_only") is True
+                and paired.get("execution_quote_eligible") is False
+                and reference_time == timestamp(paired["quote_timestamp"])
+                and fresh(reference_time, timestamp(paired["received_at"]), now)
+                and (comparison.get("primary_received_at") is None
+                     or fresh(primary_time, timestamp(comparison["primary_received_at"]), now))
                 and -2 <= (now - primary_time).total_seconds() <= MAX_AGE
                 and -2 <= (now - reference_time).total_seconds() <= MAX_AGE
                 and abs((reference_time - primary_time).total_seconds()) <= MAX_ALIGNMENT)
@@ -89,6 +97,9 @@ def display_state(payload, published_at, now):
             s: v for s, v in result.get("comparisons", {}).items()
             if s in result["quotes"] and comparison_current(s, v, result["quotes"][s], now)
         }
+        for comparison in result["comparisons"].values():
+            if comparison.get("reference_quote"):
+                comparison["reference_quote"]["age_seconds"] = (now-timestamp(comparison["reference_timestamp"])).total_seconds()
     except (ValueError, TypeError, KeyError):
         result.update(status="PUBLISHER_STALE", connected=False, quotes={}, comparisons={})
     return result
@@ -121,6 +132,7 @@ class KrakenReferenceService:
         self.stop_event = threading.Event()
         self.lock = threading.RLock()
         self.primary = {}
+        self.reference_history = {symbol:deque(maxlen=128) for symbol in SYMBOLS.values()}
         self.thread = None
         self.socket = None
         self.last_log = 0.0
@@ -139,22 +151,57 @@ class KrakenReferenceService:
         if self.socket:
             self.socket.close()
 
-    def observe_primary(self, payload):
-        # Capture only book fields, never credentials, orders or execution claims.
-        if not payload or payload.get("symbol") not in SYMBOLS.values():
-            return
+    def observe_response(self, requested, records, received):
+        from kraken_venue_comparison import robinhood_observations
+        observations = robinhood_observations(requested, records, received)
         with self.lock:
-            self.primary[payload["symbol"]] = {k: payload.get(k) for k in
-                ("symbol", "provider", "quote_timestamp", "bid", "ask", "stale")}
+            for symbol, observation in observations.items():
+                previous = self.primary.get(symbol, {})
+                if previous.get('received_at') and timestamp(previous['received_at']) > received:
+                    continue
+                if (previous.get('quote_timestamp') and observation.get('quote_timestamp')
+                        and timestamp(observation['quote_timestamp']) < timestamp(previous['quote_timestamp'])):
+                    observation['comparison_rejection'] = 'PRIMARY_TIMESTAMP_REGRESSION'
+                self.primary[symbol] = observation
+
+    def remember_references(self, now):
+        # At most ten samples/second per pair, max 128 per pair and ten-second age.
+        with self.lock:
+            for exchange, symbol in SYMBOLS.items():
+                history = self.reference_history[symbol]
+                while history and (now-timestamp(history[0]['received_at'])).total_seconds() > MAX_AGE:
+                    history.popleft()
+                if history and (now-timestamp(history[-1]['received_at'])).total_seconds() < .1:
+                    continue
+                quote = self.state.quote(exchange, now)
+                if quote and (not history or history[-1]['quote_timestamp'] != quote['quote_timestamp']):
+                    history.append(quote)
+
+    def clear_references(self):
+        with self.lock:
+            for history in self.reference_history.values():
+                history.clear()
 
     def publish(self, conn):
         now = utc_now()
         payload = self.state.health(now)
         with self.lock:
             primary = dict(self.primary)
+            histories = {s:list(h) for s,h in self.reference_history.items()}
         comparisons = {}
         for symbol in SYMBOLS.values():
-            comparison = compare_reference(payload["quotes"].get(symbol), primary.get(symbol), now)
+            current = payload["quotes"].get(symbol)
+            candidates = histories[symbol] + ([current] if current else [])
+            candidates = [q for q in candidates if fresh(timestamp(q['quote_timestamp']), timestamp(q['received_at']), now)]
+            observed = primary.get(symbol)
+            if current and observed and observed.get('quote_timestamp') and candidates:
+                target = timestamp(observed['quote_timestamp'])
+                reference = min(candidates, key=lambda q:(
+                    abs((timestamp(q['quote_timestamp'])-target).total_seconds()),
+                    -timestamp(q['received_at']).timestamp()))
+            else:
+                reference = current
+            comparison = compare_reference(reference, observed, now)
             comparisons[symbol] = {**comparison, "checked_at": now.isoformat()}
         payload["comparisons"] = comparisons
         # This write also detects loss of the dedicated advisory-lock session.
@@ -169,6 +216,7 @@ class KrakenReferenceService:
         self.socket = ws
         try:
             self.state.opened(utc_now())
+            self.clear_references()
             self.publish(conn)  # Replace any previous owner's live-looking row immediately.
             ws.send(json.dumps({"method": "subscribe", "params": {
                 "channel": "book", "symbol": list(SYMBOLS), "depth": 10, "snapshot": True}, "req_id": 1}))
@@ -184,6 +232,7 @@ class KrakenReferenceService:
                     raise BookIntegrityError("disconnected")
                 if raw is not None:
                     self.state.ingest(raw, utc_now())
+                    self.remember_references(utc_now())
                     last_wire = now_mono
                 if now_mono - last_wire > 15:
                     raise BookIntegrityError("liveness_timeout")
@@ -200,6 +249,7 @@ class KrakenReferenceService:
                     last_publish = now_mono
         finally:
             self.state.invalidate()
+            self.clear_references()
             ws.close()
             self.socket = None
 
@@ -253,17 +303,29 @@ def install_kraken_reference(worker):
             or getattr(worker, "_kraken_reference_service", None) is not None):
         return False
     service = KrakenReferenceService()
-    original = worker._execution_quote_payload_from_history
+    provider = getattr(worker, '_robinhood_current_marketdata_provider', None)
+    client = getattr(provider, 'client', None)
+    original = getattr(client, 'best_bid_ask_quotes', None)
+    if not callable(original):
+        log.warning('KRAKEN REFERENCE | status=PRIMARY_OBSERVER_UNAVAILABLE | execution_authority=NONE')
+        return False
 
-    def observed(*args, **kwargs):
-        payload = original(*args, **kwargs)
+    def observed(*symbols, **kwargs):
         try:
-            service.observe_primary(payload)
+            records = original(*symbols, **kwargs)
+        except Exception:
+            try:
+                service.observe_response(symbols, None, utc_now())
+            except Exception:
+                pass
+            raise
+        try:
+            service.observe_response(symbols, records, utc_now())
         except Exception:
             pass  # Diagnostic failures cannot alter quote or execution behavior.
-        return payload
+        return records
 
     service.start()
-    worker._execution_quote_payload_from_history = observed
+    client.best_bid_ask_quotes = observed
     worker._kraken_reference_service = service
     return True
