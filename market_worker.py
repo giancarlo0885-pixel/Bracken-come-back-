@@ -1280,7 +1280,6 @@ def fast_scan_market(market: str) -> list[Any]:
             quote_payload = _execution_quote_payload_from_history(symbol, history, getattr(signal, "price", None), scan_type="fast")
             if quote_payload is None:
                 continue
-            signals.append(signal)
             prices[symbol] = quote_payload
             stage = "forecast_calculation"
             forecast_diagnostics: dict[str, str] = {}
@@ -1327,14 +1326,18 @@ def fast_scan_market(market: str) -> list[Any]:
                     ),
                     created_at=signal_created_at,
                 )
+                if signal_id is None:
+                    raise RuntimeError("signal persistence returned no identity")
                 setattr(signal, "signal_id", signal_id)
                 if forecast:
                     stage = "forecast_persistence"
                     save_forecast(market, symbol, forecast, scan_type="fast", signal_id=signal_id, signal_created_at=signal_created_at)
+                # Hand off only after all required evidence writes have committed.
+                signals.append(signal)
             except Exception as exc:
                 log.warning("FAST_PROVENANCE_WRITE_FAILED | market=%s | symbol=%s | stage=%s | exception_type=%s", market, symbol, stage, type(exc).__name__)
 
-    if not signals:
+    if not prices:
         return []
     signals.sort(
         key=lambda signal: (
@@ -1479,7 +1482,6 @@ def scan_market(market: str) -> list[Any]:
             quote_payload = _execution_quote_payload_from_history(symbol, history, getattr(signal, "price", None), scan_type="deep")
             if quote_payload is None:
                 continue
-            signals.append(signal)
             prices[symbol] = quote_payload
             forecast_diagnostics: dict[str, str] = {}
             forecast = forecast_price(
@@ -1526,9 +1528,13 @@ def scan_market(market: str) -> list[Any]:
                 ),
                 created_at=signal_created_at,
             )
+            if signal_id is None:
+                raise RuntimeError("signal persistence returned no identity")
             setattr(signal, "signal_id", signal_id)
             if forecast:
                 save_forecast(market, symbol, forecast, scan_type="deep", signal_id=signal_id, signal_created_at=signal_created_at)
+            # A generated forecast is not durable until save_forecast returns.
+            signals.append(signal)
         except Exception as exc:
             log.warning("Oracle pass failed | market=%s | symbol=%s | error=%s", market, symbol, exc)
 

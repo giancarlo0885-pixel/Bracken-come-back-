@@ -319,10 +319,10 @@ def entry_audit_db(fill_evidence_db):
         conn.execute('''UPDATE position_lots SET entry_signal_id=CASE WHEN lot_id='lot-a' THEN '1' ELSE '2' END,
             entry_decision_id='decision:'||lot_id,entry_forecast_id='forecast:'||lot_id,entry_quote_id='quote:'||lot_id,
             decision_timestamp=(opened_at::timestamptz-INTERVAL '1 second')::text,feature_snapshot='{"momentum":1}' ''')
-        conn.execute('CREATE TABLE signals(id BIGINT PRIMARY KEY,market TEXT,symbol TEXT,created_at TEXT)')
+        conn.execute('CREATE TABLE signals(id BIGINT PRIMARY KEY,market TEXT,symbol TEXT,created_at TEXT,details JSONB)')
         conn.execute('''CREATE TABLE forecasts(forecast_id TEXT,signal_id BIGINT,market TEXT,symbol TEXT,
             created_at TEXT,source_quote_timestamp TEXT)''')
-        conn.execute('''INSERT INTO signals SELECT entry_signal_id::bigint,market,symbol,decision_timestamp
+        conn.execute('''INSERT INTO signals(id,market,symbol,created_at) SELECT entry_signal_id::bigint,market,symbol,decision_timestamp
             FROM trade_ledger WHERE side='BUY' ''')
         conn.execute('''INSERT INTO forecasts SELECT entry_forecast_id,entry_signal_id::bigint,market,symbol,
             decision_timestamp,(entry_time::timestamptz-INTERVAL '5 seconds')::text FROM trade_ledger WHERE side='BUY' ''')
@@ -362,3 +362,30 @@ def test_stock_zero_export_can_be_distinguished_from_existing_canonical_trades(e
         assert report['canonical_trade_counts']==[{'side':'BUY','total':1}]
         assert report['ledger_mode_counts']==[] and report['sample_rows']==0
         assert report['sample_entry_lots']==0 and report['paper_fills']['total']==0
+
+
+def test_entry_audit_distinguishes_abstention_and_missing_link_without_repair(entry_audit_db):
+    from paper_trade_evidence_audit import summarize_trade_evidence
+    with entry_audit_db() as conn:
+        conn.execute("UPDATE trade_ledger SET entry_forecast_id=NULL")
+        conn.execute("UPDATE position_lots SET entry_forecast_id=NULL")
+        conn.execute("DELETE FROM forecasts WHERE signal_id=1")
+        conn.execute('''UPDATE signals SET details='{"forecast_unavailable_reason":"stale_live_quote_timestamp"}' WHERE id=1''')
+    with entry_audit_db() as conn:
+        result=summarize_trade_evidence(conn,market='crypto')
+        assert result['sample_forecast_generation_counts']=={
+            'RECORDED_FORECAST_UNAVAILABLE':1,'PERSISTED_FORECAST_MISSING_ENTRY_LINK':1}
+        assert result['sample_complete_entry_references']==0
+        assert all(r['entry_forecast_id'] is None for r in result['sample_entry_references'])
+    with entry_audit_db() as conn:
+        assert conn.execute('SELECT COUNT(*) AS n FROM position_lots WHERE entry_forecast_id IS NOT NULL').fetchone()['n']==0
+
+
+def test_entry_audit_wrong_scope_does_not_hide_original_signal_forecast(entry_audit_db):
+    from paper_trade_evidence_audit import summarize_trade_evidence
+    with entry_audit_db() as conn:
+        conn.execute('''INSERT INTO forecasts SELECT 'unrelated',signal_id,'cash','OTHER',created_at,source_quote_timestamp
+            FROM forecasts WHERE signal_id=1''')
+    with entry_audit_db() as conn:
+        report=summarize_trade_evidence(conn,market='crypto')
+        assert report['sample_forecast_generation_counts']=={'PERSISTED_EXACT_ENTRY_LINK':2}

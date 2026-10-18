@@ -59,3 +59,22 @@ mechanism for losing referenced records, but it does not prove the exact cause
 of every missing historical ID. Absent forecasts may reflect model abstention;
 none is synthesized. Market/strategy promotion still requires new, independently
 validated post-cost outcomes.
+
+## Forecast generation versus missing entry links
+
+The bounded entry sample also reads original signal `details` and at most two
+forecast rows per exact signal/market/symbol. It reports the original
+`forecast_unavailable_reason` separately from a persisted forecast whose ID is
+absent on the entry. Multiple forecasts remain ambiguous. Future, wrong-symbol
+or wrong-market records never explain a historical entry. A missing signal,
+missing generation receipt, or referenced forecast absent from storage remains
+unknown: absence alone cannot distinguish failed persistence from old retention.
+These diagnostics never backfill an ID or make an entry qualify.
+
+Fast and deep scans now append trade candidates only after signal persistence
+returns an ID and any generated forecast has committed. Exceptions during
+forecast calculation, signal persistence, or forecast persistence exclude that
+candidate. Valid execution quotes still reach position monitoring and risk exits.
+A deliberate forecast abstention can still produce its existing paper research
+signal with a durable reason and no fabricated forecast; qualification policies
+and model vetoes are unchanged. No configuration is required.

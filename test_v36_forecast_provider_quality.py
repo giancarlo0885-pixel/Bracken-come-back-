@@ -228,7 +228,7 @@ def test_scanning_persistence_continues_when_execution_disabled(monkeypatch):
     monkeypatch.setattr(market_worker, "_fast_candidate_batch", lambda market: [("AAPL", "Apple")])
     signal = type("Signal", (), {"symbol": "AAPL", "price": 100.0, "score": 90.0, "confidence": 0.9, "action": "BUY", "reason": "", "to_dict": lambda self: {"symbol": "AAPL"}})()
     monkeypatch.setattr(market_worker, "_fast_discover_symbol", lambda market, symbol, name: (signal, _history(symbol, "5m")))
-    monkeypatch.setattr(market_worker, "save_json_signal", lambda *args, **kwargs: saved.__setitem__("signals", saved["signals"] + 1))
+    monkeypatch.setattr(market_worker, "save_json_signal", lambda *args, **kwargs: (saved.__setitem__("signals", saved["signals"] + 1) or 1))
     monkeypatch.setattr(market_worker, "save_forecast", lambda *args, **kwargs: saved.__setitem__("forecasts", saved["forecasts"] + 1))
     monkeypatch.setattr(market_worker, "update_prices", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("mutated")))
     monkeypatch.setattr(market_worker, "risk_exits", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("risk")))
