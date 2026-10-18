@@ -87,3 +87,27 @@ def test_reader_expires_persisted_primary_comparison_without_changing_evidence(p
         assert not displayed['comparisons']
         assert row['payload']['comparisons'] == payload['comparisons']
         reader.execute('ROLLBACK')
+
+
+def test_persisted_pair_keeps_its_original_book_and_expiry(pg, monkeypatch):
+    from unittest.mock import Mock
+    from kraken_reference_runtime import KrakenReferenceService
+    from test_kraken_venue_comparison import quote
+    from test_kraken_reference_book import message
+    import kraken_reference_runtime as runtime
+    service=KrakenReferenceService(connect_factory=Mock());service.state=ready()
+    service.remember_references(NOW)
+    service.observe_response(['BTC-USD'],[quote()],NOW)
+    later=NOW+timedelta(seconds=5)
+    service.state.ingest(message(when=later),later);service.remember_references(later)
+    monkeypatch.setattr(runtime,'utc_now',lambda:later)
+    with pg() as owner: service.publish(owner)
+    with pg() as reader:
+        reader.execute('BEGIN READ ONLY')
+        row=reader.execute('SELECT * FROM kraken_reference_state').fetchone()
+        shown=display_state(row['payload'],row['updated_at'],later)
+        assert shown['comparisons']['BTC-USD']['reference_timestamp']==NOW.isoformat()
+        assert shown['quotes']['BTC-USD']['quote_timestamp']==later.isoformat()
+        assert shown['comparisons']['BTC-USD']['reference_quote']['execution_quote_eligible'] is False
+        assert not display_state(row['payload'],NOW+timedelta(seconds=11),NOW+timedelta(seconds=11))['comparisons']
+        reader.execute('ROLLBACK')

@@ -210,19 +210,29 @@ class ReferenceBooks:
 
 def compare_reference(reference, primary, now):
     """Diagnostic venue basis only. Never changes either quote's authority."""
-    unavailable = {"status": "UNAVAILABLE_OR_UNALIGNED", "execution_impact": "NONE"}
-    if not reference or not primary or primary.get("symbol") != reference.get("symbol"):
-        return unavailable
+    def unavailable(reason, status="UNAVAILABLE_OR_UNALIGNED"):
+        return {"status": status, "reason": reason, "execution_impact": "NONE"}
+    if not primary:
+        return unavailable("PRIMARY_NOT_OBSERVED")
+    if primary.get("comparison_rejection"):
+        return unavailable(primary["comparison_rejection"], "PRIMARY_REJECTED")
+    if not reference:
+        return unavailable("REFERENCE_UNAVAILABLE")
+    if primary.get("symbol") != reference.get("symbol"):
+        return unavailable("SYMBOL_MISMATCH")
     try:
         rt, rr = timestamp(reference["quote_timestamp"]), timestamp(reference["received_at"])
         pt = timestamp(primary["quote_timestamp"])
-        if (reference.get("checksum_status") != "VALID" or not fresh(rt, rr, now)
-                or not -2 <= (now - pt).total_seconds() <= MAX_AGE
-                or abs((rt - pt).total_seconds()) > MAX_ALIGNMENT or primary.get("stale") is True):
-            return unavailable
+        if reference.get("checksum_status") != "VALID" or not fresh(rt, rr, now):
+            return unavailable("REFERENCE_INVALID_OR_STALE")
+        if (not -2 <= (now - pt).total_seconds() <= MAX_AGE or primary.get("stale") is True
+                or (primary.get("received_at") is not None and not fresh(pt, timestamp(primary["received_at"]), now))):
+            return unavailable("PRIMARY_STALE_OR_FUTURE")
+        if abs((rt - pt).total_seconds()) > MAX_ALIGNMENT:
+            return unavailable("TIMESTAMPS_UNALIGNED")
         bid, ask = exact_decimal(str(primary["bid"])), exact_decimal(str(primary["ask"]))
         if bid <= 0 or ask < bid:
-            return {"status": "PRIMARY_INVALID_BOOK", "execution_impact": "NONE"}
+            return unavailable("PRIMARY_CROSSED_OR_INVALID_BOOK", "PRIMARY_INVALID_BOOK")
         with localcontext() as ctx:
             ctx.prec = 80
             mid = (bid + ask) / 2
@@ -230,7 +240,11 @@ def compare_reference(reference, primary, now):
         return {"status": "ALIGNED_VENUE_COMPARISON", "symbol": primary["symbol"],
                 "primary_provider": str(primary.get("provider") or "unknown")[:64],
                 "reference_provider": SOURCE, "primary_timestamp": pt.isoformat(),
+                "primary_received_at": primary.get("received_at"),
+                "primary_timestamp_basis": primary.get("timestamp_basis", "unspecified"),
+                "alignment_basis": "kraken_exchange_vs_primary_provider_timestamp",
+                "reference_quote": {**reference, "age_seconds": (now-rt).total_seconds()},
                 "reference_timestamp": rt.isoformat(), "timestamp_delta_seconds": abs((rt - pt).total_seconds()),
                 "mid_difference_bps": str(delta), "execution_impact": "NONE"}
     except (ValueError, KeyError, TypeError, InvalidOperation):
-        return unavailable
+        return unavailable("MALFORMED_QUOTE_OR_TIMESTAMP")

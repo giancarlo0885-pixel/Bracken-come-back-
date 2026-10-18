@@ -64,8 +64,29 @@ reference-only payloads and the Kraken reference provider identity, even if a
 legacy verification alias is accidentally set true. No Kraken quote is routed
 through `MarketSnapshot`, stock routing, broker reference anchoring or fill writers.
 
-The observer calls the existing execution-payload function unchanged, records only
-the returned primary book fields, and returns the **same object**, including `None`.
+The observer wraps the existing provider client's `best_bid_ask_quotes` responses,
+before forecast selection or execution handoff. It adds **no requests** and returns
+the **same response object**, preserving original exceptions and execution paths.
+Only allowlisted public book/timestamp fields for requested BTC/USD or ETH/USD
+equivalents are retained. Duplicate, mismatched, missing or crossed responses
+produce explicit diagnostic reasons, never replacement execution quotes.
+
+The Robinhood payload timestamp is required for comparison and labeled
+`provider_payload`; local receipt time is recorded separately, never substituted
+for missing/malformed provider time. This does not change the existing execution
+adapter's timestamp semantics. Both clocks must remain fresh; a new receipt cannot
+refresh old provider time. Fixed mapping accepts BTC/USD ↔ BTC-USD and ETH/USD ↔
+ETH-USD only, with no guessed asset aliases.
+
+A ten-second in-memory history (maximum 128 samples per pair, at most ten samples
+per second) pairs each primary timestamp with the closest fresh, checksum-validated
+Kraken reference. This avoids losing a valid match when the latest Kraken update
+is five seconds newer at publication. Matching never uses price equality. History
+is cleared on disconnect/integrity failure and is not persisted as a tick ledger.
+Each of the two latest comparisons includes its actual paired reference, which
+can differ from the newest quote and is independently revalidated on read.
+Only bounded fields are added to the overwritten singleton; original inputs expire.
+
 It cannot rescue a rejected quote. Comparisons require the same internal symbol,
 fresh timestamps on both venues, no stale/crossed primary book, and timestamps no
 more than two seconds apart. Signed midpoint difference in basis points is a
@@ -78,7 +99,7 @@ existing DATA STATUS details show connection state, last valid updates, reconnec
 checksum failures, stale/crossed rejection counts, current references and comparisons.
 The reader rechecks publisher age and both quote timestamps. Comparisons are removed
 when either original venue timestamp expires, even if the
-comparison was published recently. Comparison identity must match its current
+comparison was published recently. Comparison identity must match its paired
 Kraken reference; malformed comparisons are omitted without hiding valid quotes.
 Expired current quotes are removed and labeled stale/unavailable; last-valid timestamps remain
 historical diagnostics. Five-second publication means displayed references can

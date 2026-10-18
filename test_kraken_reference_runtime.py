@@ -120,13 +120,18 @@ def test_observer_preserves_exact_primary_payload_and_none(monkeypatch):
     service = Mock(); monkeypatch.setattr(runtime, "KrakenReferenceService", lambda: service)
     payload = {"provider": "Robinhood Crypto", "verified": False, "bid": 102, "ask": 101}
     original = Mock(side_effect=[payload, None, payload])
-    worker = SimpleNamespace(_execution_quote_payload_from_history=original)
+    client = SimpleNamespace(best_bid_ask_quotes=original)
+    execution = Mock(return_value=None)
+    worker = SimpleNamespace(_execution_quote_payload_from_history=execution,
+        _robinhood_current_marketdata_provider=SimpleNamespace(client=client))
     assert runtime.install_kraken_reference(worker)
     assert not runtime.install_kraken_reference(worker)
-    assert worker._execution_quote_payload_from_history("BTC-USD", None) is payload
-    assert worker._execution_quote_payload_from_history("BTC-USD", None) is None
-    service.observe_primary.side_effect = RuntimeError("diagnostic failure")
-    assert worker._execution_quote_payload_from_history("BTC-USD", None) is payload
+    assert client.best_bid_ask_quotes("BTC-USD") is payload
+    assert client.best_bid_ask_quotes("BTC-USD") is None
+    service.observe_response.side_effect = RuntimeError("diagnostic failure")
+    assert client.best_bid_ask_quotes("BTC-USD") is payload
+    assert worker._execution_quote_payload_from_history is execution
+    execution.assert_not_called()
     assert payload == {"provider": "Robinhood Crypto", "verified": False, "bid": 102, "ask": 101}
 
 
