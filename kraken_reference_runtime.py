@@ -133,6 +133,7 @@ class KrakenReferenceService:
         self.state = ReferenceBooks(self.symbols)
         self.stop_event = threading.Event()
         self.lock = threading.RLock()
+        self.primary_observer_available = True
         self.primary = {}
         self.reference_history = {symbol:deque(maxlen=128) for symbol in self.symbols.values()}
         self.thread = None
@@ -204,7 +205,8 @@ class KrakenReferenceService:
                     -timestamp(q['received_at']).timestamp()))
             else:
                 reference = current
-            comparison = compare_reference(reference, observed, now)
+            comparison = (compare_reference(reference, observed, now) if self.primary_observer_available else
+                {"status": "EXECUTION_SOURCE_NOT_CONFIGURED", "reason": "NO_EXECUTION_PROVIDER", "execution_impact": "NONE"})
             comparisons[symbol] = {**comparison, "checked_at": now.isoformat()}
         payload["comparisons"] = comparisons
         # This write also detects loss of the dedicated advisory-lock session.
@@ -333,8 +335,11 @@ def install_kraken_reference(worker):
     client = getattr(provider, 'client', None)
     original = getattr(client, 'best_bid_ask_quotes', None)
     if not callable(original):
-        log.warning('KRAKEN REFERENCE | status=PRIMARY_OBSERVER_UNAVAILABLE | execution_authority=NONE')
-        return False
+        service.primary_observer_available = False
+        service.start()
+        worker._kraken_reference_service = service
+        log.info('KRAKEN REFERENCE | primary_observer=NOT_CONFIGURED | ingestion=INDEPENDENT | execution_authority=NONE')
+        return True
 
     def observed(*symbols, **kwargs):
         try:

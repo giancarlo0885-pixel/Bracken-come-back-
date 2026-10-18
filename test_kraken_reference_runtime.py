@@ -188,3 +188,23 @@ def test_reader_never_opens_websocket_or_starts_ingestion(monkeypatch):
     factory = Mock(); monkeypatch.setattr(runtime, "KrakenReferenceService", factory)
     assert runtime.read_kraken_reference_state()["status"] == "UNAVAILABLE_OR_DISABLED"
     factory.assert_not_called()
+
+
+def test_ingestion_starts_without_any_broker_or_execution_observer(monkeypatch):
+    for key,value in {'EXECUTION_MODE':'paper','ENABLE_BROKER_SUBMISSION':'false',
+        'LIVE_TRADING_ARMED':'false','DATABASE_URL':'test-placeholder','KRAKEN_REFERENCE_WS_ENABLED':'true'}.items():
+        monkeypatch.setenv(key,value)
+    service=runtime.KrakenReferenceService(connect_factory=Mock())
+    monkeypatch.setattr(service,'start',Mock())
+    monkeypatch.setattr(runtime,'KrakenReferenceService',lambda:service)
+    execution=Mock();worker=SimpleNamespace(_execution_quote_payload_from_history=execution)
+    assert runtime.install_kraken_reference(worker)
+    assert not runtime.install_kraken_reference(worker)
+    service.start.assert_called_once_with()
+    assert service.primary_observer_available is False
+    assert worker._execution_quote_payload_from_history is execution
+    execution.assert_not_called()
+    conn=Mock();service.publish(conn)
+    payload=json.loads(conn.execute.call_args.args[1][1])
+    assert payload['execution_authority']=='NONE'
+    assert all(c['status']=='EXECUTION_SOURCE_NOT_CONFIGURED' for c in payload['comparisons'].values())

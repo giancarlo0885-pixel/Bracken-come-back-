@@ -152,12 +152,14 @@ MAX_RECONCILIATION_DIFFERENCE_PCT = max(
     0.0,
     min(0.10, float(os.getenv("MAX_RECONCILIATION_DIFFERENCE_PCT", "0.005"))),
 )
-ROBINHOOD_CRYPTO_ENABLED = os.getenv("ROBINHOOD_CRYPTO_ENABLED", "false").lower() == "true"
-ROBINHOOD_CRYPTO_API_KEY = os.getenv("ROBINHOOD_CRYPTO_API_KEY", "").strip()
-ROBINHOOD_CRYPTO_PRIVATE_KEY_BASE64 = os.getenv("ROBINHOOD_CRYPTO_PRIVATE_KEY_BASE64", "").strip()
-ROBINHOOD_CRYPTO_API_VERSION = os.getenv("ROBINHOOD_CRYPTO_API_VERSION", "v2").strip()
-ROBINHOOD_CRYPTO_BASE_URL = os.getenv("ROBINHOOD_CRYPTO_BASE_URL", "https://trading.robinhood.com").strip().rstrip("/")
-ROBINHOOD_CRYPTO_API_MODE = os.getenv("ROBINHOOD_CRYPTO_API_MODE", "disabled").strip().lower()
+# Retired integration: legacy environment values cannot reactivate networking.
+# Names remain for offline historical parsers and archived provenance only.
+ROBINHOOD_CRYPTO_ENABLED = False
+ROBINHOOD_CRYPTO_API_KEY = ""
+ROBINHOOD_CRYPTO_PRIVATE_KEY_BASE64 = ""
+ROBINHOOD_CRYPTO_API_VERSION = "v2"
+ROBINHOOD_CRYPTO_BASE_URL = "https://trading.robinhood.com"
+ROBINHOOD_CRYPTO_API_MODE = "removed"
 CRYPTO_PRIORITY_WEIGHT = max(0.0, min(1.0, float(os.getenv("CRYPTO_PRIORITY_WEIGHT", "0.70"))))
 STOCK_PRIORITY_WEIGHT = max(0.0, min(1.0, float(os.getenv("STOCK_PRIORITY_WEIGHT", "0.30"))))
 ENABLE_NEWS = os.getenv("ENABLE_NEWS", "true").lower() == "true"
