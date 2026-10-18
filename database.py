@@ -91,6 +91,7 @@ TRANSIENT_DATABASE_ERROR_TEXT = (
 )
 DATABASE_BOOTSTRAP_LOCK_NAME = "garibaldi_database_bootstrap_v37"
 DATABASE_MAINTENANCE_LOCK_NAME = "garibaldi_database_maintenance_v37"
+ENTRY_EVIDENCE_RETENTION_LOCK = 73420261605
 CANONICAL_PROTECTED_TABLES = {
     "kraken_research_evidence",
     "portfolios",
@@ -130,8 +131,8 @@ CANONICAL_PROTECTED_TABLES = {
     "paper_aeve_provenance_epochs",
 }
 DATABASE_RETENTION_POLICIES = {
-    "signals": {"keep_rows": 6000, "batch_size": DATABASE_RETENTION_BATCH_SIZE, "classification": "append-only analytical/ephemeral"},
-    "forecasts": {"keep_rows": 3000, "batch_size": DATABASE_RETENTION_BATCH_SIZE, "classification": "append-only analytical/ephemeral"},
+    "signals": {"keep_rows": 6000, "batch_size": DATABASE_RETENTION_BATCH_SIZE, "classification": "analytical; preserve entry/forecast-linked provenance"},
+    "forecasts": {"keep_rows": 3000, "batch_size": DATABASE_RETENTION_BATCH_SIZE, "classification": "analytical; preserve trade-linked provenance"},
     "equity_snapshots": {"keep_rows": 15000, "batch_size": DATABASE_RETENTION_BATCH_SIZE, "classification": "append-only analytical/ephemeral"},
     "alerts": {"keep_rows": 3000, "batch_size": DATABASE_RETENTION_BATCH_SIZE, "classification": "append-only analytical/ephemeral"},
     "intelligence_events": {"keep_rows": 5000, "batch_size": DATABASE_RETENTION_BATCH_SIZE, "classification": "canonical deduplicated research observations"},
@@ -156,8 +157,8 @@ DATABASE_TABLE_GROWTH_AUDIT = {
     "live_order_proposals": {"class": "governance/audit records", "inserted_by": "brokerage readiness proposal flow", "frequency": "one per immutable live proposal", "retention": "never auto-delete"},
     "live_order_approvals": {"class": "governance/audit records", "inserted_by": "manual live approval flow", "frequency": "one per approval/rejection", "retention": "never auto-delete"},
     "execution_claims": {"class": "governance/audit records", "inserted_by": "oracle_bot execution idempotency", "frequency": "one per execution attempt", "retention": "never auto-delete"},
-    "signals": {"class": "append-only analytical/ephemeral records", "inserted_by": "market_worker save_json_signal", "frequency": "scan candidates", "retention": "keep newest 6000 rows"},
-    "forecasts": {"class": "append-only analytical/ephemeral records", "inserted_by": "market_worker save_forecast", "frequency": "scan candidates", "retention": "keep newest 3000 rows"},
+    "signals": {"class": "append-only analytical/ephemeral records", "inserted_by": "market_worker save_json_signal", "frequency": "scan candidates", "retention": "keep newest 6000 unlinked rows; preserve entry/forecast-linked provenance"},
+    "forecasts": {"class": "append-only analytical/ephemeral records", "inserted_by": "market_worker save_forecast", "frequency": "scan candidates", "retention": "keep newest 3000 unlinked rows; preserve trade-linked provenance"},
     "equity_snapshots": {"class": "append-only analytical/ephemeral records", "inserted_by": "oracle_bot snapshot", "frequency": "worker pulse/scan", "retention": "keep newest 15000 rows"},
     "alerts": {"class": "append-only analytical/ephemeral records", "inserted_by": "database save_alert", "frequency": "notable system/market events", "retention": "keep newest 3000 rows"},
     "intelligence_events": {"class": "canonical deduplicated research observations", "inserted_by": "market intelligence bridge", "frequency": "continuous collection", "retention": "keep newest 5000 unique events"},
@@ -1519,6 +1520,7 @@ def save_forecast(
     signal_created_at: str | None = None,
 ) -> None:
     with connect() as conn:
+        conn.execute("SELECT pg_advisory_xact_lock_shared(%s)", (ENTRY_EVIDENCE_RETENTION_LOCK,))
         with conn.cursor() as cursor:
             cursor.execute(
                 """
@@ -1801,16 +1803,28 @@ def _trim_global_decision_ledger(conn: Any, *, keep_rows: int, batch_size: int, 
     return deleted_total
 
 
+def _entry_evidence_retention_sql(table: str) -> str:
+    """Only unreferenced analytical records may enter rolling retention."""
+    if table == "signals":
+        return ("NOT EXISTS (SELECT 1 FROM position_lots p WHERE p.entry_signal_id=signals.id::text) "
+                "AND NOT EXISTS (SELECT 1 FROM trade_ledger l WHERE l.entry_signal_id=signals.id::text) "
+                "AND NOT EXISTS (SELECT 1 FROM forecasts f WHERE f.signal_id=signals.id)")
+    if table == "forecasts":
+        return ("NOT EXISTS (SELECT 1 FROM position_lots p WHERE p.entry_forecast_id=forecasts.forecast_id) "
+                "AND NOT EXISTS (SELECT 1 FROM trade_ledger l WHERE l.entry_forecast_id=forecasts.forecast_id)")
+    return "TRUE"
+
+
 def _retention_cleanup_due(conn: Any, table: str, *, keep_rows: int, batch_size: int) -> bool:
     """Avoid constant INSERT/DELETE churn by trimming only after a bounded overshoot.
 
-    The table may temporarily grow by at most max(batch_size, 20% of keep_rows)
-    before a cleanup runs. This preserves the same retained history after cleanup
-    while reducing dead tuples, index churn, and WAL generated by tiny trims.
+    Cleanup becomes due after max(batch_size, 20% of keep_rows) unlinked rows
+    above the rolling budget. Protected parents do not count toward that budget;
+    busy entry writers can defer a pass. Existing per-pass batch limits remain.
     """
     slack_rows = max(batch_size, max(1, keep_rows // 5))
     probe = conn.execute(
-        f"SELECT id FROM {table} ORDER BY id DESC OFFSET %s LIMIT 1",
+        f"SELECT id FROM {table} WHERE {_entry_evidence_retention_sql(table)} ORDER BY id DESC OFFSET %s LIMIT 1",
         (keep_rows + slack_rows,),
     ).fetchone()
     return bool(probe)
@@ -1827,6 +1841,14 @@ def _apply_retention_policy(conn: Any, table: str, policy: dict[str, Any], *, ma
         return 0
     if table == "global_decision_ledger":
         return _trim_global_decision_ledger(conn, keep_rows=keep_rows, batch_size=batch_size, max_batches=max_batches)
+    if table in {"signals", "forecasts"}:
+        # BUY attribution holds a shared transaction lock while persisting its
+        # references. Skip maintenance rather than waiting on an active writer.
+        locked = conn.execute("SELECT pg_try_advisory_xact_lock(%s) AS owned",
+                              (ENTRY_EVIDENCE_RETENTION_LOCK,)).fetchone()
+        if not locked or locked.get("owned") is not True:
+            return 0
+    eligible_sql = _entry_evidence_retention_sql(table)
     if not _retention_cleanup_due(conn, table, keep_rows=keep_rows, batch_size=batch_size):
         return 0
     deleted_total = 0
@@ -1837,14 +1859,14 @@ def _apply_retention_policy(conn: Any, table: str, policy: dict[str, Any], *, ma
             WITH doomed AS (
                 SELECT id
                 FROM {table}
-                WHERE id NOT IN (
-                    SELECT id FROM {table} ORDER BY id DESC LIMIT %s
+                WHERE {eligible_sql} AND id NOT IN (
+                    SELECT id FROM {table} WHERE {eligible_sql} ORDER BY id DESC LIMIT %s
                 )
                 ORDER BY id
                 LIMIT %s
             )
             DELETE FROM {table}
-            WHERE id IN (SELECT id FROM doomed)
+            WHERE id IN (SELECT id FROM doomed) AND {eligible_sql}
             """,
             (keep_rows, batch_size),
         ).rowcount or 0
