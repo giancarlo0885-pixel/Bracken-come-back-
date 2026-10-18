@@ -44,4 +44,6 @@ if os.getenv("EXECUTION_MODE", "paper").strip().lower() == "paper":
 if __name__ == "__main__":
     logger.info("ORACLE STOCK SOURCE SYNC | current-main deployment active")
     prepare_capital_readiness_runtime(market_worker, "cash")
+    from paper_trade_evidence_audit import emit_trade_evidence_audit
+    emit_trade_evidence_audit("cash")
     market_worker.run_worker("cash")

@@ -253,8 +253,9 @@ def _record_order_and_fill(
         raise ValueError("paper audit requires exact lot and ledger links")
     if len({ledger_id for _, ledger_id, _ in lot_links}) != len(lot_links):
         raise ValueError("paper audit contains duplicate ledger references")
+    from paper_fill_provenance import close as evidence_close
     linked_qty = sum(float(link_qty) for _, _, link_qty in lot_links)
-    if abs(linked_qty - qty) > max(1e-8, qty * 1e-8):
+    if not evidence_close(linked_qty, qty, quantity=True):
         raise ValueError("paper audit lot quantities do not reconcile")
 
     # Lock the exact row returned by the INSERT in this transaction. A matching
@@ -270,7 +271,7 @@ def _record_order_and_fill(
     if (str(trade["market"]).lower() != market
             or str(trade["symbol"]).upper() != symbol
             or str(trade["side"]).upper() != side
-            or abs(_finite(trade["quantity"]) - qty) > max(1e-8, qty * 1e-8)
+            or not evidence_close(trade["quantity"], qty, quantity=True)
             or abs(_finite(trade["price"]) - executed_price) > max(1e-8, executed_price * 1e-8)
             or abs(_finite(trade["value"]) - filled_notional) > max(0.01, filled_notional * 1e-8)):
         raise ValueError("paper audit canonical execution identity or economics mismatch")

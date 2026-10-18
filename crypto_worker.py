@@ -235,4 +235,6 @@ if __name__ == "__main__":
     if os.getenv("EXECUTION_MODE", "paper").strip().lower() == "paper":
         emit_recent_crypto_sell_db_verification()
         emit_paper_accounting_reconciliation("crypto")
+        from paper_trade_evidence_audit import emit_trade_evidence_audit
+        emit_trade_evidence_audit("crypto")
     market_worker.run_worker("crypto")

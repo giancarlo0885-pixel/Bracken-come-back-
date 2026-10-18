@@ -178,3 +178,23 @@ def test_accounting_only_installer_preserves_fifo_entry_identity_and_single_fee_
     assert [lot.quantity_remaining for lot in lots] == [0, 1]
     # Entry fees on the BUY allocation plus SELL ledger net equal full-cost net.
     assert sum(row.net_pnl for row in rows) - 3 == pytest.approx(sum(row.round_trip_net_pnl for row in rows))
+
+
+def test_atomic_writer_rejects_material_tiny_lot_quantity_mismatch_before_sql():
+    from unittest.mock import Mock
+    conn=Mock()
+    with pytest.raises(ValueError,match='lot quantities'):
+        accounting._record_order_and_fill(conn,execution_trade_id=1,market='crypto',symbol='TEST-USD',
+            side='BUY',quantity=1e-24,price=100,reference_price=100,fee_amount=0,
+            requested_notional=1e-22,lot_links=[('lot','ledger',1e-8)],quote={},reason='test')
+    conn.execute.assert_not_called()
+
+
+def test_atomic_writer_rejects_canonical_tiny_quantity_mismatch():
+    from unittest.mock import Mock
+    conn=Mock();conn.execute.return_value.fetchone.return_value={
+        'id':1,'market':'crypto','symbol':'TEST-USD','side':'BUY','quantity':2e-24,'price':100,'value':2e-22}
+    with pytest.raises(ValueError,match='canonical execution identity'):
+        accounting._record_order_and_fill(conn,execution_trade_id=1,market='crypto',symbol='TEST-USD',
+            side='BUY',quantity=1e-24,price=100,reference_price=100,fee_amount=0,
+            requested_notional=1e-22,lot_links=[('lot','ledger',1e-24)],quote={},reason='test')

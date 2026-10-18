@@ -303,3 +303,62 @@ def test_postgres_invalid_close_timestamp_fails_closed_for_that_lot_only(fill_ev
         assert allocations[0]["lot_closed_quantity"] is None
         assert "_fill_accounting_provenance" not in _read(conn, ["overclose:1"])[0]
         assert _read(conn, ["sell:a"])[0]["_fill_accounting_provenance"] == PROVENANCE_VERSION
+
+
+@pytest.fixture
+def entry_audit_db(fill_evidence_db):
+    connection, reader = fill_evidence_db
+    with connection() as conn:
+        _seed_graph(conn)
+        conn.execute('ALTER TABLE trade_ledger ADD COLUMN id BIGSERIAL, ADD COLUMN decision_timestamp TEXT, ADD COLUMN feature_snapshot JSONB')
+        conn.execute('''ALTER TABLE position_lots ADD COLUMN entry_signal_id TEXT,
+            ADD COLUMN entry_decision_id TEXT, ADD COLUMN entry_forecast_id TEXT,
+            ADD COLUMN entry_quote_id TEXT, ADD COLUMN decision_timestamp TEXT, ADD COLUMN feature_snapshot JSONB''')
+        conn.execute('''UPDATE trade_ledger SET entry_signal_id=CASE WHEN entry_signal_id='signal:lot-a' THEN '1' ELSE '2' END,
+            decision_timestamp=(entry_time::timestamptz-INTERVAL '1 second')::text,feature_snapshot='{"momentum":1}' ''')
+        conn.execute('''UPDATE position_lots SET entry_signal_id=CASE WHEN lot_id='lot-a' THEN '1' ELSE '2' END,
+            entry_decision_id='decision:'||lot_id,entry_forecast_id='forecast:'||lot_id,entry_quote_id='quote:'||lot_id,
+            decision_timestamp=(opened_at::timestamptz-INTERVAL '1 second')::text,feature_snapshot='{"momentum":1}' ''')
+        conn.execute('CREATE TABLE signals(id BIGINT PRIMARY KEY,market TEXT,symbol TEXT,created_at TEXT)')
+        conn.execute('''CREATE TABLE forecasts(forecast_id TEXT,signal_id BIGINT,market TEXT,symbol TEXT,
+            created_at TEXT,source_quote_timestamp TEXT)''')
+        conn.execute('''INSERT INTO signals SELECT entry_signal_id::bigint,market,symbol,decision_timestamp
+            FROM trade_ledger WHERE side='BUY' ''')
+        conn.execute('''INSERT INTO forecasts SELECT entry_forecast_id,entry_signal_id::bigint,market,symbol,
+            decision_timestamp,(entry_time::timestamptz-INTERVAL '5 seconds')::text FROM trade_ledger WHERE side='BUY' ''')
+    return connection
+
+
+def test_committed_entry_audit_resolves_actual_graph_and_is_read_only(entry_audit_db):
+    from paper_trade_evidence_audit import summarize_trade_evidence
+    with entry_audit_db() as conn:
+        report=summarize_trade_evidence(conn,market='crypto')
+        assert report['paper_fills']=={'total':4,'unlinked_legacy':0,'dangling_trade_id':0,'invalid_fee':0,'missing_lot_links':0}
+        assert report['sample_rows']==report['sample_accounting_verified']==5
+        assert report['sample_entry_lots']==report['sample_complete_entry_references']==2
+        assert report['sample_entry_exclusions']=={}
+        assert conn.execute('SHOW transaction_read_only').fetchone()['transaction_read_only']=='on'
+        assert report['historical_repair']=='NONE' and report['profitability']=='NOT_EVALUATED'
+
+
+def test_entry_audit_never_substitutes_wrong_forecast_or_lot_features(entry_audit_db):
+    from paper_trade_evidence_audit import summarize_trade_evidence
+    with entry_audit_db() as conn:
+        conn.execute("UPDATE forecasts SET signal_id=2 WHERE forecast_id='forecast:lot-a'")
+        conn.execute("UPDATE position_lots SET feature_snapshot='{}' WHERE lot_id='lot-a'")
+    with entry_audit_db() as conn:
+        report=summarize_trade_evidence(conn,market='crypto')
+        assert report['sample_accounting_verified']==5  # Finance and decision-reference scopes differ.
+        assert report['sample_complete_entry_references']==1
+        assert report['sample_entry_exclusions']=={'lot_entry_snapshot_mismatch':1,'unresolved_or_ambiguous_entry_forecast':1}
+
+
+def test_stock_zero_export_can_be_distinguished_from_existing_canonical_trades(entry_audit_db):
+    from paper_trade_evidence_audit import summarize_trade_evidence
+    with entry_audit_db() as conn:
+        conn.execute("INSERT INTO trades(market,symbol,side,quantity,price,created_at) VALUES('cash','TEST','BUY',1,100,'2026-10-18T00:00:00Z')")
+    with entry_audit_db() as conn:
+        report=summarize_trade_evidence(conn,market='cash')
+        assert report['canonical_trade_counts']==[{'side':'BUY','total':1}]
+        assert report['ledger_mode_counts']==[] and report['sample_rows']==0
+        assert report['sample_entry_lots']==0 and report['paper_fills']['total']==0
