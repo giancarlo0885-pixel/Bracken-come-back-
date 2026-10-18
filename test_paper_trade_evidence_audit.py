@@ -122,3 +122,9 @@ def test_conflicts_invalid_quotes_and_late_signals_stay_unknown():
 def test_malformed_receipt_cannot_become_proof_of_abstention(details):
     e,lot,s,f=entry();e['entry_forecast_id']=None;s[0]['details']=details
     assert forecast_generation_evidence(e,s,[])['status']=='UNKNOWN_NO_GENERATION_RECEIPT'
+
+
+def test_conflicting_original_forecast_id_is_not_diagnosed_as_a_recoverable_link():
+    e,lot,s,f=entry();e['entry_forecast_id']=None
+    s[0]['details']={'forecast_id':'different-original-forecast'}
+    assert forecast_generation_evidence(e,s,f)['status']=='CONFLICTING_GENERATION_EVIDENCE'

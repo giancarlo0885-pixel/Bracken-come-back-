@@ -98,6 +98,8 @@ def forecast_generation_evidence(entry, signals, forecasts):
         generated, quote = _time(row.get('created_at')), _time(row.get('source_quote_timestamp'))
         if quote is None or quote > generated or not row.get('forecast_id'):
             return {'status': 'UNKNOWN_INVALID_FORECAST_EVIDENCE'}
+        if declared_id and declared_id != row['forecast_id']:
+            return {'status': 'CONFLICTING_GENERATION_EVIDENCE'}
         if not linked_id:
             return {'status': 'PERSISTED_FORECAST_MISSING_ENTRY_LINK'}
         if linked_id != row['forecast_id'] or (declared_id and declared_id != linked_id):
