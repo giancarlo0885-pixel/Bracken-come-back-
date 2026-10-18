@@ -531,7 +531,7 @@ def test_scanning_and_signal_persistence_continue_when_execution_disabled(monkey
     monkeypatch.setattr(market_worker, "ENABLE_AUTOTRADE", False)
     monkeypatch.setattr(market_worker, "_fast_candidate_batch", lambda market: [("AAPL", "Apple")])
     monkeypatch.setattr(market_worker, "_fast_discover_symbol", lambda *args, **kwargs: (Signal(), history))
-    monkeypatch.setattr(market_worker, "save_json_signal", lambda *args, **kwargs: saved.__setitem__("signals", saved["signals"] + 1))
+    monkeypatch.setattr(market_worker, "save_json_signal", lambda *args, **kwargs: (saved.__setitem__("signals", saved["signals"] + 1) or 1))
     monkeypatch.setattr(market_worker, "forecast_price", lambda *args, **kwargs: {"target_price": 105})
     monkeypatch.setattr(market_worker, "save_forecast", lambda *args, **kwargs: saved.__setitem__("forecasts", saved["forecasts"] + 1))
     monkeypatch.setattr(market_worker, "update_prices", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("update called")))

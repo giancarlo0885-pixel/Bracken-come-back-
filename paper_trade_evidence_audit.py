@@ -55,6 +55,60 @@ def entry_reference_reasons(entry, lot, signals, forecasts):
     return reasons
 
 
+def forecast_generation_evidence(entry, signals, forecasts):
+    """Diagnose original entry evidence without inferring or repairing a link."""
+    scope = (entry.get('market'), entry.get('symbol'))
+    signal_id = entry.get('entry_signal_id')
+    matches = [r for r in signals if str(r.get('id')) == str(signal_id)
+               and (r.get('market'), r.get('symbol')) == scope] if signal_id else []
+    if len(matches) != 1:
+        return {'status': 'UNKNOWN_SIGNAL_UNRESOLVED'}
+    signal = matches[0]
+    entered, created = _time(entry.get('entry_time')), _time(signal.get('created_at'))
+    if entered is None or created is None or created > entered:
+        return {'status': 'UNKNOWN_INVALID_SIGNAL_TIME'}
+    details = signal.get('details')
+    if isinstance(details, str):
+        try:
+            details = json.loads(details)
+        except (ValueError, TypeError):
+            details = None
+    details = details if isinstance(details, dict) else {}
+    reason = details.get('forecast_unavailable_reason')
+    reason = reason if isinstance(reason, str) and reason.strip() else None
+    declared_id = details.get('forecast_id')
+    linked_id = entry.get('entry_forecast_id')
+    # Only the original signal's exact scope and pre-entry rows are evidence.
+    related = [r for r in forecasts if str(r.get('signal_id')) == str(signal_id)
+               and (r.get('market'), r.get('symbol')) == scope
+               and _time(r.get('created_at')) is not None
+               and _time(r['created_at']) <= entered]
+    all_scoped = [r for r in forecasts if str(r.get('signal_id')) == str(signal_id)
+                  and (r.get('market'), r.get('symbol')) == scope]
+    if len(all_scoped) > 1:
+        return {'status': 'AMBIGUOUS_PERSISTED_FORECASTS'}
+    if reason and (declared_id or linked_id or related):
+        return {'status': 'CONFLICTING_GENERATION_EVIDENCE', 'unavailable_reason': reason}
+    if reason:
+        return {'status': 'RECORDED_FORECAST_UNAVAILABLE', 'unavailable_reason': reason}
+    if related:
+        if len(related) != 1:
+            return {'status': 'AMBIGUOUS_PERSISTED_FORECASTS'}
+        row = related[0]
+        generated, quote = _time(row.get('created_at')), _time(row.get('source_quote_timestamp'))
+        if quote is None or quote > generated or not row.get('forecast_id'):
+            return {'status': 'UNKNOWN_INVALID_FORECAST_EVIDENCE'}
+        if not linked_id:
+            return {'status': 'PERSISTED_FORECAST_MISSING_ENTRY_LINK'}
+        if linked_id != row['forecast_id'] or (declared_id and declared_id != linked_id):
+            return {'status': 'CONFLICTING_GENERATION_EVIDENCE'}
+        return {'status': 'PERSISTED_EXACT_ENTRY_LINK'}
+    if declared_id or linked_id:
+        # Absence cannot distinguish a failed INSERT from historical retention.
+        return {'status': 'REFERENCED_FORECAST_NOT_FOUND'}
+    return {'status': 'UNKNOWN_NO_GENERATION_RECEIPT'}
+
+
 def summarize_trade_evidence(conn, *, market, limit=SAMPLE_LIMIT):
     if market not in {'cash','crypto'}:
         raise ValueError('invalid market')
@@ -94,20 +148,33 @@ def summarize_trade_evidence(conn, *, market, limit=SAMPLE_LIMIT):
         entries[opening['trade_id']] = (opening,a['lot'])
     signal_ids = sorted({str(e.get('entry_signal_id')) for e,_ in entries.values() if e.get('entry_signal_id')})
     forecast_ids = sorted({e.get('entry_forecast_id') for e,_ in entries.values() if e.get('entry_forecast_id')})
-    signals = list(conn.execute('SELECT id,market,symbol,created_at FROM signals WHERE id::text=ANY(%s)',(signal_ids,)).fetchall()) if signal_ids else []
+    signals = list(conn.execute('SELECT id,market,symbol,created_at,details FROM signals WHERE id::text=ANY(%s)',(signal_ids,)).fetchall()) if signal_ids else []
     forecasts = list(conn.execute('''SELECT forecast_id,signal_id,market,symbol,created_at,source_quote_timestamp
         FROM forecasts WHERE forecast_id=ANY(%s)''',(forecast_ids,)).fetchall()) if forecast_ids else []
-    reasons=Counter(); samples=[]; complete=0
+    # Bound related rows per sampled signal; two rows suffice to detect ambiguity.
+    numeric_ids = [int(i) for i in signal_ids if i.isdecimal() and int(i) <= 9223372036854775807]
+    related_forecasts = list(conn.execute("""SELECT f.* FROM unnest(%s::bigint[]) AS ids(signal_id)
+        CROSS JOIN LATERAL (SELECT forecast_id,signal_id,market,symbol,created_at,source_quote_timestamp
+            FROM forecasts f0 WHERE signal_id=ids.signal_id
+              AND EXISTS(SELECT 1 FROM signals s0 WHERE s0.id=ids.signal_id
+                AND s0.market=f0.market AND s0.symbol=f0.symbol)
+            ORDER BY created_at LIMIT 2) f""",
+        (numeric_ids,)).fetchall()) if numeric_ids else []
+    reasons=Counter(); generation_counts=Counter(); samples=[]; complete=0
     for trade_id,(entry,lot) in sorted(entries.items()):
         failures=entry_reference_reasons(entry,lot,signals,forecasts)
         reasons.update(failures);complete+=not failures
+        generation = forecast_generation_evidence(entry, signals, related_forecasts)
+        generation_counts[generation['status']] += 1
         samples.append({'entry_trade_id':trade_id,'entry_signal_id':entry.get('entry_signal_id'),
-            'entry_forecast_id':entry.get('entry_forecast_id'),'symbol':entry['symbol'],'reasons':failures})
+            'entry_forecast_id':entry.get('entry_forecast_id'),'symbol':entry['symbol'],'reasons':failures,
+            'forecast_generation':generation})
     return {'market':market,'as_of':as_of.isoformat(),'canonical_trade_counts':[dict(r) for r in canonical],
         'ledger_mode_counts':[dict(r) for r in modes],'paper_fills':fills,
         'sample_scope':'latest_explicitly_linked_ledger_rows_only','sample_limit':limit,
         'sample_rows':len(ledger),'sample_accounting_verified':sum(r.get('_fill_accounting_provenance')==PROVENANCE_VERSION for r in verified),
         'sample_entry_lots':len(entries),'sample_complete_entry_references':complete,
+        'sample_forecast_generation_counts':dict(generation_counts),
         'sample_entry_exclusions':dict(reasons),'sample_entry_references':samples,
         'historical_repair':'NONE','execution_impact':'NONE','profitability':'NOT_EVALUATED',
         'scope_warning':'Sample counts are not all-history qualifications, independent episodes, or decision-time Brain-consumption receipts.'}
