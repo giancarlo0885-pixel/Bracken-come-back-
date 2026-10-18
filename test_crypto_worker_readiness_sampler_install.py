@@ -1,7 +1,8 @@
-from __future__ import annotations
+from pathlib import Path
 
 
-def test_crypto_worker_installs_v39_quote_readiness_sampler() -> None:
-    source = open("crypto_worker.py", encoding="utf-8").read()
-    assert "from crypto_quote_readiness_sampler import install_v39_quote_verification_sampler" in source
-    assert "install_v39_quote_verification_sampler(market_worker)" in source
+def test_worker_removes_broker_sampler_and_installs_no_execution_source_guard():
+    source=Path('crypto_worker.py').read_text()
+    assert 'install_v39_quote_verification_sampler' not in source
+    assert source.index('    install_unavailable_crypto_execution_source()') < source.index('    prepare_capital_readiness_runtime(')
+    assert 'run_robinhood_startup_preflight' not in source

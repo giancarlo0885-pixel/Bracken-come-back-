@@ -7,24 +7,18 @@ from capital_readiness_runtime import prepare_capital_readiness_runtime
 from core_rebalance_observability import install_core_rebalance_observability
 from core_rebalance_optimizer_trace import install_core_rebalance_optimizer_trace
 from core_rebalance_score_compat import install_core_rebalance_score_compat
-from crypto_dynamic_universe_runtime import install_crypto_dynamic_universe_runtime
 from crypto_execution_guard import install_crypto_execution_quote_guard
 from crypto_forecast_runtime import install_crypto_short_horizon_forecast
 from crypto_pipeline_integrity_runtime import install_crypto_pipeline_integrity_runtime
-from crypto_provider_health_runtime import install_crypto_provider_health_runtime
-from crypto_quote_readiness_sampler import install_v39_quote_verification_sampler
 from crypto_v39_risk_bridge import install_crypto_v39_risk_bridge
 from crypto_v39_spread_bridge import install_crypto_v39_spread_bridge
 from current_model_readiness_fix import install_current_model_readiness_fix
 from event_opportunity_runtime import install_event_opportunity_runtime
-from live_broker_capital import install_live_broker_capital_sizing
-from live_v39_broker_bridge import install_live_v39_broker_capital_bridge
 from massive_crypto_websocket import install_massive_crypto_websocket
 from migration_runtime_safety import install_migration_runtime_safety
 from optimizer_repair_runtime import install_optimizer_repairs
 from paper_accounting_reconciliation_runtime import emit_paper_accounting_reconciliation
 from paper_autonomous_learning import install_paper_autonomous_learning
-from paper_broker_reference_runtime import install_paper_broker_reference
 from paper_core_rebalance_qualification import install_paper_core_rebalance_qualification
 from paper_crypto_churn_guard import install_paper_crypto_churn_guard
 from paper_crypto_learning_relaxation import install_paper_crypto_learning_relaxation
@@ -43,12 +37,6 @@ from paper_strategy_economics import install_paper_strategy_economics
 from paper_strategy_execution_guard import install_paper_strategy_execution_guard
 from paper_weekly_risk_period_runtime import install_paper_weekly_risk_period
 from readiness_observability import emit_capital_readiness_report
-from robinhood_current_marketdata_runtime import install_robinhood_current_marketdata
-from robinhood_pagination_compat import install_robinhood_pagination_compat
-from robinhood_quote_compat import install_robinhood_quote_compat
-from robinhood_quote_core_fix import install_robinhood_quote_core_fix
-from robinhood_quote_resilience import install_robinhood_quote_resilience
-from robinhood_transport_resilience import install_robinhood_transport_resilience
 from runtime_integrity_patch import install_runtime_integrity_patch
 from runtime_provider_reliability import install_yahoo_runtime_reliability
 from selective_model_leakage_fix import install_selective_model_leakage_fix
@@ -69,25 +57,9 @@ install_paper_crypto_learning_relaxation()
 install_core_rebalance_score_compat()
 install_strategic_core_rebalance_producer(market_worker)
 install_binance_us_reference_fallback()
-install_robinhood_pagination_compat()
-install_robinhood_quote_compat()
-install_robinhood_quote_core_fix()
-install_robinhood_transport_resilience()
-# Robinhood now supplies the point-in-time crypto execution mark. Historical
-# OHLCV remains on the existing provider router for indicators and forecasts.
-install_robinhood_current_marketdata(market_worker)
-# Expand discovery only from broker-reported tradable USD pairs. Capital and
-# execution gates remain unchanged for every dynamically added symbol.
-install_crypto_dynamic_universe_runtime(market_worker)
-install_robinhood_quote_resilience(market_worker)
-# Observe final broker availability after retries/cache grace. This is telemetry
-# only and does not alter quote contents or execution eligibility.
-install_crypto_provider_health_runtime(market_worker)
+# Crypto research remains active; no broker execution source is configured.
 install_crypto_v39_spread_bridge(market_worker)
 install_crypto_execution_quote_guard(market_worker)
-install_v39_quote_verification_sampler(market_worker)
-install_live_broker_capital_sizing()
-install_live_v39_broker_capital_bridge(market_worker)
 install_crypto_short_horizon_forecast(market_worker)
 install_crypto_v39_risk_bridge(market_worker)
 install_paper_core_rebalance_qualification(market_worker)
@@ -114,7 +86,6 @@ if os.getenv("EXECUTION_MODE", "paper").strip().lower() == "paper":
     # Must run after fee-aware attribution is installed so the repair wraps the
     # final SELL attribution path and shares the caller's database transaction.
     install_atomic_paper_sell_lot_repair(market_worker)
-    install_paper_broker_reference(market_worker)
     # Prevent fast generic SELL noise from immediately reversing a fresh paper
     # entry. Protective EXIT/CLOSE/risk-exit paths remain unrestricted.
     install_paper_crypto_churn_guard(market_worker)
@@ -124,8 +95,7 @@ if os.getenv("EXECUTION_MODE", "paper").strip().lower() == "paper":
     install_paper_sell_execution_router(market_worker)
     install_paper_lifecycle_observability(market_worker)
 
-# Massive is a surveillance/reference feed only. It observes broker-anchored
-# execution payloads without replacing Robinhood as the execution authority.
+# Massive remains a surveillance/reference feed only; it has no execution authority.
 install_massive_crypto_websocket(market_worker)
 
 # Install last so the optimizer repair sees the final wrapped execution chain.
@@ -152,77 +122,10 @@ install_paper_regime_economics_shadow()
 install_paper_shadow_exit_challenger("crypto")
 install_paper_strategy_execution_guard()
 
-# Keep this entrypoint in the crypto-worker deploy watch set; readiness helpers are imported above.
-# Production deploy marker: broker-anchored paper BUY/SELL execution, dynamic crypto discovery,
-# provider-health telemetry, adaptive sizing, optimizer tracing, churn control, economics gating,
-# and Massive surveillance are active.
-
-
-def run_robinhood_startup_preflight() -> None:
-    """Run read-only broker connectivity plus durable restart reconciliation."""
-    if os.getenv("ROBINHOOD_CRYPTO_ENABLED", "false").strip().lower() != "true":
-        logger.info("ROBINHOOD PREFLIGHT | connection=DISABLED | live_trading=DISARMED")
-        return
-
-    reconciliation_status = "NOT_RUN"
-    try:
-        from broker_order_journal import PersistentOrderJournal
-        from broker_reconciliation import reconcile_persistent_journal
-        from robinhood_crypto_api import RobinhoodCryptoClient, preflight
-
-        client = RobinhoodCryptoClient()
-        journal = PersistentOrderJournal()
-        result = preflight(client, journal)
-
-        if result.get("ROBINHOOD AUTH") == "PASS" and result.get("ACCOUNT STATUS") == "PASS":
-            account = client.account_details()
-            account_number = str(account.get("account_number") or "").strip()
-            if account_number:
-                remote_orders = client.orders(account_number)
-                reconciliation = reconcile_persistent_journal(
-                    journal,
-                    remote_orders,
-                    account_number_present=True,
-                )
-                reconciliation_status = str(reconciliation.get("status") or "UNKNOWN")
-                if reconciliation_status != "PASS":
-                    result["ORDER JOURNAL"] = "FAIL"
-            else:
-                reconciliation_status = "FAIL_CLOSED"
-                result["ORDER JOURNAL"] = "FAIL"
-    except Exception as exc:
-        logger.warning(
-            "ROBINHOOD PREFLIGHT | connection=ERROR | auth=FAIL | reconciliation=FAIL_CLOSED | "
-            "live_trading=DISARMED | reason=%s",
-            exc.__class__.__name__,
-        )
-        return
-
-    buying_power_state = str(result.get("BUYING POWER STATE") or "NOT_CHECKED")
-
-    logger.info(
-        "ROBINHOOD PREFLIGHT | connection=%s | auth=%s | account=%s | crypto=%s | "
-        "pairs=%s | quote=%s | quote_reason=%s | buying_power=%s | buying_power_state=%s | holdings=%s | "
-        "orders=%s | journal=%s | reconciliation=%s | live_trading=%s | reason=%s",
-        result.get("ROBINHOOD CONNECTION", "UNKNOWN"),
-        result.get("ROBINHOOD AUTH", "UNKNOWN"),
-        result.get("ACCOUNT STATUS", "UNKNOWN"),
-        result.get("CRYPTO STATUS", "UNKNOWN"),
-        result.get("TRADABLE PAIR COUNT", 0),
-        result.get("QUOTE CHECK", "UNKNOWN"),
-        result.get("QUOTE CHECK REASON", "DIRECT_BTC_OR_PRIMARY_PAIR"),
-        result.get("BUYING POWER CHECK", "UNKNOWN"),
-        buying_power_state,
-        result.get("HOLDINGS CHECK", "UNKNOWN"),
-        result.get("ORDERS CHECK", "UNKNOWN"),
-        result.get("ORDER JOURNAL", "UNKNOWN"),
-        reconciliation_status,
-        result.get("LIVE TRADING ARMED/DISARMED", "DISARMED"),
-        str(result.get("reason") or "")[:240],
-    )
-
-
 if __name__ == "__main__":
+    from crypto_execution_source import install_unavailable_crypto_execution_source
+    install_unavailable_crypto_execution_source()
+    logger.info("CRYPTO BROKER | provider=NONE | robinhood=REMOVED | execution_quotes=UNAVAILABLE | broker_submission=NONE | execution_authority=NONE")
     prepare_capital_readiness_runtime(market_worker, "crypto")
     from kraken_reference_runtime import install_kraken_reference
     install_kraken_reference(market_worker)
@@ -230,7 +133,6 @@ if __name__ == "__main__":
     if kraken_research_enabled():
         market_worker._kraken_primary_research = PrimaryResearch()
         market_worker._kraken_primary_research.start()
-    run_robinhood_startup_preflight()
     emit_capital_readiness_report(logger)
     if os.getenv("EXECUTION_MODE", "paper").strip().lower() == "paper":
         emit_recent_crypto_sell_db_verification()

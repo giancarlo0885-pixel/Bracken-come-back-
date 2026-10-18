@@ -329,7 +329,7 @@ class RobinhoodCryptoClient:
 
     def configured(self) -> dict[str, Any]:
         if not ROBINHOOD_CRYPTO_ENABLED:
-            return {"ok": False, "reason": "ROBINHOOD_CRYPTO_ENABLED=false"}
+            return {"ok": False, "reason": "ROBINHOOD_INTEGRATION_REMOVED"}
         if not self.api_key:
             return {"ok": False, "reason": "ROBINHOOD_CRYPTO_API_KEY missing"}
         if not self.private_key_base64:

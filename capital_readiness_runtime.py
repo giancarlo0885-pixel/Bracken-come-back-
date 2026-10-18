@@ -155,20 +155,7 @@ def prepare_capital_readiness_runtime(worker: Any, market: str) -> dict[str, Any
         log.warning("Model governance refresh unavailable: %s", exc.__class__.__name__)
 
     if result["market"] == "crypto":
-        try:
-            from shadow_broker_runtime import install_shadow_broker_tracking
-
-            install_shadow_broker_tracking(worker)
-            result["shadow"] = "INSTALLED"
-        except Exception as exc:
-            result["shadow"] = "UNAVAILABLE"
-            result["shadow_error"] = exc.__class__.__name__
-            if live_requested:
-                result["live_capital_gate"] = "BLOCKED_SHADOW_TRACKING"
-                raise LiveCapitalSafetyError(
-                    f"Live-capital startup blocked: shadow broker tracking unavailable ({exc.__class__.__name__})"
-                ) from exc
-            log.warning("Shadow broker tracking unavailable: %s", exc.__class__.__name__)
+        result["shadow"] = "BROKER_REMOVED"
 
     if live_requested:
         _enforce_live_capital_gate(result)
