@@ -124,6 +124,10 @@ def display_research(payload, now):
 
 
 def read_research(fetch_rows, now=None):
+    # The default-off writer has not necessarily created its optional table.
+    relation = fetch_rows("SELECT to_regclass('kraken_research_state') AS relation")
+    if not relation or relation[0].get('relation') is None:
+        return {'status':'UNAVAILABLE', 'execution_authority':'NONE', 'symbols':{}}
     rows = fetch_rows('SELECT payload FROM kraken_research_state WHERE id=1')
     if not rows:
         return {'status':'UNAVAILABLE', 'execution_authority':'NONE', 'symbols':{}}

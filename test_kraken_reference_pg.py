@@ -140,3 +140,14 @@ def test_research_evidence_is_exact_bounded_immutable_and_separate(pg):
         view=read_research(lambda q:conn.execute(q).fetchall(),NOW+timedelta(seconds=11))
         assert view['symbols']['BTC-USD']['current'] is False
         assert view['execution_authority']=='NONE'
+
+
+def test_disabled_research_reader_works_before_optional_table_exists(pg):
+    from kraken_primary_research import read_research
+    with pg() as conn:
+        conn.execute('BEGIN READ ONLY')
+        view=read_research(lambda q:conn.execute(q).fetchall(),NOW)
+        assert view['status']=='UNAVAILABLE' and view['symbols']=={}
+        # A missing-relation query would abort this read-only transaction.
+        assert conn.execute('SELECT 1 AS ok').fetchone()['ok']==1
+        conn.execute('ROLLBACK')

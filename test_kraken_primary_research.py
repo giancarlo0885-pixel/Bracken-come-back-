@@ -193,6 +193,7 @@ def test_brain_consumes_research_separately_from_qualified_outcomes():
     from test_oracle_brain import _fetch
     r=research.research_forecast(quote(),history(),NOW,forecast=prediction)
     def fetch(query,*args,**kwargs):
+        if 'to_regclass' in query:return [{'relation':'kraken_research_state'}]
         if 'FROM kraken_research_state' in query:return [{'payload':{'symbols':{'BTC-USD':r}}}]
         return _fetch(query,*args,**kwargs)
     snap=build_oracle_brain_snapshot(fetch,market_scope='crypto')
@@ -270,3 +271,10 @@ def test_coinbase_350_row_response_is_bounded_to_300_closed_bars(monkeypatch):
     assert len(h)==300 and h.index[-1]==pd.Timestamp(NOW)-pd.Timedelta(minutes=5)
     assert h.attrs['provider']=='Coinbase Exchange' and h.attrs['quote_verified'] is False
     assert h.index.is_monotonic_increasing
+
+
+@pytest.mark.parametrize('metadata',[[],[{'relation':None}]])
+def test_disabled_reader_does_not_query_optional_missing_table(metadata):
+    fetch=Mock(return_value=metadata)
+    assert research.read_research(fetch,NOW)['status']=='UNAVAILABLE'
+    fetch.assert_called_once_with("SELECT to_regclass('kraken_research_state') AS relation")
