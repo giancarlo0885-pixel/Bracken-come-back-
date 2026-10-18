@@ -137,3 +137,58 @@ Official documentation reviewed October 16, 2026:
 Existing rejected models, strategy thresholds, trading flags, accounting, Brain,
 AEVE and permanent evidence remain unchanged. No profitability claim follows from
 improved reference-data availability.
+
+## Primary research analysis (separate opt-in)
+
+`KRAKEN_PRIMARY_RESEARCH_ENABLED=true`, together with the existing
+`KRAKEN_REFERENCE_WS_ENABLED=true`, enables a separate paper-only analysis path.
+The new flag defaults to false. Live mode, broker submission or live arming
+prevents startup. No execution/trading flag or model qualification changes.
+
+The elected ingestion worker keeps the same single depth-10 WebSocket and may
+expand to at most four exact USD instruments from the existing crypto watchlist.
+Additional pairs require online currency instruments from public Kraken
+AssetPairs metadata (`assetVersion=1`); no aliases, tokenized stocks, leveraged
+products or inferred coverage. Discovery failure preserves BTC/ETH ingestion.
+This metadata establishes research coverage, not broker tradability.
+
+A separately elected research worker samples at most every five minutes. Kraken
+is primary for current prices and same-venue closed five-minute candles. Public
+OHLC bootstrap excludes the uncommitted final candle and validates ordered,
+contiguous, finite OHLCV. The observed API can return 720 closed bars plus the
+uncommitted bar; storage and model input stay capped at 720 completed bars.
+Candles retain their historical timestamps/provider, independently of the book.
+The existing 15-minute selective model runs unchanged: abstentions and failed
+qualification remain abstentions/failures. Research target prices anchor the
+model's unchanged predicted return to the actual fresh venue mid, with explicit
+source/receipt timestamps; these forecasts are never routed to trading signals.
+
+Coinbase public level-1 books provide independent timestamp-aligned diagnostics.
+Auction, crossed, stale or missing-timestamp books are rejected. If the Kraken
+book is missing, a fresh Coinbase book and same-venue closed Coinbase candles may
+supply an explicitly labeled research backup. Coinbase never inherits a Kraken
+checksum and missing Coinbase checksums remain `NOT_PROVIDED`. No synthetic
+volume or local receipt time is substituted for an exchange timestamp. Robinhood
+remains the execution authority; its invalid books still block fills.
+
+Both public HTTP clients use existing shared provider budgets and cooldowns:
+Kraken Public Research <=1200 requests/day, Coinbase Public Research <=2400/day,
+with five-minute bounded caches and local plus shared 429/API-rate-limit
+cooldowns. Database/ledger unavailability fails closed for new requests.
+
+Brain and dashboard read `kraken_research_state`, a singleton containing latest
+research/abstention diagnostics; readers label it a retained observation and
+recheck freshness. Research is separate from qualified trade/episode statistics.
+Actual shadow forecasts also append immutable, deduplicated
+`kraken_research_evidence`: original quote, model output and compressed closed
+input candles. This new protected evidence table cannot exceed 5000 slots;
+payloads and compressed history are size bounded. Capacity exhaustion stops new
+evidence acceptance with an explicit diagnostic, without deleting old evidence.
+Repeated symbol/venue/bar/model generations are not counted twice. No trade,
+fees, realized profitability or future outcome is synthesized. These records
+support later reproducible evaluation; they do not establish a profitable edge.
+
+`KRAKEN PRIMARY RESEARCH` logs report actual roles, source times, evidence IDs,
+model abstentions and independent comparison availability. A successful forecast
+is not approval to trade. Existing stocks, execution gates, sizing, canonical
+trades/accounting, Brain memory and AEVE generations are unchanged.

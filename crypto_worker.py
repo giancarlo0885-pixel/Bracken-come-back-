@@ -226,6 +226,10 @@ if __name__ == "__main__":
     prepare_capital_readiness_runtime(market_worker, "crypto")
     from kraken_reference_runtime import install_kraken_reference
     install_kraken_reference(market_worker)
+    from kraken_primary_research import PrimaryResearch, enabled as kraken_research_enabled
+    if kraken_research_enabled():
+        market_worker._kraken_primary_research = PrimaryResearch()
+        market_worker._kraken_primary_research.start()
     run_robinhood_startup_preflight()
     emit_capital_readiness_report(logger)
     if os.getenv("EXECUTION_MODE", "paper").strip().lower() == "paper":

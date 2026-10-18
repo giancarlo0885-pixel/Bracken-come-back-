@@ -3,16 +3,17 @@ from kraken_reference_book import SYMBOLS, timestamp, exact_decimal
 from robinhood_quote_core_fix import _first_present, _normalized_book
 
 
-def canonical_pair(value):
+def canonical_pair(value, symbols_map=None):
     pair = str(value or '').upper().strip()
-    return SYMBOLS.get(pair, pair if pair in SYMBOLS.values() else None)
+    mapping = symbols_map or SYMBOLS
+    return mapping.get(pair, pair if pair in mapping.values() else None)
 
 
-def robinhood_observations(requested, records, received):
-    symbols = {s for value in requested if (s := canonical_pair(value))}
+def robinhood_observations(requested, records, received, symbols_map=None):
+    symbols = {s for value in requested if (s := canonical_pair(value, symbols_map))}
     result = {}
     for symbol in symbols:
-        rows = [r for r in records if isinstance(r, dict) and canonical_pair(r.get('symbol')) == symbol] if isinstance(records, list) else []
+        rows = [r for r in records if isinstance(r, dict) and canonical_pair(r.get('symbol'), symbols_map) == symbol] if isinstance(records, list) else []
         observed = {'symbol':symbol, 'provider':'Robinhood Crypto',
                     'received_at':received.isoformat(), 'timestamp_basis':'provider_payload',
                     'source_identity':'Robinhood Crypto:best_bid_ask'}

@@ -82,7 +82,7 @@ def display_state(payload, published_at, now):
             raise ValueError("publisher stale")
         quotes = {}
         for symbol, quote in result.get("quotes", {}).items():
-            if (symbol in SYMBOLS.values() and quote.get("checksum_status") == "VALID"
+            if (symbol in result.get("subscribed_symbols", SYMBOLS.values()) and quote.get("checksum_status") == "VALID"
                     and fresh(timestamp(quote["quote_timestamp"]), timestamp(quote["received_at"]), now)):
                 quote.update(reference_only=True, verified=False, quote_verified=False,
                              provider_quote_verified=False, paper_reference_verified=False,
@@ -91,7 +91,7 @@ def display_state(payload, published_at, now):
                              age_seconds=(now - timestamp(quote["quote_timestamp"])).total_seconds())
                 quotes[symbol] = quote
         result["quotes"] = quotes if result.get("connected") else {}
-        if result.get("connected") and len(quotes) != 2:
+        if result.get("connected") and len(quotes) != len(result.get("subscribed_symbols", SYMBOLS)):
             result["status"] = "STALE_OR_AWAITING_SNAPSHOT"
         result["comparisons"] = {
             s: v for s, v in result.get("comparisons", {}).items()
@@ -122,17 +122,19 @@ def read_kraken_reference_state():
 
 
 class KrakenReferenceService:
-    def __init__(self, *, connect_factory=None, socket_factory=None):
+    def __init__(self, *, connect_factory=None, socket_factory=None, research_symbols=None):
         if connect_factory is None:
             from database import connect
             connect_factory = connect
         self.connect_factory = connect_factory
         self.socket_factory = socket_factory or websocket.create_connection
-        self.state = ReferenceBooks()
+        self.symbols = dict(SYMBOLS)
+        self.research_symbols = research_symbols
+        self.state = ReferenceBooks(self.symbols)
         self.stop_event = threading.Event()
         self.lock = threading.RLock()
         self.primary = {}
-        self.reference_history = {symbol:deque(maxlen=128) for symbol in SYMBOLS.values()}
+        self.reference_history = {symbol:deque(maxlen=128) for symbol in self.symbols.values()}
         self.thread = None
         self.socket = None
         self.last_log = 0.0
@@ -153,7 +155,7 @@ class KrakenReferenceService:
 
     def observe_response(self, requested, records, received):
         from kraken_venue_comparison import robinhood_observations
-        observations = robinhood_observations(requested, records, received)
+        observations = robinhood_observations(requested, records, received, self.symbols)
         with self.lock:
             for symbol, observation in observations.items():
                 previous = self.primary.get(symbol, {})
@@ -167,7 +169,7 @@ class KrakenReferenceService:
     def remember_references(self, now):
         # At most ten samples/second per pair, max 128 per pair and ten-second age.
         with self.lock:
-            for exchange, symbol in SYMBOLS.items():
+            for exchange, symbol in self.symbols.items():
                 history = self.reference_history[symbol]
                 while history and (now-timestamp(history[0]['received_at'])).total_seconds() > MAX_AGE:
                     history.popleft()
@@ -185,11 +187,12 @@ class KrakenReferenceService:
     def publish(self, conn):
         now = utc_now()
         payload = self.state.health(now)
+        payload["subscribed_symbols"] = list(self.symbols.values())
         with self.lock:
             primary = dict(self.primary)
             histories = {s:list(h) for s,h in self.reference_history.items()}
         comparisons = {}
-        for symbol in SYMBOLS.values():
+        for symbol in self.symbols.values():
             current = payload["quotes"].get(symbol)
             candidates = histories[symbol] + ([current] if current else [])
             candidates = [q for q in candidates if fresh(timestamp(q['quote_timestamp']), timestamp(q['received_at']), now)]
@@ -219,7 +222,7 @@ class KrakenReferenceService:
             self.clear_references()
             self.publish(conn)  # Replace any previous owner's live-looking row immediately.
             ws.send(json.dumps({"method": "subscribe", "params": {
-                "channel": "book", "symbol": list(SYMBOLS), "depth": 10, "snapshot": True}, "req_id": 1}))
+                "channel": "book", "symbol": list(self.symbols), "depth": 10, "snapshot": True}, "req_id": 1}))
             ws.settimeout(1)
             opened = last_wire = last_ping = last_publish = time.monotonic()
             while not self.stop_event.is_set():
@@ -253,6 +256,14 @@ class KrakenReferenceService:
             ws.close()
             self.socket = None
 
+    def restrict_base_coverage(self):
+        """A rejected expansion must not indefinitely disable BTC/ETH."""
+        counts = self.state.counts.copy()
+        self.symbols = dict(SYMBOLS)
+        self.state = ReferenceBooks(self.symbols)
+        self.state.counts.update(counts)
+        self.reference_history = {s:deque(maxlen=128) for s in self.symbols.values()}
+
     def _run(self):
         attempt = 0
         while not self.stop_event.is_set():
@@ -264,6 +275,15 @@ class KrakenReferenceService:
                         continue
                     conn.execute("SET statement_timeout='3s'")
                     conn.execute(STATE_DDL)
+                    if self.research_symbols is not None:
+                        from kraken_research_data import PublicResearchData, select_instruments
+                        try:
+                            metadata = PublicResearchData().instruments()
+                            self.symbols = select_instruments(metadata, self.research_symbols)
+                        except Exception as exc:
+                            log.warning('KRAKEN RESEARCH COVERAGE | status=DISCOVERY_UNAVAILABLE | reason=%s', type(exc).__name__)
+                        self.state = ReferenceBooks(self.symbols)
+                        self.reference_history = {s:deque(maxlen=128) for s in self.symbols.values()}
                     while not self.stop_event.is_set():
                         started = time.monotonic()
                         initial_updates = self.state.counts["updates"]
@@ -274,6 +294,9 @@ class KrakenReferenceService:
                             reason = str(exc) if isinstance(exc, BookIntegrityError) else type(exc).__name__
                             self.state.invalidate(reason)
                             self.state.counts["connection_failures"] += 1
+                            if reason == 'subscription_error' and len(self.symbols) > 2:
+                                self.restrict_base_coverage()
+                                log.warning('KRAKEN RESEARCH COVERAGE | status=EXPANSION_REJECTED | retained=BTC/USD,ETH/USD')
                             log.warning("KRAKEN REFERENCE | status=%s | execution_authority=NONE", reason)
                         self.publish(conn)
                         if self.stop_event.is_set():
@@ -302,7 +325,10 @@ def install_kraken_reference(worker):
             or not os.getenv("DATABASE_URL", "").strip()
             or getattr(worker, "_kraken_reference_service", None) is not None):
         return False
+    from kraken_primary_research import enabled
+    research_symbols = list(getattr(worker, 'WATCHLISTS', {}).get('crypto', {})) if enabled() else None
     service = KrakenReferenceService()
+    service.research_symbols = research_symbols
     provider = getattr(worker, '_robinhood_current_marketdata_provider', None)
     client = getattr(provider, 'client', None)
     original = getattr(client, 'best_bid_ask_quotes', None)

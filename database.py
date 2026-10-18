@@ -92,6 +92,7 @@ TRANSIENT_DATABASE_ERROR_TEXT = (
 DATABASE_BOOTSTRAP_LOCK_NAME = "garibaldi_database_bootstrap_v37"
 DATABASE_MAINTENANCE_LOCK_NAME = "garibaldi_database_maintenance_v37"
 CANONICAL_PROTECTED_TABLES = {
+    "kraken_research_evidence",
     "portfolios",
     "positions",
     "trades",
