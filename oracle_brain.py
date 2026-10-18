@@ -619,11 +619,19 @@ def build_oracle_brain_snapshot(fetch_rows: FetchRows, *, market_scope: str | No
         if _num(item.get("confidence"), 0.0) >= 0.70 and int(_num(item.get("evidence_count"), 0.0)) >= 3
     ]
 
+    # Read-only research observations are separate from qualified trade memory.
+    try:
+        from kraken_primary_research import read_research
+        crypto_research = read_research(lambda query: _safe_rows(fetch_rows, query))
+    except Exception:
+        crypto_research = {"status":"UNAVAILABLE", "execution_authority":"NONE", "symbols":{}}
+
     return {
         "market_scope": market_scope or "all",
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "read_only": True,
         "execution_authority": "NONE",
+        "crypto_primary_research": crypto_research,
         "doctrine": CORE_DOCTRINE,
         "entries": entries,
         "experiments": experiments,

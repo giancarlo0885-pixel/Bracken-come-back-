@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
+import time
+
+import crypto_provider_health_runtime as runtime
 
 from crypto_provider_health_runtime import install_crypto_provider_health_runtime
 
@@ -68,3 +72,29 @@ def test_provider_health_keeps_unsupported_symbols_as_coverage_gaps():
     assert health["last_quality_quarantined"] == []
     assert health["last_requested"] == 1
     assert health["last_resolved"] == 1
+
+
+def test_concurrent_health_scoring_uses_immutable_window(monkeypatch):
+    provider = _Provider()
+    worker = SimpleNamespace(_robinhood_current_marketdata_provider=provider, log=_Log())
+    assert install_crypto_provider_health_runtime(worker)
+
+    original_ratio = runtime._ratio_score
+
+    def checked_ratio(events, requested_index, good_index):
+        # Fail deterministically if the shared mutable deque reaches scoring.
+        assert isinstance(events, tuple)
+        time.sleep(0)  # Yield to concurrent snapshot callers.
+        return original_ratio(events, requested_index, good_index)
+
+    monkeypatch.setattr(runtime, "_ratio_score", checked_ratio)
+    with ThreadPoolExecutor(max_workers=12) as executor:
+        results = list(executor.map(lambda _: provider.snapshots(["ETH-USD"]), range(300)))
+
+    assert all("ETH-USD" in result for result in results)
+    health = worker._crypto_provider_health
+    assert health["window_calls"] == 200
+    assert health["requested"] == 200
+    assert health["resolved"] == 200
+    assert health["availability_score"] == 100.0
+    assert health["data_quality_score"] == 100.0

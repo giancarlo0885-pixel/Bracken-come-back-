@@ -111,3 +111,32 @@ def test_persisted_pair_keeps_its_original_book_and_expiry(pg, monkeypatch):
         assert shown['comparisons']['BTC-USD']['reference_quote']['execution_quote_eligible'] is False
         assert not display_state(row['payload'],NOW+timedelta(seconds=11),NOW+timedelta(seconds=11))['comparisons']
         reader.execute('ROLLBACK')
+
+
+def test_research_evidence_is_exact_bounded_immutable_and_separate(pg):
+    import json,zlib
+    from kraken_primary_research import EVIDENCE_DDL, DDL, persist_evidence, read_research
+    from kraken_research_data import ResearchUnavailable
+    from test_kraken_primary_research import history,quote,prediction
+    from kraken_primary_research import research_forecast
+    from database import CANONICAL_PROTECTED_TABLES
+    assert 'kraken_research_evidence' in CANONICAL_PROTECTED_TABLES
+    h=history(); result=research_forecast(quote(),h,NOW,forecast=prediction)
+    with pg() as conn:
+        conn.execute(EVIDENCE_DDL);conn.execute(DDL)
+        assert persist_evidence(conn,result,h)==1
+        with pytest.raises(ResearchUnavailable,match='BAR_ALREADY_RECORDED'):
+            persist_evidence(conn,result,h)
+        row=conn.execute('SELECT * FROM kraken_research_evidence').fetchone()
+        assert row['payload']==result and zlib.decompress(row['closed_history']).decode()==h.to_csv()
+        # Simulate the last fixed storage slot without creating 5000 fake outcomes.
+        conn.execute('INSERT INTO kraken_research_evidence VALUES(5000,%s,%s,%s::jsonb,%s)',
+            ('capacity-test',NOW,json.dumps({'fixture':True}),b''))
+        other={**result,'history_last_closed_bar':'different-fixture-bar'}
+        with pytest.raises(ResearchUnavailable,match='CAPACITY'):
+            persist_evidence(conn,other,h)
+        assert conn.execute('SELECT count(*) AS n FROM kraken_research_evidence').fetchone()['n']==2
+        conn.execute('INSERT INTO kraken_research_state VALUES(1,%s,%s::jsonb)',(NOW,json.dumps({'symbols':{'BTC-USD':result}})))
+        view=read_research(lambda q:conn.execute(q).fetchall(),NOW+timedelta(seconds=11))
+        assert view['symbols']['BTC-USD']['current'] is False
+        assert view['execution_authority']=='NONE'

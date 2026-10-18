@@ -1090,6 +1090,12 @@ elif page == "Dashboard":
         from kraken_reference_runtime import read_kraken_reference_state
         st.caption("Kraken reference feed: shadow research only. Venue differences do not authorize trades.")
         st.json(read_kraken_reference_state(), expanded=False)
+        from kraken_primary_research import read_research
+        st.caption("Kraken primary analysis: retained research forecasts and abstentions; no execution authority.")
+        try:
+            st.json(read_research(safe_rows), expanded=False)
+        except Exception:
+            st.caption("Kraken primary research unavailable.")
         alpha_rows = [row for row in diagnostics if str(row.get("provider") or "").lower() in {"alpha vantage", "alpha_vantage_api_key"}]
         if alpha_rows:
             alpha = alpha_rows[0]

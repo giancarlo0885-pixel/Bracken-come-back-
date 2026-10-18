@@ -64,7 +64,8 @@ class ReferenceBooks:
     Kraken v2 book has no sequence number. Equal exchange timestamps are valid;
     ordered delivery plus every-message CRC32 establishes book consistency.
     """
-    def __init__(self):
+    def __init__(self, symbols=None):
+        self.symbols = dict(symbols or SYMBOLS)
         self.books = {}
         self.counts = Counter()
         self.connected = False
@@ -97,7 +98,7 @@ class ReferenceBooks:
             if message.get("method") == "subscribe":
                 result = message.get("result") or {}
                 if (message.get("success") is not True or result.get("channel") != "book"
-                        or result.get("symbol") not in SYMBOLS or result.get("depth") != DEPTH
+                        or result.get("symbol") not in self.symbols or result.get("depth") != DEPTH
                         or result.get("snapshot") is not True):
                     raise BookIntegrityError("subscription_error")
                 self.subscribed.add(result["symbol"])
@@ -114,7 +115,7 @@ class ReferenceBooks:
                 raise BookIntegrityError("unexpected_message")
             kind = message.get("type")
             data = message.get("data")
-            if kind not in {"snapshot", "update"} or not isinstance(data, list) or not 1 <= len(data) <= 2:
+            if kind not in {"snapshot", "update"} or not isinstance(data, list) or not 1 <= len(data) <= len(self.symbols):
                 raise BookIntegrityError("invalid_book_message")
             for item in data:
                 self._apply(item, kind, received)
@@ -126,7 +127,7 @@ class ReferenceBooks:
 
     def _apply(self, item, kind, received):
         symbol = item["symbol"]
-        if symbol not in SYMBOLS or symbol not in self.subscribed:
+        if symbol not in self.symbols or symbol not in self.subscribed:
             raise BookIntegrityError("unexpected_symbol")
         previous = self.books.get(symbol)
         if kind == "update" and previous is None:
@@ -182,7 +183,7 @@ class ReferenceBooks:
             mid, spread = (bid + ask) / 2, ask - bid
             spread_pct = spread / mid * 100
         return {
-            "provider": SOURCE, "source": SOURCE, "venue": "Kraken", "symbol": SYMBOLS[symbol],
+            "provider": SOURCE, "source": SOURCE, "venue": "Kraken", "symbol": self.symbols[symbol],
             "exchange_symbol": symbol, "bid": str(bid), "ask": str(ask),
             "bid_quantity": str(book["bids"][bid]), "ask_quantity": str(book["asks"][ask]),
             "price": str(mid), "spread": str(spread), "spread_pct": str(spread_pct),
@@ -195,9 +196,9 @@ class ReferenceBooks:
         }
 
     def health(self, now):
-        quotes = {SYMBOLS[s]: q for s in SYMBOLS if (q := self.quote(s, now)) is not None}
+        quotes = {self.symbols[s]: q for s in self.symbols if (q := self.quote(s, now)) is not None}
         status = self.status
-        if self.connected and len(quotes) != len(SYMBOLS):
+        if self.connected and len(quotes) != len(self.symbols):
             status = "STALE_OR_AWAITING_SNAPSHOT"
         counts = {key: self.counts[key] for key in ("snapshots", "updates", "reconnects", "heartbeats",
             "checksum_failures", "stale_rejections", "crossed_book_rejections", "subscription_error", "connection_failures")}
