@@ -407,7 +407,7 @@ def test_retention_cleanup_is_bounded_per_maintenance_pass(monkeypatch):
                 return Result()
             class Row:
                 def fetchone(self):
-                    return {"id": 1}
+                    return {"id": 1, "owned": True}
             return Row()
 
     conn = Conn()
@@ -599,3 +599,14 @@ def test_trim_old_records_prioritizes_ledger_and_commits_each_table(monkeypatch)
     assert applied[0] == ("global_decision_ledger", 5)
     assert len(entered) == len(database.DATABASE_RETENTION_POLICIES)
     assert len(exited) == len(database.DATABASE_RETENTION_POLICIES)
+
+
+def test_entry_parent_retention_skips_busy_writer_without_deleting():
+    class Result:
+        def fetchone(self):return {'owned':False}
+    class Conn:
+        def __init__(self):self.calls=[]
+        def execute(self,sql,params=()):self.calls.append(sql);return Result()
+    conn=Conn()
+    assert database._apply_retention_policy(conn,'signals',{'keep_rows':6000,'batch_size':1000})==0
+    assert len(conn.calls)==1 and 'pg_try_advisory_xact_lock' in conn.calls[0]

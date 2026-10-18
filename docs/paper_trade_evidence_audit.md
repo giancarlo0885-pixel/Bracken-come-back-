@@ -33,3 +33,29 @@ committed-database evidence through the worker's existing connection without
 exposing credentials or exporting private order payloads. Query failure returns
 UNAVAILABLE and logs only the exception class. It never claims zero anomalies
 when a read failed. Live mode or armed broker/live flags disable the audit.
+
+## Preserve entry-linked parent records
+
+Signals and forecasts are high-volume analytical tables, but records referenced
+by permanent position lots or trade-ledger entries are reproducibility evidence.
+Rolling cleanup must exclude those references. Retained forecasts also preserve
+their exact parent signal IDs. The existing 6000-signal and 3000-forecast budgets
+apply to unlinked records; trade-linked parent records are retained separately.
+A later pass may reclaim an unlinked signal after its unlinked forecast expires.
+
+BUY attribution and forecast persistence hold a shared transaction advisory
+lock while storing their parent references. Signal/forecast maintenance uses a nonblocking exclusive lock;
+if a writer is active it skips that pass. This serializes reference capture and
+cleanup without waiting on an entry writer or changing trade qualification.
+Existing batch limits and maintenance cadence are unchanged; an active writer
+can defer cleanup. No production cleanup, deletion, vacuum, reindex or historical
+backfill is invoked by this repair workflow. Regression deletions use only guarded
+disposable local PostgreSQL schemas.
+
+The production baseline found 3132 legacy fills without canonical trade/lot links,
+and 17 unresolved signal IDs plus 26 absent forecast IDs across 26 sampled entry
+lots. These limitations remain visible. The unguarded old cleanup is a confirmed
+mechanism for losing referenced records, but it does not prove the exact cause
+of every missing historical ID. Absent forecasts may reflect model abstention;
+none is synthesized. Market/strategy promotion still requires new, independently
+validated post-cost outcomes.

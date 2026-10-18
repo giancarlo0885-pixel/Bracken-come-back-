@@ -12,7 +12,7 @@ from typing import Any
 
 from config import *
 from capital_allocator import adaptive_capital_allocation
-from database import connect, row, rows, utc_now
+from database import connect, row, rows, utc_now, ENTRY_EVIDENCE_RETENTION_LOCK
 from execution_policy import execution_policy
 from forecast_quality import model_execution_approved
 from quant_trade_standard import assess_trade
@@ -1778,6 +1778,7 @@ def _record_buy_attribution(
     risk_snapshot: dict[str, Any] | None = None,
     execution_trade_id: int | None = None,
 ) -> None:
+    conn.execute("SELECT pg_advisory_xact_lock_shared(%s)", (ENTRY_EVIDENCE_RETENTION_LOCK,))
     bucket = _lot_bucket_from_signal(signal, market)
     strategy = safe_text(signal_value(signal, "strategy", signal_value(signal, "scan_type", "")))
     decision_id = signal_value(signal, "signal_id", signal_value(signal, "id", None))

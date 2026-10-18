@@ -96,3 +96,44 @@ def test_empty_audit_never_infers_learning_or_profit(lineage_db):
     assert result['exact_brain_episodes'] == result['retrospective_decision_replays'] == 0
     assert result['verified_decision_consumption'] == 'UNAVAILABLE'
     assert result['historical_repair'] == result['execution_impact'] == 'NONE'
+
+
+from test_paper_fill_provenance_pg import entry_audit_db
+
+
+def _seed_retention_candidates(conn):
+    conn.execute('ALTER TABLE forecasts ADD COLUMN id BIGSERIAL')
+    # Exercise independent lot-only and ledger-only references.
+    conn.execute("UPDATE trade_ledger SET entry_signal_id=NULL,entry_forecast_id=NULL WHERE entry_signal_id='1'")
+    conn.execute("UPDATE position_lots SET entry_signal_id=NULL,entry_forecast_id=NULL WHERE entry_signal_id='2'")
+    conn.execute("INSERT INTO signals VALUES(3,'crypto','PARENT','2026-01-01T00:00:00Z')")
+    conn.execute("INSERT INTO forecasts(forecast_id,signal_id,market,symbol,created_at,source_quote_timestamp) VALUES('parent-only',3,'crypto','PARENT','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')")
+    for i in range(10):
+        conn.execute("INSERT INTO signals VALUES(%s,'crypto','UNLINKED','2026-01-01T00:00:00Z')",(10+i,))
+        conn.execute("INSERT INTO forecasts(forecast_id,signal_id,market,symbol,created_at,source_quote_timestamp) VALUES(%s,NULL,'crypto','UNLINKED','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')",('unlinked-'+str(i),))
+
+
+def test_retention_preserves_exact_entry_parents_and_bounds_only_unlinked_rows(entry_audit_db):
+    import database
+    with entry_audit_db() as conn:_seed_retention_candidates(conn)
+    policy={'keep_rows':2,'batch_size':2}
+    with entry_audit_db() as conn:
+        assert database._apply_retention_policy(conn,'signals',policy,max_batches=10)==8
+        ids={r['id'] for r in conn.execute('SELECT id FROM signals').fetchall()}
+        assert ids=={1,2,3,18,19}  # Two trade parents, one forecast parent, two unlinked.
+        assert database._apply_retention_policy(conn,'forecasts',policy,max_batches=10)==9
+        ids={r['forecast_id'] for r in conn.execute('SELECT forecast_id FROM forecasts').fetchall()}
+        assert ids=={'forecast:lot-a','forecast:lot-b','unlinked-8','unlinked-9'}
+
+
+@pytest.mark.parametrize('finish',['commit','rollback'])
+def test_retention_skips_active_entry_writer_and_lock_releases(entry_audit_db,finish):
+    import database
+    with entry_audit_db() as conn:_seed_retention_candidates(conn)
+    with entry_audit_db() as writer, entry_audit_db() as maintainer:
+        writer.execute('SELECT pg_advisory_xact_lock_shared(%s)',(database.ENTRY_EVIDENCE_RETENTION_LOCK,))
+        assert database._apply_retention_policy(maintainer,'signals',{'keep_rows':2,'batch_size':2})==0
+        assert maintainer.execute('SELECT count(*) AS n FROM signals').fetchone()['n']==13
+        getattr(writer,finish)()
+        assert database._apply_retention_policy(maintainer,'signals',{'keep_rows':2,'batch_size':2})==8
+        assert maintainer.execute('SELECT count(*) AS n FROM signals').fetchone()['n']==5
