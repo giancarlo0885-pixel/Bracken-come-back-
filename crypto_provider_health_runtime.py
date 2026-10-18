@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import deque
+from threading import Lock
 import time
 from typing import Any, Iterable
 
@@ -41,6 +42,7 @@ def install_crypto_provider_health_runtime(worker: Any) -> bool:
 
     original_snapshots = provider.snapshots
     events: deque[tuple[float, int, int, int, int]] = deque(maxlen=_WINDOW)
+    events_lock = Lock()
 
     def observed_snapshots(symbols: Iterable[str]):
         requested = list(
@@ -80,16 +82,20 @@ def install_crypto_provider_health_runtime(worker: Any) -> bool:
             symbol for symbol in quality_eligible
             if symbol not in quality_quarantined and symbol not in paper_estimate_only
         ]
-        events.append((
-            time.monotonic(),
-            len(health_eligible),
-            resolved,
-            len(quality_eligible),
-            len(quality_good),
-        ))
+        # Snapshot the rolling window atomically; concurrent quote calls may append
+        # while another caller calculates provider-health diagnostics.
+        with events_lock:
+            events.append((
+                time.monotonic(),
+                len(health_eligible),
+                resolved,
+                len(quality_eligible),
+                len(quality_good),
+            ))
+            window = tuple(events)
 
-        availability_score = _ratio_score(events, 1, 2)
-        data_quality_score = _ratio_score(events, 3, 4)
+        availability_score = _ratio_score(window, 1, 2)
+        data_quality_score = _ratio_score(window, 3, 4)
         score = min(availability_score, data_quality_score)
         unresolved = [symbol for symbol in health_eligible if symbol not in result]
         quarantined_requested = [symbol for symbol in requested if symbol in quality_quarantined]
@@ -98,9 +104,9 @@ def install_crypto_provider_health_runtime(worker: Any) -> bool:
             "quote_health_score": score,
             "availability_score": availability_score,
             "data_quality_score": data_quality_score,
-            "window_calls": len(events),
-            "requested": sum(item[1] for item in events),
-            "resolved": sum(item[2] for item in events),
+            "window_calls": len(window),
+            "requested": sum(item[1] for item in window),
+            "resolved": sum(item[2] for item in window),
             "last_requested": len(health_eligible),
             "last_resolved": resolved,
             "last_unresolved": unresolved[:12],
@@ -109,7 +115,7 @@ def install_crypto_provider_health_runtime(worker: Any) -> bool:
             "last_paper_estimate_only": sorted(paper_estimate_only)[:12],
         }
 
-        if unresolved or coverage_gaps or quarantined_requested or paper_estimate_only or len(events) in {1, 10, 25, 50, 100, 200}:
+        if unresolved or coverage_gaps or quarantined_requested or paper_estimate_only or len(window) in {1, 10, 25, 50, 100, 200}:
             worker.log.info(
                 "CRYPTO_PROVIDER_HEALTH | provider=Robinhood Crypto | score=%.2f | availability=%.2f | quality=%.2f | "
                 "eligible_requested=%d | resolved=%d | unresolved=%s | coverage_gaps=%s | quality_quarantined=%s | paper_estimate_only=%s | window_calls=%d",
@@ -122,7 +128,7 @@ def install_crypto_provider_health_runtime(worker: Any) -> bool:
                 ",".join(coverage_gaps[:8]) or "none",
                 ",".join(quarantined_requested[:8]) or "none",
                 ",".join(sorted(paper_estimate_only)[:8]) or "none",
-                len(events),
+                len(window),
             )
         return result
 
