@@ -278,9 +278,15 @@ def _record_order_and_fill(
 
     fee_pct = fee / filled_notional
     data = dict(quote or {})
-    fill = _simulate_fill_explicit_fee(
+    if data.get("provider") == "Coinbase Exchange paper pricing":
+        if (data.get("symbol")!=symbol or data.get("requested_symbol")!=symbol
+                or data.get("provider_symbol")!=symbol or data.get("paper_fee_pct")!=0.006
+                or abs(fee_pct-0.006)>1e-10):
+            raise ValueError("paper price identity or modeled fee mismatch")
+    pricing = reality.simulate_fill if data.get("provider") == "Coinbase Exchange paper pricing" else _simulate_fill_explicit_fee
+    fill = pricing(
         side=side, market=market, reference_price=reference, quote=data,
-        order_value=filled_notional, fee_pct=fee_pct,
+        order_value=data.get("paper_depth_order_value", filled_notional), fee_pct=fee_pct,
     )
     requested = max(filled_notional, _finite(requested_notional, filled_notional))
     requested_qty = requested / reference
@@ -333,6 +339,20 @@ def _record_order_and_fill(
             data.get("quote_timestamp") or data.get("timestamp"), now,
         ),
     )
+    if data.get("provider") == "Coinbase Exchange paper pricing":
+        import json
+        original=data["paper_original_price_quote"]
+        if original.get("quote_id")!=data["quote_id"] or original.get("book")!=data.get("book"):
+            raise ValueError("paper original price receipt mismatch")
+        evidence={"source_quote":original,"execution":{"side":side,"quantity":qty,"price":executed_price,
+            "reference_price":reference,"fee_amount":fee,"fee_pct":fee_pct,
+            "depth_vwap":data.get("paper_depth_vwap"),"depth_order_value":data.get("paper_depth_order_value"),
+            "slippage_pct":fill.slippage_pct,"latency_pct":fill.latency_pct,"market_impact_pct":fill.market_impact_pct},
+            "execution_authority":"PAPER_SIMULATION_ONLY"}
+        conn.execute("""INSERT INTO paper_fill_price_evidence
+            (fill_id,model_version,quote_id,evidence,execution_authority)
+            VALUES (%s,%s,%s,%s::jsonb,'PAPER_SIMULATION_ONLY')""",
+            (fill_id, data["paper_price_model"], data["quote_id"], json.dumps(evidence,allow_nan=False,default=str)))
     for lot_id, ledger_trade_id, link_qty in lot_links:
         conn.execute(
             """INSERT INTO paper_fill_lot_links(

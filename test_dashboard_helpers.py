@@ -592,10 +592,10 @@ def test_balanced_data_status_is_compact_provider_bar():
     rows = balanced_data_status(True, True, [{"provider": "EODHD", "status": "cooldown"}])
 
     assert rows == [
-        {"Area": "STOCKS", "Status": "GREEN"},
-        {"Area": "CRYPTO", "Status": "GREEN"},
-        {"Area": "NEWS", "Status": "YELLOW"},
-        {"Area": "GLOBAL", "Status": "YELLOW"},
+        {"Area": "STOCK WORKER", "Status": "GREEN"},
+        {"Area": "CRYPTO WORKER", "Status": "GREEN"},
+        {"Area": "NEWS PROVIDER", "Status": "UNKNOWN"},
+        {"Area": "GLOBAL PROVIDER", "Status": "UNKNOWN"},
     ]
 
 
@@ -616,3 +616,11 @@ def test_trade_summary_counts_and_formats_business_values():
 def test_trade_value_arithmetic_detects_huge_trade_consistency():
     assert trade_value_matches_quantity_price({"quantity": 10_000_000, "price": 0.20, "value": 2_000_000})
     assert not trade_value_matches_quantity_price({"quantity": 10_000_000, "price": 0.20, "value": 200_000})
+
+
+def test_unrelated_stock_cooldown_does_not_degrade_news_or_global():
+    assert balanced_data_status(True,False,[{'provider':'Alpaca IEX','capability':'us_history','status':'cooldown'}])[-2:]==[
+        {'Area':'NEWS PROVIDER','Status':'UNKNOWN'},{'Area':'GLOBAL PROVIDER','Status':'UNKNOWN'}]
+    statuses=balanced_data_status(True,True,[{'provider':'NewsAPI','status':'rate_limited'},
+        {'provider':'Global Monitoring','status':'healthy'}])
+    assert [r['Status'] for r in statuses[-2:]]==['YELLOW','GREEN']

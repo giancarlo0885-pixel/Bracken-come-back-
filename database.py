@@ -93,6 +93,7 @@ DATABASE_BOOTSTRAP_LOCK_NAME = "garibaldi_database_bootstrap_v37"
 DATABASE_MAINTENANCE_LOCK_NAME = "garibaldi_database_maintenance_v37"
 ENTRY_EVIDENCE_RETENTION_LOCK = 73420261605
 CANONICAL_PROTECTED_TABLES = {
+    "paper_fill_price_evidence",
     "kraken_research_evidence",
     "portfolios",
     "positions",

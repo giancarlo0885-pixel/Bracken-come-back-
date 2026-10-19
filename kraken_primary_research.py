@@ -55,7 +55,9 @@ def research_forecast(quote, history, now, forecast=None):
     diagnostics = {}
     prediction = (forecast or forecast_price)(history, None, market='crypto', source_interval='5m',
                        horizon_minutes=15, diagnostics=diagnostics, require_live_quote=False)
-    result = {'symbol':symbol, 'purpose':'SHADOW_RESEARCH', 'primary_quote':dict(quote), 'data_role':'KRAKEN_PRIMARY' if kraken else 'COINBASE_RESEARCH_BACKUP',
+    from forecasting import active_crypto_model_identity
+    model_name,model_version = active_crypto_model_identity()
+    result = {'model_identity':{'model':model_name,'model_version':model_version},'symbol':symbol, 'purpose':'SHADOW_RESEARCH', 'primary_quote':dict(quote), 'data_role':'KRAKEN_PRIMARY' if kraken else 'COINBASE_RESEARCH_BACKUP',
         'history_provider':history.attrs.get('provider'), 'history_last_closed_bar':history.index[-1].isoformat(),
         'history_bars':len(history), 'history_fingerprint':hashlib.sha256(history.to_csv().encode()).hexdigest(),
         'model_governance':'UNCHANGED_NOT_APPROVED_FOR_EXECUTION', 'execution_authority':'NONE',
@@ -77,10 +79,11 @@ def research_forecast(quote, history, now, forecast=None):
 def persist_evidence(conn, result, history):
     # The runner's session advisory lock serializes writers. Fixed slot IDs and
     # payload bounds stop storage growth without deleting permanent evidence.
-    if result['status'] != 'SHADOW_FORECAST':
+    if result['status'] not in {'SHADOW_FORECAST','ABSTAINED'}:
         return None
-    key = '|'.join([result['symbol'],result['history_provider'],result['history_last_closed_bar'],
-                    result['forecast']['model_version']])
+    model_version=(result.get('forecast') or result.get('model_identity') or {})['model_version']
+    key = '|'.join([result['symbol'],result['history_provider'],result['history_last_closed_bar'],model_version])
+    if result['status']=='ABSTAINED':key+='|ABSTAINED|'+result['reason']
     existing = conn.execute('SELECT id FROM kraken_research_evidence WHERE evidence_key=%s',(key,)).fetchone()
     if existing:
         raise ResearchUnavailable('BAR_ALREADY_RECORDED')
@@ -186,6 +189,15 @@ class PrimaryResearch:
         conn.execute('''INSERT INTO kraken_research_state VALUES(1,%s,%s::jsonb)
                     ON CONFLICT(id) DO UPDATE SET updated_at=EXCLUDED.updated_at,payload=EXCLUDED.payload''',
                     (now,json.dumps(payload, allow_nan=False)))
+        try:
+            from kraken_brain_evidence import sync_research_sources, committed_receipt
+            with conn.transaction():
+                learning = sync_research_sources(conn)
+            # The source INSERTs have committed on this autocommit writer connection.
+            receipt = committed_receipt(conn)
+            log.info('KRAKEN BRAIN RECEIPT | %s',json.dumps({'learning':learning,'committed':receipt},default=str))
+        except Exception as exc:
+            log.warning('KRAKEN BRAIN RECEIPT | status=UNAVAILABLE | reason=%s | execution_impact=NONE',type(exc).__name__)
         log.info('KRAKEN PRIMARY RESEARCH | %s', json.dumps({'status':payload['status'],
             'symbols':{s:{'status':r['status'],'reason':r.get('reason'),
                 'data_role':r.get('data_role'),'quote_timestamp':r.get('primary_quote',{}).get('quote_timestamp'),

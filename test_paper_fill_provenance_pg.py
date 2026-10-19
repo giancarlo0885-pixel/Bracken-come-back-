@@ -389,3 +389,45 @@ def test_entry_audit_wrong_scope_does_not_hide_original_signal_forecast(entry_au
     with entry_audit_db() as conn:
         report=summarize_trade_evidence(conn,market='crypto')
         assert report['sample_forecast_generation_counts']=={'PERSISTED_EXACT_ENTRY_LINK':2}
+
+
+def test_paper_book_evidence_commits_atomically_and_rollback_preserves_canonical_graph(fill_evidence_db,monkeypatch):
+    import json
+    from paper_execution_accounting import _record_order_and_fill
+    import paper_execution_reality as reality
+    from coinbase_paper_pricing import SOURCE,MODEL
+    from test_coinbase_paper_pricing import valid
+    connection,reader=fill_evidence_db
+    q=valid();q.update(paper_price_model=MODEL,provider=SOURCE);q['paper_original_price_quote']=dict(q)
+    with connection() as conn:
+        _seed_graph(conn)
+        conn.execute((Path(__file__).parent/'migrations/20261019_coinbase_paper_price_evidence.sql').read_text())
+    # Use real accounting math; quote registration/depth behavior is unit-tested separately.
+    from paper_execution_accounting import _simulate_fill_explicit_fee
+    monkeypatch.setattr(reality,'simulate_fill',_simulate_fill_explicit_fee)
+    def write(conn,evidence):
+        lot='price-lot:'+uuid.uuid4().hex;ledger='price-buy:'+uuid.uuid4().hex
+        at=datetime.now(timezone.utc).isoformat()
+        conn.execute("""INSERT INTO position_lots VALUES(%s,'crypto','BTC-USD',%s,100,1.2,2,2,'PAPER','PAPER')""",(lot,at))
+        conn.execute("""INSERT INTO trade_ledger VALUES(%s,'crypto','BTC-USD','BUY',2,%s,NULL,100,NULL,
+            0,-1.2,1.2,'PAPER','PAPER','s','d','f','q')""",(ledger,at))
+        trade=conn.execute("""INSERT INTO trades(market,symbol,side,quantity,price,value,realized_pnl,created_at)
+            VALUES('crypto','BTC-USD','BUY',2,100,200,0,%s) RETURNING id""",(at,)).fetchone()['id']
+        _record_order_and_fill(conn,execution_trade_id=trade,market='crypto',symbol='BTC-USD',side='BUY',
+            quantity=2,price=100,reference_price=100,fee_amount=1.2,requested_notional=200,
+            lot_links=[(lot,ledger,2)],quote=evidence,reason='test pricing receipt')
+    with connection() as conn:
+        write(conn,q)
+    with reader() as conn:
+        receipt=conn.execute('''SELECT p.evidence,f.canonical_trade_id,t.id FROM paper_fill_price_evidence p
+            JOIN paper_fills f USING(fill_id) JOIN trades t ON t.id=f.canonical_trade_id''').fetchone()
+        assert receipt['canonical_trade_id']==receipt['id']
+        assert receipt['evidence']['source_quote']['book']==q['book']
+        count=conn.execute('SELECT COUNT(*) AS n FROM trades').fetchone()['n']
+    # A failed immutable evidence constraint must roll back the fill and canonical trade.
+    too_large={**q,'paper_original_price_quote':{**q['paper_original_price_quote'],'oversize':'x'*40000}}
+    with pytest.raises(Exception):
+        with connection() as conn:write(conn,too_large)
+    with reader() as conn:
+        assert conn.execute('SELECT COUNT(*) AS n FROM trades').fetchone()['n']==count
+        assert conn.execute('SELECT COUNT(*) AS n FROM paper_fill_price_evidence').fetchone()['n']==1

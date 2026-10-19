@@ -278,3 +278,15 @@ def test_disabled_reader_does_not_query_optional_missing_table(metadata):
     fetch=Mock(return_value=metadata)
     assert research.read_research(fetch,NOW)['status']=='UNAVAILABLE'
     fetch.assert_called_once_with("SELECT to_regclass('kraken_research_state') AS relation")
+
+
+def test_live_books_expire_independently_of_history_and_receipt_is_not_renewed(monkeypatch):
+    c,get,_=request_client(monkeypatch,[response({'time':'original'}),response({'time':'new'})])
+    clock=[0.0];monkeypatch.setattr(data.time,'monotonic',lambda:clock[0])
+    first=c.request('Coinbase Public Research','products/BTC-USD/book',{'level':1});receipt=c.last_receipt
+    clock[0]=1
+    assert c.request('Coinbase Public Research','products/BTC-USD/book',{'level':1}) is first
+    assert c.last_receipt==receipt
+    clock[0]=3
+    assert c.request('Coinbase Public Research','products/BTC-USD/book',{'level':1})['time']=='new'
+    assert get.call_count==2

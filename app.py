@@ -928,6 +928,13 @@ elif page == "Dashboard":
 
     render_money_bar(balanced_money_bar(combined_metrics, recent_trades))
 
+    from coinbase_paper_pricing import read_pricing_status
+    paper_pricing = read_pricing_status(safe_rows)
+    if paper_pricing["status"] == "ON_DEMAND_PAPER_PRICING":
+        st.info("Crypto paper pricing: Coinbase public depth, independently checked against Kraken. "
+                "Prices are validated on demand; model, forecast and risk approval are still required. Live trading remains disabled.")
+    else:
+        st.warning("Crypto paper execution is waiting for validated pricing. Research continues; live trading remains disabled.")
     st.markdown("<div class='section-title'>ORACLE RIGHT NOW</div>", unsafe_allow_html=True)
     if top:
         summary = simple_opportunity_summary(top)

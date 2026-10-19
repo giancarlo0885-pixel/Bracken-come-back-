@@ -174,6 +174,18 @@ def install_paper_core_rebalance_qualification(worker: Any) -> None:
         if str(market or "").strip().lower() != "crypto" or not _strict_paper_learning():
             return opportunity
 
+        source_check = getattr(worker, "_crypto_execution_source_eligible", None)
+        if source_check is not None:
+            symbol = str(patch._signal_value(signal, "symbol", "") or "").upper().strip()
+            try:
+                source_eligible = bool(source_check((prices or {}).get(symbol), symbol))
+            except Exception:
+                source_eligible = False
+            if not source_eligible:
+                opportunity["qualified_for_capital"] = False
+                opportunity["execution_source_eligible"] = False
+                return opportunity
+
         target_amount = _finite(patch._signal_value(signal, "core_target_amount", None))
         if target_amount is not None and target_amount > 0:
             opportunity["core_target_amount"] = target_amount
