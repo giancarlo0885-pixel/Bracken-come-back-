@@ -101,6 +101,20 @@ def test_missing_reference_makes_no_requests(monkeypatch):
     p.data.request.assert_not_called()
 
 
+def test_http_latency_uses_actual_post_request_reference_without_relaxing_alignment(monkeypatch):
+    p=provider(monkeypatch)
+    old={**reference(),'quote_timestamp':(NOW-timedelta(seconds=3)).isoformat(),
+         'received_at':(NOW-timedelta(seconds=3)).isoformat()}
+    p.reference=Mock(side_effect=[{'quotes':{'BTC-USD':old}},{'quotes':{'BTC-USD':reference()}}])
+    q=p.quote('BTC-USD')
+    assert q is not None
+    assert q['independent_comparison']['reference_timestamp']==NOW.isoformat()
+    assert old['quote_timestamp']==(NOW-timedelta(seconds=3)).isoformat()
+    p.reference=lambda:{'quotes':{'BTC-USD':old}}
+    assert p.quote('BTC-USD') is None
+    assert p.last_health['BTC-USD']['reason']=='INDEPENDENT_BOOK_TIMESTAMPS_UNALIGNED'
+
+
 def install(monkeypatch,real_contract=False):
     import oracle_bot,market_data,paper_execution_reality,market_worker
     p=provider(monkeypatch);q=p.quote('BTC-USD')

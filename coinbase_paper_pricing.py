@@ -140,6 +140,20 @@ class PaperPricing:
                     product['product_metadata_received_at']=self.data.last_receipt.isoformat()
                     data=self.data.request('Coinbase Public Research','products/'+symbol+'/book',{'level':2})
                     received=self.data.last_receipt
+                # HTTP work can outlive the alignment window. Compare the book
+                # with the closest actual pre/post-request reference observation,
+                # never a manufactured or refreshed exchange timestamp.
+                latest=self.reference().get('quotes',{}).get(symbol)
+                event=timestamp(data.get('time'));current=self.clock();candidates=[]
+                for candidate in (reference,latest):
+                    try:
+                        if (candidate and candidate.get('symbol')==symbol and candidate.get('checksum_status')=='VALID'
+                                and fresh(timestamp(candidate['quote_timestamp']),timestamp(candidate['received_at']),current)):
+                            candidates.append(candidate)
+                    except (ValueError,KeyError,TypeError):
+                        continue
+                if not candidates:raise ResearchUnavailable('NO_FRESH_INDEPENDENT_REFERENCE')
+                reference=min(candidates,key=lambda c:abs((timestamp(c['quote_timestamp'])-event).total_seconds()))
                 q=validate_book(symbol,data,received,reference,self.clock())
                 q.update(product,fee_source='https://help.coinbase.com/en/exchange/trading-and-funding/exchange-fees')
                 identity=hashlib.sha256(json.dumps(q,sort_keys=True,allow_nan=False).encode()).hexdigest()
