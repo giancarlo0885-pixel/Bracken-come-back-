@@ -101,10 +101,11 @@ def test_missing_reference_makes_no_requests(monkeypatch):
     p.data.request.assert_not_called()
 
 
-def install(monkeypatch):
+def install(monkeypatch,real_contract=False):
     import oracle_bot,market_data,paper_execution_reality,market_worker
     p=provider(monkeypatch);q=p.quote('BTC-USD')
-    orig_guard=Mock(return_value=(True,''));orig_verified=Mock(side_effect=lambda s,quotes,m:quotes.get(s))
+    orig_guard=oracle_bot._execution_quote_guard if real_contract else Mock(return_value=(True,''))
+    orig_verified=oracle_bot._verified_quote_for if real_contract else Mock(side_effect=lambda s,quotes,m:quotes.get(s))
     for module,name,value in [(oracle_bot,'_execution_quote_guard',orig_guard),(oracle_bot,'_verified_quote_for',orig_verified),
         (market_data,'get_live_snapshot',Mock()),(paper_execution_reality,'simulate_fill',paper_execution_reality.simulate_fill),
         (oracle_bot,'simulate_fill',oracle_bot.simulate_fill)]:monkeypatch.setattr(module,name,value)
@@ -129,6 +130,27 @@ def test_final_guard_preserves_model_veto_and_exact_forecast_link(monkeypatch):
     assert oracle_bot._execution_quote_guard('crypto','BTC-USD',q['price'],signal,quote_metadata=q)==(True,'')
     # Independent research quote copied directly cannot cross the final fill boundary.
     assert oracle_bot._execution_quote_guard('crypto','BTC-USD',100,signal,quote_metadata=reference())[0] is False
+
+
+def test_registered_source_and_depth_fill_pass_existing_quote_contract_only_in_paper(monkeypatch):
+    import oracle_bot,paper_execution_reality
+    # Fixture time is controlled; freshness is checked by the adapter's clock.
+    monkeypatch.setattr(oracle_bot,'quote_is_fresh',lambda *a,**k:True)
+    monkeypatch.setattr(oracle_bot,'EXECUTION_MODE','paper')
+    monkeypatch.setattr(oracle_bot,'PAPER_BROKER_MODE',True)
+    p,q,worker,_=install(monkeypatch,real_contract=True)
+    assert oracle_bot._verified_quote_for('BTC-USD',{'BTC-USD':q},'crypto')['provider']==pricing.SOURCE
+    signal={'symbol':'BTC-USD','signal_id':1,'forecast_id':'original-forecast'}
+    monkeypatch.setattr(pricing,'model_approved',lambda s:(True,''))
+    monkeypatch.setattr(pricing,'exact_forecast_link',lambda *a:True)
+    assert oracle_bot._execution_quote_guard('crypto','BTC-USD',q['price'],signal,quote_metadata=q)[0]
+    adjusted,fill=paper_execution_reality._execution_quote(market='crypto',side='BUY',
+        reference_price=q['price'],quote=q,order_value=150)
+    assert adjusted['paper_original_price_quote']==p.receipts[q['quote_id']]
+    assert oracle_bot._execution_quote_guard('crypto','BTC-USD',fill.fill_price,signal,quote_metadata=adjusted)[0]
+    monkeypatch.setattr(oracle_bot,'EXECUTION_MODE','live')
+    assert oracle_bot._verified_quote_for('BTC-USD',{'BTC-USD':q},'crypto') is None
+    assert not oracle_bot._execution_quote_guard('crypto','BTC-USD',fill.fill_price,signal,quote_metadata=adjusted)[0]
 
 
 def test_stock_path_unchanged_and_pricing_requires_known_notional(monkeypatch):
