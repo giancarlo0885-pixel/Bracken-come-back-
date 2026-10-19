@@ -70,6 +70,7 @@ def validate_book(symbol, data, received, reference, now):
         sides[side]=clean
     bid,ask=exact_decimal(sides['bids'][0][0]),exact_decimal(sides['asks'][0][0])
     if bid>ask:raise ResearchUnavailable('CROSSED_PAPER_BOOK')
+    if bid==ask:raise ResearchUnavailable('LOCKED_PAPER_BOOK')
     mid=(bid+ask)/2
     spread=(ask-bid)/mid
     if spread>Decimal('.015'):raise ResearchUnavailable('PAPER_SPREAD_LIMIT')
