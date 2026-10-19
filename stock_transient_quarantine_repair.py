@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import logging
+import threading
+import time
 from typing import Any
 
 
 log = logging.getLogger("stock-transient-quarantine")
+_MAX_TRANSIENT_LOG_KEYS = 2048
+_TRANSIENT_LOG_SECONDS = 300.0
 
 _TRANSIENT_FAILURES = {
     "empty_history",
@@ -34,14 +38,30 @@ def install_stock_transient_quarantine_repair(worker: Any) -> None:
     original = worker._v39_quarantine_symbol
     if getattr(original, "_oracle_stock_transient_aware", False):
         return
+    last_logged: dict[tuple[str, str], float] = {}
+    log_lock = threading.Lock()
 
     def transient_aware(symbol: str, provider: str, failure_type: str) -> None:
         failure = str(failure_type or "").strip()
         provider_name = str(provider or "").strip()
         if provider_name == "market_data" and failure in _TRANSIENT_FAILURES:
+            normalized_symbol = str(symbol or "").upper().strip()
+            key = (normalized_symbol, failure)
+            now = time.monotonic()
+            with log_lock:
+                previous = last_logged.get(key)
+                if previous is not None and now - previous < _TRANSIENT_LOG_SECONDS:
+                    return
+                if key not in last_logged and len(last_logged) >= _MAX_TRANSIENT_LOG_KEYS:
+                    expired = [k for k, at in last_logged.items() if now - at >= _TRANSIENT_LOG_SECONDS]
+                    for old_key in expired:
+                        last_logged.pop(old_key, None)
+                    if len(last_logged) >= _MAX_TRANSIENT_LOG_KEYS:
+                        last_logged.pop(next(iter(last_logged)))
+                last_logged[key] = now
             log.info(
-                "STOCK TRANSIENT DATA COOLDOWN | symbol=%s | failure=%s | invalid_symbol_quarantine=SKIPPED",
-                str(symbol or "").upper().strip(),
+                "STOCK TRANSIENT DATA COOLDOWN | symbol=%s | failure=%s | invalid_symbol_quarantine=SKIPPED | provider_cooldown=UNCHANGED",
+                normalized_symbol,
                 failure,
             )
             return

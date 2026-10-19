@@ -187,22 +187,26 @@ def yahoo_reference_history(market_data_module: Any, symbol: str, period: str, i
             )
         except Exception as exc:
             _mark_unavailable(key)
+            from provider_router import _provider_status_from_exception, classify_provider_failure
+
+            http_status = _provider_status_from_exception(exc)
+            failure_class = classify_provider_failure(exc)
             log.info(
-                "YAHOO REFERENCE UNAVAILABLE | symbol=%s | provider_native_symbol=%s | period=%s | interval=%s | reason=%s | cooldown=active",
+                "YAHOO REFERENCE UNAVAILABLE | symbol=%s | provider_native_symbol=%s | period=%s | interval=%s | reason=%s | failure_class=%s | http_status=%s | coverage=UNVERIFIED | cooldown=active",
                 requested,
                 provider_native,
                 period,
                 interval,
                 exc.__class__.__name__,
+                failure_class,
+                http_status if isinstance(http_status, int) else "UNKNOWN",
             )
             # Preserve typed HTTP/transport outcomes so the router can distinguish
             # them from an actual empty market-data response. Rate limits must
             # still reach its shared cooldown across all symbols and workers.
-            from provider_router import _provider_status_from_exception, classify_provider_failure
-
             if (
-                _provider_status_from_exception(exc) is not None
-                or classify_provider_failure(exc) in {"rate_limited", "timeout", "transport_error", "malformed_response"}
+                http_status is not None
+                or failure_class in {"rate_limited", "timeout", "transport_error", "malformed_response"}
             ):
                 raise
             return pd.DataFrame()
