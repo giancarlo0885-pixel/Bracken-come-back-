@@ -59,6 +59,21 @@ def test_invalid_stale_crossed_or_sparse_book_is_rejected(change):
     with pytest.raises(ValueError):pricing.validate_book('BTC-USD',book(**change),NOW,reference(),NOW)
 
 
+def test_locked_book_is_rejected_even_with_aligned_independent_reference():
+    with pytest.raises(ResearchUnavailable, match='LOCKED_PAPER_BOOK'):
+        pricing.validate_book('BTC-USD',book(asks=[['100','2',1]]),NOW,reference(),NOW)
+
+
+def test_locked_book_never_registers_a_paper_pricing_receipt(monkeypatch):
+    p=provider(monkeypatch)
+    original=p.data.request.side_effect
+    p.data.request.side_effect=lambda source,path,*args: (
+        book(asks=[['100','2',1]]) if path.endswith('/book') else original(source,path,*args))
+    assert p.quote('BTC-USD') is None
+    assert not p.receipts
+    assert p.last_health['BTC-USD']=={'status':'UNAVAILABLE','reason':'LOCKED_PAPER_BOOK'}
+
+
 @pytest.mark.parametrize('change',[{'symbol':'ETH-USD'},{'checksum_status':'FAILED'},
     {'quote_timestamp':(NOW-timedelta(seconds=3)).isoformat()},{'price':'102'}])
 def test_independent_reference_is_required_and_venues_not_assumed_identical(change):
