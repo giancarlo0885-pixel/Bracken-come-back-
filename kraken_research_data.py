@@ -1,6 +1,7 @@
 """Bounded public research requests. No broker credentials or execution claims."""
 from datetime import datetime, timezone
 import time
+import threading
 import requests
 import pandas as pd
 from global_adaptive_engine import (provider_cooldown_active_live,
@@ -17,11 +18,17 @@ class PublicResearchData:
         self.cooldowns = {}
         self.cache = {}
         self.last_receipt = None
+        self.lock = threading.RLock()
 
     def request(self, provider, path, params=None):
+        with self.lock:
+            return self._request(provider, path, params)
+
+    def _request(self, provider, path, params=None):
         key = (provider, path, tuple(sorted((params or {}).items())))
         now = time.monotonic()
-        if key in self.cache and now-self.cache[key][0] < 300:
+        ttl = 2 if path.endswith('/book') else 300
+        if key in self.cache and now-self.cache[key][0] < ttl:
             self.last_receipt = self.cache[key][2]
             return self.cache[key][1]
         if self.cooldowns.get(provider, 0) > now or provider_cooldown_active_live(provider).get('active'):
@@ -31,7 +38,7 @@ class PublicResearchData:
             raise ResearchUnavailable('PROVIDER_BUDGET_BLOCKED')
         root = 'https://api.kraken.com/0/public/' if provider == 'Kraken Public Research' else 'https://api.exchange.coinbase.com/'
         response = self.get(root+path, params=params, timeout=6,
-                            headers={'User-Agent':'GARIBALDI-MARKET-ORACLE/1.0'})
+                            headers={'User-Agent':'GARIBALDI-MARKET-ORACLE/1.0','Cache-Control':'no-cache'})
         if response.status_code == 429:
             self.cooldowns[provider] = now+300
             mark_provider_cooldown_live(provider, seconds=300, reason='HTTP 429')
@@ -48,7 +55,7 @@ class PublicResearchData:
                 raise ResearchUnavailable('KRAKEN_API_ERROR')
             payload = payload['result']
         # This client is scoped to <=4 instruments; cache cannot grow with ticks.
-        if len(self.cache) >= 12:
+        if key not in self.cache and len(self.cache) >= 12:
             self.cache.pop(next(iter(self.cache)))
         self.last_receipt = datetime.now(timezone.utc)
         self.cache[key] = (now, payload, self.last_receipt)
@@ -92,17 +99,19 @@ def select_instruments(metadata, requested):
     return selected
 
 
-def coinbase_quote(client, symbol, received=None):
+def coinbase_quote(client, symbol, received=None, *, now=None):
     """Independent L1 diagnostic; cached source time is never refreshed."""
     from kraken_reference_book import timestamp, fresh, exact_decimal
     if not symbol.endswith('-USD') or not symbol[:-4].isalnum():
         raise ResearchUnavailable('UNSUPPORTED_SYMBOL')
-    data = client.request('Coinbase Public Research', 'products/'+symbol+'/book', {'level':1})
-    received = received or client.last_receipt
+    current = now or received or datetime.now(timezone.utc)
+    with client.lock:
+        data = client.request('Coinbase Public Research', 'products/'+symbol+'/book', {'level':1})
+        received = received or client.last_receipt
     if data.get('auction_mode') is True:
         raise ResearchUnavailable('COINBASE_AUCTION')
     event = timestamp(data.get('time'))
-    if not fresh(event, received, received):
+    if not fresh(event, received, current):
         raise ResearchUnavailable('COINBASE_STALE')
     bids, asks = data['bids'], data['asks']
     if len(bids) != 1 or len(asks) != 1:

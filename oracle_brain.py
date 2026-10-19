@@ -416,6 +416,8 @@ def build_oracle_brain_snapshot(fetch_rows: FetchRows, *, market_scope: str | No
         if pipeline == "intelligence":
             new_sources += int(_num(result.get("new"), 0.0))
             revised_sources += int(_num(result.get("updated"), 0.0))
+        elif pipeline == "kraken_research":
+            new_sources += int(_num(result.get("inserted"), 0.0))
         elif pipeline == "episodes":
             new_exact_episodes += int(_num(result.get("new_exact_episodes"), 0.0))
             skipped_provenance += int(_num(result.get("skipped_missing_exact_provenance"), 0.0))

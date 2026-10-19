@@ -57,7 +57,7 @@ install_paper_crypto_learning_relaxation()
 install_core_rebalance_score_compat()
 install_strategic_core_rebalance_producer(market_worker)
 install_binance_us_reference_fallback()
-# Crypto research remains active; no broker execution source is configured.
+# Crypto research remains active; broker submission stays unavailable.
 install_crypto_v39_spread_bridge(market_worker)
 install_crypto_execution_quote_guard(market_worker)
 install_crypto_short_horizon_forecast(market_worker)
@@ -124,8 +124,10 @@ install_paper_strategy_execution_guard()
 
 if __name__ == "__main__":
     from crypto_execution_source import install_unavailable_crypto_execution_source
-    install_unavailable_crypto_execution_source()
-    logger.info("CRYPTO BROKER | provider=NONE | robinhood=REMOVED | execution_quotes=UNAVAILABLE | broker_submission=NONE | execution_authority=NONE")
+    from coinbase_paper_pricing import install_paper_pricing
+    if not install_paper_pricing(market_worker):
+        install_unavailable_crypto_execution_source(worker=market_worker)
+    logger.info("CRYPTO BROKER | provider=NONE | robinhood=REMOVED | broker_submission=NONE | execution_authority=PAPER_ONLY_OR_UNAVAILABLE")
     prepare_capital_readiness_runtime(market_worker, "crypto")
     from kraken_reference_runtime import install_kraken_reference
     install_kraken_reference(market_worker)

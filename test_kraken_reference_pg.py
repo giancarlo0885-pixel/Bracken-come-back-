@@ -151,3 +151,34 @@ def test_disabled_research_reader_works_before_optional_table_exists(pg):
         # A missing-relation query would abort this read-only transaction.
         assert conn.execute('SELECT 1 AS ok').fetchone()['ok']==1
         conn.execute('ROLLBACK')
+
+
+def test_forecasts_and_abstentions_are_committed_to_brain_exactly_once(pg):
+    from pathlib import Path
+    from kraken_primary_research import EVIDENCE_DDL,persist_evidence,research_forecast
+    from kraken_brain_evidence import sync_research_sources,committed_receipt
+    from test_kraken_primary_research import history,quote,prediction
+    from datetime import datetime,timezone
+    h=history();forecast=research_forecast(quote(),h,NOW,forecast=prediction)
+    def abstain(*a,**k):k['diagnostics']['unavailable_reason']='causal_model_abstention'
+    abstention=research_forecast(quote(),h,NOW,forecast=abstain)
+    with pg() as conn:
+        conn.execute(EVIDENCE_DDL)
+        conn.execute('CREATE TABLE oracle_brain_entries(id BIGSERIAL PRIMARY KEY)')
+        conn.execute((Path(__file__).parent/'migrations/20260920_oracle_brain_learning_v2.sql').read_text())
+        assert persist_evidence(conn,forecast,h)==1
+        assert persist_evidence(conn,abstention,h)==2
+        with conn.transaction():
+            result=sync_research_sources(conn)
+            assert result['inserted']==2
+        assert committed_receipt(conn)['matched']==2
+        assert sync_research_sources(conn)['inserted']==0
+        rows=conn.execute('SELECT metadata FROM oracle_brain_sources ORDER BY source_key').fetchall()
+        assert rows[0]['metadata']['evidence']==forecast
+        assert rows[1]['metadata']['evidence']==abstention
+        assert all(r['metadata']['trade_outcome'] is False for r in rows)
+        assert conn.execute('SELECT COUNT(*) AS n FROM oracle_brain_episodes').fetchone()['n']==0
+    with pg() as reader:
+        reader.execute('BEGIN READ ONLY')
+        assert committed_receipt(reader)['matched']==2
+        reader.execute('ROLLBACK')

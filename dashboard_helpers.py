@@ -605,19 +605,20 @@ def balanced_portfolio_rows(positions: list[dict[str, Any]], equity: Any) -> lis
 
 def balanced_data_status(stocks_online: bool, crypto_online: bool, provider_rows: list[dict[str, Any]] | None = None) -> list[dict[str, str]]:
     provider_rows = provider_rows or []
-    limited = any(
-        str(row.get("status") or row.get("severity") or "").lower()
-        in {
-            "limited", "degraded", "cooldown", "warning", "rate_limited",
-            "plan_limited", "capability_cooldown", "quota_exhausted",
-        }
-        for row in provider_rows
-    )
+    def scoped_status(words):
+        scoped = [r for r in provider_rows if any(word in " ".join(str(r.get(k) or "").lower()
+            for k in ("provider","capability","category","scope")) for word in words)]
+        if not scoped:return "UNKNOWN"
+        states={str(r.get("status") or r.get("severity") or "").lower() for r in scoped}
+        if states & {"offline","invalid_key","error","failed"}:return "RED"
+        if states & {"limited","degraded","cooldown","warning","rate_limited","plan_limited",
+                     "capability_cooldown","quota_exhausted"}:return "YELLOW"
+        return "GREEN" if states and states <= {"healthy","ok"} else "UNKNOWN"
     return [
-        {"Area": "STOCKS", "Status": "GREEN" if stocks_online else "RED"},
-        {"Area": "CRYPTO", "Status": "GREEN" if crypto_online else "RED"},
-        {"Area": "NEWS", "Status": "YELLOW" if limited else "GREEN"},
-        {"Area": "GLOBAL", "Status": "YELLOW" if limited else "GREEN"},
+        {"Area":"STOCK WORKER","Status":"GREEN" if stocks_online else "RED"},
+        {"Area":"CRYPTO WORKER","Status":"GREEN" if crypto_online else "RED"},
+        {"Area":"NEWS PROVIDER","Status":scoped_status(("news",))},
+        {"Area":"GLOBAL PROVIDER","Status":scoped_status(("global","international","macro"))},
     ]
 
 

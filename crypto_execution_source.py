@@ -6,7 +6,31 @@ Historical order/quote parsers and permanent evidence are unaffected.
 from asset_routing import infer_asset_class
 
 
-def install_unavailable_crypto_execution_source(oracle_module=None):
+def install_crypto_candidate_source_guard(worker, eligible, reason):
+    """Apply the active pricing source's identity check to capital candidates too."""
+    worker._crypto_execution_source_eligible = eligible
+    original = worker._v39_signal_opportunity
+
+    def opportunity(market, signal, prices, ranked_by_symbol, scan_type):
+        result = original(market, signal, prices, ranked_by_symbol, scan_type)
+        if str(market).strip().lower() != 'crypto':
+            return result
+        symbol = signal.get('symbol') if isinstance(signal, dict) else getattr(signal, 'symbol', '')
+        symbol = str(symbol).upper().strip()
+        try:
+            valid = bool(eligible((prices or {}).get(symbol), symbol))
+        except Exception:
+            valid = False
+        result['execution_source_eligible'] = valid
+        if not valid:
+            result['qualified_for_capital'] = False
+            result['execution_source_rejection'] = reason
+        return result
+
+    worker._v39_signal_opportunity = opportunity
+
+
+def install_unavailable_crypto_execution_source(oracle_module=None, worker=None):
     if oracle_module is None:
         import oracle_bot as oracle_module
     original = oracle_module._verified_quote_for
@@ -14,6 +38,9 @@ def install_unavailable_crypto_execution_source(oracle_module=None):
         return False
 
     original_guard = oracle_module._execution_quote_guard
+    if worker is not None:
+        install_crypto_candidate_source_guard(worker, lambda quote, symbol: False,
+                                              'CRYPTO_EXECUTION_SOURCE_NOT_CONFIGURED')
 
     def unavailable(market, symbol):
         return str(market).strip().lower() == 'crypto' or infer_asset_class(str(symbol).upper()) == 'crypto'

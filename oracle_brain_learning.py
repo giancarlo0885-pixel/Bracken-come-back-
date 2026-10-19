@@ -1115,6 +1115,14 @@ def sync_brain_learning(market: str, *, source_limit: int = _SOURCE_BATCH, episo
             }
         sources = _sync_intelligence_sources(conn, limit=source_limit) if normalized_market == "cash" else 0
         curated_history = _sync_curated_crypto_history(conn) if normalized_market == "crypto" else 0
+        kraken_research = {"status":"NOT_APPLICABLE","inserted":0}
+        if normalized_market == "crypto":
+            try:
+                from kraken_brain_evidence import sync_research_sources
+                with conn.transaction():
+                    kraken_research = sync_research_sources(conn,limit=min(500,source_limit))
+            except Exception as exc:
+                kraken_research = {"status":"UNAVAILABLE","inserted":0,"reason":type(exc).__name__}
         episodes, skipped, new_episodes = _sync_trade_episodes(conn, normalized_market, limit=episode_limit)
         lessons, queued = _sync_regime_lessons_and_queue(conn, normalized_market)
         refreshed = _refresh_source_freshness(conn) if normalized_market == "cash" else 0
@@ -1135,6 +1143,7 @@ def sync_brain_learning(market: str, *, source_limit: int = _SOURCE_BATCH, episo
             "observations_ingested": observation_sync["inserted"],
             "observation_sources": observation_sync["by_source"],
             "sources_ingested": sources,
+            "kraken_research": kraken_research,
             "curated_history_ingested": curated_history,
             "episodes_processed": episodes,
             "new_exact_episodes": new_episodes,

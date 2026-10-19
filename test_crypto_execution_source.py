@@ -58,3 +58,28 @@ def test_buy_and_sell_paths_stop_before_database_mutations(monkeypatch):
         False,'CRYPTO_EXECUTION_SOURCE_NOT_CONFIGURED',None)
     assert oracle._close_position('crypto',{'symbol':'BTC-USD','quantity':1},100,'EXIT',quote_metadata=quote) is False
     execute_close.assert_not_called()
+
+
+def test_unconfigured_source_rejects_capital_candidate_despite_legacy_verified_flag(monkeypatch):
+    import paper_core_rebalance_qualification as qualification
+    import runtime_integrity_patch as patch
+    for key, value in {'EXECUTION_MODE':'paper', 'PAPER_AUTONOMOUS_LEARNING':'true',
+                       'PAPER_UNBOUNDED_LEARNING':'false', 'ENABLE_BROKER_SUBMISSION':'false',
+                       'LIVE_TRADING_ARMED':'false'}.items():
+        monkeypatch.setenv(key, value)
+    log = Mock()
+    worker = SimpleNamespace(log=log, _execution_quote_eligible=Mock(return_value=True),
+        _v39_signal_opportunity=lambda *a:dict(qualified_for_capital=False, tradeable=True,
+            avg_dollar_volume=1208940.8, spread_pct=.049402, risk_score=15.54))
+    qualification.install_paper_core_rebalance_qualification(worker)
+    oracle = SimpleNamespace(_verified_quote_for=Mock(), _execution_quote_guard=Mock())
+    install_unavailable_crypto_execution_source(oracle, worker=worker)
+    signal = SimpleNamespace(symbol='BNB-USD', action='HOLD', signal_id=1, forecast_id=None,
+        portfolio_intent=patch.CORE_REBALANCE_STRATEGIC_CANDIDATE_INTENT)
+    quote = dict(quote_verified=True, requested_symbol='BNB-USD', provider_symbol='BNB-USD')
+    result = worker._v39_signal_opportunity('crypto', signal, {'BNB-USD':quote}, {}, 'fast')
+    assert result['qualified_for_capital'] is False
+    assert result['execution_source_eligible'] is False
+    assert result['execution_source_rejection'] == 'CRYPTO_EXECUTION_SOURCE_NOT_CONFIGURED'
+    assert not log.info.called  # No misleading PAPER QUALIFICATION success message.
+    assert quote['quote_verified'] is True  # Historical/original payload remains intact.
