@@ -3,6 +3,7 @@ from __future__ import annotations
 from contextvars import ContextVar
 from datetime import datetime, timezone
 import logging
+import json
 import math
 import os
 import uuid
@@ -278,6 +279,21 @@ def _record_order_and_fill(
 
     fee_pct = fee / filled_notional
     data = dict(quote or {})
+    # Optional future Coinbase pricing receipts must be replayed before any
+    # canonical mutation. Their presence does NOT grant execution authority.
+    pricing_receipt = data.get("coinbase_paper_pricing_receipt")
+    if pricing_receipt is not None:
+        if market != "crypto":
+            raise ValueError("Coinbase paper receipt cannot be attached to cash trades")
+        from paper_coinbase_execution import BookRejected, utc, verify_receipt
+        verify_receipt(
+            pricing_receipt, symbol=symbol, side=side, quantity=qty,
+            fill_price=executed_price, fee_amount=fee,
+        )
+        receipt_time = utc(pricing_receipt["book"]["received_at"])
+        receipt_age = (datetime.now(timezone.utc) - receipt_time).total_seconds()
+        if not 0 <= receipt_age <= 10:
+            raise BookRejected("EXPIRED_PRICING_RECEIPT")
     fill = _simulate_fill_explicit_fee(
         side=side, market=market, reference_price=reference, quote=data,
         order_value=filled_notional, fee_pct=fee_pct,
@@ -339,6 +355,22 @@ def _record_order_and_fill(
                    fill_id,lot_id,ledger_trade_id,quantity
                ) VALUES (%s,%s,%s,%s)""",
             (fill_id, lot_id, ledger_trade_id, link_qty),
+        )
+    if pricing_receipt is not None:
+        book = pricing_receipt["book"]
+        # Same caller-owned transaction as canonical trades/fills/lots.
+        # PostgreSQL errors must propagate; never save an orphan receipt.
+        conn.execute(
+            """INSERT INTO paper_fill_pricing_books (
+                   fill_id,canonical_trade_id,provider,market,symbol,side,
+                   book_sequence,book_sha256,ticker_exchange_time,received_at,receipt
+               ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb)""",
+            (
+                fill_id, execution_trade_id, pricing_receipt["provider"], market,
+                symbol, side, book["sequence"], pricing_receipt["sha256"],
+                book["ticker_time"], book["received_at"],
+                json.dumps(pricing_receipt, sort_keys=True),
+            ),
         )
 
 
