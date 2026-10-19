@@ -65,6 +65,20 @@ def pricing_receipt_evidence(fill, receipts, *, execution_time, entry=None):
         reasons.append('fill_quote_timestamp_mismatch')
     comparison = quote.get('independent_comparison')
     comparison = comparison if isinstance(comparison, dict) else {}
+    reference = comparison.get('reference_quote')
+    reference = reference if isinstance(reference, dict) else {}
+    from kraken_reference_book import SOURCE as KRAKEN_SOURCE
+    reference_identity = {'provider': KRAKEN_SOURCE, 'source': KRAKEN_SOURCE, 'venue': 'Kraken',
+        'reference_only': True, 'verified': False, 'quote_verified': False,
+        'provider_quote_verified': False, 'paper_reference_verified': False,
+        'quote_eligible': False, 'execution_quote_eligible': False, 'execution_authority': 'NONE'}
+    if any(not _same_json(reference.get(k), v) for k, v in reference_identity.items()):
+        reasons.append('independent_reference_identity_or_authority_mismatch')
+    reference_observed = _time(reference.get('quote_timestamp'))
+    reference_received = _time(reference.get('received_at'))
+    if (decision is None or reference_observed is None or reference_received is None
+            or reference_observed > decision or reference_received > decision):
+        reasons.append('independent_reference_not_available_at_original_decision')
     try:
         # Revalidate the original book at its execution time, never at audit time.
         # Do not fetch a new quote or substitute a later independent reference.
@@ -77,6 +91,8 @@ def pricing_receipt_evidence(fill, receipts, *, execution_time, entry=None):
         if any(not _same_json(quote.get(k), v) for k, v in checked.items() if k not in excluded):
             reasons.append('original_pricing_book_or_provenance_mismatch')
         fields = ('status', 'symbol', 'primary_timestamp', 'reference_timestamp',
+                  'primary_provider', 'reference_provider', 'alignment_basis',
+                  'primary_received_at', 'primary_timestamp_basis',
                   'timestamp_delta_seconds', 'mid_difference_bps', 'execution_impact')
         if any(not _same_json(comparison.get(k), checked['independent_comparison'].get(k)) for k in fields):
             reasons.append('original_independent_comparison_mismatch')

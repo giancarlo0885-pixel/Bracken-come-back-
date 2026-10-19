@@ -189,13 +189,21 @@ def test_pricing_audit_reads_only_committed_original_receipts(pricing_receipt_db
         assert reader.execute('SHOW transaction_read_only').fetchone()['transaction_read_only']=='on'
 
 
-@pytest.mark.parametrize('conflict',['late','wrong_quote','wrong_symbol','wrong_cost'])
+@pytest.mark.parametrize('conflict',['late','wrong_quote','wrong_symbol','wrong_cost','late_reference','relabelled_reference'])
 def test_persisted_late_and_conflicting_receipts_remain_unverified(pricing_receipt_db,conflict):
     from datetime import timedelta
     connection, receipt, entry = pricing_receipt_db
     if conflict=='late':receipt['created_at']+=timedelta(minutes=1)
     elif conflict=='wrong_quote':receipt['quote_id']='unrelated-quote'
     elif conflict=='wrong_symbol':receipt['evidence']['source_quote']['symbol']='ETH-USD'
+    elif conflict=='late_reference':
+        from kraken_reference_book import compare_reference
+        quote=receipt['evidence']['source_quote']
+        reference=quote['independent_comparison']['reference_quote']
+        reference['received_at']=(entry['decision_timestamp']+timedelta(milliseconds=250)).isoformat()
+        quote['independent_comparison']=compare_reference(reference,quote,receipt['created_at'])
+    elif conflict=='relabelled_reference':
+        receipt['evidence']['source_quote']['independent_comparison']['reference_quote']['provider']='Yahoo Finance'
     else:receipt['evidence']['execution']['fee_amount']=0
     with connection() as writer:_write_pricing_receipt(writer,receipt)
     with connection() as reader:

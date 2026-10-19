@@ -131,3 +131,34 @@ def test_matching_negative_costs_do_not_prove_valid_costs():
     graph=receipt_graph()
     graph[0]['slippage_pct']=graph[1]['evidence']['execution']['slippage_pct']=-.01
     assert 'pricing_execution_slippage_pct_mismatch' in check(graph)['reasons']
+
+
+@pytest.mark.parametrize('late_field',['quote_timestamp','received_at'])
+def test_independent_reference_received_after_decision_cannot_validate_that_decision(late_field):
+    from kraken_reference_book import compare_reference
+    graph=receipt_graph()
+    quote=graph[1]['evidence']['source_quote']
+    reference=quote['independent_comparison']['reference_quote']
+    # Both observations are fresh and aligned at execution, but the independent
+    # reference arrived after the original entry decision (0.5 seconds).
+    reference[late_field]=(NOW+timedelta(milliseconds=750)).isoformat()
+    quote['independent_comparison']=compare_reference(reference,quote,graph[2])
+    assert quote['independent_comparison']['status']=='ALIGNED_VENUE_COMPARISON'
+    result=check(graph)
+    assert result['status']=='UNAVAILABLE'
+    assert 'independent_reference_not_available_at_original_decision' in result['reasons']
+
+
+def test_reference_at_decision_time_is_not_rejected_as_late():
+    graph=receipt_graph()
+    graph[3]['decision_timestamp']=NOW
+    assert check(graph)['status']=='CONSISTENT_ORIGINAL_PAPER_RECEIPT'
+
+
+@pytest.mark.parametrize('field,value',[('provider','Yahoo Finance'),('source','unknown'),
+    ('venue','Coinbase'),('reference_only',False),('execution_quote_eligible',True),
+    ('execution_authority','PAPER_SIMULATION_ONLY'),('provider_quote_verified',True)])
+def test_reference_identity_and_authority_cannot_be_relabelled(field,value):
+    graph=receipt_graph()
+    graph[1]['evidence']['source_quote']['independent_comparison']['reference_quote'][field]=value
+    assert 'independent_reference_identity_or_authority_mismatch' in check(graph)['reasons']
