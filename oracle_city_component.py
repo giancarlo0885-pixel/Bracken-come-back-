@@ -24,7 +24,9 @@ def render_oracle_city_component(snapshot: dict[str, Any]) -> str:
 *{box-sizing:border-box}
 html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#02050a;color:#eef8ff;font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
 #app{position:relative;width:100%;height:100%;min-height:780px;overflow:hidden;border:1px solid #17394d;border-radius:22px;background:#02050a;box-shadow:inset 0 0 80px rgba(8,57,87,.2)}
-#stage{position:absolute;inset:0}
+#stage{position:absolute;inset:0;overflow:hidden}
+/* DPR affects backing pixels, never the canvas' displayed CSS dimensions. */
+#stage canvas{display:block;width:100%;height:100%;touch-action:none}
 #status{position:absolute;z-index:20;left:50%;top:50%;transform:translate(-50%,-50%);padding:10px 13px;border-radius:10px;background:rgba(2,8,12,.9);border:1px solid #28516a;color:#b8d5e4;font-size:11px}
 #fallbackCity{display:none;position:absolute;inset:0;z-index:3;overflow:hidden;background:linear-gradient(#183a5a 0%,#e59a65 48%,#07111b 49%,#02060b 100%)}
 #fallbackCity.show{display:block}
@@ -61,13 +63,13 @@ input[type=range]{width:100%;accent-color:#55d4ff}
 #hovercard.show{display:block}
 #hovercard b{display:block;font-size:11px;line-height:1.25}
 #hovercard span{display:block;margin-top:2px;color:#a9c3d0;font-size:9px;line-height:1.3}
-@media(max-width:720px){
+@media(max-width:720px), (max-width:1100px) and (pointer:coarse){
   #app{min-height:860px;border-radius:14px}
   .topbar{left:8px;right:8px;top:8px;gap:6px}
-  .brand{max-width:176px;padding:8px 9px}.brand b{font-size:9px}
-  .chips{margin-top:5px;gap:3px}.chip{font-size:8px;min-height:20px;padding:2px 5px}
+  .brand{max-width:176px;padding:8px 9px}.brand b{font-size:11px}
+  .chips{margin-top:5px;gap:3px}.chip{font-size:10px;min-height:23px;padding:2px 5px}
   .toolbar{display:grid;grid-template-columns:1fr 1fr;gap:4px;padding:4px;max-width:176px}
-  button{padding:7px 8px;min-height:44px;font-size:9px}
+  button{padding:7px 8px;min-height:44px;font-size:10px}
   .legend,.minimap,.label{display:none}
   #hovercard{max-width:190px}
   .inspector{left:8px;right:8px;width:auto;bottom:66px;padding:10px;max-height:150px;overflow:auto}
@@ -89,7 +91,7 @@ button.active{color:#4cf9c7;border-color:#26cdb9}
 .crypto-cockpit .warning{color:#ffbf75;font-size:10px;margin-top:7px}
 /* Reveal the inspector or replay instead of letting the cockpit cover them. */
 #app:has(.inspector.open) .crypto-cockpit,#app:has(.replay.open) .crypto-cockpit{display:none}
-@media(max-width:720px){.crypto-cockpit{left:8px;bottom:8px;width:min(230px,calc(100% - 16px));padding:8px}.crypto-cockpit .idea{font-size:10px}.brand{max-width:156px}.toolbar{max-width:150px}}
+@media(max-width:720px), (max-width:1100px) and (pointer:coarse){.crypto-cockpit{left:8px;bottom:8px;width:min(230px,calc(100% - 16px));padding:8px}.crypto-cockpit .idea{font-size:10px}.brand{max-width:156px}.toolbar{max-width:150px}}
 </style>
 <script type="importmap">
 {"imports":{
@@ -188,7 +190,12 @@ function activateCityFallback(reason){
 }
 window.addEventListener("error",event=>activateCityFallback(event&&event.message?event.message:"renderer error"));
 window.addEventListener("unhandledrejection",event=>activateCityFallback(event&&event.reason?String(event.reason):"renderer rejection"));
-const isMobileDevice=window.matchMedia("(max-width:720px)").matches;
+function compactViewport(){
+  // Chrome's desktop-site mode can report a wide CSS viewport on a phone.
+  return window.matchMedia("(max-width:720px)").matches ||
+    window.matchMedia("(max-width:1100px) and (pointer:coarse)").matches;
+}
+const isMobileDevice=compactViewport();
 const prefersReduced=window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 const DETAIL=isMobileDevice?0.78:1.15;
 const colors={online:0x4df49b,waiting:0xffd166,offline:0xff6767};
@@ -276,6 +283,10 @@ renderer.shadowMap.enabled=!isMobileDevice;
 renderer.shadowMap.type=THREE.PCFSoftShadowMap;
 renderer.toneMapping=THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure=1.0+initialDaylight*.42+initialTwilight*.10;
+// setSize(..., false) only resizes the drawing buffer. Fix CSS sizing to stage.
+renderer.domElement.style.width="100%";
+renderer.domElement.style.height="100%";
+renderer.domElement.style.display="block";
 stage.appendChild(renderer.domElement);
 renderer.domElement.addEventListener("webglcontextlost",event=>{
   event.preventDefault();
@@ -1061,6 +1072,7 @@ function setBrainControlMode(on){
 function setBrainMode(on){
   brainMode=on;showCityObjects(!on);brainGroup.visible=on;
   const b=document.getElementById("brain");b.classList.toggle("active",on);b.textContent=on?"CITY":"BRAIN";
+  document.getElementById("reset").textContent=on?"CENTER":"CITY";
   inspector.classList.remove("open");
   hovercard.classList.remove("show");
   if(on){
@@ -1134,7 +1146,7 @@ renderer.domElement.addEventListener("click",e=>{
   else inspector.classList.remove("open");
 });
 
-function mobileView(){return window.matchMedia&&window.matchMedia("(max-width:720px)").matches;}
+function mobileView(){return compactViewport();}
 function resetView(){
   if(mobileView()){
     // Fit the complete metropolis into portrait/mobile instead of looking
@@ -1157,7 +1169,7 @@ function resetView(){
   inspector.classList.remove("open");
   hovercard.classList.remove("show");
 }
-document.getElementById("reset").onclick=()=>{if(brainMode)setBrainMode(false);else resetView();};
+document.getElementById("reset").onclick=()=>{if(brainMode)settleBrainView();else resetView();};
 document.getElementById("street").onclick=()=>{if(brainMode)setBrainMode(false);camera.position.set(-2,3.0,18);controls.target.set(3,2.4,0);controls.update();};
 document.getElementById("topview").onclick=()=>{if(brainMode)setBrainMode(false);camera.position.set(2.5,48,.01);controls.target.set(2.5,0,0);controls.update();};
 document.getElementById("autorotate").onclick=function(){controls.autoRotate=!controls.autoRotate;controls.autoRotateSpeed=.48;this.classList.toggle("active",controls.autoRotate);};

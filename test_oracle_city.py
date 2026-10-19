@@ -398,7 +398,7 @@ def test_oracle_city_component_escapes_script_breakout_payloads():
 
 def test_oracle_city_mobile_layout_suppresses_label_collisions_and_resets_camera():
     rendered = render_oracle_city_component({"nodes": [], "flows": [], "replay": []})
-    assert "@media(max-width:720px)" in rendered
+    assert "@media(max-width:720px), (max-width:1100px) and (pointer:coarse)" in rendered
     assert ".legend,.minimap,.label{display:none}" in rendered
     assert 'window.matchMedia("(max-width:720px)")' in rendered
     assert "const hFov=2*Math.atan(Math.tan(THREE.MathUtils.degToRad(62)/2)*aspect);" in rendered
@@ -408,6 +408,31 @@ def test_oracle_city_mobile_layout_suppresses_label_collisions_and_resets_camera
     assert "min-height:44px" in rendered
     assert "isMobileDevice?26:68" in rendered
     assert "isMobileDevice?6:16" in rendered
+
+
+def test_oracle_city_canvas_css_bounds_are_independent_of_pixel_ratio():
+    rendered = render_oracle_city_component({"nodes": [], "flows": [], "replay": []})
+    # With renderer.setSize(..., false), the DPR-scaled drawing buffer must not
+    # determine the canvas' CSS box or the Brain will be offset and clipped.
+    assert "#stage canvas{display:block;width:100%;height:100%;touch-action:none}" in rendered
+    assert 'renderer.domElement.style.width="100%"' in rendered
+    assert 'renderer.domElement.style.height="100%"' in rendered
+    assert "renderer.setSize(w,h,false)" in rendered
+    assert 'window.matchMedia("(max-width:1100px) and (pointer:coarse)")' in rendered
+    assert "function mobileView(){return compactViewport();}" in rendered
+
+
+def test_oracle_city_brain_can_recenter_without_switching_views():
+    rendered = render_oracle_city_component({"nodes": [], "flows": [], "replay": []})
+    assert 'document.getElementById("reset").textContent=on?"CENTER":"CITY"' in rendered
+    assert 'if(brainMode)settleBrainView();else resetView();' in rendered
+
+
+def test_oracle_city_page_wraps_metrics_on_touch_viewports():
+    page = Path("pages/2_Oracle_City.py").read_text(encoding="utf-8")
+    assert "@media (max-width: 720px), (max-width: 1100px) and (pointer: coarse)" in page
+    assert "flex: 1 1 calc(50% - .5rem) !important" in page
+    assert "[data-testid=\"stMetricValue\"]" in page
 
 
 def test_oracle_city_renderer_distinguishes_observed_from_accepted_aeve_samples():
