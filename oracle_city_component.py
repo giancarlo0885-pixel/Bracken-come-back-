@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from typing import Any
 
 
@@ -13,8 +14,17 @@ def _safe_json(value: Any) -> str:
     )
 
 
+def city_economics_caption(economics: dict[str, Any]) -> str:
+    count = int(economics.get("sample_count") or 0)
+    value = economics.get("recent_net_pnl")
+    if not count or value is None or not math.isfinite(float(value)):
+        return "ECON: UNKNOWN · RECENT P/L UNAVAILABLE"
+    return (f"ECON: {economics.get('condition') or 'UNKNOWN'} · "
+            f"LAST {count} CLOSES P/L ${float(value):+.2f}")
+
+
 def render_oracle_city_component(snapshot: dict[str, Any]) -> str:
-    encoded = _safe_json(snapshot)
+    encoded = _safe_json({**snapshot, "city_economics_caption":city_economics_caption(snapshot.get("city_economics") or {})})
     document = r"""<!doctype html>
 <html>
 <head>
@@ -203,10 +213,9 @@ const aeveData=DATA.aeve||{};
 document.getElementById("cityMood").textContent="CITY MOOD: "+String(DATA.city_mood||"UNKNOWN");
 const cityEconomics=DATA.city_economics||{};
 const cityStress=Number(cityEconomics.stress_pct||0);
-document.getElementById("cityEconomics").textContent=
-  "ECON: "+String(cityEconomics.condition||"UNKNOWN")+" · STRESS "+cityStress.toFixed(0)+"% · P/L "+
-  Number(cityEconomics.recent_net_pnl||0).toFixed(2);
+document.getElementById("cityEconomics").textContent=DATA.city_economics_caption;
 document.getElementById("cityEconomics").title=
+  "Recent recorded SELL results within the latest 80 trades; not lifetime account P/L or qualified strategy expectancy. Stress "+cityStress.toFixed(0)+"%. "+
   String(cityEconomics.recent_wins||0)+" wins · "+String(cityEconomics.recent_losses||0)+" losses · drawdown "+
   Number(cityEconomics.max_drawdown||0).toFixed(2);
 const aeveObserved=aeveData.observed==null?null:Number(aeveData.observed);

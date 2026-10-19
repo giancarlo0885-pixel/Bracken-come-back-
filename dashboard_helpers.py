@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from datetime import datetime, timezone
 from typing import Any
 
@@ -399,15 +400,30 @@ def simple_money_summary(metrics: dict[str, Any]) -> dict[str, str]:
     }
 
 
+def _display_quote_age(record: dict[str, Any], now: datetime) -> float:
+    ages = []
+    for key in ("quote_age_seconds", "data_freshness_seconds"):
+        value = as_float(record.get(key), -1.0)
+        if math.isfinite(value) and value >= 0:
+            ages.append(value)
+    timestamp = parse_timestamp(record.get("quote_timestamp") or record.get("timestamp"))
+    if timestamp is not None:
+        ages.append(max(0.0, (now - timestamp).total_seconds()))
+    return max(ages, default=-1.0)
+
+
 def live_data_status(record: dict[str, Any], now: datetime | None = None) -> dict[str, Any]:
     now = now or datetime.now(timezone.utc)
-    age = record.get("quote_age_seconds")
-    if age is None:
-        age = record.get("data_freshness_seconds")
     timestamp = parse_timestamp(record.get("quote_timestamp") or record.get("timestamp"))
-    age_seconds = as_float(age, -1.0)
-    if age_seconds < 0 and timestamp is not None:
-        age_seconds = max(0.0, (now - timestamp).total_seconds())
+    age_seconds = _display_quote_age(record, now)
+    from quote_provenance import is_shadow_reference, quote_quality_rejection_reason, is_paper_reference
+    rejection = quote_quality_rejection_reason(record)
+    if is_shadow_reference(record):
+        rejection = "reference-only research quote"
+    if timestamp is not None and (timestamp - now).total_seconds() > 2:
+        rejection = "quote timestamp is in the future"
+    if rejection:
+        return {"label":"OLD DATA", "detail":f"Not execution-eligible: {rejection}.", "blocks_execution":True}
 
     status_text = str(record.get("data_status") or "").lower()
     verified = record.get("quote_verified") is True
@@ -462,11 +478,13 @@ def live_data_status(record: dict[str, Any], now: datetime | None = None) -> dic
         label = "DELAYED DATA"
         if age_seconds >= 0:
             minutes = max(1, int(round(age_seconds / 60)))
-            detail = f"Verified execution-eligible price checked {minutes} minutes ago"
+            detail = f"Execution-eligible price checked {minutes} minutes ago"
         else:
-            detail = "Verified completed-market price is eligible under the execution freshness rules."
+            detail = "Completed-market price is eligible under the execution freshness rules."
         blocks_execution = False
 
+    if not blocks_execution and is_paper_reference(record):
+        detail += " Paper reference only; not broker-verified."
     return {"label": label, "detail": detail, "blocks_execution": blocks_execution}
 
 
@@ -476,14 +494,7 @@ def data_age_label(record: dict[str, Any], now: datetime | None = None) -> str:
         return "Unknown"
     if status["label"] == "OLD DATA":
         return "Old"
-    age = record.get("quote_age_seconds")
-    if age is None:
-        age = record.get("data_freshness_seconds")
-    timestamp = parse_timestamp(record.get("quote_timestamp") or record.get("timestamp"))
-    seconds = as_float(age, -1.0)
-    if seconds < 0 and timestamp is not None:
-        reference = now or datetime.now(timezone.utc)
-        seconds = max(0.0, (reference - timestamp).total_seconds())
+    seconds = _display_quote_age(record, now or datetime.now(timezone.utc))
     if seconds < 0:
         return "Unknown"
     if seconds < 60:
@@ -519,7 +530,7 @@ def balanced_money_bar(metrics: dict[str, Any], trades: list[dict[str, Any]], no
         {"label": "CASH", "value": compact_money_text(cash)},
         {"label": "INVESTED", "value": compact_money_text(invested)},
         {"label": "TOTAL PROFIT / LOSS", "value": signed_compact_money_text(equity - starting)},
-        {"label": "TODAY", "value": signed_compact_money_text(today_pnl)},
+        {"label": f"TODAY · LAST {len(trades)} {'RECORD' if len(trades)==1 else 'RECORDS'}", "value": signed_compact_money_text(today_pnl)},
     ]
 
 

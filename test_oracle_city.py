@@ -642,6 +642,7 @@ def test_city_component_exposes_outcome_driven_economics():
             "condition": "DAMAGED",
             "stress_pct": 62.0,
             "recent_net_pnl": -12.5,
+            "sample_count": 10,
             "recent_wins": 3,
             "recent_losses": 7,
             "max_drawdown": -9.0,
@@ -649,11 +650,20 @@ def test_city_component_exposes_outcome_driven_economics():
     })
     assert 'id="cityEconomics"' in rendered
     assert "cityEconomics.stress_pct" in rendered
-    assert "cityEconomics.recent_net_pnl" in rendered
+    assert "LAST 10 CLOSES P/L $-12.50" in rendered
     assert "cityEconomics.max_drawdown" in rendered
     assert "protectedFromEconomicDecay" in rendered
     assert "economicDecay" in rendered
     assert 'new Set(["brain","data","intel"])' in rendered
+
+
+def test_city_profit_label_exposes_sample_and_never_turns_missing_outcomes_into_zero():
+    from oracle_city_component import city_economics_caption
+    assert city_economics_caption({"sample_count":20,"recent_net_pnl":-.37,"condition":"DAMAGED"})==(
+        "ECON: DAMAGED · LAST 20 CLOSES P/L $-0.37")
+    for value in ({},{"sample_count":0,"recent_net_pnl":0,"condition":"HEALTHY"},
+                  {"sample_count":2,"recent_net_pnl":None}):
+        assert city_economics_caption(value)=="ECON: UNKNOWN · RECENT P/L UNAVAILABLE"
 
 
 def test_oracle_city_mobile_camera_fits_portrait_and_ignores_stale_saved_view():

@@ -791,13 +791,13 @@ st.markdown(
 )
 
 live_records = [record for record in workers if worker_live(record)]
-mode_label = "LIVE PAPER SIMULATION ENGINE" if EXECUTION_MODE == "paper" and PAPER_BROKER_MODE else ("PAPER EXECUTION ENGINE" if EXECUTION_MODE == "paper" else f"LIVE {EXECUTION_MODE.upper()} EXECUTION")
+mode_label = "PAPER SIMULATION WORKERS" if EXECUTION_MODE == "paper" else f"{EXECUTION_MODE.upper()} WORKERS"
 show_advanced_chrome = page != "Dashboard"
 if len(live_records) == 2 and show_advanced_chrome:
     always_text = "ALWAYS-ON" if ALWAYS_ON_TRADING else "CONTINUOUS MONITORING"
     st.success(
-        f"🟢 {mode_label} · {always_text} · rolling fast scans, deep research, "
-        "position monitoring, qualified entries, rotations, and risk exits are active."
+        f"🟢 {mode_label} · {always_text} · both workers have fresh heartbeats. "
+        "Heartbeat health does not authorize trades; pricing, model, forecast and risk checks remain required."
     )
 elif live_records and show_advanced_chrome:
     st.warning(f"🟠 {mode_label} · only {len(live_records)} of 2 workers currently has a fresh heartbeat.")
@@ -927,6 +927,7 @@ elif page == "Dashboard":
     ]
 
     render_money_bar(balanced_money_bar(combined_metrics, recent_trades))
+    st.caption("Today shows recorded realized P/L in the latest 50 trade records (UTC), not a complete daily account return.")
 
     from coinbase_paper_pricing import read_pricing_status
     paper_pricing = read_pricing_status(safe_rows)
@@ -1126,7 +1127,7 @@ elif page == "Dashboard":
     with advisor_context:
         st.caption("Paper simulation diagnostics remain available here. Execution switches stay disabled unless deliberately configured.")
         a1, a2, a3, a4 = st.columns(4)
-        a1.metric("Broker Equity", compact_money(combined_equity), pct(combined_return))
+        a1.metric("Paper Equity" if EXECUTION_MODE == "paper" else "Account Equity", compact_money(combined_equity), pct(combined_return))
         a2.metric("Available Buying Power", compact_money(combined_buying_power))
         a3.metric("Trade-ready Buys", len(buy_decisions), f"{len(waiting_for_data)} waiting on data")
         a4.metric("Margin Debt", compact_money(combined_margin_debt))
@@ -1288,7 +1289,7 @@ elif page == "Portfolios":
     ):
         with tab:
             a, b, c, d = st.columns(4)
-            a.metric("Broker Equity", compact_money(metrics["equity"]), pct(metrics["return_pct"]))
+            a.metric("Paper Equity" if EXECUTION_MODE == "paper" else "Account Equity", compact_money(metrics["equity"]), pct(metrics["return_pct"]))
             b.metric("Buying Power", compact_money(metrics["buying_power"]), f"{metrics['leverage_limit']:.1f}x limit")
             c.metric("Gross Exposure", compact_money(metrics["gross_exposure"]), f"{metrics['leverage_used']:.2f}x equity")
             d.metric("Portfolio Status", portfolio_status_label(health.health_score), f"{health.health_score}/100")

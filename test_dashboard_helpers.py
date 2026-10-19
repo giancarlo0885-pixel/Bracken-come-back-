@@ -510,8 +510,27 @@ def test_balanced_money_bar_has_professional_top_cards():
         now=datetime(2026, 8, 20, tzinfo=timezone.utc),
     )
 
-    assert [item["label"] for item in items] == ["PORTFOLIO VALUE", "CASH", "INVESTED", "TOTAL PROFIT / LOSS", "TODAY"]
+    assert [item["label"] for item in items] == ["PORTFOLIO VALUE", "CASH", "INVESTED", "TOTAL PROFIT / LOSS", "TODAY · LAST 1 RECORD"]
     assert items[-1]["value"] == "+$30"
+
+
+def test_cached_quote_age_cannot_make_an_old_timestamp_appear_live():
+    now=datetime(2026,10,19,14,0,tzinfo=timezone.utc)
+    record={"symbol":"AAPL","market":"cash","quote_verified":True,
+            "quote_timestamp":"2026-10-19T13:56:00+00:00","quote_age_seconds":2,"interval":"5m"}
+    assert live_data_status(record,now)["label"]=="DELAYED DATA"
+    assert "4 minutes" in live_data_status(record,now)["detail"]
+    assert data_age_label(record,now)=="4 min"
+
+
+def test_explicit_quote_quality_vetoes_override_legacy_display_eligibility():
+    base={"symbol":"BTC-USD","quote_verified":True,"quote_age_seconds":1}
+    for veto in ({"execution_quote_eligible":False},{"stale":True},{"reference_only":True},
+                 {"bid":101,"ask":100}):
+        assert live_data_status({**base,**veto})["blocks_execution"] is True
+    status=live_data_status({**base,"provider":"Coinbase Exchange paper pricing","paper_reference_verified":True})
+    assert status["blocks_execution"] is False
+    assert "not broker-verified" in status["detail"]
 
 
 def test_balanced_top_opportunity_table_output_is_compact():
