@@ -169,6 +169,48 @@ def test_missing_subscription_ack_times_out_even_on_unsupported_packets():
     assert ws.closed
 
 
+
+def test_heartbeat_does_not_prevent_reconnect_when_level2_book_stalls():
+    ticks = [0.0]
+
+    def mono():
+        ticks[0] += 1.0
+        return ticks[0]
+
+    events = [ack(), snap(), upd()] + [packet("heartbeat")] * 25
+    probe, ws, _ = setup_probe(events, monotonic=mono)
+    with pytest.raises(feed.ShadowWireError, match="BOOK_UPDATE_TIMEOUT"):
+        probe.session()
+    assert ws.closed
+    assert probe.counts["snapshots"] == 1
+    assert probe.counts["updates"] == 1
+    assert probe.books.shadow_reference("BTC-USD", now=NOW) is None
+
+
+def test_level2_updates_preserve_session_liveness_without_false_book_timeout():
+    ticks = [0.0]
+
+    def mono():
+        ticks[0] += 1.0
+        return ticks[0]
+
+    events = [ack(), snap()] + [upd()] * 20
+    probe, ws, _ = setup_probe(events, monotonic=mono)
+    probe.session(max_packets=len(events))
+    assert probe.counts["updates"] == 20
+    assert ws.closed
+    assert probe.books.shadow_reference("BTC-USD", now=NOW) is None
+
+
+def test_repeat_snapshot_on_same_connection_requires_resubscribe():
+    probe, ws, _ = setup_probe([ack(), snap(), upd(), snap()])
+    with pytest.raises(feed.ShadowWireError, match="UNEXPECTED_RESNAPSHOT"):
+        probe.session(max_packets=4)
+    assert ws.closed
+    assert probe.counts["snapshots"] == 1
+    assert probe.counts["updates"] == 1
+    assert probe.books.shadow_reference("BTC-USD", now=NOW) is None
+
 def test_stale_or_crossed_books_never_compared_to_kraken(monkeypatch):
     probe, ws, _ = setup_probe([ack(), snap()])
     probe.books.ingest({"type": "snapshot", "product_id": "BTC-USD",
