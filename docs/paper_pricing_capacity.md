@@ -115,6 +115,18 @@ The public research adapter now distinguishes these *fail-closed* statuses:
 `PROVIDER_BUDGET_BLOCKED` (unknown reservation denial). They expose no SQL
 exception text, credentials, unverified prices or bypass paths.
 
+The elected Kraken-primary research worker now emits a bounded
+`PUBLIC RESEARCH BUDGET` log every successful five-minute cycle. This executes
+one read-only `SELECT` over the two named provider-wide ledger rows for the
+current UTC day (limit two). It returns configured allowance, requests
+reserved, remaining reservations and active cooldown state, or an explicit
+missing/inconsistent/unavailable status. It cannot see external Coinbase API
+account usage, infer actual data coverage or grant execution authority.
+Provider failures report exception *classes only*, never database error text.
+This runtime report will appear only **after** the reviewed change is deployed
+and the elected research worker is enabled. It is not running in production
+during this PR's review.
+
 The following query is for an authorized **read-only** production database session;
 it has **not** been executed as part of this change:
 
