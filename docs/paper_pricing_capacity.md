@@ -158,3 +158,28 @@ and auction metadata. Fee documentation states standard taker fees up to 0.60%.
 A healthy pricing adapter does not establish profitable expectancy. Qualified
 forward outcomes and independent post-cost validation remain required. Live
 trading stays disabled.
+
+
+### Zero-budget cooldown marker is not measured quota exhaustion
+
+The production table definition and mark_provider_cooldown_db in
+global_adaptive_engine.py establish a distinct case: recording a provider
+cooldown before any reservation for the UTC day creates a row with
+daily_budget=0, requests_used=0 and remaining_budget=0. That is NOT
+evidence that 2,400 Coinbase requests (or 1,200 Kraken requests)
+were consumed.
+
+The elected provider-ledger report distinguishes this situation as
+ZERO_CONFIGURED_BUDGET and prints exhaustion_proven_by_ledger=false.
+It separately indicates whether cooldown_until is active. The label
+CONFIGURED_BUDGET_EXHAUSTED (or an exhaustion_proven_by_ledger=true
+flag during an active cooldown) requires a positive configured daily
+budget whose recorded requests_used equals that allowance, with no
+remaining reservations. This distinction changes diagnostic labeling
+only; it does NOT reset budgets, repair cooldown marker rows,
+increase provider access, make data available or permit a trade.
+
+The configured ledger records reservations rather than confirmed
+successful external API requests. A fully consumed positive budget
+therefore proves reserved capacity exhaustion, not externally
+successful requests or an actual exchange-imposed limit.
