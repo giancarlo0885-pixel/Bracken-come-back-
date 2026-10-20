@@ -69,12 +69,19 @@ def read_public_research_budgets(conn, *, now=None):
                     or used + remaining != budget or cooldown is None):
                 result = {"status": "LEDGER_INCONSISTENT"}
             else:
-                state = ("CONFIGURED_COOLDOWN_ACTIVE" if cooldown else
+                # mark_provider_cooldown_db can create a same-day ledger row
+                # with (daily_budget,requests_used,remaining_budget) = (0,0,0)
+                # before any quota reservation occurs. That row is not proof
+                # that a configured provider allowance was consumed.
+                state = ("ZERO_CONFIGURED_BUDGET" if budget == 0 else
+                         "CONFIGURED_COOLDOWN_ACTIVE" if cooldown else
                          "CONFIGURED_BUDGET_EXHAUSTED" if remaining == 0 else
                          "CONFIGURED_CAPACITY_REMAINING")
                 result = {"status": state, "configured_daily_budget": budget,
                           "requests_reserved": used, "remaining_reservations": remaining,
-                          "cooldown_active": cooldown}
+                          "cooldown_active": cooldown,
+                          "exhaustion_proven_by_ledger": bool(budget > 0 and remaining == 0
+                                                              and used == budget)}
             by_provider[provider] = result
         except (TypeError, KeyError, ValueError):
             return {"status": "LEDGER_INCONSISTENT", "observed_at": current.isoformat(),
