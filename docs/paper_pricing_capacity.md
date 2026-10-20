@@ -86,6 +86,55 @@ is durable ingestion proof, not proof that a decision used that memory. The norm
 Brain learner also reconciles the bounded backlog. Existing 5000-record research
 ledger capacity remains; capacity exhaustion is explicit, never deletion.
 
+
+## Provider-budget incident audit (read-only)
+
+The Coinbase paper-pricing adapter and the optional Kraken-primary research's
+Coinbase diagnostics both call `PublicResearchData.request()`. Each call that
+misses the **process-local** cache reserves from the same
+`Coinbase Public Research / __provider__` UTC-day PostgreSQL ledger. The configured
+ceiling is 2,400 reservations/day; Kraken's separate public REST research ceiling
+is 1,200/day. The Coinbase L2 book cache expires after two seconds; product and
+five-minute candle caches expire after 300 seconds. Separate processes do not
+share their HTTP caches. The cache never renews source or receipt timestamps.
+
+At one uncached Coinbase request every ten seconds, demand is 8,640/day,
+already above the entire nominal 2,400/day allowance. This arithmetic diagnoses
+a capacity risk, **not** a measured request count, rate-limit entitlement,
+confirmed cause of a particular ledger denial, or an executable pricing quote.
+More frequent paper scans, multiple symbols and research consumers make the
+shortage worse. Slowing requests must never lengthen quote freshness windows.
+A sustained high-frequency paper source would need a separately validated
+streaming or appropriately budgeted execution-pricing architecture.
+
+Until actual ledger counts are available, `PROVIDER_BUDGET_BLOCKED` is ambiguous.
+The public research adapter now distinguishes these *fail-closed* statuses:
+`PROVIDER_BUDGET_EXHAUSTED` (actual reservation quota exhausted),
+`PROVIDER_LEDGER_UNAVAILABLE` (shared-ledger read/write error),
+`PROVIDER_COOLDOWN` (real local/shared cooldown), and
+`PROVIDER_BUDGET_BLOCKED` (unknown reservation denial). They expose no SQL
+exception text, credentials, unverified prices or bypass paths.
+
+The following query is for an authorized **read-only** production database session;
+it has **not** been executed as part of this change:
+
+```sql
+SELECT provider, capability, utc_date, daily_budget, requests_used,
+       remaining_budget, last_failure, cooldown_until, updated_at
+FROM provider_budget_ledger
+WHERE provider IN ('Coinbase Public Research', 'Kraken Public Research')
+ORDER BY utc_date DESC, provider, capability
+LIMIT 12;
+```
+
+Record current and previous UTC days, match the original log timestamps, and
+verify whether the ledger actually exhausted versus becoming unavailable.
+The ledger does not attribute spend to each code path. Neither this diagnostic
+change nor its tests increase quotas, retry on denied reservations, recycle
+timestamps, change risk/governance gates, reconcile missing legacy signals,
+authorize deployment, or claim validated profitability.
+
+
 ## Documentation consulted
 
 - https://docs.cdp.coinbase.com/exchange/reference/exchangerestapi_getproductbook
