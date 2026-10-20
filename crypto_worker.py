@@ -131,6 +131,9 @@ if __name__ == "__main__":
     prepare_capital_readiness_runtime(market_worker, "crypto")
     from kraken_reference_runtime import install_kraken_reference
     install_kraken_reference(market_worker)
+    # Optional, default-off feed diagnostics only. No paper price/execution hook.
+    from coinbase_l2_shadow_runtime import install_coinbase_shadow_probes
+    install_coinbase_shadow_probes(market_worker)
     from kraken_primary_research import PrimaryResearch, enabled as kraken_research_enabled
     if kraken_research_enabled():
         market_worker._kraken_primary_research = PrimaryResearch()
