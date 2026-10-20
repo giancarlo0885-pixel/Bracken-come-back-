@@ -21,6 +21,7 @@ MAX_WIRE_BYTES = 4 * 1024 * 1024
 MAX_SNAPSHOT_SECONDS = 15
 MAX_ACK_SECONDS = 10
 MAX_WIRE_IDLE_SECONDS = 15
+MAX_BOOK_UPDATE_SILENCE_SECONDS = 15
 PUBLICATION_SECONDS = 60
 MAX_BACKOFF_SECONDS = 30
 
@@ -136,6 +137,7 @@ class CoinbaseShadowWireProbe:
         snapshot_seen = False
         packets = 0
         start = last_wire = last_report = self.monotonic()
+        last_book_update = None
         ws = None
         try:
             ws = self.socket_factory(URI, timeout=2, enable_multithread=True)
@@ -150,6 +152,12 @@ class CoinbaseShadowWireProbe:
                     raise ShadowWireError("SNAPSHOT_TIMEOUT")
                 if tick - last_wire > MAX_WIRE_IDLE_SECONDS:
                     raise ShadowWireError("WIRE_IDLE")
+                # Heartbeats prove socket liveness, not exchange-book freshness.
+                # A quiet or wedged L2 stream must re-snapshot before its book
+                # can be used even for diagnostic venue comparisons.
+                if (last_book_update is not None
+                        and tick - last_book_update > MAX_BOOK_UPDATE_SILENCE_SECONDS):
+                    raise ShadowWireError("BOOK_UPDATE_TIMEOUT")
                 if tick - last_report >= PUBLICATION_SECONDS:
                     self._report(self.clock())
                     last_report = tick
@@ -175,6 +183,11 @@ class CoinbaseShadowWireProbe:
                 elif message_type in ("snapshot", "l2update"):
                     if not acked or packet.get("product_id") != self.symbol:
                         raise ShadowWireError("UNSUBSCRIBED_PRODUCT")
+                    # Coinbase sends one snapshot after a successful subscription.
+                    # A second snapshot inside the same session can roll the book
+                    # backwards; do not silently adopt it as a current book.
+                    if message_type == "snapshot" and snapshot_seen:
+                        raise ShadowWireError("UNEXPECTED_RESNAPSHOT")
                     if not self.books.ingest(packet, received_at=now):
                         self.counts["invalid_books"] += 1
                         raise ShadowWireError("INVALID_LEVEL2_BOOK")
@@ -183,6 +196,7 @@ class CoinbaseShadowWireProbe:
                         self.counts["snapshots"] += 1
                     else:
                         self.counts["updates"] += 1
+                    last_book_update = tick
                     last_wire = tick
                 elif message_type == "heartbeat" and packet.get("product_id") == self.symbol:
                     # A heartbeat cannot make a stale book or event timestamp fresh.
