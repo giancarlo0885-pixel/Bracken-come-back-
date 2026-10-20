@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import math
+import re
+from decimal import Decimal, InvalidOperation
 from datetime import datetime, timezone
 from typing import Any
 
@@ -486,6 +488,61 @@ def live_data_status(record: dict[str, Any], now: datetime | None = None) -> dic
     if not blocks_execution and is_paper_reference(record):
         detail += " Paper reference only; not broker-verified."
     return {"label": label, "detail": detail, "blocks_execution": blocks_execution}
+
+
+def plain_reason(
+    raw: Any, *, record: dict[str, Any] | None = None, now: datetime | None = None,
+) -> tuple[list[str], list[str]]:
+    """Describe recorded analysis without granting it current quote authority.
+
+    The legacy narrative is not structured cost evidence. Only an unambiguous,
+    signed percentage can describe its modeled EV, never realized profitability.
+    Quote readiness always comes from the existing provenance/freshness display
+    guard, not an execution-score substring. This helper authorizes no trades.
+    """
+    lower = str(raw or "").replace("\n", " ").strip().lower()
+    supports: list[str] = []
+    cautions: list[str] = []
+    ready = (record is not None and record.get("trade_eligible") is True
+             and not live_data_status(record, now=now)["blocks_execution"])
+    if not ready:
+        cautions.append("Current trade eligibility is not established; recorded analysis does not validate this quote.")
+    for token, label in (
+        ("momentum breakout", "Recorded setup: momentum breakout."),
+        ("trend continuation", "Recorded setup: trend continuation."),
+        ("sector leadership", "Recorded setup: sector leadership."),
+    ):
+        if token in lower:
+            supports.append(label)
+
+    mentions = re.findall(r"\bnet\s+ev\b", lower)
+    values = re.findall(r"\bnet\s+ev\b\s*[:=]?\s*([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?)\s*%", lower)
+    ev = None
+    if len(mentions) == len(values) == 1:
+        try:
+            ev = Decimal(values[0])
+        except InvalidOperation:
+            pass
+    if ev is not None and ev.is_finite():
+        # Retain original text instead of converting an unknown unit or treating
+        # a missing/zero/negative estimate as a positive one.
+        if ev > 0:
+            message = f"Recorded modeled net EV: {values[0]}%; this is an estimate, not realized profit."
+            (supports if ready else cautions).append(message)
+        elif ev == 0:
+            cautions.append("Recorded modeled net EV is zero; it does not establish a positive post-cost edge.")
+        else:
+            cautions.append(f"Recorded modeled net EV is negative ({values[0]}%); it does not support a profitability claim.")
+    else:
+        cautions.append("A usable modeled net EV estimate is unavailable; positive post-cost expectancy is not established.")
+
+    if "historically cautionary" in lower or "win rate 0%" in lower:
+        cautions.append("Recorded historical analogs performed poorly; sample adequacy still requires validation.")
+    if "neutral global backdrop" in lower:
+        cautions.append("Recorded global conditions were neutral rather than strongly supportive.")
+    if "no completed historical analogs" in lower:
+        cautions.append("There is not enough completed historical evidence yet.")
+    return supports, cautions
 
 
 def data_age_label(record: dict[str, Any], now: datetime | None = None) -> str:
