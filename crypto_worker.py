@@ -123,12 +123,14 @@ install_paper_shadow_exit_challenger("crypto")
 install_paper_strategy_execution_guard()
 
 if __name__ == "__main__":
+    from paper_brain_consumption import install_paper_brain_consumption
     from crypto_execution_source import install_unavailable_crypto_execution_source
     from coinbase_paper_pricing import install_paper_pricing
     if not install_paper_pricing(market_worker):
         install_unavailable_crypto_execution_source(worker=market_worker)
     logger.info("CRYPTO BROKER | provider=NONE | robinhood=REMOVED | broker_submission=NONE | execution_authority=PAPER_ONLY_OR_UNAVAILABLE")
     prepare_capital_readiness_runtime(market_worker, "crypto")
+    install_paper_brain_consumption()
     from kraken_reference_runtime import install_kraken_reference
     install_kraken_reference(market_worker)
     from kraken_primary_research import PrimaryResearch, enabled as kraken_research_enabled

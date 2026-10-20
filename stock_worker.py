@@ -42,8 +42,10 @@ if os.getenv("EXECUTION_MODE", "paper").strip().lower() == "paper":
 # Keep this entrypoint in the stock-worker deploy watch set when paper-learning
 # runtime policy changes. Production source-sync marker: current main, 2026-09-03.
 if __name__ == "__main__":
+    from paper_brain_consumption import install_paper_brain_consumption
     logger.info("ORACLE STOCK SOURCE SYNC | current-main deployment active")
     prepare_capital_readiness_runtime(market_worker, "cash")
+    install_paper_brain_consumption()
     from paper_trade_evidence_audit import emit_trade_evidence_audit
     emit_trade_evidence_audit("cash")
     market_worker.run_worker("cash")

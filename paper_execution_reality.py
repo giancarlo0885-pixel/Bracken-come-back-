@@ -68,6 +68,8 @@ class SimulatedFill:
     adverse_cost_pct: float
     participation_rate: float | None
     liquidity_value: float | None
+    max_adverse_fill_pct: float | None = None
+    fee_excluded_from_fill_price: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

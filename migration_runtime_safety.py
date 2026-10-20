@@ -101,6 +101,9 @@ def safe_run_migrations() -> list[str]:
     folder = Path(migrations.__file__).with_name("migrations")
     applied: list[str] = []
     with migrations.connect() as conn:
+        # Entrypoints replace migrations.run_migrations with this wrapper. Bound
+        # its wait too, before advisory locking, runtime sync, or schema repair.
+        conn.execute("SET LOCAL lock_timeout = '5s'")
         conn.execute("SELECT pg_advisory_xact_lock(%s)", (migrations.MIGRATION_LOCK_ID,))
         # This table is independent of the hot portfolio/position relations and
         # is needed to determine whether heavyweight compatibility repair is new.

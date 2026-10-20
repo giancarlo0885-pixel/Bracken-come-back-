@@ -155,6 +155,8 @@ def _simulate_fill_explicit_fee(
         adverse_cost_pct=round(adverse, 10),
         participation_rate=round(participation, 10) if participation is not None else None,
         liquidity_value=round(liquidity, 8) if liquidity is not None else None,
+        max_adverse_fill_pct=max_adverse,
+        fee_excluded_from_fill_price=True,
     )
 
 
@@ -349,6 +351,9 @@ def _record_order_and_fill(
             "depth_vwap":data.get("paper_depth_vwap"),"depth_order_value":data.get("paper_depth_order_value"),
             "slippage_pct":fill.slippage_pct,"latency_pct":fill.latency_pct,"market_impact_pct":fill.market_impact_pct},
             "execution_authority":"PAPER_SIMULATION_ONLY"}
+        evidence['execution'].update(executable_reference=fill.executable_reference,
+            max_adverse_fill_pct=fill.max_adverse_fill_pct,
+            fee_excluded_from_fill_price=fill.fee_excluded_from_fill_price)
         conn.execute("""INSERT INTO paper_fill_price_evidence
             (fill_id,model_version,quote_id,evidence,execution_authority)
             VALUES (%s,%s,%s,%s::jsonb,'PAPER_SIMULATION_ONLY')""",

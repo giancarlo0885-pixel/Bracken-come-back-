@@ -233,6 +233,9 @@ def run_migrations() -> list[str]:
     applied: list[str] = []
 
     with connect() as conn:
+        # Bound advisory and DDL lock waits before repairing or installing schema.
+        # SET LOCAL expires with this transaction; failures roll everything back.
+        conn.execute("SET LOCAL lock_timeout = '5s'")
         conn.execute("SELECT pg_advisory_xact_lock(%s)", (MIGRATION_LOCK_ID,))
         _repair_database(conn)
 
