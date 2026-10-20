@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import threading
+import time
 
 from asset_routing import infer_asset_class
 from kraken_research_data import PublicResearchData, ResearchUnavailable, coinbase_history
@@ -128,6 +129,29 @@ class PaperPricing:
         self.data=data or PublicResearchData()
         self.reference=reference or read_kraken_reference_state
         self.clock=clock;self.publish=publish;self.lock=threading.RLock();self.receipts={};self.fill_receipts={};self.last_health={}
+        self._health_publication_signature = None
+        self._health_publication_monotonic = float('-inf')
+
+    def _health_publication_due(self):
+        # Keep successful paper quotes visible without delay. Only identical
+        # all-unavailable states are throttled; no execution receipts are cached
+        # or revalidated by this diagnostic publication throttle.
+        signature = tuple(sorted(
+            (symbol, record.get('status'), record.get('reason'))
+            for symbol, record in self.last_health.items()
+        ))
+        has_valid_quote = any(
+            record.get('status') == 'VALID_PAPER_PRICE'
+            for record in self.last_health.values()
+        )
+        current = time.monotonic()
+        if (not has_valid_quote
+                and signature == self._health_publication_signature
+                and current - self._health_publication_monotonic < 60):
+            return False
+        self._health_publication_signature = signature
+        self._health_publication_monotonic = current
+        return True
 
     def quote(self,symbol):
         symbol=str(symbol).upper().strip()
@@ -170,15 +194,16 @@ class PaperPricing:
                 self.last_health[symbol]={'status':'UNAVAILABLE','reason':str(exc) if isinstance(exc,ResearchUnavailable) else type(exc).__name__}
                 return None
             finally:
-                if self.publish:
-                    try:
-                        from database import connect
-                        with connect() as conn:
-                            conn.execute('''INSERT INTO coinbase_paper_price_state VALUES(1,NOW(),%s::jsonb)
-                                ON CONFLICT(id) DO UPDATE SET updated_at=EXCLUDED.updated_at,payload=EXCLUDED.payload''',
-                                (json.dumps({'provider':SOURCE,'symbols':self.last_health,'broker_submission':'NONE'}),))
-                    except Exception:pass
-                log.info('COINBASE PAPER PRICING | %s',json.dumps({'symbols':self.last_health,'broker_submission':'NONE'}))
+                if self._health_publication_due():
+                    if self.publish:
+                        try:
+                            from database import connect
+                            with connect() as conn:
+                                conn.execute('''INSERT INTO coinbase_paper_price_state VALUES(1,NOW(),%s::jsonb)
+                                    ON CONFLICT(id) DO UPDATE SET updated_at=EXCLUDED.updated_at,payload=EXCLUDED.payload''',
+                                    (json.dumps({'provider':SOURCE,'symbols':self.last_health,'broker_submission':'NONE'}),))
+                        except Exception:pass
+                    log.info('COINBASE PAPER PRICING | %s',json.dumps({'symbols':self.last_health,'broker_submission':'NONE'}))
 
     def authentic(self,quote,symbol):
         if not enabled() or not isinstance(quote,dict):return False
