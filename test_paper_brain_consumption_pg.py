@@ -96,13 +96,25 @@ def test_migration_lock_timeout_rolls_back_partial_schema_and_allows_retry(fill_
         assert reader.execute("SELECT to_regclass('paper_brain_fill_links') AS relation").fetchone()['relation']
 
 
-def test_runner_bounds_advisory_lock_before_schema_repair(fill_evidence_db, monkeypatch):
+@pytest.mark.parametrize('runner', ['legacy', 'installed_runtime_wrapper'])
+def test_runner_bounds_advisory_lock_before_schema_repair(fill_evidence_db, monkeypatch, runner):
     import psycopg
     import migrations
     connection, _ = fill_evidence_db
     repaired = []
     monkeypatch.setattr(migrations, 'connect', connection)
     monkeypatch.setattr(migrations, '_repair_database', lambda conn: repaired.append(True))
+    if runner == 'installed_runtime_wrapper':
+        import capital_readiness_runtime
+        import migration_runtime_safety
+        # Preserve all installation bindings for the next test/worker fixture.
+        monkeypatch.setattr(migration_runtime_safety, '_INSTALLED', False)
+        monkeypatch.setattr(migration_runtime_safety, '_ORIGINAL', None)
+        monkeypatch.setattr(migrations, 'run_migrations', migrations.run_migrations)
+        monkeypatch.setattr(capital_readiness_runtime, 'run_migrations', capital_readiness_runtime.run_migrations)
+        migration_runtime_safety.install_migration_runtime_safety()
+        assert migrations.run_migrations is migration_runtime_safety.safe_run_migrations
+        assert capital_readiness_runtime.run_migrations is migration_runtime_safety.safe_run_migrations
     with connection() as blocker:
         blocker.execute('SELECT pg_advisory_xact_lock(%s)', (migrations.MIGRATION_LOCK_ID,))
         with pytest.raises(psycopg.errors.LockNotAvailable):
