@@ -187,7 +187,7 @@ def test_read_only_reference_alignment_and_expiry(monkeypatch):
     monkeypatch.setattr(reference, "read_kraken_reference_state", lambda: {
         "quotes": {"BTC-USD": {
             "symbol": "BTC-USD", "provider": "Kraken WS v2",
-            "bid": "99", "ask": "101", "price": "100",
+            "bid": "100", "ask": "101", "price": "100.5",
             "quote_timestamp": NOW.isoformat(), "received_at": NOW.isoformat(),
             "checksum_status": "VALID",
         }}
@@ -218,7 +218,7 @@ def test_enabling_requires_disarmed_paper_execution_and_never_changes_broker(mon
                      ("EXECUTION_MODE", "live")]:
         monkeypatch.setenv(key, bad)
         assert not feed.permitted()
-        assert not feed.CoinbaseShadowWireProbe("BTC-USD").start()
+        assert not feed.install_coinbase_shadow_probes(SimpleNamespace())
         monkeypatch.setenv(key, "false" if key != "EXECUTION_MODE" else "paper")
     monkeypatch.delenv("COINBASE_L2_SHADOW_PROBE_ENABLED")
     assert not feed.permitted()
