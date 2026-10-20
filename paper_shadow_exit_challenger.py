@@ -609,6 +609,39 @@ def ensure_schema() -> None:
         )
 
 
+
+def _missing_signal_open_lot_diagnostic(conn: Any, market: str, symbol: str) -> dict[str, Any]:
+    """Bounded attribution only; never reconstructs a signal or qualifies an exit."""
+    try:
+        rows = list(conn.execute(
+            """SELECT entry_signal_id,entry_forecast_id
+               FROM position_lots
+               WHERE market=%s AND symbol=%s AND COALESCE(quantity_remaining,0)>0
+               ORDER BY opened_at ASC,id ASC LIMIT 9""",
+            (market, symbol),
+        ).fetchall())
+    except Exception:
+        return {"status": "LOT_EVIDENCE_UNAVAILABLE", "sampled_open_lots": None,
+                "truncated": None, "entry_signal_ids_present": None,
+                "entry_forecast_ids_present": None}
+    sample = rows[:8]
+    signal_count = sum(bool(row.get("entry_signal_id")) for row in sample)
+    forecast_count = sum(bool(row.get("entry_forecast_id")) for row in sample)
+    if not sample:
+        status = "NO_OPEN_LOT_ROWS"
+    elif signal_count == 0:
+        status = "OPEN_LOTS_WITHOUT_ENTRY_SIGNAL_IDS"
+    elif signal_count < len(sample):
+        status = "MIXED_ENTRY_SIGNAL_ID_COVERAGE"
+    else:
+        # An ID in a lot is not proof that its original signals row exists.
+        status = "ENTRY_SIGNAL_IDS_PRESENT_BUT_CURRENT_SIGNAL_ABSENT"
+    return {"status": status, "sampled_open_lots": len(sample),
+            "truncated": len(rows) > len(sample),
+            "entry_signal_ids_present": signal_count,
+            "entry_forecast_ids_present": forecast_count}
+
+
 def sample_open_positions(market: str) -> int:
     """Update in-memory persistence only; never writes heartbeat telemetry rows."""
     if not active():
@@ -639,6 +672,18 @@ def sample_open_positions(market: str) -> int:
             signal = _latest_signal(conn, normalized_market, symbol)
             if not signal:
                 exclusions["missing_signal"] += 1
+                details = _missing_signal_open_lot_diagnostic(
+                    conn, normalized_market, symbol)
+                log.warning(
+                    "SHADOW_MISSING_CURRENT_SIGNAL | market=%s | symbol=%s | "
+                    "lot_status=%s | sampled_open_lots=%s | truncated=%s | "
+                    "entry_signal_ids_present=%s | entry_forecast_ids_present=%s | "
+                    "eligible_for_shadow_exit=false | execution_impact=NONE",
+                    normalized_market, symbol, details["status"],
+                    details["sampled_open_lots"], details["truncated"],
+                    details["entry_signal_ids_present"],
+                    details["entry_forecast_ids_present"],
+                )
                 continue
             initial_risk_usd, risk_basis_source = _open_position_risk_context(
                 conn,
