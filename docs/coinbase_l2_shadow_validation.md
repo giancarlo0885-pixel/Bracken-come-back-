@@ -71,3 +71,46 @@ PAXG lacks current independent pricing and remains excluded. Legacy
 missing signal/forecast IDs are not backfilled. PR #392 and #393 remain
 on independent release hold. CI fixtures exercise protocol semantics,
 not real exchange availability, network integrity or profitability.
+
+
+## Optional shadow-only live subscriber (stacked follow-up)
+
+coinbase_l2_shadow_runtime.py uses unauthenticated Coinbase Exchange
+wss://ws-feed.exchange.coinbase.com, with the documented level2_batch
+subscription. One socket each is used for BTC-USD and ETH-USD, to
+isolate traffic and reconnect failure. The crypto-worker imports the
+installer at startup, but it is OFF BY DEFAULT. Opt-in requires
+COINBASE_L2_SHADOW_PROBE_ENABLED=true, paper mode, broker submission
+disabled, and live trading disarmed. The default configuration has
+no new WebSocket or network activity.
+
+Each socket requires an acknowledged channel/product subscription and
+a full snapshot. It then applies timed updates with the existing
+non-executing Level2 reducer. It bounds decoded WebSocket frame length,
+uses socket timeouts, checks initial acknowledgment and snapshot
+deadlines, closes idle connections, clears books on wire integrity
+failures, and reconnects with bounded exponential delay. Heartbeats
+never refresh a quote timestamp. Non-book frames are ignored and do
+not independently keep a socket healthy.
+
+Once per minute per connected socket, diagnostics compare only a
+valid SHADOW reference with the separately observed Kraken
+checksum-qualified feed. The log includes comparison status,
+original timestamps' delta, mid-basis and aggregate non-trading
+counters. The probe does not write to PostgreSQL and never registers
+any feed/quote with the execution engine, paper pricing, fill
+accounting or decision path. Coinbase websocket messages are not
+trusted as execution data and remain checksum-unavailable.
+
+Tests inject fake sockets and clocks. Passing them does NOT
+prove Coinbase connectivity, production network lag/CPU, durable
+independent evidence, uninterrupted snapshots, quote-to-decision
+accounting receipts or profitable post-cost performance.
+
+Release sequence: code review and exact-head CI -> explicit
+non-execution shadow enablement in a later authorized deployment ->
+capture real connection/latency/uptime and Kraken alignment ->
+independent pricing receipt design and regression tests. The
+current REST paper-pricing block remains in place throughout.
+No merge, deployment, activation or trading permission change is
+part of this draft.
