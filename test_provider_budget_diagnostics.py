@@ -13,9 +13,11 @@ COINBASE = "Coinbase Public Research"
 KRAKEN = "Kraken Public Research"
 
 
-def row(provider=COINBASE, budget=2400, used=2400, remaining=0, cooldown=None):
+def row(provider=COINBASE, budget=2400, used=2400, remaining=0, cooldown=None,
+        data_mode="shadow_research"):
     return {"provider": provider, "daily_budget": budget, "requests_used": used,
-            "remaining_budget": remaining, "cooldown_until": cooldown}
+            "remaining_budget": remaining, "cooldown_until": cooldown,
+            "data_mode": data_mode}
 
 
 class Reader:
@@ -44,6 +46,7 @@ def test_exhausted_quota_is_explicit_but_not_provider_entitlement(caplog):
         "status": "CONFIGURED_BUDGET_EXHAUSTED",
         "configured_daily_budget": 2400, "requests_reserved": 2400,
         "remaining_reservations": 0, "cooldown_active": False,
+        "created_as_cooldown_marker": False,
         "exhaustion_proven_by_ledger": True,
     }
     assert result["providers"][KRAKEN]["status"] == "CONFIGURED_CAPACITY_REMAINING"
@@ -80,15 +83,17 @@ def test_zero_budget_cooldown_marker_is_not_classified_as_exhausted_usage(cooldo
     # mark_provider_cooldown_db creates a zero-budget row if no request
     # reservation happened yet in this UTC day.
     results = read_public_research_budgets(
-        Reader([row(budget=0, used=0, remaining=0, cooldown=cooldown)]),
+        Reader([row(budget=0, used=0, remaining=0, cooldown=cooldown,
+                    data_mode="shared_cooldown")]),
         now=NOW,
     )
     marker = results["providers"][COINBASE]
-    assert marker["status"] == "ZERO_CONFIGURED_BUDGET"
+    assert marker["status"] == "COOLDOWN_MARKER_NO_CAPACITY"
     assert marker["configured_daily_budget"] == 0
     assert marker["requests_reserved"] == 0
     assert marker["remaining_reservations"] == 0
     assert marker["cooldown_active"] is active
+    assert marker["created_as_cooldown_marker"] is True
     assert marker["exhaustion_proven_by_ledger"] is False
     assert results["provider_api_entitlements"] == "UNVERIFIED"
 
@@ -101,6 +106,17 @@ def test_quota_still_exhausted_when_positive_capacity_is_consumed_during_cooldow
     info = result["providers"][COINBASE]
     assert info["status"] == "CONFIGURED_COOLDOWN_ACTIVE"
     assert info["exhaustion_proven_by_ledger"] is True
+    assert info["created_as_cooldown_marker"] is False
+
+
+
+def test_explicit_zero_request_quota_is_not_mistaken_for_cooldown_marker():
+    result = read_public_research_budgets(Reader([
+        row(budget=0, used=0, remaining=0, data_mode="shadow_research")
+    ]), now=NOW)["providers"][COINBASE]
+    assert result["status"] == "ZERO_CONFIGURED_BUDGET"
+    assert result["created_as_cooldown_marker"] is False
+    assert result["exhaustion_proven_by_ledger"] is False
 
 
 def test_missing_rows_are_unknown_not_free_capacity():
