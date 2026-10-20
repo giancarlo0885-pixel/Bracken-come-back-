@@ -82,7 +82,7 @@ def read_public_research_budgets(conn, *, now=None):
                 result = {"status": state, "configured_daily_budget": budget,
                           "requests_reserved": used, "remaining_reservations": remaining,
                           "cooldown_active": cooldown,
-                          "created_as_cooldown_marker": cooldown_marker,
+                          "current_cooldown_marker": cooldown_marker,
                           "exhaustion_proven_by_ledger": bool(budget > 0 and remaining == 0
                                                               and used == budget)}
             by_provider[provider] = result

@@ -46,7 +46,7 @@ def test_exhausted_quota_is_explicit_but_not_provider_entitlement(caplog):
         "status": "CONFIGURED_BUDGET_EXHAUSTED",
         "configured_daily_budget": 2400, "requests_reserved": 2400,
         "remaining_reservations": 0, "cooldown_active": False,
-        "created_as_cooldown_marker": False,
+        "current_cooldown_marker": False,
         "exhaustion_proven_by_ledger": True,
     }
     assert result["providers"][KRAKEN]["status"] == "CONFIGURED_CAPACITY_REMAINING"
@@ -93,7 +93,7 @@ def test_zero_budget_cooldown_marker_is_not_classified_as_exhausted_usage(cooldo
     assert marker["requests_reserved"] == 0
     assert marker["remaining_reservations"] == 0
     assert marker["cooldown_active"] is active
-    assert marker["created_as_cooldown_marker"] is True
+    assert marker["current_cooldown_marker"] is True
     assert marker["exhaustion_proven_by_ledger"] is False
     assert results["provider_api_entitlements"] == "UNVERIFIED"
 
@@ -106,7 +106,7 @@ def test_quota_still_exhausted_when_positive_capacity_is_consumed_during_cooldow
     info = result["providers"][COINBASE]
     assert info["status"] == "CONFIGURED_COOLDOWN_ACTIVE"
     assert info["exhaustion_proven_by_ledger"] is True
-    assert info["created_as_cooldown_marker"] is False
+    assert info["current_cooldown_marker"] is False
 
 
 
@@ -115,7 +115,7 @@ def test_explicit_zero_request_quota_is_not_mistaken_for_cooldown_marker():
         row(budget=0, used=0, remaining=0, data_mode="shadow_research")
     ]), now=NOW)["providers"][COINBASE]
     assert result["status"] == "ZERO_CONFIGURED_BUDGET"
-    assert result["created_as_cooldown_marker"] is False
+    assert result["current_cooldown_marker"] is False
     assert result["exhaustion_proven_by_ledger"] is False
 
 

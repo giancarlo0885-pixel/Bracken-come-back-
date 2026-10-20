@@ -118,6 +118,8 @@ def test_budget_blocks_network(monkeypatch):
      'PROVIDER_LEDGER_UNAVAILABLE'),
     ({'reserved': False, 'reason': 'provider capability in cooldown'},
      'PROVIDER_COOLDOWN'),
+    ({'reserved': False, 'reason': 'provider capability has no initialized capacity'},
+     'PROVIDER_BUDGET_BLOCKED'),
     ({'reserved': False, 'reason': 'unrecognized private provider error'},
      'PROVIDER_BUDGET_BLOCKED'),
 ])

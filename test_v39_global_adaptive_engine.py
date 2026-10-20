@@ -361,7 +361,7 @@ def test_provider_db_budget_reservation_is_atomic_shape():
 
 
 def test_provider_db_budget_exhaustion_blocks_request():
-    conn = FakeConn({"requests_used": 20, "remaining_budget": 0, "cooldown_until": None})
+    conn = FakeConn({"daily_budget": 20, "requests_used": 20, "remaining_budget": 0, "cooldown_until": None})
     result = v39.reserve_provider_budget_db(conn, "alpha", "daily", daily_budget=20)
     assert result["reserved"] is False
     assert "exhausted" in result["reason"]

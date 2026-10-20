@@ -171,7 +171,7 @@ were consumed.
 
 The elected provider-ledger report distinguishes this situation as
 COOLDOWN_MARKER_NO_CAPACITY when data_mode=shared_cooldown and prints
-created_as_cooldown_marker=true and exhaustion_proven_by_ledger=false.
+current_cooldown_marker=true and exhaustion_proven_by_ledger=false.
 An intentionally configured zero allowance with a different data_mode
 is labeled ZERO_CONFIGURED_BUDGET instead. Both labels avoid the false
 claim that the normal positive quota was used up.
@@ -179,11 +179,43 @@ It separately indicates whether cooldown_until is active. The label
 CONFIGURED_BUDGET_EXHAUSTED (or an exhaustion_proven_by_ledger=true
 flag during an active cooldown) requires a positive configured daily
 budget whose recorded requests_used equals that allowance, with no
-remaining reservations. This distinction changes diagnostic labeling
-only; it does NOT reset budgets, repair cooldown marker rows,
-increase provider access, make data available or permit a trade.
+remaining reservations. This report changes diagnostic labeling only; it does
+not itself reserve capacity or permit a trade. The marker flag describes the
+current data_mode, not an immutable history of how a row was first created.
 
 The configured ledger records reservations rather than confirmed
 successful external API requests. A fully consumed positive budget
 therefore proves reserved capacity exhaustion, not externally
 successful requests or an actual exchange-imposed limit.
+
+### Confirmed cooldown-marker initialization defect and guarded correction
+
+The old reservation writer used `INSERT ... ON CONFLICT DO NOTHING`, then
+checked the existing row's remaining capacity. An expired all-zero cooldown
+marker therefore remained all-zero and was incorrectly called exhausted for
+the remainder of the UTC day. A request reserved just before UTC midnight whose
+HTTP 429 response arrives just after midnight can create this state. Normal
+same-day 429 handling already has a reservation row and does not usually create
+this marker. This mechanism was reproduced locally; it has not been established
+as the cause of the current BTC/ETH production denials.
+
+Under the existing provider/capability/day row lock, the reservation writer now
+initializes only a pristine `shared_cooldown` marker with all three counts zero,
+a valid original cooldown timestamp at or before now and a positive
+caller-configured allowance. Missing or malformed expiry evidence stays blocked. It
+installs that existing allowance once, changes data_mode to the caller's request
+mode and performs the normal single reservation debit in the same transaction.
+The prior failure and original cooldown timestamp remain unchanged. A used or
+positive configured budget, an explicit zero nonmarker allowance, malformed
+nonzero-used marker, active cooldown, or zero caller allowance is never refilled.
+Zero-capacity denials no longer masquerade as consumed positive allowances.
+
+Disposable-PostgreSQL regressions cover both public providers crossing midnight,
+active cooldown preservation, one-time initialization, no subsequent allowance
+increase even if a later caller supplies a larger number, concurrent first
+reservations, initialized exhaustion, explicit-zero/malformed rows and atomic
+rollback. Fixtures use tiny synthetic allowances, not production requests or
+claimed exchange entitlements. No provider configuration or quote TTL changes.
+The actual production ledger query remains unexecuted; PR #395 remains a draft
+requiring exact-head CI and explicit approval before merge/deployment. Existing
+#392/#393 holds remain independent and intact.
