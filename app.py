@@ -30,6 +30,7 @@ from dashboard_helpers import (
     format_quantity,
     format_asset_price,
     live_data_status,
+    plain_reason,
     wall_street_market_focus,
     money_text,
     readable_trade_rows,
@@ -80,6 +81,9 @@ html{font-size:17px}.stApp{background:var(--bg);color:var(--text)}.block-contain
 .decision{border:2px solid var(--line);border-left:8px solid var(--yellow);background:var(--panel);border-radius:16px;padding:17px;margin:12px 0}.decision.buy{border-left-color:var(--green)}.decision.sell{border-left-color:var(--red)}.decision.wait{border-left-color:var(--yellow)}.decision.hold{border-left-color:var(--blue)}
 .action{font-size:1.32rem;font-weight:950}.buy-text{color:var(--green)}.sell-text{color:var(--red)}.wait-text{color:var(--yellow)}.hold-text{color:var(--blue)}
 .grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}.tile{border:2px solid var(--line);background:var(--panel);border-radius:15px;padding:14px}.tile small{color:var(--muted)}.tile b{display:block;font-size:1.55rem;margin-top:.25rem}.summary-cell small{display:block}.summary-cell b{display:block;margin-top:.2rem;overflow-wrap:anywhere}.money-grid{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:12px}.money-tile{border:2px solid var(--line);background:var(--panel);border-radius:15px;padding:18px}.money-tile small{color:var(--muted);font-weight:800;text-transform:uppercase}.money-tile b{display:block;font-size:clamp(1.35rem,2.1vw,1.95rem);margin-top:.3rem;overflow-wrap:anywhere}.simple-status{font-size:1.45rem;font-weight:950}.reason{line-height:1.6;color:#eef6fc}.pill{display:inline-block;border:1px solid var(--line);border-radius:999px;padding:.35rem .65rem;margin:.2rem .25rem .1rem 0;background:#09131d;font-weight:700}.status-bar{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}.status-chip{border:1px solid var(--line);background:#09131d;border-radius:12px;padding:10px 12px;font-weight:900}.status-chip span{float:right}.green-text{color:var(--green)}.yellow-text{color:var(--yellow)}.red-text{color:var(--red)}.section-title{font-size:1.25rem;font-weight:950;margin:1.4rem 0 .65rem}.oracle-strip{border:2px solid var(--line);background:var(--panel);border-radius:16px;padding:16px;margin:12px 0 18px}
+[data-testid="stMetricValue"],[data-testid="stMetricValue"] *{color:var(--text)!important}
+[data-testid="stMetricLabel"],[data-testid="stMetricLabel"] *{color:var(--muted)!important}
+[data-testid="stAlert"] [data-testid="stMarkdownContainer"],[data-testid="stAlert"] [data-testid="stMarkdownContainer"] *{color:var(--text)!important}
 [data-testid="stSidebar"]{border-right:2px solid var(--line)}[data-testid="stMetric"]{border:2px solid var(--line);border-radius:16px;padding:14px;background:var(--panel)}
 .stTabs [data-baseweb="tab-list"]{gap:.3rem;overflow-x:auto}.stTabs [data-baseweb="tab"]{min-height:48px;font-weight:800;white-space:nowrap}.stTabs [aria-selected="true"]{border-bottom:4px solid var(--green)!important}
 [data-testid="stDataFrame"]{border:2px solid var(--line);border-radius:15px;overflow:hidden}button,input,textarea,select{min-height:44px}
@@ -198,35 +202,6 @@ def action_class(action: str) -> tuple[str, str]:
     return "wait", "wait-text"
 
 
-def plain_reason(raw: Any) -> tuple[list[str], list[str]]:
-    """Translate dense engine output into simple supporting points and cautions."""
-    text = str(raw or "").replace("\n", " ").strip()
-    lower = text.lower()
-    supports: list[str] = []
-    cautions: list[str] = []
-    if "momentum breakout" in lower:
-        supports.append("Momentum breakout detected")
-    if "trend continuation" in lower:
-        supports.append("The price trend is still moving in the favorable direction")
-    if "sector leadership" in lower:
-        supports.append("The asset is showing leadership inside its sector")
-    if "execution 9" in lower or "execution 8" in lower:
-        supports.append("Market liquidity and execution conditions are acceptable")
-    if "net ev" in lower:
-        supports.append("The estimated reward remains greater than the modeled trading cost")
-    if "historically cautionary" in lower or "win rate 0%" in lower:
-        cautions.append("A small number of similar completed trades performed poorly")
-    if "neutral global backdrop" in lower:
-        cautions.append("Global conditions are neutral rather than strongly supportive")
-    if "no completed historical analogs" in lower:
-        cautions.append("There is not enough completed historical evidence yet")
-    if not supports:
-        supports.append("The combined market models currently support this decision")
-    if not cautions:
-        cautions.append("The recommendation can change if price, risk, or global conditions weaken")
-    return supports[:3], cautions[:2]
-
-
 def portfolio_status_label(score: Any) -> str:
     value = as_float(score)
     if value >= 75:
@@ -297,7 +272,7 @@ def decision_card(item: dict[str, Any], compact: bool = False, simple: bool = Fa
     symbol = str(item.get("symbol", "")).upper()
     market_key = str(item.get("market", "")).lower()
     market = "Stock" if market_key == "cash" else "Crypto"
-    supports, cautions = plain_reason(item.get("reason"))
+    supports, cautions = plain_reason(item.get("reason"), record=item)
     freshness = live_data_status(item)
     ready = bool(item.get("trade_eligible")) and not freshness["blocks_execution"]
     data_status = str(item.get("data_status") or freshness["detail"] or "Data status unavailable")
@@ -362,7 +337,7 @@ def decision_card(item: dict[str, Any], compact: bool = False, simple: bool = Fa
                 st.metric("Risk", risk)
             st.markdown("**Why this decision**")
             for point in supports:
-                st.markdown(f"✅ {point}")
+                st.markdown(f"- {point}")
             st.markdown("**What to watch**")
             for point in cautions:
                 st.markdown(f"Warning: {point}")
@@ -699,7 +674,8 @@ if page == "Oracle City":
     from oracle_city_model import build_oracle_city_snapshot
 
     st.subheader("Oracle City — Cinematic Metropolis")
-    city_snapshot = build_oracle_city_snapshot(rows)
+    with st.spinner("Loading Oracle City evidence…"):
+        city_snapshot = build_oracle_city_snapshot(rows)
     if city_snapshot.get("warnings"):
         st.warning("Partial Oracle City feeds: " + "; ".join(city_snapshot["warnings"]))
     st.iframe(render_oracle_city_component(city_snapshot), height=980)
@@ -710,10 +686,13 @@ if page == "Oracle Brain":
     from oracle_brain_component import render_oracle_brain_component
 
     st.subheader("Oracle Brain — Living Learning Map")
-    brain_snapshot = build_oracle_brain_snapshot(rows)
+    with st.spinner("Loading Oracle Brain evidence…"):
+        brain_snapshot = build_oracle_brain_snapshot(rows)
     st.iframe(render_oracle_brain_component(brain_snapshot), height=610)
     st.stop()
 
+dashboard_loading = st.empty()
+dashboard_loading.info("Loading portfolio and market evidence…")
 stock_portfolio, stock_positions, stock_metrics = get_portfolio("cash")
 crypto_portfolio, crypto_positions, crypto_metrics = get_portfolio("crypto")
 all_positions = stock_positions + crypto_positions
@@ -754,6 +733,8 @@ sell_decisions = decision_buckets["sells"]
 bearish_watch_decisions = decision_buckets["bearish_watch"]
 waiting_for_data = decision_buckets["waiting"]
 professional_decisions = professional_decision_views(decisions, all_positions)
+
+dashboard_loading.empty()
 
 with st.sidebar:
     st.divider()
@@ -987,7 +968,7 @@ elif page == "Dashboard":
         selected_label = st.selectbox("Opportunity details", labels, key="balanced-opportunity-details")
         selected = table_decisions[labels.index(selected_label)]
         with st.expander("Details"):
-            supports, cautions = plain_reason(selected.get("reason"))
+            supports, cautions = plain_reason(selected.get("reason"), record=selected)
             d1, d2, d3, d4 = st.columns(4)
             d1.metric("Forecast", f"{as_float(selected.get('expected_return')):+.1f}%")
             d2.metric("Technical Score", f"{as_float(selected.get('score')):.0f}/100")
@@ -1600,7 +1581,7 @@ elif page == "Professional":
             selected_symbol = st.selectbox("Decision", decision_labels)
             selected_index = decision_labels.index(selected_symbol)
             d = professional_decisions[selected_index]
-            supports, cautions = plain_reason(d.get("reason"))
+            supports, cautions = plain_reason(d.get("reason"), record=d)
             a, b, c, e = st.columns(4)
             a.metric("Decision", d.get("action", "WAIT"))
             b.metric("Confidence", f"{as_float(d.get('confidence')):.0f}%")
@@ -1613,9 +1594,9 @@ elif page == "Professional":
                 st.warning(f"Not trade-ready - {freshness['label']}: {freshness['detail']}")
             if d.get("execution_note"):
                 st.info(str(d["execution_note"]))
-            st.markdown("### Supporting evidence")
+            st.markdown("### Recorded supporting context")
             for point in supports:
-                st.success(point)
+                st.write(point)
             st.markdown("### Main cautions")
             for point in cautions:
                 st.warning(point)
