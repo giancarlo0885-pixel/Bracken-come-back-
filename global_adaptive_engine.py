@@ -435,7 +435,43 @@ def reserve_provider_budget_db(conn: Any, provider: str, capability: str, *, dai
         )
         if not guarded_auth_recheck:
             return {"reserved": False, "reason": "provider capability in cooldown", "remaining": int(existing.get("remaining_budget") or 0)}
-    remaining = int(existing.get("remaining_budget") or 0)
+    # A 429/cooldown recorded before the day's first reservation may have
+    # initialized a marker with a zero budget. Once its real cooldown expires,
+    # the original INSERT ... DO NOTHING would permanently preserve that 0-row,
+    # misreporting exhaustion until the next UTC day. Recover *only* the two
+    # public research providers at their unchanged hard-coded request budgets,
+    # under the existing daily-row lock. Real spent quotas and active cooldowns
+    # are never replenished or bypassed.
+    public_research_limit = {
+        "Coinbase Public Research": 2400, "Kraken Public Research": 1200
+    }.get(provider) if capability == "__provider__" else None
+    marker = (
+        public_research_limit is not None
+        and budget == public_research_limit
+        and existing.get("data_mode") == "shared_cooldown"
+        and existing.get("entitlement") == "configured"
+        and cooldown_until is not None
+        and cooldown_until <= now_dt.astimezone(timezone.utc)
+        and all(type(existing.get(key)) is int and existing[key] == 0
+                for key in ("daily_budget", "requests_used", "remaining_budget"))
+    )
+    if marker:
+        repaired = conn.execute(
+            """UPDATE provider_budget_ledger
+               SET daily_budget=%s, remaining_budget=%s,
+                   data_mode=%s, updated_at=%s
+               WHERE provider=%s AND capability=%s AND utc_date=%s
+                 AND daily_budget=0 AND requests_used=0 AND remaining_budget=0
+                 AND data_mode='shared_cooldown' AND entitlement='configured'
+                 AND cooldown_until=%s""",
+            (budget, budget, data_mode, timestamp, provider, capability,
+             utc_date, existing.get("cooldown_until")),
+        )
+        if repaired.rowcount != 1:
+            return {"reserved": False, "reason": "provider cooldown marker recovery unavailable"}
+        remaining = budget
+    else:
+        remaining = int(existing.get("remaining_budget") or 0)
     if remaining <= 0:
         return {"reserved": False, "reason": "provider capability budget exhausted", "remaining": 0}
     conn.execute(
