@@ -165,15 +165,19 @@ def summarize_trade_evidence(conn, *, market, limit=SAMPLE_LIMIT):
                 AND s0.market=f0.market AND s0.symbol=f0.symbol)
             ORDER BY created_at LIMIT 2) f""",
         (numeric_ids,)).fetchall()) if numeric_ids else []
-    reasons=Counter(); generation_counts=Counter(); samples=[]; complete=0
+    reasons=Counter(); generation_counts=Counter(); samples=[]; complete=0; brain_verified=0; fully_verified=0
     for trade_id,(entry,lot) in sorted(entries.items()):
         failures=entry_reference_reasons(entry,lot,signals,forecasts)
         reasons.update(failures);complete+=not failures
         generation = forecast_generation_evidence(entry, signals, related_forecasts)
         generation_counts[generation['status']] += 1
+        from paper_brain_consumption import audit_forward_trade
+        forward=audit_forward_trade(conn,entry_trade_id=trade_id,market=market)
+        brain_verified+=forward['brain_consumption_verified']
+        fully_verified+=forward['fully_verified']
         samples.append({'entry_trade_id':trade_id,'entry_signal_id':entry.get('entry_signal_id'),
             'entry_forecast_id':entry.get('entry_forecast_id'),'symbol':entry['symbol'],'reasons':failures,
-            'forecast_generation':generation})
+            'forecast_generation':generation,'forward_consumption_chain':forward})
     return {'market':market,'as_of':as_of.isoformat(),'canonical_trade_counts':[dict(r) for r in canonical],
         'ledger_mode_counts':[dict(r) for r in modes],'paper_fills':fills,
         'sample_scope':'latest_explicitly_linked_ledger_rows_only','sample_limit':limit,
@@ -183,17 +187,18 @@ def summarize_trade_evidence(conn, *, market, limit=SAMPLE_LIMIT):
         'sample_entry_exclusions':dict(reasons),'sample_entry_references':samples,
         'sample_pricing_receipts':pricing,
         'decision_time_brain_consumption': {
-            'status':'UNAVAILABLE',
-            'reason':'NO_PERSISTED_IMMUTABLE_DECISION_CONSUMPTION_CONTRACT',
+            'status':'VERIFIED_FOR_SAMPLED_FORWARD_ENTRIES' if brain_verified else 'UNAVAILABLE',
+            'verified_sample_entries':brain_verified,
+            'reason':'ORIGINAL_FORWARD_RECEIPTS_ONLY_NO_RETROSPECTIVE_CERTIFICATION',
             'ingestion_and_retrospective_replays_are_consumption_proof':False},
-        'sample_fully_verified_trades':0,
+        'sample_fully_verified_trades':fully_verified,
         'full_trade_verification': {
-            'status':'UNAVAILABLE',
+            'status':'VERIFIED_FOR_SAMPLED_CLOSED_LOTS' if fully_verified else 'UNAVAILABLE',
             'requires':['original_entry_references','original_entry_and_exit_pricing_receipts',
                         'finalized_exit_with_exact_costs','decision_time_brain_consumption'],
-            'finalized_round_trip_status':'NOT_EVALUATED'},
+            'finalized_round_trip_status':'VERIFIED_FOR_FULL_CHAIN_ROWS_ONLY' if fully_verified else 'NOT_EVALUATED'},
         'historical_repair':'NONE','execution_impact':'NONE','profitability':'NOT_EVALUATED',
-        'scope_warning':'Sample counts are not all-history qualifications, independent episodes, or decision-time Brain-consumption receipts.'}
+        'scope_warning':'Accounting/entry counts alone do not prove full-chain qualification. Only explicit forward_consumption_chain checks verify consumption; sample counts are not all-history totals or independent episodes.'}
 
 
 def emit_trade_evidence_audit(market, *, connect_factory=None):

@@ -1881,6 +1881,9 @@ def _record_buy_attribution(
             lot_links=[(lot_id, trade_id, quantity)], quote=quote,
             reason=str(audit_context.get("buy_reason") or "entry"),
         )
+        from paper_brain_consumption import link_entry_fill
+        link_entry_fill(conn,signal=signal,market=market,symbol=symbol,
+            lot_id=lot_id,ledger_trade_id=trade_id,execution_trade_id=execution_trade_id)
 
 
 def _record_sell_attribution(
@@ -3448,16 +3451,21 @@ def process_signals(
                 "SELECT * FROM positions WHERE market=%s",
                 (market,),
             )
-            oracle_decision = evaluate_opportunity(
-                signal,
-                market=market,
-                min_quality=QUANT_MIN_QUALITY,
-                min_net_ev_pct=QUANT_MIN_NET_EV_PCT,
-                max_spread_pct=QUANT_MAX_SPREAD_PCT,
-                max_slippage_pct=QUANT_MAX_SLIPPAGE_PCT,
-                portfolio=allocation_equity,
-                positions=allocation_positions,
-            )
+            from paper_brain_consumption import DecisionEvidenceUnavailable
+            try:
+                oracle_decision = evaluate_opportunity(
+                    signal,
+                    market=market,
+                    min_quality=QUANT_MIN_QUALITY,
+                    min_net_ev_pct=QUANT_MIN_NET_EV_PCT,
+                    max_spread_pct=QUANT_MAX_SPREAD_PCT,
+                    max_slippage_pct=QUANT_MAX_SLIPPAGE_PCT,
+                    portfolio=allocation_equity,
+                    positions=allocation_positions,
+                )
+            except DecisionEvidenceUnavailable:
+                log.warning('PAPER BRAIN DECISION | market=%s | symbol=%s | status=UNAVAILABLE | entry=BLOCKED',market,symbol)
+                continue
             quant_assessment = assess_trade(
                 signal,
                 market=market,

@@ -93,6 +93,8 @@ DATABASE_BOOTSTRAP_LOCK_NAME = "garibaldi_database_bootstrap_v37"
 DATABASE_MAINTENANCE_LOCK_NAME = "garibaldi_database_maintenance_v37"
 ENTRY_EVIDENCE_RETENTION_LOCK = 73420261605
 CANONICAL_PROTECTED_TABLES = {
+    "paper_brain_snapshots", "paper_brain_decisions",
+    "paper_brain_consumption_receipts", "paper_brain_fill_links",
     "paper_fill_price_evidence",
     "kraken_research_evidence",
     "portfolios",
@@ -1804,19 +1806,21 @@ def _trim_global_decision_ledger(conn: Any, *, keep_rows: int, batch_size: int, 
     return deleted_total
 
 
-def _entry_evidence_retention_sql(table: str) -> str:
+def _entry_evidence_retention_sql(table: str, *, brain_snapshots_available: bool = False) -> str:
     """Only unreferenced analytical records may enter rolling retention."""
     if table == "signals":
         return ("NOT EXISTS (SELECT 1 FROM position_lots p WHERE p.entry_signal_id=signals.id::text) "
                 "AND NOT EXISTS (SELECT 1 FROM trade_ledger l WHERE l.entry_signal_id=signals.id::text) "
-                "AND NOT EXISTS (SELECT 1 FROM forecasts f WHERE f.signal_id=signals.id)")
+                "AND NOT EXISTS (SELECT 1 FROM forecasts f WHERE f.signal_id=signals.id)" +
+                (" AND NOT EXISTS (SELECT 1 FROM paper_brain_snapshots b WHERE b.source_signal_id=signals.id)" if brain_snapshots_available else ""))
     if table == "forecasts":
         return ("NOT EXISTS (SELECT 1 FROM position_lots p WHERE p.entry_forecast_id=forecasts.forecast_id) "
-                "AND NOT EXISTS (SELECT 1 FROM trade_ledger l WHERE l.entry_forecast_id=forecasts.forecast_id)")
+                "AND NOT EXISTS (SELECT 1 FROM trade_ledger l WHERE l.entry_forecast_id=forecasts.forecast_id)" +
+                (" AND NOT EXISTS (SELECT 1 FROM paper_brain_snapshots b WHERE b.source_forecast_row_id=forecasts.id)" if brain_snapshots_available else ""))
     return "TRUE"
 
 
-def _retention_cleanup_due(conn: Any, table: str, *, keep_rows: int, batch_size: int) -> bool:
+def _retention_cleanup_due(conn: Any, table: str, *, keep_rows: int, batch_size: int, brain_snapshots_available: bool = False) -> bool:
     """Avoid constant INSERT/DELETE churn by trimming only after a bounded overshoot.
 
     Cleanup becomes due after max(batch_size, 20% of keep_rows) unlinked rows
@@ -1825,7 +1829,7 @@ def _retention_cleanup_due(conn: Any, table: str, *, keep_rows: int, batch_size:
     """
     slack_rows = max(batch_size, max(1, keep_rows // 5))
     probe = conn.execute(
-        f"SELECT id FROM {table} WHERE {_entry_evidence_retention_sql(table)} ORDER BY id DESC OFFSET %s LIMIT 1",
+        f"SELECT id FROM {table} WHERE {_entry_evidence_retention_sql(table,brain_snapshots_available=brain_snapshots_available)} ORDER BY id DESC OFFSET %s LIMIT 1",
         (keep_rows + slack_rows,),
     ).fetchone()
     return bool(probe)
@@ -1849,8 +1853,12 @@ def _apply_retention_policy(conn: Any, table: str, policy: dict[str, Any], *, ma
                               (ENTRY_EVIDENCE_RETENTION_LOCK,)).fetchone()
         if not locked or locked.get("owned") is not True:
             return 0
-    eligible_sql = _entry_evidence_retention_sql(table)
-    if not _retention_cleanup_due(conn, table, keep_rows=keep_rows, batch_size=batch_size):
+    brain_available=False
+    if table in {'signals','forecasts'}:
+        relation=conn.execute("SELECT to_regclass('paper_brain_snapshots') AS relation").fetchone()
+        brain_available=bool(relation and relation.get('relation'))
+    eligible_sql = _entry_evidence_retention_sql(table,brain_snapshots_available=brain_available)
+    if not _retention_cleanup_due(conn, table, keep_rows=keep_rows, batch_size=batch_size,brain_snapshots_available=brain_available):
         return 0
     deleted_total = 0
     batches = 0

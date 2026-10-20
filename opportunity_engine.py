@@ -70,9 +70,16 @@ def rank_opportunities(signals: list[Any], limit: int = 12, market: str | None =
             portfolio_context = {"cash": cash, "equity": cash + invested}
         except Exception:
             portfolio_context = None
-        decision = evaluate_opportunity(
-            signal, market=signal_market, portfolio=portfolio_context, positions=position_rows
-        )
+        from paper_brain_consumption import DecisionEvidenceUnavailable
+        try:
+            decision = evaluate_opportunity(
+                signal, market=signal_market, portfolio=portfolio_context, positions=position_rows
+            )
+        except DecisionEvidenceUnavailable:
+            import logging
+            logging.getLogger(__name__).warning('PAPER BRAIN DECISION | market=%s | symbol=%s | status=UNAVAILABLE | candidate=SKIPPED',
+                signal_market,_value(signal,'symbol',''))
+            continue
         payload = decision.to_dict()
         route = _value(signal, "market_data_route", {}) or {}
         signal_id = _value(signal, "signal_id", None)
@@ -87,7 +94,8 @@ def rank_opportunities(signals: list[Any], limit: int = 12, market: str | None =
             {
                 "signal_id": signal_id,
                 "forecast_id": forecast_id,
-                "entry_decision_id": f"signal:{signal_id}" if signal_id not in (None, "") else None,
+                "entry_decision_id": (getattr(decision,"decision_receipt_id",None)
+                    or (f"signal:{signal_id}" if signal_id not in (None, "") else None)),
                 "decision_correlation_id": correlation_id,
                 "scan_type": _value(signal, "scan_type", "") or route.get("scan_type"),
                 "source_interval": _value(signal, "source_interval", "") or route.get("interval"),

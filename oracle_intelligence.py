@@ -65,6 +65,7 @@ class OracleDecision:
     oracle_one: dict[str, Any]
     base_opportunity_score: float
     reason: str
+    decision_receipt_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -85,6 +86,7 @@ def evaluate_opportunity(
     positions: list[dict[str, Any]] | None = None,
     competing_opportunities: list[dict[str, Any]] | None = None,
     global_context: dict[str, Any] | None = None,
+    _provenance_crypto_history: dict[str, Any] | None = None,
 ) -> OracleDecision:
     assessment: QuantTradeAssessment = assess_trade(
         signal,
@@ -102,7 +104,8 @@ def evaluate_opportunity(
     memory = assess_market_memory(signal, records) if use_market_memory else assess_market_memory(signal, [])
     # Historical crypto knowledge is reasoning context only. It deliberately
     # contributes no score, probability, sizing, veto, or execution authority.
-    crypto_history = crypto_history_context(signal, market=market)
+    crypto_history = (_provenance_crypto_history if _provenance_crypto_history is not None
+                      else crypto_history_context(signal, market=market))
     base_quality = assessment.trade_quality
     global_intelligence = assess_global_intelligence(signal, global_context, market=market)
     radar = assess_opportunity_radar(signal, market=market)
