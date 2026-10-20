@@ -70,6 +70,113 @@ def test_migration_is_repeatable_without_rewriting_original_evidence(brain_db):
         assert consumption(conn,identity)['snapshot']['brain']['summary']=='original'
 
 
+def test_migration_lock_timeout_rolls_back_partial_schema_and_allows_retry(fill_evidence_db):
+    """A late FK lock conflict must undo even DDL installed before that FK."""
+    import psycopg
+    connection, _ = fill_evidence_db
+    with connection() as setup:
+        setup.execute('CREATE TABLE signals(id BIGINT PRIMARY KEY)')
+        setup.execute('CREATE TABLE forecasts(id BIGINT PRIMARY KEY)')
+    with connection() as blocker:
+        blocker.execute('LOCK TABLE paper_fills IN ACCESS EXCLUSIVE MODE')
+        with pytest.raises(psycopg.errors.LockNotAvailable):
+            with connection() as installer:
+                installer.execute(MIGRATION.read_text())
+    with connection() as reader:
+        for table in ('paper_brain_snapshots', 'paper_brain_decisions',
+                      'paper_brain_consumption_receipts', 'paper_brain_fill_links'):
+            assert reader.execute('SELECT to_regclass(%s) AS relation', (table,)).fetchone()['relation'] is None
+        assert reader.execute("SELECT to_regprocedure('paper_brain_fill_link_valid()') AS fn").fetchone()['fn'] is None
+        assert reader.execute('SELECT count(*) AS n FROM paper_fills').fetchone()['n'] == 0
+        before = reader.execute('SHOW lock_timeout').fetchone()['lock_timeout']
+        reader.execute(MIGRATION.read_text())
+        assert reader.execute('SHOW lock_timeout').fetchone()['lock_timeout'] == '5s'
+        reader.commit()
+        assert reader.execute('SHOW lock_timeout').fetchone()['lock_timeout'] == before
+        assert reader.execute("SELECT to_regclass('paper_brain_fill_links') AS relation").fetchone()['relation']
+
+
+def test_runner_bounds_advisory_lock_before_schema_repair(fill_evidence_db, monkeypatch):
+    import psycopg
+    import migrations
+    connection, _ = fill_evidence_db
+    repaired = []
+    monkeypatch.setattr(migrations, 'connect', connection)
+    monkeypatch.setattr(migrations, '_repair_database', lambda conn: repaired.append(True))
+    with connection() as blocker:
+        blocker.execute('SELECT pg_advisory_xact_lock(%s)', (migrations.MIGRATION_LOCK_ID,))
+        with pytest.raises(psycopg.errors.LockNotAvailable):
+            migrations.run_migrations()
+    assert repaired == []
+    with connection() as reader:
+        assert reader.execute('SHOW lock_timeout').fetchone()['lock_timeout'] == '0'
+
+
+def test_bootstrap_lock_is_bounded_before_initialization(fill_evidence_db, monkeypatch):
+    import database
+    import psycopg
+    connection, _ = fill_evidence_db
+    initialized = []
+    monkeypatch.setattr(database, 'connect', connection)
+    monkeypatch.setattr(database, 'initialize_database', lambda: initialized.append(True))
+    with connection() as blocker:
+        blocker.execute('SELECT pg_advisory_xact_lock(hashtext(%s))', (database.DATABASE_BOOTSTRAP_LOCK_NAME,))
+        with pytest.raises(psycopg.errors.LockNotAvailable):
+            database.bootstrap_database_with_lock(lambda: initialized.append(True))
+    assert initialized == []
+
+
+def test_legacy_retention_fk_failure_preserves_evidence_and_new_worker_can_continue(brain_db):
+    """Old retention lacks the snapshot exclusion: safe rollback, not seamless compatibility."""
+    import database
+    import psycopg
+    identity = snapshot(brain_db)
+    with brain_db() as setup:
+        setup.execute('ALTER TABLE position_lots ADD COLUMN entry_forecast_id TEXT')
+    # This is the pre-393 eligibility predicate and bounded DELETE shape. It
+    # intentionally omits snapshot parents, as an already-running old worker does.
+    legacy_eligible = database._entry_evidence_retention_sql('forecasts', brain_snapshots_available=False)
+    with pytest.raises(psycopg.errors.ForeignKeyViolation):
+        with brain_db() as old_worker:
+            old_worker.execute(f'''WITH doomed AS (
+                SELECT id FROM forecasts WHERE {legacy_eligible} ORDER BY id LIMIT 1)
+                DELETE FROM forecasts WHERE id IN (SELECT id FROM doomed) AND {legacy_eligible}''')
+    with brain_db() as new_worker:
+        assert new_worker.execute("SELECT count(*) AS n FROM forecasts WHERE forecast_id='f1'").fetchone()['n'] == 1
+        provenance.persist_decision(new_worker, consumption(new_worker, identity), {'action':'HOLD'}, decision_id='after-old-retention')
+    with brain_db() as reader:
+        assert verify(reader, 'after-old-retention')
+
+
+@pytest.mark.parametrize('reuse_snapshot', [True, False])
+def test_storage_measurement_is_read_only_and_reports_synthetic_workload(brain_db, reuse_snapshot):
+    import json
+    with brain_db() as conn:
+        with pytest.raises(RuntimeError, match='read-only'):
+            provenance.storage_diagnostics(conn)
+    def measure():
+        with brain_db() as reader:
+            reader.execute('SET TRANSACTION READ ONLY')
+            return provenance.storage_diagnostics(reader)
+    before = measure()
+    for i in range(100):
+        with brain_db() as writer:
+            identity = provenance.persist_snapshot(writer, market='crypto', symbol='BTC-USD',
+                signal={'signal_id':1, 'forecast_id':'f1'},
+                brain={'summary':'synthetic storage fixture', 'revision':0 if reuse_snapshot else i})
+        with brain_db() as writer:
+            provenance.persist_decision(writer, consumption(writer, identity),
+                {'action':'HOLD'}, decision_id=f'storage-{i}')
+    report = measure()
+    assert report['tables']['paper_brain_decisions']['sampled_rows'] == 100
+    assert report['tables']['paper_brain_snapshots']['sampled_rows'] == (1 if reuse_snapshot else 100)
+    delta = report['total_relation_bytes'] - before['total_relation_bytes']
+    assert delta > 0
+    print('SYNTHETIC_STORAGE ' + json.dumps({'decisions':100, 'reuse_snapshot':reuse_snapshot,
+        'incremental_relation_bytes':delta, 'incremental_bytes_per_decision':delta/100,
+        'report':report}, sort_keys=True))
+
+
 def test_identical_snapshots_are_reused_without_rewriting_timestamps(brain_db):
     identity=snapshot(brain_db)
     with brain_db() as conn:before=conn.execute('SELECT * FROM paper_brain_snapshots').fetchone()

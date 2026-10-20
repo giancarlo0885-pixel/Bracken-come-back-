@@ -53,6 +53,37 @@ def canonical(value):
 def digest(raw):return hashlib.sha256(raw.encode('utf-8')).hexdigest()
 
 
+def storage_diagnostics(conn):
+    """Read-only sizes and bounded payload samples, never a capacity approval.
+
+    Samples are unordered, at most 1000 rows per table, and need not represent
+    production traffic. Relation sizes include indexes/TOAST, but exclude WAL,
+    replicas and retained source rows. No exact full-table count is requested.
+    """
+    if conn.execute("SELECT current_setting('transaction_read_only') AS ro").fetchone()['ro'] != 'on':
+        raise RuntimeError('read-only storage diagnostics required')
+    result = {'sample_limit': 1000, 'total_relation_bytes': 0, 'tables': {}}
+    for table, columns in (
+        ('paper_brain_snapshots', 'octet_length(canonical_snapshot)'),
+        ('paper_brain_decisions', 'octet_length(canonical_input)+octet_length(canonical_output)'),
+        ('paper_brain_consumption_receipts', '0'),
+        ('paper_brain_fill_links', '0'),
+    ):
+        row = conn.execute('SELECT to_regclass(%s) AS relation', (table,)).fetchone()
+        if not row['relation']:
+            result['tables'][table] = {'status': 'UNAVAILABLE'}
+            continue
+        size = conn.execute('SELECT pg_total_relation_size(%s::regclass) AS bytes', (table,)).fetchone()['bytes']
+        # Identifiers/expressions come only from the static allowlist above.
+        sample = conn.execute(f'''SELECT count(*) AS sampled_rows,
+            avg(payload_bytes)::float8 AS mean_canonical_payload_bytes,
+            max(payload_bytes) AS max_canonical_payload_bytes
+            FROM (SELECT {columns} AS payload_bytes FROM {table} LIMIT 1000) sample''').fetchone()
+        result['tables'][table] = {'status': 'AVAILABLE', 'relation_bytes': size, **sample}
+        result['total_relation_bytes'] += size
+    return result
+
+
 def _value(signal,key):
     return signal.get(key) if isinstance(signal,dict) else getattr(signal,key,None)
 

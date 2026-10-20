@@ -1,5 +1,7 @@
 -- Additive only: no historical backfill or rewrite. PostgreSQL built-in SHA256;
 -- no extension, legacy constraint change, or scan/index of existing evidence.
+-- The runner owns one transaction. Also bound direct transactional installation.
+SET LOCAL lock_timeout = '5s';
 CREATE TABLE IF NOT EXISTS paper_brain_snapshots (
     brain_snapshot_id TEXT PRIMARY KEY,
     source_forecast_row_id BIGINT NOT NULL REFERENCES forecasts(id),

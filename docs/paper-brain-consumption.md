@@ -73,16 +73,51 @@ not retroactively certify historical decisions.
 
 The migration creates four protected tables, indexes on the new snapshot source
 columns, append-only triggers and foreign keys. It scans/reindexes no historical
-table and changes no existing column. Normal FK/migration locks still need a
-production compatibility review. Parent references are now permanent evidence;
+table and changes no existing column. Blocking bootstrap-lock acquisition and
+the migration runner set a transaction-local five-second `lock_timeout` before
+waiting. The SQL migration also sets it for direct transactional installation.
+The runner already owns a single transaction: a lock error propagates and rolls
+back schema changes and migration bookkeeping. The timeout bounds each lock
+wait, not total migration duration; it does not modify session-wide settings or
+automatically retry. Disposable-PostgreSQL tests hold the bootstrap/migration
+advisory locks and a late FK parent lock, verify failure before repair or rollback
+of partially created tables/functions, then verify a clean retry. Actual
+production lock pressure still needs review. Parent references are permanent evidence;
 old workers during a mixed rollout may fail a retention batch on an FK instead
 of deleting a referenced parent. Roll out all three core services together after
 approval. Do not delete new evidence to roll back application code.
+
+A mixed-version regression executes the old forecast-retention eligibility
+predicate without the new snapshot exclusion. Its DELETE fails the new FK,
+rolls back without losing the original forecast, and a separate new worker can
+still commit a verified decision/receipt. This proves evidence preservation and
+recovery, **not** uninterrupted old retention. Avoid a prolonged mixed rollout;
+if uninterrupted old-worker retention is required, release a retention-only
+compatibility change before enabling new snapshot writers. That rollout remains
+an approval/release gate, not something these tests silently authorize.
 
 Canonical snapshot/input payloads are capped at 1 MiB and outputs at 256 KiB.
 Evidence is append-only and is never auto-pruned. Snapshot reuse reduces duplicate
 storage; total permanent evidence necessarily grows with distinct decisions.
 Capacity must be monitored under the existing non-destructive storage policy.
+
+`paper_brain_consumption.storage_diagnostics(conn)` is an opt-in read-only
+measurement. It reports total relation bytes (including indexes/TOAST) for the
+four new tables and at most 1,000 unordered payload samples per table. It never
+requests an exact full-table count and marks absent tables unavailable. Samples
+are not necessarily representative; zero canonical bytes on receipt/link rows
+means those rows have no canonical JSON columns, not zero physical storage.
+
+Local PostgreSQL synthetic measurements (100 HOLD decisions, tiny fixture
+payloads, no fills) observed 212,992 incremental relation bytes with one reused
+snapshot (2,129.92 bytes/decision), versus 335,872 with 100 distinct snapshots
+(3,358.72 bytes/decision). At a purely hypothetical 10,000 decisions/day, linear
+extrapolation is about 20.31–32.03 MiB/day. These are reproducible fixture results,
+**not production sizing or an upper bound**: actual Brain/input payloads can be
+much larger. WAL, replicas/backups, retained source rows and real fill links add
+storage. The payload caps alone allow up to 2.25 MiB of canonical text for a new
+snapshot plus decision input/output, before overhead. Obtain production payload
+and decision-rate observations and available-capacity figures before approval.
 
 No configuration enables live trading or broker submission. Required settings
 remain `EXECUTION_MODE=paper`, `ENABLE_BROKER_SUBMISSION=false` and

@@ -280,6 +280,8 @@ def wait_for_database_ready(*, stop_event: Any | None = None, initial_delay: flo
 @contextmanager
 def database_advisory_lock(lock_name: str, wait: bool = True) -> Iterator[bool]:
     with connect() as conn:
+        if wait:
+            conn.execute("SET LOCAL lock_timeout = '5s'")
         function = "pg_advisory_lock" if wait else "pg_try_advisory_lock"
         record = conn.execute(f"SELECT {function}(hashtext(%s)) AS locked", (lock_name,)).fetchone()
         locked = True if wait else bool(record and record.get("locked"))
