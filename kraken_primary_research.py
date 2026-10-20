@@ -219,6 +219,14 @@ class PrimaryResearch:
                     self.stop.wait(10)  # Allow the elected feed to obtain its initial snapshots.
                     while not self.stop.is_set() and enabled():
                         self.cycle(conn)
+                        # The elected five-minute research loop reports configured
+                        # budget occupancy without issuing provider HTTP requests.
+                        try:
+                            from provider_budget_diagnostics import emit_public_research_budget_report
+                            emit_public_research_budget_report(conn)
+                        except Exception as exc:
+                            log.warning('PUBLIC RESEARCH BUDGET | status=UNAVAILABLE | reason=%s | execution_impact=NONE',
+                                        type(exc).__name__)
                         self.stop.wait(300)
             except Exception as exc:
                 log.warning('KRAKEN PRIMARY RESEARCH | status=STORAGE_OR_CYCLE_UNAVAILABLE | reason=%s | execution_authority=NONE',type(exc).__name__)
