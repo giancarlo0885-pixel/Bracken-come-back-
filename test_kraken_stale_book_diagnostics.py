@@ -22,7 +22,7 @@ def ready_two():
 def test_bounded_source_report_exposes_actual_stale_symbol_only():
     state = ready_two()
     late = NOW + timedelta(seconds=8)
-    state.ingest(message(symbol="ETH/USD", kind="update", bids={}, asks={}, when=late), late)
+    state.ingest(message(symbol="ETH/USD", kind="update", when=late), late)
     report = runtime.stale_book_source_diagnostic(state, NOW + timedelta(seconds=11))
     assert report == [{
         "symbol": "BTC-USD",
