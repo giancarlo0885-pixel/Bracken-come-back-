@@ -44,6 +44,7 @@ def test_exhausted_quota_is_explicit_but_not_provider_entitlement(caplog):
         "status": "CONFIGURED_BUDGET_EXHAUSTED",
         "configured_daily_budget": 2400, "requests_reserved": 2400,
         "remaining_reservations": 0, "cooldown_active": False,
+        "exhaustion_proven_by_ledger": True,
     }
     assert result["providers"][KRAKEN]["status"] == "CONFIGURED_CAPACITY_REMAINING"
     assert result["providers"][KRAKEN]["remaining_reservations"] == 700
@@ -67,6 +68,39 @@ def test_cooldown_in_elected_ledger_is_safely_reported(cooldown, state):
     result = read_public_research_budgets(conn, now=NOW)
     assert result["providers"][COINBASE]["status"] == state
     assert result["providers"][KRAKEN] == {"status": "LEDGER_ROW_ABSENT"}
+
+
+
+@pytest.mark.parametrize("cooldown,active", [
+    (None, False),
+    ("2026-10-20T17:46:00Z", True),
+    ("2026-10-20T17:00:00Z", False),
+])
+def test_zero_budget_cooldown_marker_is_not_classified_as_exhausted_usage(cooldown, active):
+    # mark_provider_cooldown_db creates a zero-budget row if no request
+    # reservation happened yet in this UTC day.
+    results = read_public_research_budgets(
+        Reader([row(budget=0, used=0, remaining=0, cooldown=cooldown)]),
+        now=NOW,
+    )
+    marker = results["providers"][COINBASE]
+    assert marker["status"] == "ZERO_CONFIGURED_BUDGET"
+    assert marker["configured_daily_budget"] == 0
+    assert marker["requests_reserved"] == 0
+    assert marker["remaining_reservations"] == 0
+    assert marker["cooldown_active"] is active
+    assert marker["exhaustion_proven_by_ledger"] is False
+    assert results["provider_api_entitlements"] == "UNVERIFIED"
+
+
+def test_quota_still_exhausted_when_positive_capacity_is_consumed_during_cooldown():
+    result = read_public_research_budgets(Reader([
+        row(budget=2400, used=2400, remaining=0,
+            cooldown="2026-10-20T17:46:00Z")
+    ]), now=NOW)
+    info = result["providers"][COINBASE]
+    assert info["status"] == "CONFIGURED_COOLDOWN_ACTIVE"
+    assert info["exhaustion_proven_by_ledger"] is True
 
 
 def test_missing_rows_are_unknown_not_free_capacity():
