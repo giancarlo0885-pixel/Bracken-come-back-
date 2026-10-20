@@ -170,7 +170,11 @@ evidence that 2,400 Coinbase requests (or 1,200 Kraken requests)
 were consumed.
 
 The elected provider-ledger report distinguishes this situation as
-ZERO_CONFIGURED_BUDGET and prints exhaustion_proven_by_ledger=false.
+COOLDOWN_MARKER_NO_CAPACITY when data_mode=shared_cooldown and prints
+created_as_cooldown_marker=true and exhaustion_proven_by_ledger=false.
+An intentionally configured zero allowance with a different data_mode
+is labeled ZERO_CONFIGURED_BUDGET instead. Both labels avoid the false
+claim that the normal positive quota was used up.
 It separately indicates whether cooldown_until is active. The label
 CONFIGURED_BUDGET_EXHAUSTED (or an exhaustion_proven_by_ledger=true
 flag during an active cooldown) requires a positive configured daily
