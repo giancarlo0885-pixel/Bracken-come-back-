@@ -128,3 +128,36 @@ def should_take_profit(*, unrealized_return_pct: float, round_trip_cost_pct: flo
     required_net = max(_f(minimum_net_profit_pct, 0.20), cost)
     trailing_trigger = max(0.15, 0.30 * mfe)
     return bool(net >= required_net and pullback >= trailing_trigger)
+
+
+@dataclass(frozen=True)
+class BreakoutGuardResearchResult:
+    score: float
+    would_trade: bool
+    reason: str
+
+
+def score_breakout_guard_research(
+    *, high_vol_breakout: bool = False,
+    **candidate: Any,
+) -> BreakoutGuardResearchResult:
+    """V1.1 shadow-only challenger; never called by execution routing.
+
+    Inputs must be reconstructed strictly as-of entry. Do not pass realized
+    excursion or post-entry P&L as predictive features.
+    """
+    baseline = score_entry(**candidate)
+    cfg = _config(candidate.get("config"))
+    mfe = max(0.0, _f(candidate["mfe_pct"]))
+    mae = abs(min(0.0, _f(candidate["mae_pct"])))
+    streak = max(0, int(candidate["loss_streak"]))
+    excursion_delta = 0.15 * baseline.excursion_quality
+    streak_delta = -0.06 * min(streak, max(0, cfg.max_loss_streak))
+    regime_delta = -0.25 if high_vol_breakout and not candidate["regime_expectancy_positive"] else 0.0
+    score = baseline.score + excursion_delta + streak_delta + regime_delta
+    cost = max(0.0, _f(candidate["round_trip_cost_pct"]))
+    rebound = baseline.rebound_quality >= max(cfg.rebound_gate, 0.65)
+    excursion = mfe >= max(cfg.min_mfe_mae_ratio, 1.5) * mae and mfe > cfg.min_mfe_cost_multiple * cost
+    allowed = baseline.would_trade and rebound and excursion and score > cfg.score_gate
+    reason = "pass" if allowed else "challenger_rejected"
+    return BreakoutGuardResearchResult(score, allowed, reason)
