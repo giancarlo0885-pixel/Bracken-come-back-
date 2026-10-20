@@ -40,7 +40,7 @@ def read_public_research_budgets(conn, *, now=None):
     try:
         rows = conn.execute(
             """SELECT provider, daily_budget, requests_used, remaining_budget,
-                      cooldown_until
+                      cooldown_until, data_mode
                FROM provider_budget_ledger
                WHERE utc_date=%s AND capability='__provider__'
                  AND provider IN ('Coinbase Public Research','Kraken Public Research')
@@ -65,6 +65,7 @@ def read_public_research_budgets(conn, *, now=None):
             used = _safe_count(row["requests_used"])
             remaining = _safe_count(row["remaining_budget"])
             cooldown = _cooldown_active(row["cooldown_until"], current)
+            cooldown_marker = row["data_mode"] == "shared_cooldown"
             if (budget is None or used is None or remaining is None
                     or used + remaining != budget or cooldown is None):
                 result = {"status": "LEDGER_INCONSISTENT"}
@@ -73,13 +74,15 @@ def read_public_research_budgets(conn, *, now=None):
                 # with (daily_budget,requests_used,remaining_budget) = (0,0,0)
                 # before any quota reservation occurs. That row is not proof
                 # that a configured provider allowance was consumed.
-                state = ("ZERO_CONFIGURED_BUDGET" if budget == 0 else
+                state = ("COOLDOWN_MARKER_NO_CAPACITY" if budget == 0 and cooldown_marker else
+                         "ZERO_CONFIGURED_BUDGET" if budget == 0 else
                          "CONFIGURED_COOLDOWN_ACTIVE" if cooldown else
                          "CONFIGURED_BUDGET_EXHAUSTED" if remaining == 0 else
                          "CONFIGURED_CAPACITY_REMAINING")
                 result = {"status": state, "configured_daily_budget": budget,
                           "requests_reserved": used, "remaining_reservations": remaining,
                           "cooldown_active": cooldown,
+                          "created_as_cooldown_marker": cooldown_marker,
                           "exhaustion_proven_by_ledger": bool(budget > 0 and remaining == 0
                                                               and used == budget)}
             by_provider[provider] = result
