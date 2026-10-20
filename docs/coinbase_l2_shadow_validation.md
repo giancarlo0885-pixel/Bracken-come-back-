@@ -114,3 +114,21 @@ independent pricing receipt design and regression tests. The
 current REST paper-pricing block remains in place throughout.
 No merge, deployment, activation or trading permission change is
 part of this draft.
+
+
+### Continuous book-progress watchdog
+
+An acknowledged socket or Coinbase heartbeat is not proof that the level2
+order book is still being updated. Once a session receives its first
+snapshot, it now requires a valid source-book snapshot/update progress
+within each 15-second window. If that window expires, the subscriber
+drops the entire book, closes the connection and reconnects to obtain
+a new full snapshot. A heartbeat does NOT extend this book-progress
+deadline. Unexpected extra snapshots on an already subscribed session
+are also rejected instead of silently replacing the tracked book.
+
+A quiet but healthy market could trigger an unnecessary reconnect under
+this conservative bound. The probe is research-only, default off, and
+must be tested on independent real market episodes before changing the
+threshold or treating source availability as proven. No pricing
+authority, live execution, broker or database capability changes.
