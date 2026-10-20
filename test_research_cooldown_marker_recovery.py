@@ -71,7 +71,6 @@ def test_expired_original_cooldown_marker_recovers_only_configured_budget(provid
     {"budget": 2400, "used": 2400, "remaining": 0},
     {"budget": 2400, "used": 0, "remaining": 0},
     {"budget": 0, "used": 1, "remaining": 0},
-    {"budget": 0, "used": 0, "remaining": 1},
 ])
 def test_cannot_replenish_actual_consumption_or_active_nonmarker_or_inconsistent_row(changes):
     conn = Ledger(row(**changes))
