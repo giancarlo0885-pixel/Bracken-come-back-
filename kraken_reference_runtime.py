@@ -18,6 +18,9 @@ from kraken_reference_book import (BookIntegrityError, ReferenceBooks, SYMBOLS, 
 log = logging.getLogger("kraken-reference")
 URL = "wss://ws.kraken.com/v2"
 OWNER_LOCK = 73420261603
+# Shared readers compare venue timestamps within two seconds. Coalesce the
+# stream to one singleton write/second without renewing either source clock.
+PUBLISH_INTERVAL_SECONDS = 1.0
 STATE_DDL = """CREATE TABLE IF NOT EXISTS kraken_reference_state (
     id SMALLINT PRIMARY KEY CHECK (id=1), updated_at TIMESTAMPTZ NOT NULL,
     payload JSONB NOT NULL)"""
@@ -288,9 +291,10 @@ class KrakenReferenceService:
                 if now_mono - last_ping >= 5:
                     ws.send(json.dumps({"method": "ping", "req_id": 2}))
                     last_ping = now_mono
-                if now_mono - last_publish >= 5:
+                if now_mono - last_publish >= PUBLISH_INTERVAL_SECONDS:
                     self.publish(conn)
-                    last_publish = now_mono
+                    # A slow write must not trigger an immediate catchup write.
+                    last_publish = time.monotonic()
         finally:
             self.state.invalidate()
             self.clear_references()
