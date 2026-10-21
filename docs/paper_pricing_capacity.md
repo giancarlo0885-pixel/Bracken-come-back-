@@ -107,7 +107,7 @@ shortage worse. Slowing requests must never lengthen quote freshness windows.
 A sustained high-frequency paper source would need a separately validated
 streaming or appropriately budgeted execution-pricing architecture.
 
-Until actual ledger counts are available, `PROVIDER_BUDGET_BLOCKED` is ambiguous.
+The generic `PROVIDER_BUDGET_BLOCKED` message alone is ambiguous.
 The public research adapter now distinguishes these *fail-closed* statuses:
 `PROVIDER_BUDGET_EXHAUSTED` (actual reservation quota exhausted),
 `PROVIDER_LEDGER_UNAVAILABLE` (shared-ledger read/write error),
@@ -127,8 +127,9 @@ This runtime report will appear only **after** the reviewed change is deployed
 and the elected research worker is enabled. It is not running in production
 during this PR's review.
 
-The following query is for an authorized **read-only** production database session;
-it has **not** been executed as part of this change:
+The following full reconciliation query is for an authorized **read-only**
+production database session. It has not been executed directly by the agent;
+the user supplied the narrower count query results recorded below:
 
 ```sql
 SELECT provider, capability, utc_date, daily_budget, requests_used,
@@ -145,6 +146,48 @@ The ledger does not attribute spend to each code path. Neither this diagnostic
 change nor its tests increase quotas, retry on denied reservations, recycle
 timestamps, change risk/governance gates, reconcile missing legacy signals,
 authorize deployment, or claim validated profitability.
+
+### Observed production reservation counts
+
+A user-supplied Railway production SQL screenshot on October 21, 2026 shows
+these `Coinbase Public Research / __provider__` UTC-day rows:
+
+| UTC day | Configured allowance | Reservations used | Remaining |
+| --- | ---: | ---: | ---: |
+| 2026-10-21 | 2400 | 524 | 1876 |
+| 2026-10-20 | 2400 | 2400 | 0 |
+| 2026-10-19 | 2400 | 2400 | 0 |
+| 2026-10-18 | 2400 | 36 | 2364 |
+
+The October 19/20 rows prove exhaustion of the configured positive reservation
+allowance. They are **not** the all-zero cooldown markers described below.
+The October 21 row shows reservations and remaining capacity after UTC-day
+rollover at capture time. It does not prove continued capacity, absence of
+cooldowns, successful external requests or paper-price eligibility. The
+screenshot omits `cooldown_until`, `last_failure`, `data_mode` and per-request
+attribution; no external Coinbase HTTP 429 or account entitlement is inferred.
+This is user-provided production evidence, not a claim of direct agent SQL access.
+
+Source review found one reservation per normal cache miss, serialized same-client
+requests and an elected primary-research writer; it did not establish duplicate
+reservation accounting. Separate clients and L1/L2 consumers share the cap.
+An allowance of 2400/day averages one reservation per 36 seconds across all
+consumers, while paper pricing retains its five-second maximum quote age.
+Removing unnecessary requests alone cannot establish continuous fresh two-asset
+REST coverage under that cap. A shared streaming replacement requires its own
+integration and validation; the pure reducer in PR #396 is not that replacement.
+
+A narrower avoidable request was reproduced: after a Coinbase primary fallback
+forecast, the comparison path could ask Coinbase for another L1 observation even
+when no Kraken reference existed. If the two-second cache had expired during
+forecast work, that lookup could reserve another request without any possible
+independent comparison. The path now checks reference presence before fetching
+Coinbase, then retains the original post-request Kraken reread and alignment
+checks. The necessary primary fallback and persisted research remain intact.
+Regression coverage first failed with two quote attempts instead of one, then
+passed after the guard; a positive test preserves comparison when a reference
+exists. This path's contribution to measured production exhaustion is unknown,
+and this correction does not establish continuous daily coverage.
 
 
 ## Documentation consulted
@@ -196,8 +239,8 @@ marker therefore remained all-zero and was incorrectly called exhausted for
 the remainder of the UTC day. A request reserved just before UTC midnight whose
 HTTP 429 response arrives just after midnight can create this state. Normal
 same-day 429 handling already has a reservation row and does not usually create
-this marker. This mechanism was reproduced locally; it has not been established
-as the cause of the current BTC/ETH production denials.
+this marker. This mechanism was reproduced locally. It does not match the
+positive exhausted budgets shown in the supplied October 19/20 production rows.
 
 Under the existing provider/capability/day row lock, the reservation writer now
 initializes only a pristine `shared_cooldown` marker with all three counts zero,
@@ -216,6 +259,7 @@ increase even if a later caller supplies a larger number, concurrent first
 reservations, initialized exhaustion, explicit-zero/malformed rows and atomic
 rollback. Fixtures use tiny synthetic allowances, not production requests or
 claimed exchange entitlements. No provider configuration or quote TTL changes.
-The actual production ledger query remains unexecuted; PR #395 remains a draft
-requiring exact-head CI and explicit approval before merge/deployment. Existing
-#392/#393 holds remain independent and intact.
+Direct agent production SQL access remains unavailable; user-provided counts
+and their limits are recorded above. PR #395 remains a draft requiring
+exact-head CI and explicit approval before merge/deployment. Existing #392/#393
+holds remain independent and intact.

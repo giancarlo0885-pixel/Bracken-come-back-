@@ -170,6 +170,8 @@ class PrimaryResearch:
                 result = research_forecast(quote, history, datetime.now(timezone.utc))
                 result['broker_comparison'] = state.get('comparisons',{}).get(symbol)
                 try:
+                    if not read_kraken_reference_state().get('quotes',{}).get(symbol):
+                        raise ResearchUnavailable('REFERENCE_UNAVAILABLE')
                     independent = coinbase_quote(self.data, symbol)
                     latest = read_kraken_reference_state().get('quotes',{}).get(symbol)
                     result['independent_comparison'] = compare_reference(latest, independent, datetime.now(timezone.utc))

@@ -271,7 +271,7 @@ def test_cycle_uses_labeled_coinbase_backup_without_touching_broker(monkeypatch)
     monkeypatch.setattr(research,'datetime',Clock)
     monkeypatch.setattr(runtime,'read_kraken_reference_state',lambda:{'subscribed_symbols':['BTC-USD'],'quotes':{}})
     monkeypatch.setattr(research,'coinbase_history',lambda *a:h)
-    monkeypatch.setattr(research,'coinbase_quote',lambda *a:q)
+    coinbase=Mock(return_value=q);monkeypatch.setattr(research,'coinbase_quote',coinbase)
     monkeypatch.setattr(forecasting,'forecast_price',prediction)
     persist=Mock(return_value=7);monkeypatch.setattr(research,'persist_evidence',persist)
     conn=Mock();runner=research.PrimaryResearch(connect_factory=Mock(),data=Mock())
@@ -280,6 +280,39 @@ def test_cycle_uses_labeled_coinbase_backup_without_touching_broker(monkeypatch)
     assert payload['symbols']['BTC-USD']['data_role']=='COINBASE_RESEARCH_BACKUP'
     assert payload['symbols']['BTC-USD']['evidence_id']==7
     assert payload['symbols']['BTC-USD']['primary_quote']['execution_quote_eligible'] is False
+    persist.assert_called_once()
+    # The fallback quote is necessary; another Coinbase read cannot compare
+    # venues when Kraken has no reference, even if the first read is cached.
+    coinbase.assert_called_once_with(runner.data,'BTC-USD')
+    assert payload['symbols']['BTC-USD']['independent_comparison']['reason']=='REFERENCE_UNAVAILABLE'
+
+
+def test_cycle_compares_coinbase_when_fresh_kraken_reference_exists(monkeypatch):
+    import kraken_reference_runtime as runtime
+    import forecasting
+    class Clock:
+        @staticmethod
+        def now(tz):return NOW
+    monkeypatch.setattr(research,'datetime',Clock)
+    reference=quote()
+    monkeypatch.setattr(runtime,'read_kraken_reference_state',lambda:{
+        'subscribed_symbols':['BTC-USD'],'quotes':{'BTC-USD':reference}})
+    independent=dict(reference,provider='Coinbase Exchange public reference',checksum_status='NOT_PROVIDED')
+    coinbase=Mock(return_value=independent);monkeypatch.setattr(research,'coinbase_quote',coinbase)
+    backup_history=Mock();monkeypatch.setattr(research,'coinbase_history',backup_history)
+    monkeypatch.setattr(forecasting,'forecast_price',prediction)
+    persist=Mock(return_value=8);monkeypatch.setattr(research,'persist_evidence',persist)
+    conn=Mock();client=Mock();client.history.return_value=history()
+    runner=research.PrimaryResearch(connect_factory=Mock(),data=client)
+    runner.cycle(conn)
+    result=json.loads(conn.execute.call_args.args[1][1])['symbols']['BTC-USD']
+    assert result['data_role']=='KRAKEN_PRIMARY' and result['evidence_id']==8
+    assert result['independent_comparison']['status']=='ALIGNED_VENUE_COMPARISON'
+    assert result['independent_comparison']['execution_impact']=='NONE'
+    assert result['execution_authority']=='NONE'
+    assert result['primary_quote']['execution_quote_eligible'] is False
+    coinbase.assert_called_once_with(client,'BTC-USD')
+    backup_history.assert_not_called()
     persist.assert_called_once()
 
 
