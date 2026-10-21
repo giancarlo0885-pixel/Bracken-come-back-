@@ -1,20 +1,6 @@
 import logging
 import os
 
-from structured_logging import configure_structured_logging
-
-configure_structured_logging(os.getenv("LOG_LEVEL", "INFO"))
-logger = logging.getLogger("stock-worker")
-
-# Decide before imports/installers that can bootstrap schemas or start samplers.
-# Keep the existing runtime installers for the explicitly opted-in worker.
-if __name__ == "__main__":
-    if os.getenv("ENABLE_CASH_MARKET_RESEARCH", "false").strip().lower() not in {"1", "true", "yes", "on"}:
-        import time
-        logger.info("ORACLE COST CONTROL | cash market research paused | historical data preserved | execution_impact=NONE")
-        while True:
-            time.sleep(3600)
-
 import market_worker
 from capital_readiness_runtime import prepare_capital_readiness_runtime
 from event_opportunity_runtime import install_event_opportunity_runtime
@@ -30,6 +16,10 @@ from runtime_integrity_patch import install_runtime_integrity_patch
 from runtime_provider_reliability import install_yahoo_runtime_reliability
 from stock_execution_repair import install_stock_execution_quote_repair
 from stock_transient_quarantine_repair import install_stock_transient_quarantine_repair
+from structured_logging import configure_structured_logging
+
+configure_structured_logging(os.getenv("LOG_LEVEL", "INFO"))
+logger = logging.getLogger("stock-worker")
 install_migration_runtime_safety()
 install_yahoo_runtime_reliability()
 install_runtime_integrity_patch(market_worker)

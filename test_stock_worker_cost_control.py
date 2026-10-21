@@ -1,100 +1,111 @@
-"""Execute the worker entrypoint; never contact providers or a database."""
-import builtins
-import logging
-from pathlib import Path
-import runpy
-import sys
-import time
-from types import ModuleType
+"""Cash opportunity cost control must preserve the running research worker."""
+from contextlib import contextmanager
+from types import SimpleNamespace
 
 import pytest
+import market_worker as worker
 
 
-WORKER = Path(__file__).with_name("stock_worker.py")
-INSTALLERS = {
-    'migration_runtime_safety': 'install_migration_runtime_safety',
-    'runtime_provider_reliability': 'install_yahoo_runtime_reliability',
-    'runtime_integrity_patch': 'install_runtime_integrity_patch',
-    'event_opportunity_runtime': 'install_event_opportunity_runtime',
-    'paper_autonomous_learning': 'install_paper_autonomous_learning',
-    'portfolio_valuation': 'install_closed_market_valuation_pulse',
-    'stock_execution_repair': 'install_stock_execution_quote_repair',
-    'stock_transient_quarantine_repair': 'install_stock_transient_quarantine_repair',
-    'paper_execution_reality': 'install_paper_execution_reality',
-    'paper_execution_accounting': 'install_paper_execution_accounting',
-    'paper_fee_policy': 'install_fee_aware_fifo_policy',
-    'paper_regime_economics_shadow': 'install_paper_regime_economics_shadow',
-    'paper_shadow_exit_challenger': 'install_paper_shadow_exit_challenger',
-}
-
-
-class Paused(BaseException):
-    """Stop an actual entrypoint once it reaches its idle sleep."""
-
-
-@pytest.fixture(autouse=True)
-def paper_only(monkeypatch):
-    for key, value in {'EXECUTION_MODE': 'paper', 'ENABLE_BROKER_SUBMISSION': 'false',
-                       'LIVE_TRADING_ARMED': 'false', 'DATABASE_URL': ''}.items():
-        monkeypatch.setenv(key, value)
-    module = ModuleType('structured_logging')
-    module.configure_structured_logging = lambda *args: None
-    monkeypatch.setitem(sys.modules, module.__name__, module)
-
-
-@pytest.mark.parametrize('value', [None, '', 'false', '0', 'no', 'off', 'invalid', ' FALSE '])
-def test_paused_entrypoint_never_imports_worker_or_background_installers(monkeypatch, caplog, value):
+@pytest.mark.parametrize('market,value', [('crypto','false'),('cash',None),('cash','true'),('cash','invalid'),('cash','')])
+def test_default_unknown_and_crypto_keep_existing_scans(monkeypatch, market, value):
     if value is None:
         monkeypatch.delenv('ENABLE_CASH_MARKET_RESEARCH', raising=False)
     else:
         monkeypatch.setenv('ENABLE_CASH_MARKET_RESEARCH', value)
-    original_import = builtins.__import__
-
-    def forbid_startup(name, *args, **kwargs):
-        if name == 'market_worker' or name in INSTALLERS or name == 'capital_readiness_runtime':
-            pytest.fail('Paused worker imported active runtime: '+name)
-        return original_import(name, *args, **kwargs)
-
-    sleeps = []
-
-    def reached_idle(seconds):
-        sleeps.append(seconds)
-        raise Paused
-
-    monkeypatch.setattr(builtins, '__import__', forbid_startup)
-    monkeypatch.setattr(time, 'sleep', reached_idle)
-    with caplog.at_level(logging.INFO), pytest.raises(Paused):
-        runpy.run_path(str(WORKER), run_name='__main__')
-    assert sleeps == [3600]
-    assert 'cash market research paused' in caplog.text
+    monkeypatch.setattr(worker, 'connect', lambda: pytest.fail('Unexpected inventory read'))
+    assert worker._cash_opportunity_scans_enabled(market)
 
 
-@pytest.mark.parametrize('value', ['1', 'true', 'yes', 'on', ' TRUE '])
-def test_explicit_opt_in_preserves_installers_readiness_audit_and_cash_worker(monkeypatch, value):
+@pytest.mark.parametrize('value', ['false','0','no','off',' FALSE '])
+@pytest.mark.parametrize('outstanding', [True, False])
+def test_explicit_pause_requires_verified_empty_positions_and_orders(monkeypatch, value, outstanding):
     monkeypatch.setenv('ENABLE_CASH_MARKET_RESEARCH', value)
-    events = []
+    @contextmanager
+    def connect():
+        def execute(sql, params):
+            assert 'FROM positions WHERE market=%s' in sql
+            assert 'FROM paper_orders WHERE market=%s' in sql
+            assert 'quantity IS NULL OR quantity <> 0' in sql
+            assert 'status IS NULL OR status NOT IN' in sql
+            assert params == ('cash', 'cash')
+            return SimpleNamespace(fetchone=lambda: {'outstanding':outstanding})
+        yield SimpleNamespace(execute=execute)
+    monkeypatch.setattr(worker, 'connect', connect)
+    assert worker._cash_opportunity_scans_enabled('cash') is outstanding
 
-    def install_module(module_name, function_name):
-        module = ModuleType(module_name)
-        def call(*args):
-            events.append((function_name, args))
-        setattr(module, function_name, call)
-        monkeypatch.setitem(sys.modules, module_name, module)
-        return module
 
-    worker = install_module('market_worker', 'run_worker')
-    for module, function in INSTALLERS.items():
-        install_module(module, function)
-    install_module('capital_readiness_runtime', 'prepare_capital_readiness_runtime')
-    install_module('paper_trade_evidence_audit', 'emit_trade_evidence_audit')
-    monkeypatch.setattr(time, 'sleep', lambda *_: pytest.fail('Opted-in worker unexpectedly paused'))
-    runpy.run_path(str(WORKER), run_name='__main__')
-    assert events[-3:] == [
-        ('prepare_capital_readiness_runtime', (worker, 'cash')),
-        ('emit_trade_evidence_audit', ('cash',)),
-        ('run_worker', ('cash',)),
-    ]
-    names = [name for name, _ in events]
-    assert all(names.count(name) == 1 for name in INSTALLERS.values())
-    assert ('install_paper_regime_economics_shadow', ('cash',)) in events
-    assert ('install_paper_shadow_exit_challenger', ('cash',)) in events
+@pytest.mark.parametrize('result', [None, {}, {'outstanding':None}, {'outstanding':'false'}])
+def test_incomplete_inventory_retains_monitoring(monkeypatch, result):
+    monkeypatch.setenv('ENABLE_CASH_MARKET_RESEARCH','false')
+    @contextmanager
+    def connect():
+        yield SimpleNamespace(execute=lambda *args: SimpleNamespace(fetchone=lambda:result))
+    monkeypatch.setattr(worker, 'connect', connect)
+    assert worker._cash_opportunity_scans_enabled('cash')
+
+
+def test_inventory_failure_retains_monitoring(monkeypatch):
+    monkeypatch.setenv('ENABLE_CASH_MARKET_RESEARCH','false')
+    def connect():
+        raise RuntimeError('test database unavailable')
+    monkeypatch.setattr(worker,'connect',connect)
+    assert worker._cash_opportunity_scans_enabled('cash')
+
+
+@pytest.mark.parametrize('scans_enabled',[False,True])
+def test_worker_cycle_preserves_intelligence_brain_and_positions(monkeypatch, scans_enabled):
+    events=[]
+    class Executor:
+        def __init__(self, **kwargs): pass
+        def submit(self, function, *args):
+            events.append((function.__name__,args))
+            return SimpleNamespace(done=lambda:False)
+        def shutdown(self, **kwargs): pass
+    monkeypatch.setattr(worker,'ThreadPoolExecutor',Executor)
+    monkeypatch.setattr(worker,'_bootstrap_worker_database',lambda *args:True)
+    import alpaca_auth_recovery
+    monkeypatch.setattr(alpaca_auth_recovery,'recover_alpaca_authentication',lambda:None)
+    monkeypatch.setattr(worker,'cadence_for',lambda *args:SimpleNamespace(pulse_seconds=1, fast_scan_seconds=20,deep_scan_seconds=60,session_label='test'))
+    monkeypatch.setattr(worker,'set_market_status',lambda *args,**kwargs:None)
+    monkeypatch.setattr(worker,'_run_scheduled_database_maintenance',lambda *args:None)
+    monkeypatch.setattr(worker,'_cash_opportunity_scans_enabled',lambda market:scans_enabled)
+    monkeypatch.setattr(worker,'ALWAYS_ON_TRADING',True)
+    monkeypatch.setattr(worker,'FAST_SIGNAL_SCAN_ENABLED',True)
+    monkeypatch.setattr(worker,'REALTIME_MODE',True)
+    monkeypatch.setattr(worker,'stop_event',SimpleNamespace(is_set=lambda:False,wait=lambda _:True))
+    def pulse(market):
+        events.append(('position_pulse',(market,)))
+        return [],0,'unavailable'
+    monkeypatch.setattr(worker,'live_position_pulse',pulse)
+    worker.run_worker('cash')
+    names=[name for name,args in events]
+    assert '_collect_stock_intelligence' in names
+    assert '_run_brain_learning_sync' in names
+    assert 'position_pulse' in names
+    assert ('scan_market' in names) is scans_enabled
+    assert ('fast_scan_market' in names) is scans_enabled
+    assert all(args==('cash',) for name,args in events if name!='_collect_stock_intelligence')
+
+
+@pytest.mark.skipif(not worker.os.getenv('DATABASE_URL'), reason='Disposable PostgreSQL required')
+@pytest.mark.parametrize('quantity,status,expected', [
+    (0,'FILLED',False), (1,'FILLED',True), (-1,'FILLED',True),
+    (None,'FILLED',True), (0,'NEW',True), (0,None,True),
+    (0,'unknown',True), (0,'PARTIAL_CANCELLED',False),
+])
+def test_postgres_inventory_pause_policy(monkeypatch, quantity,status,expected):
+    """Temporary tables isolate this query from canonical trading records."""
+    from database import connect as real_connect
+    monkeypatch.setenv('ENABLE_CASH_MARKET_RESEARCH','false')
+    with real_connect() as conn:
+        conn.execute('CREATE TEMP TABLE positions(market TEXT,quantity DOUBLE PRECISION) ON COMMIT DROP')
+        conn.execute('CREATE TEMP TABLE paper_orders(market TEXT,status TEXT) ON COMMIT DROP')
+        conn.execute('INSERT INTO positions VALUES (%s,%s)',('cash',quantity))
+        conn.execute('INSERT INTO positions VALUES (%s,%s)',('crypto',10))
+        conn.execute('INSERT INTO paper_orders VALUES (%s,%s)',('cash',status))
+        conn.execute('INSERT INTO paper_orders VALUES (%s,%s)',('crypto','NEW'))
+        @contextmanager
+        def connect():
+            yield conn
+        monkeypatch.setattr(worker,'connect',connect)
+        assert worker._cash_opportunity_scans_enabled('cash') is expected

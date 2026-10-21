@@ -1752,6 +1752,33 @@ def _future_result(future: Future[list[Any]] | None, label: str) -> tuple[list[A
         return [], str(exc)
 
 
+def _cash_opportunity_scans_enabled(market: str) -> bool:
+    """Skip optional scans only after an explicit pause and an empty cash book.
+
+    Preserve the existing worker on missing/unknown configuration or failed reads.
+    This policy cannot authorize execution or alter any trading safeguard.
+    """
+    if market != "cash" or os.getenv("ENABLE_CASH_MARKET_RESEARCH", "true").strip().lower() not in {"0", "false", "no", "off"}:
+        return True
+    try:
+        with connect() as conn:
+            result = conn.execute(
+                """SELECT (
+                    EXISTS (SELECT 1 FROM positions WHERE market=%s
+                            AND (quantity IS NULL OR quantity <> 0))
+                    OR EXISTS (SELECT 1 FROM paper_orders WHERE market=%s
+                               AND (status IS NULL OR status NOT IN
+                                   ('FILLED','PARTIAL_CANCELLED','CANCELLED','REJECTED')))
+                ) AS outstanding""", ("cash", "cash"),
+            ).fetchone()
+        if not result or not isinstance(result.get("outstanding"), bool):
+            raise ValueError("Cash scan inventory result unavailable")
+        return result["outstanding"]
+    except Exception as exc:
+        log.warning("CASH SCAN COST CONTROL | status=MONITORING_RETAINED | reason=%s | execution_impact=NONE", type(exc).__name__)
+        return True
+
+
 def run_worker(market: str) -> None:
     requested_market = market.lower().strip()
     market = "cash" if requested_market == "stock" else requested_market
@@ -1810,6 +1837,7 @@ def run_worker(market: str) -> None:
     last_deep_actions = 0
     last_fast_actions = 0
     consecutive_errors = 0
+    scans_enabled = True
 
     try:
         while not stop_event.is_set():
@@ -1875,20 +1903,24 @@ def run_worker(market: str) -> None:
                     else:
                         log.debug(fast_message)
 
-                if deep_future is None and now_monotonic >= next_deep_due:
-                    deep_future = deep_executor.submit(scan_market, market)
+                deep_due = deep_future is None and now_monotonic >= next_deep_due
+                fast_due = (ALWAYS_ON_TRADING and FAST_SIGNAL_SCAN_ENABLED
+                            and fast_future is None and now_monotonic >= next_fast_due)
+                if deep_due or fast_due:
+                    scans_enabled = _cash_opportunity_scans_enabled(market)
+                if deep_due:
                     next_deep_due = now_monotonic + cadence.deep_scan_seconds
-                    log.info("%s deep scan launched; next target in %ss", label, cadence.deep_scan_seconds)
+                    if scans_enabled:
+                        deep_future = deep_executor.submit(scan_market, market)
+                        log.info("%s deep scan launched; next target in %ss", label, cadence.deep_scan_seconds)
+                    else:
+                        log.info("CASH SCAN COST CONTROL | opportunity_scans=PAUSED | intelligence=ACTIVE | brain_sync=ACTIVE | position_monitoring=ACTIVE | execution_impact=NONE")
 
-                if (
-                    ALWAYS_ON_TRADING
-                    and FAST_SIGNAL_SCAN_ENABLED
-                    and fast_future is None
-                    and now_monotonic >= next_fast_due
-                ):
-                    fast_future = fast_executor.submit(fast_scan_market, market)
+                if fast_due:
                     next_fast_due = now_monotonic + cadence.fast_scan_seconds
-                    log.info("%s fast scan launched; next target in %ss", label, cadence.fast_scan_seconds)
+                    if scans_enabled:
+                        fast_future = fast_executor.submit(fast_scan_market, market)
+                        log.info("%s fast scan launched; next target in %ss", label, cadence.fast_scan_seconds)
 
                 if market == "cash" and intelligence_executor is not None:
                     if intelligence_future is not None and intelligence_future.done():
@@ -1923,6 +1955,9 @@ def run_worker(market: str) -> None:
                 next_fast_scan_at = (datetime.now(timezone.utc) + timedelta(seconds=seconds_to_fast)).isoformat()
                 deep_text = "deep scan running" if deep_future is not None else f"deep scan in {seconds_to_deep}s"
                 fast_text = "fast scan running" if fast_future is not None else f"fast scan in {seconds_to_fast}s"
+                if not scans_enabled:
+                    deep_text = f"cash opportunity scans paused; eligibility recheck in {min(seconds_to_deep, seconds_to_fast)}s"
+                    fast_text = "intelligence and Brain sync active"
                 pulse_text = (
                     f"Always-on engine active · {refreshed} positions refreshed via {provider_text} · "
                     f"{fast_text} · {deep_text} · {cadence.session_label} session"
