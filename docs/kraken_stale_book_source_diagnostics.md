@@ -78,3 +78,8 @@ checks. Dense wire traffic, slow storage, stale expiry and reference-only
 authority remain covered. These are mocked protocol tests, not production
 latency or live-feed validation. Exact-head CI and explicit review/approval
 remain required before merging or deploying this draft.
+
+The follow-up [write-impact review](kraken_publication_write_impact.md) records
+read-only Railway capacity telemetry, disposable PostgreSQL 16/18 measurements,
+old-reader sensitivity and observed production publication delays. Its disposition
+remains HOLD; local write performance does not clear the production gates.
