@@ -263,3 +263,26 @@ Direct agent production SQL access remains unavailable; user-provided counts
 and their limits are recorded above. PR #395 remains a draft requiring
 exact-head CI and explicit approval before merge/deployment. Existing #392/#393
 holds remain independent and intact.
+
+## October 21 current-main release validation
+
+Revalidated the existing corrections together with main
+`525a1813b1ef317176e2ac0b0fed64d33cabe7bc` without releasing them.
+New disposable-PostgreSQL regressions verify both providers cannot replenish an
+exhausted same-day row, even if a later caller supplies a larger allowance;
+normal next-UTC-day recovery leaves the historical day untouched and installs
+only one next-day allowance. These tests do not assert new production recovery.
+
+A production read-only query via authenticated Railway SSH was attempted, but
+CLI stopped before connecting because no SSH key was present. No keys, TCP
+exposure, credentials, database access settings or production rows were changed.
+Current ledger denial cause remains unverified. Earlier positive-budget exhaustion
+must not be mislabeled an expired zero-capacity marker, and the marker repair
+must not be described as a full-day pricing-capacity solution.
+
+The default-off research-only drafts #396/#400 still have no validated bridge
+into the paper-pricing adapter. Do not silently promote their diagnostic quotes
+or bypass independent Kraken alignment, metadata, depth, cost, forecast/model
+and execution provenance safeguards. Restoring continuous pricing requires that
+separate transport integration and evidence-based validation. Release of #395
+requires explicit approval; all existing holds and paper-only settings persist.

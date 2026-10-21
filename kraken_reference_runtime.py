@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from collections import deque
 import json
 import logging
+import math
 import os
 import random
 import threading
@@ -121,6 +122,67 @@ def read_kraken_reference_state():
             "execution_authority": "NONE", "broker_submission": "NONE"}
 
 
+class _PublicationTiming:
+    """Best-effort wall attribution; never changes publication/error semantics."""
+    PHASES = ('state_capture', 'history_lock_wait', 'history_copy', 'comparisons',
+              'write_state', 'health_logging')
+
+    def __init__(self, service):
+        self.service = service
+        self.elapsed = dict.fromkeys(self.PHASES)
+        self.phase = 'state_capture'
+        self.started = self.previous = self._clock()
+
+    @staticmethod
+    def _clock():
+        try:
+            value = time.monotonic()
+            return value if type(value) in (int, float) and math.isfinite(value) else None
+        except Exception:
+            return None
+
+    @staticmethod
+    def _milliseconds(start, end):
+        if start is not None and end is not None:
+            elapsed = (end-start)*1000
+            if math.isfinite(elapsed) and elapsed >= 0:
+                return round(elapsed, 3)
+        return None
+
+    def enter(self, phase):
+        try:
+            now = self._clock()
+            if self.phase is not None:
+                self.elapsed[self.phase] = self._milliseconds(self.previous, now)
+            self.phase, self.previous = phase, now
+        except Exception:
+            pass
+
+    def skip(self):
+        self.phase = self.previous = None
+
+    def finish(self, failed):
+        try:
+            now = self._clock()
+            if self.phase is not None:
+                self.elapsed[self.phase] = self._milliseconds(self.previous, now)
+            if now is None:
+                return
+            previous = self.service._last_publication_timing
+            if previous is not None and now-previous < 30:
+                return
+            # Failed emission consumes the interval too; no retry bursts.
+            self.service._last_publication_timing = now
+            record = {'status': 'FAILED' if failed else 'SUCCESS',
+                      'failure_stage': self.phase if failed else None,
+                      'phase_ms': self.elapsed,
+                      'total_ms': self._milliseconds(self.started, now),
+                      'scope': 'publication_before_timing_log'}
+            log.info('KRAKEN PUBLICATION TIMING | %s', json.dumps(record, allow_nan=False, sort_keys=True))
+        except Exception:
+            pass  # Diagnostic clocks/serialization/log sinks cannot mask failures.
+
+
 class KrakenReferenceService:
     def __init__(self, *, connect_factory=None, socket_factory=None, research_symbols=None):
         if connect_factory is None:
@@ -139,6 +201,7 @@ class KrakenReferenceService:
         self.thread = None
         self.socket = None
         self.last_log = 0.0
+        self._last_publication_timing = None
 
     def start(self):
         with self.lock:
@@ -186,35 +249,49 @@ class KrakenReferenceService:
                 history.clear()
 
     def publish(self, conn):
-        now = utc_now()
-        payload = self.state.health(now)
-        payload["subscribed_symbols"] = list(self.symbols.values())
-        with self.lock:
-            primary = dict(self.primary)
-            histories = {s:list(h) for s,h in self.reference_history.items()}
-        comparisons = {}
-        for symbol in self.symbols.values():
-            current = payload["quotes"].get(symbol)
-            candidates = histories[symbol] + ([current] if current else [])
-            candidates = [q for q in candidates if fresh(timestamp(q['quote_timestamp']), timestamp(q['received_at']), now)]
-            observed = primary.get(symbol)
-            if current and observed and observed.get('quote_timestamp') and candidates:
-                target = timestamp(observed['quote_timestamp'])
-                reference = min(candidates, key=lambda q:(
-                    abs((timestamp(q['quote_timestamp'])-target).total_seconds()),
-                    -timestamp(q['received_at']).timestamp()))
+        timing = _PublicationTiming(self)
+        failed = True
+        try:
+            now = utc_now()
+            payload = self.state.health(now)
+            payload["subscribed_symbols"] = list(self.symbols.values())
+            timing.enter('history_lock_wait')
+            with self.lock:
+                timing.enter('history_copy')
+                primary = dict(self.primary)
+                histories = {s:list(h) for s,h in self.reference_history.items()}
+            timing.enter('comparisons')
+            comparisons = {}
+            for symbol in self.symbols.values():
+                current = payload["quotes"].get(symbol)
+                candidates = histories[symbol] + ([current] if current else [])
+                candidates = [q for q in candidates if fresh(timestamp(q['quote_timestamp']), timestamp(q['received_at']), now)]
+                observed = primary.get(symbol)
+                if current and observed and observed.get('quote_timestamp') and candidates:
+                    target = timestamp(observed['quote_timestamp'])
+                    reference = min(candidates, key=lambda q:(
+                        abs((timestamp(q['quote_timestamp'])-target).total_seconds()),
+                        -timestamp(q['received_at']).timestamp()))
+                else:
+                    reference = current
+                comparison = (compare_reference(reference, observed, now) if self.primary_observer_available else
+                    {"status": "EXECUTION_SOURCE_NOT_CONFIGURED", "reason": "NO_EXECUTION_PROVIDER", "execution_impact": "NONE"})
+                comparisons[symbol] = {**comparison, "checked_at": now.isoformat()}
+            payload["comparisons"] = comparisons
+            # This wall phase includes JSON, network, commit and process resume;
+            # it is not a measurement of server-side statement execution alone.
+            timing.enter('write_state')
+            # A failed write escapes to _run, closing the socket and ownership.
+            write_state(conn, payload, now)
+            timing.enter('health_logging')
+            if time.monotonic() - self.last_log >= 30:
+                self.last_log = time.monotonic()
+                log.info("KRAKEN REFERENCE HEALTH | %s", json.dumps(payload, sort_keys=True))
             else:
-                reference = current
-            comparison = (compare_reference(reference, observed, now) if self.primary_observer_available else
-                {"status": "EXECUTION_SOURCE_NOT_CONFIGURED", "reason": "NO_EXECUTION_PROVIDER", "execution_impact": "NONE"})
-            comparisons[symbol] = {**comparison, "checked_at": now.isoformat()}
-        payload["comparisons"] = comparisons
-        # This write also detects loss of the dedicated advisory-lock session.
-        # A failed write escapes to _run, which closes the socket and drops ownership.
-        write_state(conn, payload, now)
-        if time.monotonic() - self.last_log >= 30:
-            self.last_log = time.monotonic()
-            log.info("KRAKEN REFERENCE HEALTH | %s", json.dumps(payload, sort_keys=True))
+                timing.skip()
+            failed = False
+        finally:
+            timing.finish(failed)
 
     def _session(self, conn):
         ws = self.socket_factory(URL, timeout=8, enable_multithread=True)

@@ -146,3 +146,24 @@ def test_initialization_and_reservation_roll_back_together(budget_db):
     with budget_db() as conn:
         assert record(conn) == before
         assert reserve(conn)['remaining'] == 1
+
+
+@pytest.mark.parametrize('provider', ['Coinbase Public Research','Kraken Public Research'])
+def test_spent_day_remains_closed_and_next_utc_day_receives_only_normal_allowance(budget_db,provider):
+    """Recovery must use the next UTC allocation, never refill an exhausted day."""
+    last_minute=DAY+timedelta(hours=23,minutes=59)
+    with budget_db() as conn:
+        assert reserve(conn,provider,budget=1,now=last_minute)['reserved']
+        before=record(conn,provider)
+        assert (before['daily_budget'],before['requests_used'],before['remaining_budget'])==(1,1,0)
+        assert not reserve(conn,provider,budget=2400,now=last_minute+timedelta(seconds=30))['reserved']
+        assert record(conn,provider)==before
+    with budget_db() as conn:
+        tomorrow=DAY+timedelta(days=1)
+        result=reserve(conn,provider,budget=1,now=tomorrow)
+        assert result['reserved'] and result['remaining']==0
+        assert not reserve(conn,provider,budget=2400,now=tomorrow+timedelta(seconds=1))['reserved']
+        assert record(conn,provider)==before
+        today=conn.execute('SELECT daily_budget,requests_used,remaining_budget FROM provider_budget_ledger WHERE provider=%s AND utc_date=%s',
+                          (provider,tomorrow.date().isoformat())).fetchone()
+        assert (today['daily_budget'],today['requests_used'],today['remaining_budget'])==(1,1,0)
