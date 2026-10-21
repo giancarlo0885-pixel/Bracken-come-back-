@@ -18,6 +18,9 @@ from kraken_reference_book import (BookIntegrityError, ReferenceBooks, SYMBOLS, 
 log = logging.getLogger("kraken-reference")
 URL = "wss://ws.kraken.com/v2"
 OWNER_LOCK = 73420261603
+# Shared readers compare venue timestamps within two seconds. Coalesce the
+# stream to one singleton write/second without renewing either source clock.
+PUBLISH_INTERVAL_SECONDS = 1.0
 STATE_DDL = """CREATE TABLE IF NOT EXISTS kraken_reference_state (
     id SMALLINT PRIMARY KEY CHECK (id=1), updated_at TIMESTAMPTZ NOT NULL,
     payload JSONB NOT NULL)"""
@@ -119,6 +122,39 @@ def read_kraken_reference_state():
         pass
     return {"provider": SOURCE, "status": "UNAVAILABLE_OR_DISABLED", "quotes": {},
             "execution_authority": "NONE", "broker_submission": "NONE"}
+
+
+def stale_book_source_diagnostic(state, now):
+    """Observe which original exchange/receipt timestamps expired; never authorize a quote.
+
+    Returned fields contain no book levels, prices, raw wire payloads or credentials.
+    This mirrors the preexisting reference-book quote() expiry decision.
+    """
+    expired = []
+    for exchange in sorted(state.books):
+        if state.quote(exchange, now) is not None:
+            continue
+        book = state.books[exchange]
+        exchange_time = book.get("exchange_time")
+        received_time = book.get("received_time")
+        try:
+            exchange_age = (now - exchange_time).total_seconds()
+            receipt_age = (now - received_time).total_seconds()
+            if not all(isinstance(x, (int, float)) and abs(x) < 1_000_000
+                       for x in (exchange_age, receipt_age)):
+                raise ValueError("invalid timestamp")
+            reason = ("EXCHANGE_TIMESTAMP_EXPIRED" if not -2 <= exchange_age <= MAX_AGE
+                      else "RECEIPT_TIMESTAMP_EXPIRED" if not 0 <= receipt_age <= MAX_AGE
+                      else "QUOTE_UNAVAILABLE")
+            entry = {"symbol": state.symbols.get(exchange, "UNKNOWN"),
+                     "reason": reason,
+                     "exchange_age_seconds": round(exchange_age, 3),
+                     "receipt_age_seconds": round(receipt_age, 3)}
+        except (TypeError, ValueError, AttributeError, OverflowError):
+            entry = {"symbol": state.symbols.get(exchange, "UNKNOWN"),
+                     "reason": "TIMESTAMP_UNAVAILABLE"}
+        expired.append(entry)
+    return expired
 
 
 class KrakenReferenceService:
@@ -244,14 +280,21 @@ class KrakenReferenceService:
                 if now_mono - opened > 15 and set(self.state.books) != set(self.symbols):
                     raise BookIntegrityError("snapshot_timeout")
                 # Heartbeats/pongs never refresh a book's exchange/receipt timestamps.
-                if any(self.state.quote(symbol, utc_now()) is None for symbol in self.state.books):
+                # Preserve the original fail-closed reset; attribute which source
+                # clock aged out before the session clears its books.
+                expired = stale_book_source_diagnostic(self.state, utc_now())
+                if expired:
+                    log.warning("KRAKEN STALE BOOK DIAGNOSTIC | %s", json.dumps({
+                        "expired": expired, "subscribed_market_count": len(self.symbols),
+                        "execution_authority": "NONE", "broker_submission": "NONE"}))
                     raise BookIntegrityError("stale_book")
                 if now_mono - last_ping >= 5:
                     ws.send(json.dumps({"method": "ping", "req_id": 2}))
                     last_ping = now_mono
-                if now_mono - last_publish >= 5:
+                if now_mono - last_publish >= PUBLISH_INTERVAL_SECONDS:
                     self.publish(conn)
-                    last_publish = now_mono
+                    # A slow write must not trigger an immediate catchup write.
+                    last_publish = time.monotonic()
         finally:
             self.state.invalidate()
             self.clear_references()

@@ -24,9 +24,12 @@ No application worker, database connection, or execution path waits for Kraken.
 
 The new migration creates `kraken_reference_state`, an overwritten singleton with
 `CHECK(id=1)`. The owner also idempotently ensures this isolated table exists.
-Publication is at most once per five seconds during streaming plus lifecycle
-transitions. Only two top-of-book references, counters, last-valid timestamps and
-two latest comparisons are stored. No raw message/tick history is persisted.
+Periodic publication is at most once per second during streaming, measured from
+completion of the previous write, plus lifecycle transitions. Slow writes do not
+trigger catch-up bursts. Only configured top-of-book references, counters,
+last-valid timestamps and latest comparisons are stored: two default markets,
+or at most four when the separate research expansion qualifies them. No raw
+message/tick history is persisted. Original source timestamps are never renewed.
 Logical row count and payload shape are bounded; ordinary PostgreSQL MVCC cleanup
 still applies. Existing retention policies and canonical evidence tables are
 unchanged. Counters cover the current process lifetime, not lifetime accounting.
@@ -102,8 +105,11 @@ when either original venue timestamp expires, even if the
 comparison was published recently. Comparison identity must match its paired
 Kraken reference; malformed comparisons are omitted without hiding valid quotes.
 Expired current quotes are removed and labeled stale/unavailable; last-valid timestamps remain
-historical diagnostics. Five-second publication means displayed references can
-expire between publications. No cached value is represented as live after expiry.
+historical diagnostics. A one-second publication schedule cannot prevent source
+expiry or a slow publication path; displayed references can still expire between
+publications. No cached value is represented as live after expiry. The additional
+write volume and production latency require separate release review; see
+[the delivery and source-time review](kraken_stale_book_source_diagnostics.md).
 
 ## Validation
 
