@@ -137,3 +137,119 @@ def test_retention_skips_active_entry_writer_and_lock_releases(entry_audit_db,fi
         getattr(writer,finish)()
         assert database._apply_retention_policy(maintainer,'signals',{'keep_rows':2,'batch_size':2})==8
         assert maintainer.execute('SELECT count(*) AS n FROM signals').fetchone()['n']==5
+
+
+@pytest.fixture
+def pricing_receipt_db(fill_evidence_db):
+    from test_paper_pricing_receipt_audit import receipt_graph
+    connection, _ = fill_evidence_db
+    stored_fill, receipt, event, entry = receipt_graph()
+    with connection() as conn:
+        conn.execute((Path(__file__).parent/'migrations/20261019_coinbase_paper_price_evidence.sql').read_text())
+        fill(conn, 'fill-1', stored_fill['fee_amount'], linked=True)
+        conn.execute('''UPDATE paper_fills SET symbol=%s,quote_provider=%s,quote_timestamp=%s,
+            created_at=%s,fill_price=%s,notional=%s,fee_pct=%s,reference_price=%s,
+            slippage_pct=%s,latency_pct=%s,market_impact_pct=%s WHERE fill_id='fill-1' ''',
+            tuple(stored_fill[k] for k in ('symbol','quote_provider','quote_timestamp','created_at',
+                'fill_price','notional','fee_pct','reference_price','slippage_pct','latency_pct','market_impact_pct')))
+        conn.execute('UPDATE trades SET created_at=%s', (event.isoformat(),))
+    return connection, receipt, entry
+
+
+def _write_pricing_receipt(conn, receipt):
+    conn.execute('''INSERT INTO paper_fill_price_evidence
+        (fill_id,model_version,quote_id,evidence,created_at,execution_authority)
+        VALUES(%s,%s,%s,%s::jsonb,%s,%s)''',
+        (receipt['fill_id'],receipt['model_version'],receipt['quote_id'],json.dumps(receipt['evidence']),
+         receipt['created_at'],receipt['execution_authority']))
+
+
+def _read_pricing_receipt_audit(conn, entry):
+    from paper_pricing_receipt_audit import audit_sample_pricing_receipts
+    conn.execute('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY')
+    record = conn.execute('''SELECT to_jsonb(f) AS fill,to_jsonb(t) AS execution
+        FROM paper_fills f JOIN trades t ON t.id=f.canonical_trade_id WHERE f.fill_id='fill-1' ''').fetchone()
+    return audit_sample_pricing_receipts(conn, [{**dict(record), 'ledger':entry}])
+
+
+def test_pricing_audit_reads_only_committed_original_receipts(pricing_receipt_db):
+    connection, receipt, entry = pricing_receipt_db
+    with connection() as writer, connection() as reader:
+        _write_pricing_receipt(writer,receipt)
+        report = _read_pricing_receipt_audit(reader,entry)
+        assert report['consistent_original_receipts']==0
+        assert report['records'][0]['reasons']==['missing_pricing_receipt']
+        writer.commit()
+        # A committed-later row cannot enter the reader's original snapshot.
+        assert reader.execute('SELECT COUNT(*) AS n FROM paper_fill_price_evidence').fetchone()['n']==0
+    with connection() as reader:
+        report = _read_pricing_receipt_audit(reader,entry)
+        assert report['sample_fills']==report['consistent_original_receipts']==1
+        assert report['records'][0]['fee_provenance']=='MODELED_NOT_ACCOUNT_VERIFIED'
+        assert reader.execute('SHOW transaction_read_only').fetchone()['transaction_read_only']=='on'
+
+
+@pytest.mark.parametrize('conflict',['late','wrong_quote','wrong_symbol','wrong_cost','late_reference','relabelled_reference'])
+def test_persisted_late_and_conflicting_receipts_remain_unverified(pricing_receipt_db,conflict):
+    from datetime import timedelta
+    connection, receipt, entry = pricing_receipt_db
+    if conflict=='late':receipt['created_at']+=timedelta(minutes=1)
+    elif conflict=='wrong_quote':receipt['quote_id']='unrelated-quote'
+    elif conflict=='wrong_symbol':receipt['evidence']['source_quote']['symbol']='ETH-USD'
+    elif conflict=='late_reference':
+        from kraken_reference_book import compare_reference
+        quote=receipt['evidence']['source_quote']
+        reference=quote['independent_comparison']['reference_quote']
+        reference['received_at']=(entry['decision_timestamp']+timedelta(milliseconds=250)).isoformat()
+        quote['independent_comparison']=compare_reference(reference,quote,receipt['created_at'])
+    elif conflict=='relabelled_reference':
+        receipt['evidence']['source_quote']['independent_comparison']['reference_quote']['provider']='Yahoo Finance'
+    else:receipt['evidence']['execution']['fee_amount']=0
+    with connection() as writer:_write_pricing_receipt(writer,receipt)
+    with connection() as reader:
+        report = _read_pricing_receipt_audit(reader,entry)
+        assert report['sample_fills']==1 and report['consistent_original_receipts']==0
+        assert report['records'][0]['reasons']
+
+
+def test_complete_entry_references_are_not_fully_verified_trades_or_brain_consumption(entry_audit_db):
+    from paper_trade_evidence_audit import summarize_trade_evidence
+    with entry_audit_db() as reader:
+        report=summarize_trade_evidence(reader,market='crypto')
+        assert report['sample_complete_entry_references']==2
+        assert report['sample_fully_verified_trades']==0
+        assert report['full_trade_verification']['status']=='UNAVAILABLE'
+        assert report['full_trade_verification']['finalized_round_trip_status']=='NOT_EVALUATED'
+        assert report['decision_time_brain_consumption']['status']=='UNAVAILABLE'
+        assert report['decision_time_brain_consumption']['ingestion_and_retrospective_replays_are_consumption_proof'] is False
+        assert report['sample_pricing_receipts']['sample_fills']==4
+        assert report['sample_pricing_receipts']['consistent_original_receipts']==0
+
+
+@pytest.mark.parametrize('kind',['stored_before_decision','stored_late','conflicting_replay'])
+def test_persisted_brain_records_cannot_stand_in_for_consumption_receipts(entry_audit_db,kind):
+    from datetime import timedelta
+    from paper_trade_evidence_audit import summarize_trade_evidence
+    with entry_audit_db() as writer:
+        for filename in ('20260919_oracle_brain.sql','20260920_oracle_brain_learning_v2.sql','20260922_oracle_advanced_learning.sql'):
+            writer.execute((Path(__file__).parent/'migrations'/filename).read_text())
+        row=writer.execute("SELECT decision_timestamp FROM trade_ledger WHERE trade_id='buy:lot-a'").fetchone()
+        from paper_fill_provenance import _time
+        decision=_time(row['decision_timestamp'])
+        created=decision+timedelta(days=1) if kind=='stored_late' else decision-timedelta(seconds=1)
+        writer.execute('''INSERT INTO oracle_brain_episodes
+            (episode_key,trade_id,market,symbol,strategy,regime,provenance_status,outcome_snapshot,created_at)
+            VALUES('trade:past','past','crypto','TEST-USD','test','test','exact',
+            '{"accounting_version":"exact_round_trip_v1","cost_provenance":"exact_lot"}',%s)''',(created,))
+        # Even a replay that claims consumption is retrospective, not an original
+        # decision-time writer/commit receipt. No ID or timestamp inference.
+        keys=['trade:other'] if kind=='conflicting_replay' else ['trade:past']
+        writer.execute('''INSERT INTO oracle_decision_replays
+            (decision_id,market,symbol,decision_time,replay_snapshot,lineage_hash)
+            VALUES(1,'crypto','TEST-USD',%s,%s::jsonb,'test-only-replay')''',
+            (decision,json.dumps({'consumed_episode_keys':keys,'evidence_immutable':True})))
+    with entry_audit_db() as reader:
+        report=summarize_trade_evidence(reader,market='crypto')
+        assert report['decision_time_brain_consumption']['status']=='UNAVAILABLE'
+        assert report['sample_fully_verified_trades']==0
+        assert report['sample_complete_entry_references']==2
