@@ -53,6 +53,38 @@ def sync_research_sources(conn,limit=250):
     return result
 
 
+
+RESEARCH_EVIDENCE_MAX_ID = 5000
+
+
+def read_evidence_capacity(conn):
+    """Observe immutable evidence ID occupancy, never count holes as free slots."""
+    try:
+        value = conn.execute(
+            'SELECT COALESCE(MAX(id),0) AS highest_id FROM kraken_research_evidence'
+        ).fetchone()
+        highest_id = value['highest_id']
+        if (type(highest_id) is not int or highest_id < 0
+                or highest_id > RESEARCH_EVIDENCE_MAX_ID):
+            return {'status':'UNAVAILABLE','reason':'INVALID_HIGHEST_ID',
+                    'execution_impact':'NONE'}
+        remaining = RESEARCH_EVIDENCE_MAX_ID - highest_id
+        if remaining == 0:
+            status = 'CAPACITY_REACHED'
+        elif remaining <= 250:
+            status = 'CAPACITY_CRITICAL'
+        elif remaining <= 1000:
+            status = 'CAPACITY_WARNING'
+        else:
+            status = 'CAPACITY_NORMAL'
+        return {'status':status,'highest_id':highest_id,
+                'max_id':RESEARCH_EVIDENCE_MAX_ID,'remaining_id_slots':remaining,
+                'execution_impact':'NONE'}
+    except Exception as exc:
+        return {'status':'UNAVAILABLE','reason_class':type(exc).__name__,
+                'execution_impact':'NONE'}
+
+
 def committed_receipt(conn):
     """Read committed rows after the caller's ingestion transaction has exited."""
     count=conn.execute('''SELECT COUNT(*) AS matched FROM oracle_brain_sources s
@@ -64,5 +96,6 @@ def committed_receipt(conn):
         JOIN kraken_research_evidence e ON s.source_key='kraken-research:'||e.id::text
         WHERE s.metadata->'evidence'=e.payload ORDER BY e.id DESC LIMIT 10''').fetchall()
     expected=conn.execute('SELECT COUNT(*) AS n FROM kraken_research_evidence').fetchone()['n']
-    return {'expected':expected,'matched':count,'unmatched':expected-count,'sample':[dict(r) for r in sample],'execution_impact':'NONE',
+    return {'expected':expected,'matched':count,'unmatched':expected-count,'sample':[dict(r) for r in sample],
+        'evidence_capacity':read_evidence_capacity(conn),'execution_impact':'NONE',
         'trade_outcomes':'NOT_INFERRED','profitability':'NOT_EVALUATED'}
