@@ -42,6 +42,14 @@ if os.getenv("EXECUTION_MODE", "paper").strip().lower() == "paper":
 # Keep this entrypoint in the stock-worker deploy watch set when paper-learning
 # runtime policy changes. Production source-sync marker: current main, 2026-09-03.
 if __name__ == "__main__":
+    # Crypto-only cost-control: retain the service and its historical database
+    # records, but avoid cash-market API polling, scans, and writes by default.
+    # Explicit opt-in restores the previous stock research behavior.
+    if os.getenv("ENABLE_CASH_MARKET_RESEARCH", "false").strip().lower() not in {"1", "true", "yes", "on"}:
+        import time
+        logger.info("ORACLE COST CONTROL | cash market research paused | historical data preserved | execution_impact=NONE")
+        while True:
+            time.sleep(3600)
     logger.info("ORACLE STOCK SOURCE SYNC | current-main deployment active")
     prepare_capital_readiness_runtime(market_worker, "cash")
     from paper_trade_evidence_audit import emit_trade_evidence_audit
