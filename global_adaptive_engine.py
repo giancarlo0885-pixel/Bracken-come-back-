@@ -435,8 +435,33 @@ def reserve_provider_budget_db(conn: Any, provider: str, capability: str, *, dai
         )
         if not guarded_auth_recheck:
             return {"reserved": False, "reason": "provider capability in cooldown", "remaining": int(existing.get("remaining_budget") or 0)}
+    # A cooldown can be recorded before this UTC day's first reservation (for
+    # example a pre-midnight HTTP request returning 429 just after midnight).
+    # Its zero-capacity marker is not a spent budget. Initialize it once, under
+    # the row lock, only after the original cooldown has actually expired.
+    try:
+        marker_time = datetime.fromisoformat(str(existing.get("cooldown_until") or "").replace("Z", "+00:00"))
+        marker_expired = marker_time.tzinfo is not None and marker_time <= now_dt.astimezone(timezone.utc)
+    except (ValueError, TypeError, OverflowError):
+        marker_expired = False
+    if (budget > 0 and marker_expired and existing.get("data_mode") == "shared_cooldown"
+            and existing.get("daily_budget") == 0 and existing.get("requests_used") == 0
+            and existing.get("remaining_budget") == 0):
+        existing = conn.execute(
+            """UPDATE provider_budget_ledger
+               SET daily_budget=%s,remaining_budget=%s,entitlement=%s,data_mode=%s,updated_at=%s
+               WHERE provider=%s AND capability=%s AND utc_date=%s
+                 AND data_mode='shared_cooldown' AND daily_budget=0
+                 AND requests_used=0 AND remaining_budget=0
+               RETURNING *""",
+            (budget, budget, entitlement, data_mode, timestamp, provider, capability, utc_date),
+        ).fetchone()
+        if not existing:
+            return {"reserved": False, "reason": "provider budget marker initialization unavailable"}
     remaining = int(existing.get("remaining_budget") or 0)
     if remaining <= 0:
+        if int(existing.get("daily_budget") or 0) == 0:
+            return {"reserved": False, "reason": "provider capability has no initialized capacity", "remaining": 0}
         return {"reserved": False, "reason": "provider capability budget exhausted", "remaining": 0}
     conn.execute(
         """UPDATE provider_budget_ledger

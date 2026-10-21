@@ -109,6 +109,40 @@ def test_budget_blocks_network(monkeypatch):
     get.assert_not_called()
 
 
+@pytest.mark.parametrize('denial,expected', [
+    ({'reserved': False, 'reason': 'provider capability budget exhausted'},
+     'PROVIDER_BUDGET_EXHAUSTED'),
+    ({'reserved': False, 'reason': 'shared provider ledger unavailable; fail closed: OperationalError'},
+     'PROVIDER_LEDGER_UNAVAILABLE'),
+    ({'reserved': False, 'reason': 'provider budget row unavailable after atomic initialization'},
+     'PROVIDER_LEDGER_UNAVAILABLE'),
+    ({'reserved': False, 'reason': 'provider capability in cooldown'},
+     'PROVIDER_COOLDOWN'),
+    ({'reserved': False, 'reason': 'provider capability has no initialized capacity'},
+     'PROVIDER_BUDGET_BLOCKED'),
+    ({'reserved': False, 'reason': 'unrecognized private provider error'},
+     'PROVIDER_BUDGET_BLOCKED'),
+])
+def test_budget_denial_is_classified_without_network_or_sensitive_error(monkeypatch, denial, expected):
+    c, get, _ = request_client(monkeypatch, [])
+    monkeypatch.setattr(data, 'reserve_provider_budget_live', lambda *a, **k: denial)
+    with pytest.raises(data.ResearchUnavailable) as error:
+        c.instruments()
+    assert str(error.value) == expected
+    get.assert_not_called()
+
+
+def test_shared_cooldown_ledger_failure_is_not_mislabeled_provider_cooldown(monkeypatch):
+    c, get, _ = request_client(monkeypatch, [])
+    monkeypatch.setattr(data, 'provider_cooldown_active_live',
+                        lambda *a: {'active': True,
+                                    'reason': 'shared provider cooldown unavailable; fail closed: DatabaseError'})
+    with pytest.raises(data.ResearchUnavailable) as error:
+        c.instruments()
+    assert str(error.value) == 'PROVIDER_LEDGER_UNAVAILABLE'
+    get.assert_not_called()
+
+
 @pytest.mark.parametrize('payload,status', [({},429),({'error':['EAPI:Rate limit exceeded']},200)])
 def test_rate_limit_is_shared_and_local_without_repeat_requests(monkeypatch,payload,status):
     c,get,marker=request_client(monkeypatch,[response(payload,status)])
@@ -237,7 +271,7 @@ def test_cycle_uses_labeled_coinbase_backup_without_touching_broker(monkeypatch)
     monkeypatch.setattr(research,'datetime',Clock)
     monkeypatch.setattr(runtime,'read_kraken_reference_state',lambda:{'subscribed_symbols':['BTC-USD'],'quotes':{}})
     monkeypatch.setattr(research,'coinbase_history',lambda *a:h)
-    monkeypatch.setattr(research,'coinbase_quote',lambda *a:q)
+    coinbase=Mock(return_value=q);monkeypatch.setattr(research,'coinbase_quote',coinbase)
     monkeypatch.setattr(forecasting,'forecast_price',prediction)
     persist=Mock(return_value=7);monkeypatch.setattr(research,'persist_evidence',persist)
     conn=Mock();runner=research.PrimaryResearch(connect_factory=Mock(),data=Mock())
@@ -246,6 +280,39 @@ def test_cycle_uses_labeled_coinbase_backup_without_touching_broker(monkeypatch)
     assert payload['symbols']['BTC-USD']['data_role']=='COINBASE_RESEARCH_BACKUP'
     assert payload['symbols']['BTC-USD']['evidence_id']==7
     assert payload['symbols']['BTC-USD']['primary_quote']['execution_quote_eligible'] is False
+    persist.assert_called_once()
+    # The fallback quote is necessary; another Coinbase read cannot compare
+    # venues when Kraken has no reference, even if the first read is cached.
+    coinbase.assert_called_once_with(runner.data,'BTC-USD')
+    assert payload['symbols']['BTC-USD']['independent_comparison']['reason']=='REFERENCE_UNAVAILABLE'
+
+
+def test_cycle_compares_coinbase_when_fresh_kraken_reference_exists(monkeypatch):
+    import kraken_reference_runtime as runtime
+    import forecasting
+    class Clock:
+        @staticmethod
+        def now(tz):return NOW
+    monkeypatch.setattr(research,'datetime',Clock)
+    reference=quote()
+    monkeypatch.setattr(runtime,'read_kraken_reference_state',lambda:{
+        'subscribed_symbols':['BTC-USD'],'quotes':{'BTC-USD':reference}})
+    independent=dict(reference,provider='Coinbase Exchange public reference',checksum_status='NOT_PROVIDED')
+    coinbase=Mock(return_value=independent);monkeypatch.setattr(research,'coinbase_quote',coinbase)
+    backup_history=Mock();monkeypatch.setattr(research,'coinbase_history',backup_history)
+    monkeypatch.setattr(forecasting,'forecast_price',prediction)
+    persist=Mock(return_value=8);monkeypatch.setattr(research,'persist_evidence',persist)
+    conn=Mock();client=Mock();client.history.return_value=history()
+    runner=research.PrimaryResearch(connect_factory=Mock(),data=client)
+    runner.cycle(conn)
+    result=json.loads(conn.execute.call_args.args[1][1])['symbols']['BTC-USD']
+    assert result['data_role']=='KRAKEN_PRIMARY' and result['evidence_id']==8
+    assert result['independent_comparison']['status']=='ALIGNED_VENUE_COMPARISON'
+    assert result['independent_comparison']['execution_impact']=='NONE'
+    assert result['execution_authority']=='NONE'
+    assert result['primary_quote']['execution_quote_eligible'] is False
+    coinbase.assert_called_once_with(client,'BTC-USD')
+    backup_history.assert_not_called()
     persist.assert_called_once()
 
 

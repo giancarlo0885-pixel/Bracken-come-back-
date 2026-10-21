@@ -86,6 +86,110 @@ is durable ingestion proof, not proof that a decision used that memory. The norm
 Brain learner also reconciles the bounded backlog. Existing 5000-record research
 ledger capacity remains; capacity exhaustion is explicit, never deletion.
 
+
+## Provider-budget incident audit (read-only)
+
+The Coinbase paper-pricing adapter and the optional Kraken-primary research's
+Coinbase diagnostics both call `PublicResearchData.request()`. Each call that
+misses the **process-local** cache reserves from the same
+`Coinbase Public Research / __provider__` UTC-day PostgreSQL ledger. The configured
+ceiling is 2,400 reservations/day; Kraken's separate public REST research ceiling
+is 1,200/day. The Coinbase L2 book cache expires after two seconds; product and
+five-minute candle caches expire after 300 seconds. Separate processes do not
+share their HTTP caches. The cache never renews source or receipt timestamps.
+
+At one uncached Coinbase request every ten seconds, demand is 8,640/day,
+already above the entire nominal 2,400/day allowance. This arithmetic diagnoses
+a capacity risk, **not** a measured request count, rate-limit entitlement,
+confirmed cause of a particular ledger denial, or an executable pricing quote.
+More frequent paper scans, multiple symbols and research consumers make the
+shortage worse. Slowing requests must never lengthen quote freshness windows.
+A sustained high-frequency paper source would need a separately validated
+streaming or appropriately budgeted execution-pricing architecture.
+
+The generic `PROVIDER_BUDGET_BLOCKED` message alone is ambiguous.
+The public research adapter now distinguishes these *fail-closed* statuses:
+`PROVIDER_BUDGET_EXHAUSTED` (actual reservation quota exhausted),
+`PROVIDER_LEDGER_UNAVAILABLE` (shared-ledger read/write error),
+`PROVIDER_COOLDOWN` (real local/shared cooldown), and
+`PROVIDER_BUDGET_BLOCKED` (unknown reservation denial). They expose no SQL
+exception text, credentials, unverified prices or bypass paths.
+
+The elected Kraken-primary research worker now emits a bounded
+`PUBLIC RESEARCH BUDGET` log every successful five-minute cycle. This executes
+one read-only `SELECT` over the two named provider-wide ledger rows for the
+current UTC day (limit two). It returns configured allowance, requests
+reserved, remaining reservations and active cooldown state, or an explicit
+missing/inconsistent/unavailable status. It cannot see external Coinbase API
+account usage, infer actual data coverage or grant execution authority.
+Provider failures report exception *classes only*, never database error text.
+This runtime report will appear only **after** the reviewed change is deployed
+and the elected research worker is enabled. It is not running in production
+during this PR's review.
+
+The following full reconciliation query is for an authorized **read-only**
+production database session. It has not been executed directly by the agent;
+the user supplied the narrower count query results recorded below:
+
+```sql
+SELECT provider, capability, utc_date, daily_budget, requests_used,
+       remaining_budget, last_failure, cooldown_until, updated_at
+FROM provider_budget_ledger
+WHERE provider IN ('Coinbase Public Research', 'Kraken Public Research')
+ORDER BY utc_date DESC, provider, capability
+LIMIT 12;
+```
+
+Record current and previous UTC days, match the original log timestamps, and
+verify whether the ledger actually exhausted versus becoming unavailable.
+The ledger does not attribute spend to each code path. Neither this diagnostic
+change nor its tests increase quotas, retry on denied reservations, recycle
+timestamps, change risk/governance gates, reconcile missing legacy signals,
+authorize deployment, or claim validated profitability.
+
+### Observed production reservation counts
+
+A user-supplied Railway production SQL screenshot on October 21, 2026 shows
+these `Coinbase Public Research / __provider__` UTC-day rows:
+
+| UTC day | Configured allowance | Reservations used | Remaining |
+| --- | ---: | ---: | ---: |
+| 2026-10-21 | 2400 | 524 | 1876 |
+| 2026-10-20 | 2400 | 2400 | 0 |
+| 2026-10-19 | 2400 | 2400 | 0 |
+| 2026-10-18 | 2400 | 36 | 2364 |
+
+The October 19/20 rows prove exhaustion of the configured positive reservation
+allowance. They are **not** the all-zero cooldown markers described below.
+The October 21 row shows reservations and remaining capacity after UTC-day
+rollover at capture time. It does not prove continued capacity, absence of
+cooldowns, successful external requests or paper-price eligibility. The
+screenshot omits `cooldown_until`, `last_failure`, `data_mode` and per-request
+attribution; no external Coinbase HTTP 429 or account entitlement is inferred.
+This is user-provided production evidence, not a claim of direct agent SQL access.
+
+Source review found one reservation per normal cache miss, serialized same-client
+requests and an elected primary-research writer; it did not establish duplicate
+reservation accounting. Separate clients and L1/L2 consumers share the cap.
+An allowance of 2400/day averages one reservation per 36 seconds across all
+consumers, while paper pricing retains its five-second maximum quote age.
+Removing unnecessary requests alone cannot establish continuous fresh two-asset
+REST coverage under that cap. A shared streaming replacement requires its own
+integration and validation; the pure reducer in PR #396 is not that replacement.
+
+A narrower avoidable request was reproduced: after a Coinbase primary fallback
+forecast, the comparison path could ask Coinbase for another L1 observation even
+when no Kraken reference existed. If the two-second cache had expired during
+forecast work, that lookup could reserve another request without any possible
+independent comparison. The path now checks reference presence before fetching
+Coinbase, then retains the original post-request Kraken reread and alignment
+checks. The necessary primary fallback and persisted research remain intact.
+Regression coverage first failed with two quote attempts instead of one, then
+passed after the guard; a positive test preserves comparison when a reference
+exists. This path's contribution to measured production exhaustion is unknown,
+and this correction does not establish continuous daily coverage.
+
+
 ## Documentation consulted
 
 - https://docs.cdp.coinbase.com/exchange/reference/exchangerestapi_getproductbook
@@ -97,3 +201,88 @@ and auction metadata. Fee documentation states standard taker fees up to 0.60%.
 A healthy pricing adapter does not establish profitable expectancy. Qualified
 forward outcomes and independent post-cost validation remain required. Live
 trading stays disabled.
+
+
+### Zero-budget cooldown marker is not measured quota exhaustion
+
+The production table definition and mark_provider_cooldown_db in
+global_adaptive_engine.py establish a distinct case: recording a provider
+cooldown before any reservation for the UTC day creates a row with
+daily_budget=0, requests_used=0 and remaining_budget=0. That is NOT
+evidence that 2,400 Coinbase requests (or 1,200 Kraken requests)
+were consumed.
+
+The elected provider-ledger report distinguishes this situation as
+COOLDOWN_MARKER_NO_CAPACITY when data_mode=shared_cooldown and prints
+current_cooldown_marker=true and exhaustion_proven_by_ledger=false.
+An intentionally configured zero allowance with a different data_mode
+is labeled ZERO_CONFIGURED_BUDGET instead. Both labels avoid the false
+claim that the normal positive quota was used up.
+It separately indicates whether cooldown_until is active. The label
+CONFIGURED_BUDGET_EXHAUSTED (or an exhaustion_proven_by_ledger=true
+flag during an active cooldown) requires a positive configured daily
+budget whose recorded requests_used equals that allowance, with no
+remaining reservations. This report changes diagnostic labeling only; it does
+not itself reserve capacity or permit a trade. The marker flag describes the
+current data_mode, not an immutable history of how a row was first created.
+
+The configured ledger records reservations rather than confirmed
+successful external API requests. A fully consumed positive budget
+therefore proves reserved capacity exhaustion, not externally
+successful requests or an actual exchange-imposed limit.
+
+### Confirmed cooldown-marker initialization defect and guarded correction
+
+The old reservation writer used `INSERT ... ON CONFLICT DO NOTHING`, then
+checked the existing row's remaining capacity. An expired all-zero cooldown
+marker therefore remained all-zero and was incorrectly called exhausted for
+the remainder of the UTC day. A request reserved just before UTC midnight whose
+HTTP 429 response arrives just after midnight can create this state. Normal
+same-day 429 handling already has a reservation row and does not usually create
+this marker. This mechanism was reproduced locally. It does not match the
+positive exhausted budgets shown in the supplied October 19/20 production rows.
+
+Under the existing provider/capability/day row lock, the reservation writer now
+initializes only a pristine `shared_cooldown` marker with all three counts zero,
+a valid original cooldown timestamp at or before now and a positive
+caller-configured allowance. Missing or malformed expiry evidence stays blocked. It
+installs that existing allowance once, changes data_mode to the caller's request
+mode and performs the normal single reservation debit in the same transaction.
+The prior failure and original cooldown timestamp remain unchanged. A used or
+positive configured budget, an explicit zero nonmarker allowance, malformed
+nonzero-used marker, active cooldown, or zero caller allowance is never refilled.
+Zero-capacity denials no longer masquerade as consumed positive allowances.
+
+Disposable-PostgreSQL regressions cover both public providers crossing midnight,
+active cooldown preservation, one-time initialization, no subsequent allowance
+increase even if a later caller supplies a larger number, concurrent first
+reservations, initialized exhaustion, explicit-zero/malformed rows and atomic
+rollback. Fixtures use tiny synthetic allowances, not production requests or
+claimed exchange entitlements. No provider configuration or quote TTL changes.
+Direct agent production SQL access remains unavailable; user-provided counts
+and their limits are recorded above. PR #395 remains a draft requiring
+exact-head CI and explicit approval before merge/deployment. Existing #392/#393
+holds remain independent and intact.
+
+## October 21 current-main release validation
+
+Revalidated the existing corrections together with main
+`525a1813b1ef317176e2ac0b0fed64d33cabe7bc` without releasing them.
+New disposable-PostgreSQL regressions verify both providers cannot replenish an
+exhausted same-day row, even if a later caller supplies a larger allowance;
+normal next-UTC-day recovery leaves the historical day untouched and installs
+only one next-day allowance. These tests do not assert new production recovery.
+
+A production read-only query via authenticated Railway SSH was attempted, but
+CLI stopped before connecting because no SSH key was present. No keys, TCP
+exposure, credentials, database access settings or production rows were changed.
+Current ledger denial cause remains unverified. Earlier positive-budget exhaustion
+must not be mislabeled an expired zero-capacity marker, and the marker repair
+must not be described as a full-day pricing-capacity solution.
+
+The default-off research-only drafts #396/#400 still have no validated bridge
+into the paper-pricing adapter. Do not silently promote their diagnostic quotes
+or bypass independent Kraken alignment, metadata, depth, cost, forecast/model
+and execution provenance safeguards. Restoring continuous pricing requires that
+separate transport integration and evidence-based validation. Release of #395
+requires explicit approval; all existing holds and paper-only settings persist.

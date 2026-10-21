@@ -31,10 +31,28 @@ class PublicResearchData:
         if key in self.cache and now-self.cache[key][0] < ttl:
             self.last_receipt = self.cache[key][2]
             return self.cache[key][1]
-        if self.cooldowns.get(provider, 0) > now or provider_cooldown_active_live(provider).get('active'):
+        if self.cooldowns.get(provider, 0) > now:
             raise ResearchUnavailable('PROVIDER_COOLDOWN')
-        if not reserve_provider_budget_live(provider, '__provider__', daily_budget=1200 if provider == 'Kraken Public Research' else 2400,
-                entitlement='public', data_mode='shadow_research').get('reserved'):
+        shared_cooldown = provider_cooldown_active_live(provider)
+        if shared_cooldown.get('active'):
+            # Never mistake a failed shared-ledger read for a provider 429.
+            if str(shared_cooldown.get('reason') or '').startswith('shared provider cooldown unavailable'):
+                raise ResearchUnavailable('PROVIDER_LEDGER_UNAVAILABLE')
+            raise ResearchUnavailable('PROVIDER_COOLDOWN')
+        reservation = reserve_provider_budget_live(
+            provider, '__provider__',
+            daily_budget=1200 if provider == 'Kraken Public Research' else 2400,
+            entitlement='public', data_mode='shadow_research')
+        if not reservation.get('reserved'):
+            # Public, bounded diagnostic codes only; do not log database exception text.
+            reason = str(reservation.get('reason') or '').lower()
+            if reason == 'provider capability budget exhausted':
+                raise ResearchUnavailable('PROVIDER_BUDGET_EXHAUSTED')
+            if (reason.startswith('shared provider ledger unavailable')
+                    or reason == 'provider budget row unavailable after atomic initialization'):
+                raise ResearchUnavailable('PROVIDER_LEDGER_UNAVAILABLE')
+            if reason == 'provider capability in cooldown':
+                raise ResearchUnavailable('PROVIDER_COOLDOWN')
             raise ResearchUnavailable('PROVIDER_BUDGET_BLOCKED')
         root = 'https://api.kraken.com/0/public/' if provider == 'Kraken Public Research' else 'https://api.exchange.coinbase.com/'
         response = self.get(root+path, params=params, timeout=6,
