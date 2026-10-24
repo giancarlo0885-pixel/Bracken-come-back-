@@ -21,6 +21,12 @@ This draft changes **publication only**:
   that interval. No provider HTTP or DB-budget reservation attempts are
   skipped by this optimization. The result is **not** a request-rate fix.
 - After a restart, the first observation is immediately published.
+- Start the successful 60-second throttle only after the database transaction
+  commits. An unchanged unavailable state whose write or commit failed retries
+  at most once every five seconds, measured after the attempt finishes.
+  Changed states and valid prices still bypass these diagnostic throttles.
+- Logs distinguish `COMMITTED`, `LOG_ONLY` (persistence disabled), and
+  `UNAVAILABLE` publication status without exposing database error details.
 
 This avoids claiming that unchanged publication means an available price.
 `read_pricing_status()` still checks each stored original quote timestamp

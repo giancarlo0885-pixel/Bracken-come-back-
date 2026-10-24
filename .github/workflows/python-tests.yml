@@ -129,3 +129,4 @@ jobs:
           test_paper_persisted_lineage_audit_pg.py
           test_stock_worker_cost_control.py::test_postgres_inventory_pause_policy
           test_provider_budget_marker_pg.py
+          test_cli_probability_audit.py

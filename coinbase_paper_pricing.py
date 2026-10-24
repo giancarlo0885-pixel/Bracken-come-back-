@@ -131,27 +131,61 @@ class PaperPricing:
         self.clock=clock;self.publish=publish;self.lock=threading.RLock();self.receipts={};self.fill_receipts={};self.last_health={}
         self._health_publication_signature = None
         self._health_publication_monotonic = float('-inf')
+        self._health_attempt_signature = None
+        self._health_attempt_monotonic = float('-inf')
+
+    def _health_signature(self):
+        return tuple(sorted(
+            (symbol, record.get('status'), record.get('reason'))
+            for symbol, record in self.last_health.items()
+        ))
 
     def _health_publication_due(self):
         # Keep successful paper quotes visible without delay. Only identical
         # all-unavailable states are throttled; no execution receipts are cached
         # or revalidated by this diagnostic publication throttle.
-        signature = tuple(sorted(
-            (symbol, record.get('status'), record.get('reason'))
-            for symbol, record in self.last_health.items()
-        ))
+        signature = self._health_signature()
         has_valid_quote = any(
             record.get('status') == 'VALID_PAPER_PRICE'
             for record in self.last_health.values()
         )
         current = time.monotonic()
-        if (not has_valid_quote
-                and signature == self._health_publication_signature
-                and current - self._health_publication_monotonic < 60):
-            return False
-        self._health_publication_signature = signature
-        self._health_publication_monotonic = current
+        if not has_valid_quote:
+            if (signature == self._health_publication_signature
+                    and current - self._health_publication_monotonic < 60):
+                return False
+            if (signature == self._health_attempt_signature
+                    and current - self._health_attempt_monotonic < 5):
+                return False
         return True
+
+    def _publish_health(self):
+        if not self._health_publication_due():
+            return
+        signature = self._health_signature()
+        publication_status = 'LOG_ONLY'
+        try:
+            if self.publish:
+                from database import connect
+                with connect() as conn:
+                    conn.execute('''INSERT INTO coinbase_paper_price_state VALUES(1,NOW(),%s::jsonb)
+                        ON CONFLICT(id) DO UPDATE SET updated_at=EXCLUDED.updated_at,payload=EXCLUDED.payload''',
+                        (json.dumps({'provider':SOURCE,'symbols':self.last_health,'broker_submission':'NONE'}),))
+                publication_status = 'COMMITTED'
+            # Exiting connect() includes commit. An attempted write must not
+            # acknowledge durable delivery or start the successful throttle.
+            self._health_publication_signature = signature
+            self._health_publication_monotonic = time.monotonic()
+        except Exception:
+            publication_status = 'UNAVAILABLE'
+        finally:
+            # Bound failed-write retries too, measured after completion so slow
+            # failures cannot cause immediate catch-up writes.
+            self._health_attempt_signature = signature
+            self._health_attempt_monotonic = time.monotonic()
+        log.info('COINBASE PAPER PRICING | %s',json.dumps({
+            'symbols':self.last_health,'broker_submission':'NONE',
+            'health_publication_status':publication_status}))
 
     def quote(self,symbol):
         symbol=str(symbol).upper().strip()
@@ -194,16 +228,7 @@ class PaperPricing:
                 self.last_health[symbol]={'status':'UNAVAILABLE','reason':str(exc) if isinstance(exc,ResearchUnavailable) else type(exc).__name__}
                 return None
             finally:
-                if self._health_publication_due():
-                    if self.publish:
-                        try:
-                            from database import connect
-                            with connect() as conn:
-                                conn.execute('''INSERT INTO coinbase_paper_price_state VALUES(1,NOW(),%s::jsonb)
-                                    ON CONFLICT(id) DO UPDATE SET updated_at=EXCLUDED.updated_at,payload=EXCLUDED.payload''',
-                                    (json.dumps({'provider':SOURCE,'symbols':self.last_health,'broker_submission':'NONE'}),))
-                        except Exception:pass
-                    log.info('COINBASE PAPER PRICING | %s',json.dumps({'symbols':self.last_health,'broker_submission':'NONE'}))
+                self._publish_health()
 
     def authentic(self,quote,symbol):
         if not enabled() or not isinstance(quote,dict):return False
