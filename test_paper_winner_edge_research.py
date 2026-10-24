@@ -147,8 +147,17 @@ def test_partial_exits_count_as_one_completed_entry():
     assert len(rows) == 1
     assert rows[0]["trade_id"] == "buy"
     assert rows[0]["net_pnl"] == pytest.approx(4.6)
+    assert rows[0]["entry_fees"] == pytest.approx(.2)
+    assert rows[0]["exit_fees"] == pytest.approx(.2)
+    assert rows[0]["gross_pnl"] == pytest.approx(5)
     assert rows[0]["entry_notional"] == 200
     assert not verified_ledger_inputs([opening, closes[0]], fills, allocations=links, as_of=EVENT + timedelta(days=1))[0]
+    from paper_economic_diagnosis import diagnose_economics
+    diagnosis = diagnose_economics(rows, market="crypto", as_of=EVENT+timedelta(days=1))
+    assert diagnosis["qualified_entry_lots"] == 1
+    assert diagnosis["accounting"]["explicit_fees"] == pytest.approx(.4)
+    assert diagnosis["accounting"]["gross_fill_price_pnl"] == pytest.approx(5)
+    assert diagnosis["accounting"]["net_pnl"] == pytest.approx(4.6)
 
 
 @pytest.mark.parametrize("missing_flag", [False, True])
