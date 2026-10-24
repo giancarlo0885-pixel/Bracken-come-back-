@@ -216,4 +216,3 @@ mixed-worker rollback safety. Theoretical four symbols per five minutes
 would consume at most about 1,152 *new* IDs/day when each cycle produces
 a distinct accepted research item; this is a planning rate, not verified
 production throughput or free-storage capacity.
-
