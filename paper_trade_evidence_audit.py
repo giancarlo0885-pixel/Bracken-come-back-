@@ -138,6 +138,9 @@ def summarize_trade_evidence(conn, *, market, limit=SAMPLE_LIMIT):
     as_of = datetime.now(timezone.utc)
     allocations = load_fill_lot_allocations(conn,market=market,trade_ids=[r['trade_id'] for r in ledger],as_of=as_of)
     verified = attach_exact_fill_lot_evidence(ledger,allocations,as_of=as_of)
+    from paper_pricing_receipt_audit import audit_sample_pricing_receipts
+    exact_ids = {r['trade_id'] for r in verified if r.get('_fill_accounting_provenance') == PROVENANCE_VERSION}
+    pricing = audit_sample_pricing_receipts(conn, [a for a in allocations if a['trade_id'] in exact_ids])
     by_trade = defaultdict(list)
     for a in allocations:by_trade[a['trade_id']].append(a)
     entries = {}
@@ -178,6 +181,17 @@ def summarize_trade_evidence(conn, *, market, limit=SAMPLE_LIMIT):
         'sample_entry_lots':len(entries),'sample_complete_entry_references':complete,
         'sample_forecast_generation_counts':dict(generation_counts),
         'sample_entry_exclusions':dict(reasons),'sample_entry_references':samples,
+        'sample_pricing_receipts':pricing,
+        'decision_time_brain_consumption': {
+            'status':'UNAVAILABLE',
+            'reason':'NO_PERSISTED_IMMUTABLE_DECISION_CONSUMPTION_CONTRACT',
+            'ingestion_and_retrospective_replays_are_consumption_proof':False},
+        'sample_fully_verified_trades':0,
+        'full_trade_verification': {
+            'status':'UNAVAILABLE',
+            'requires':['original_entry_references','original_entry_and_exit_pricing_receipts',
+                        'finalized_exit_with_exact_costs','decision_time_brain_consumption'],
+            'finalized_round_trip_status':'NOT_EVALUATED'},
         'historical_repair':'NONE','execution_impact':'NONE','profitability':'NOT_EVALUATED',
         'scope_warning':'Sample counts are not all-history qualifications, independent episodes, or decision-time Brain-consumption receipts.'}
 

@@ -192,3 +192,27 @@ support later reproducible evaluation; they do not establish a profitable edge.
 model abstentions and independent comparison availability. A successful forecast
 is not approval to trade. Existing stocks, execution gates, sizing, canonical
 trades/accounting, Brain memory and AEVE generations are unchanged.
+
+
+## Immutable research ledger capacity observability (draft)
+
+The optional Kraken-primary research writer stores original shadow forecasts
+and abstentions in `kraken_research_evidence`. The schema and writer enforce
+a fixed highest evidence ID of 5,000; that is a deliberate evidence-preserving
+capacity boundary, **not** automatic retention. Each five-minute
+`KRAKEN BRAIN RECEIPT` now includes a read-only `evidence_capacity`
+field, calculated from `MAX(id)` (not `COUNT(*)`, which could mistake
+missing slots for safe reuse). The report distinguishes normal,
+1,000-or-fewer remaining IDs, 250-or-fewer remaining IDs, and full capacity.
+Failed reads report unavailable without invalidating the already-committed
+Brain receipt. No deletion, ID recycling, schema migration, quota increase,
+forecast source promotion, risk changes or broker submission occurs.
+
+This is a warning mechanism only. The writer will still reject new evidence
+when the immutable 5,000-ID boundary is reached. A future archive/partition
+design requires actual production storage measurements, permanent evidence
+preservation, foreign-key/Brain consumption review, migration locks and
+mixed-worker rollback safety. Theoretical four symbols per five minutes
+would consume at most about 1,152 *new* IDs/day when each cycle produces
+a distinct accepted research item; this is a planning rate, not verified
+production throughput or free-storage capacity.
