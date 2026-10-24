@@ -8,8 +8,12 @@ from oracle_city_component import render_oracle_city_component
 
 def test_city_does_not_reset_camera_for_spurious_mobile_resizes():
     html = render_oracle_city_component({})
-    assert "const changedWidth=Math.abs(w-lastViewportWidth)>24" in html
-    assert "if(changedMode||(changedWidth&&mobile))" in html
+    resize = html.split("function resize(){", 1)[1].split("new ResizeObserver(resize)", 1)[0]
+    initial = resize.split("if(lastMobileView===null){", 1)[1]
+    initial, responsive = initial.split("}else if(lastMobileView!==mobile){", 1)
+    assert "fitBrainView();" in initial and "resetView();" in initial
+    assert "fitBrainView();" not in responsive and "resetView();" not in responsive
+    assert "camera.position" not in resize and "controls.target" not in resize
     assert "else if(mobile&&!brainMode)" not in html
     assert "controls.enableZoom=true" in html
 
