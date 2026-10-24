@@ -136,10 +136,34 @@ with st.expander("Paper fill reconciliation"):
         center.metric("Reconciled net P&L", _format_research_number(report.get('net_pnl'), 2, prefix="$"))
         right.metric("Cost-metric discrepancies", report.get("metric_discrepancies", 0))
         st.caption("Persisted paper prices and explicit fees. Missing observations remain unavailable. These totals do not certify a profitable model or premature exits.")
+        economics = report.get("economic_diagnosis") or {}
+        if economics:
+            st.write("**Post-cost economic diagnosis**")
+            st.caption(str(economics.get("status", "UNAVAILABLE")))
+            accounting = economics.get("accounting") or {}
+            gross, fees, net = st.columns(3)
+            gross.metric("Fill P&L before explicit fees", _format_research_number(accounting.get("gross_fill_price_pnl"), 2, prefix="$"))
+            fees.metric("Explicit paper fees", _format_research_number(accounting.get("explicit_fees"), 2, prefix="$"))
+            net.metric("Completed-lot net P&L", _format_research_number(accounting.get("net_pnl"), 2, prefix="$"))
+            st.caption("Only fully closed, accounting-qualified entry lots with original cohort evidence. Fill prices already include simulated spread/slippage. This report does not establish why an entry or exit failed.")
+            st.latex(r"\mathbb{E}[R_{net}] = p_w\,\overline{R}_w - p_l\,|\overline{R}_l|")
+            st.caption("Observed winning and losing frequencies, including flat outcomes in the denominator; not forecast probabilities or an order rule.")
+            st.json(economics)
+        else:
+            st.caption("Post-cost economic diagnosis has not been produced by the worker yet.")
+        frozen_research = report.get("winner_edge_research") or {}
+        if frozen_research:
+            st.write("**Frozen forward strategy test**")
+            st.caption("Compare the frozen selection with all observed completed entries, including avoided losses and rejected winners. Unexecuted opportunities are not inferred.")
+            st.json({"cutoff": frozen_research.get("cutoff"),
+                     "discovery_frozen": frozen_research.get("discovery_frozen"),
+                     "forward": frozen_research.get("forward"),
+                     "research_blocker": frozen_research.get("research_blocker"),
+                     "promotion_action": frozen_research.get("promotion_action")})
         if report.get("cohorts"):
             st.dataframe(pd.DataFrame(report["cohorts"]), width="stretch", hide_index=True)
         memory = report.get("winner_entry_memory") or {}
-        st.caption(f"Winner formula: {memory.get('winners', 0)} complete winning BUY lots and {memory.get('losers', 0)} losing lots with verified costs and original entry features.")
+        st.caption(f"Observed entry evidence: {memory.get('winners', 0)} complete winning BUY lots and {memory.get('losers', 0)} losing lots with verified costs and original entry features.")
         winners = [r for r in memory.get("records", []) if r.get("net_pnl", 0) > 0]
         if winners:
             st.json(winners)

@@ -245,6 +245,7 @@ def reconcile_fifo(fills: list[dict[str, Any]], metrics: dict[str, dict[str, Any
                        "strategy": row.get("strategy") or "unknown", "regime": metric.get("regime") or "unknown",
                        "exit_reason": row.get("order_id") or "unknown",
                        "net_pnl": float(net) if net is not None and complete else None,
+                       "gross_pnl": float(gross) if net is not None and complete else None,
                        "entry_fees": float(entry_fees), "exit_fees": float(exit_fee),
                        "gross_difference": float(gross_delta) if gross_delta is not None else None,
                        "exit_net_difference": float(exit_net_delta) if exit_net_delta is not None else None,
@@ -435,6 +436,9 @@ def emit_reconciliation(market: str) -> dict[str, Any]:
         from paper_winner_edge_research import verified_ledger_inputs, runtime_report
         winner_rows, winner_coverage = verified_ledger_inputs(
             [dict(r) for r in fills], [], as_of=as_of, fifo_report=report)
+        from paper_economic_diagnosis import diagnose_economics
+        report["economic_diagnosis"] = diagnose_economics(
+            winner_rows, market=market, as_of=as_of, coverage=winner_coverage)
         report["winner_edge_research"] = json_safe(runtime_report(
             winner_rows, as_of=as_of,
             previous=previous_report.get("winner_edge_research"), coverage=winner_coverage))
@@ -471,6 +475,8 @@ def emit_reconciliation(market: str) -> dict[str, Any]:
              report["sell_signal_losses"], report["metric_discrepancies"], json.dumps(report["diagnostics"], sort_keys=True))
     memory = report["winner_entry_memory"]
     edge = report["winner_edge_research"]
+    log.info("PAPER ECONOMIC DIAGNOSIS | market=%s | evidence=%s | execution_impact=NONE",
+             market, json.dumps(json_safe(report["economic_diagnosis"]), sort_keys=True))
     emit_winner_edge_diagnostics(market, edge)
     log.info("PAPER WINNER ENTRY MEMORY | market=%s | winners=%s | losers=%s | exclusions=%s",
              market, memory["winners"], memory["losers"], json.dumps(memory["exclusions"], sort_keys=True))

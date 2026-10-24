@@ -172,6 +172,17 @@ def discover(rows, *, cutoff, as_of):
             "limitations": "Observed completed trades only; unexecuted signals and continuous price paths are not measured. Four-hour/day windows are dependence proxies, not certified independent episodes. Requires separate chronological validation and risk review before promotion."}
 
 
+def _sum_cost_components(parts, field):
+    values = [_finite(part.get(field)) if not isinstance(part.get(field), bool) else None for part in parts]
+    if any(value is None for value in values):
+        return None
+    try:
+        value = math.fsum(values)
+        return value if math.isfinite(value) else None
+    except OverflowError:
+        return None
+
+
 def verified_ledger_inputs(ledger, fills, *, as_of, fifo_report=None, allocations=None):
     """Reconcile full history, then use BUY-side snapshots for entry labels only."""
     from paper_exit_research import attach_fill_fee_evidence, reconcile_fifo
@@ -226,6 +237,9 @@ def verified_ledger_inputs(ledger, fills, *, as_of, fifo_report=None, allocation
         close = {**parts[0], "trade_id": buy_id,
                  "exit_time": max(part["exit_time"] for part in parts),
                  "net_pnl": sum(part["net_pnl"] for part in parts),
+                 "entry_fees": _sum_cost_components(parts, "entry_fees"),
+                 "exit_fees": _sum_cost_components(parts, "exit_fees"),
+                 "gross_pnl": _sum_cost_components(parts, "gross_pnl"),
                  "members": [{**parts[0]["members"][0], "quantity": float(closed)}],
                  "sell_trade_ids": [part["trade_id"] for part in parts]}
         if not close["fifo_complete"]:
