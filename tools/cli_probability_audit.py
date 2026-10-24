@@ -60,9 +60,11 @@ def audit_database(
         raise ValueError("timeout_ms must be between 1000 and 30000")
     import psycopg
 
-    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    as_of = datetime.now(timezone.utc)
+    cutoff = as_of - timedelta(days=days)
     counts = {category: 0 for category in CATEGORIES}
     count = 0
+    sample_capped = False
     # Server-side named cursor avoids materializing the entire query result.
     # Timestamps are stored as TEXT in this schema. Casting to timestamptz
     # ensures correct UTC comparisons but fails closed on malformed dates.
@@ -80,13 +82,15 @@ def audit_database(
                     FROM forecasts
                     WHERE created_at IS NOT NULL
                       AND created_at::timestamptz >= %s
+                      AND created_at::timestamptz <= %s
                     ORDER BY id DESC
                     LIMIT %s
                     """,
-                    (cutoff, max_rows + 1),
+                    (cutoff, as_of, max_rows + 1),
                 )
                 for row in cursor:
                     if count >= max_rows:
+                        sample_capped = True
                         break
                     counts[classify_probability(row[0])] += 1
                     count += 1
@@ -95,10 +99,11 @@ def audit_database(
             conn.rollback()
     return {
         "window_days": days,
+        "as_of": as_of.isoformat(),
         "total_records_evaluated": count,
         "evidence_classification_summary": counts,
         "max_rows": max_rows,
-        "sample_capped": count >= max_rows,
+        "sample_capped": sample_capped,
         "decision_impact": "not evaluated; requires timestamp-aligned engine replay",
         "timestamp_parse_policy": "invalid text timestamps fail the query closed",
     }
