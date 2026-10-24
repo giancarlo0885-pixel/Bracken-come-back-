@@ -317,7 +317,7 @@ controls.minDistance=9;
 controls.maxDistance=88;
 controls.maxPolarAngle=Math.PI*.49;
 controls.minPolarAngle=.12;
-controls.enablePan=!isMobileDevice;
+controls.enablePan=true;
 
 const hemisphere=new THREE.HemisphereLight(0xbfe8ff,0x27331f,1.6);
 scene.add(hemisphere);
@@ -1060,17 +1060,16 @@ function setBrainControlMode(on){
   controls.touches.ONE=THREE.TOUCH.ROTATE;
 
   if(on){
-    // Brain mode keeps one immutable visual target. Users can orbit and pinch
-    // zoom around it, but cannot pan the anatomy away from screen center.
+    // Allow orbit, pinch zoom and two-finger pan on touchscreens in both views.
     clearOrbitMomentum();
-    controls.enablePan=false;
+    controls.enablePan=true;
     controls.minDistance=4.5;
     controls.maxDistance=52;
     controls.minPolarAngle=.01;
     controls.maxPolarAngle=Math.PI-.01;
-    controls.touches.TWO=THREE.TOUCH.DOLLY_ROTATE;
+    controls.touches.TWO=THREE.TOUCH.DOLLY_PAN;
   }else{
-    controls.enablePan=!isMobileDevice;
+    controls.enablePan=true;
     controls.minDistance=9;
     controls.maxDistance=88;
     controls.minPolarAngle=.12;
@@ -1193,23 +1192,29 @@ function showReplay(index){if(!replay.length){replayTitle.textContent="No replay
 timeline.oninput=function(){showReplay(Number(this.value));};
 play.onclick=function(){if(replayTimer){clearInterval(replayTimer);replayTimer=null;play.textContent="PLAY";play.classList.remove("active");return;}play.textContent="PAUSE";play.classList.add("active");replayTimer=setInterval(()=>{replayIndex=(replayIndex+1)%Math.max(1,replay.length);showReplay(replayIndex);},1600);};showReplay(replayIndex);
 
-let lastMobileView=null,lastViewportWidth=0;
+let lastMobileView=null;
 function resize(){
   const w=Math.max(1,app.clientWidth),h=Math.max(1,app.clientHeight);
   const mobile=mobileView();
-  const changedMode=lastMobileView===null||lastMobileView!==mobile;
-  // Ignore browser-toolbar/iframe reflows; these must not steal camera control.
-  const changedWidth=Math.abs(w-lastViewportWidth)>24;
   camera.aspect=w/h;
-  if(!brainMode)camera.fov=mobile?62:46;
+  if(brainMode){
+    camera.fov=mobile?56:46;
+  }else if(mobile){
+    camera.fov=62;
+  }else{
+    camera.fov=46;
+  }
   camera.updateProjectionMatrix();
   renderer.setSize(w,h,false);labelRenderer.setSize(w,h);
-  if(changedMode||(changedWidth&&mobile)){
+  if(lastMobileView===null){
+    lastMobileView=mobile;
     if(brainMode)fitBrainView();
     else resetView();
+  }else if(lastMobileView!==mobile){
+    lastMobileView=mobile;
+    // Preserve the active camera and target across responsive layout changes.
   }
-  lastMobileView=mobile;
-  lastViewportWidth=w;
+  // A resize must never discard a user-controlled camera pose.
 }
 new ResizeObserver(resize).observe(app);resize();
 

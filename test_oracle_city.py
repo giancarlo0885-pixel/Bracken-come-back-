@@ -674,3 +674,17 @@ def test_oracle_city_mobile_camera_fits_portrait_and_ignores_stale_saved_view():
     assert "camera.position.set(2.5,Math.max(36,distance*.65),distance)" in rendered
     assert "camera.fov=62" in rendered
     assert "camera.updateProjectionMatrix();" in rendered
+
+
+def test_city_and_brain_touch_navigation_preserves_user_camera():
+    rendered = render_oracle_city_component({"nodes": [], "flows": [], "replay": []})
+    assert "controls.enablePan=true;" in rendered
+    assert "controls.enablePan=false;" not in rendered
+    assert "controls.enablePan=!isMobileDevice;" not in rendered
+    assert "controls.touches.ONE=THREE.TOUCH.ROTATE;" in rendered
+    assert rendered.count("controls.touches.TWO=THREE.TOUCH.DOLLY_PAN;") == 2
+    assert "controls.touches.TWO=THREE.TOUCH.DOLLY_ROTATE;" not in rendered
+    resize = rendered.split("function resize(){", 1)[1].split("new ResizeObserver(resize)", 1)[0]
+    assert "fitBrainView();" in resize  # Initial view only
+    assert "else if(mobile&&!brainMode)" not in resize
+    assert "A resize must never discard a user-controlled camera pose." in resize
