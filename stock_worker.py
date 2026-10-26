@@ -1,5 +1,23 @@
 import logging
 import os
+import time
+
+
+def _cash_research_enabled() -> bool:
+    return os.getenv("ENABLE_CASH_MARKET_RESEARCH", "false").strip().lower() == "true"
+
+
+# This guard must execute BEFORE importing market_worker or its database/provider
+# dependencies. Railway restarts this service ALWAYS; exiting would cause a
+# crash/restart cycle instead of a low-resource standby.
+if __name__ == "__main__" and not _cash_research_enabled():
+    logging.basicConfig(level=logging.INFO)
+    logging.getLogger("stock-worker").info(
+        "ORACLE STOCK RESEARCH PAUSED | ENABLE_CASH_MARKET_RESEARCH=false | "
+        "execution_impact=NONE"
+    )
+    while True:
+        time.sleep(3600)
 
 import market_worker
 from capital_readiness_runtime import prepare_capital_readiness_runtime
