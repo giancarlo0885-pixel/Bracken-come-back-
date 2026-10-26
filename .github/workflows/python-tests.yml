@@ -131,3 +131,4 @@ jobs:
           test_provider_budget_marker_pg.py
           test_cli_probability_audit.py
           test_kraken_capacity_backpressure.py::test_postgres_capacity_blocks_requests_and_preserves_original_evidence
+          test_kraken_research_overflow.py

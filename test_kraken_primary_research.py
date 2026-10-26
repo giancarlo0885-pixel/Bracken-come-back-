@@ -274,7 +274,7 @@ def test_cycle_uses_labeled_coinbase_backup_without_touching_broker(monkeypatch)
     coinbase=Mock(return_value=q);monkeypatch.setattr(research,'coinbase_quote',coinbase)
     monkeypatch.setattr(forecasting,'forecast_price',prediction)
     persist=Mock(return_value=7);monkeypatch.setattr(research,'persist_evidence',persist)
-    conn=Mock();conn.execute.return_value.fetchone.return_value={'highest_id':0}
+    conn=Mock();conn.execute.return_value.fetchone.return_value={'highest_id':0,'overflow_present':False}
     runner=research.PrimaryResearch(connect_factory=Mock(),data=Mock())
     runner.cycle(conn)
     payload=json.loads(conn.execute.call_args.args[1][1])
@@ -303,7 +303,7 @@ def test_cycle_compares_coinbase_when_fresh_kraken_reference_exists(monkeypatch)
     backup_history=Mock();monkeypatch.setattr(research,'coinbase_history',backup_history)
     monkeypatch.setattr(forecasting,'forecast_price',prediction)
     persist=Mock(return_value=8);monkeypatch.setattr(research,'persist_evidence',persist)
-    conn=Mock();conn.execute.return_value.fetchone.return_value={'highest_id':0}
+    conn=Mock();conn.execute.return_value.fetchone.return_value={'highest_id':0,'overflow_present':False}
     client=Mock();client.history.return_value=history()
     runner=research.PrimaryResearch(connect_factory=Mock(),data=client)
     runner.cycle(conn)

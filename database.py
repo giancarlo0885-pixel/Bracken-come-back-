@@ -95,6 +95,7 @@ ENTRY_EVIDENCE_RETENTION_LOCK = 73420261605
 CANONICAL_PROTECTED_TABLES = {
     "paper_fill_price_evidence",
     "kraken_research_evidence",
+    "kraken_research_evidence_overflow",
     "portfolios",
     "positions",
     "trades",
