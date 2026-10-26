@@ -42,6 +42,11 @@ if os.getenv("EXECUTION_MODE", "paper").strip().lower() == "paper":
 # Keep this entrypoint in the stock-worker deploy watch set when paper-learning
 # runtime policy changes. Production source-sync marker: current main, 2026-09-03.
 if __name__ == "__main__":
+    # Crypto-only deployments should not poll stock providers or start cash scans.
+    # This does not delete cash evidence, change crypto execution, or affect Brain.
+    if os.getenv("ENABLE_CASH_MARKET_RESEARCH", "false").strip().lower() != "true":
+        logger.info("ORACLE STOCK RESEARCH PAUSED | ENABLE_CASH_MARKET_RESEARCH=false | execution_impact=NONE")
+        raise SystemExit(0)
     logger.info("ORACLE STOCK SOURCE SYNC | current-main deployment active")
     prepare_capital_readiness_runtime(market_worker, "cash")
     from paper_trade_evidence_audit import emit_trade_evidence_audit
