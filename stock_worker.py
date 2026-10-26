@@ -1,5 +1,23 @@
 import logging
 import os
+import time
+
+
+def _cash_research_enabled() -> bool:
+    return os.getenv("ENABLE_CASH_MARKET_RESEARCH", "false").strip().lower() == "true"
+
+
+# This guard must execute BEFORE importing market_worker or its database/provider
+# dependencies. Railway restarts this service ALWAYS; exiting would cause a
+# crash/restart cycle instead of a low-resource standby.
+if __name__ == "__main__" and not _cash_research_enabled():
+    logging.basicConfig(level=logging.INFO)
+    logging.getLogger("stock-worker").info(
+        "ORACLE STOCK RESEARCH PAUSED | ENABLE_CASH_MARKET_RESEARCH=false | "
+        "execution_impact=NONE"
+    )
+    while True:
+        time.sleep(3600)
 
 import market_worker
 from capital_readiness_runtime import prepare_capital_readiness_runtime
@@ -42,11 +60,6 @@ if os.getenv("EXECUTION_MODE", "paper").strip().lower() == "paper":
 # Keep this entrypoint in the stock-worker deploy watch set when paper-learning
 # runtime policy changes. Production source-sync marker: current main, 2026-09-03.
 if __name__ == "__main__":
-    # Crypto-only deployments should not poll stock providers or start cash scans.
-    # This does not delete cash evidence, change crypto execution, or affect Brain.
-    if os.getenv("ENABLE_CASH_MARKET_RESEARCH", "false").strip().lower() != "true":
-        logger.info("ORACLE STOCK RESEARCH PAUSED | ENABLE_CASH_MARKET_RESEARCH=false | execution_impact=NONE")
-        raise SystemExit(0)
     logger.info("ORACLE STOCK SOURCE SYNC | current-main deployment active")
     prepare_capital_readiness_runtime(market_worker, "cash")
     from paper_trade_evidence_audit import emit_trade_evidence_audit
