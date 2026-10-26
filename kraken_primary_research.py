@@ -84,15 +84,20 @@ def persist_evidence(conn, result, history):
     model_version=(result.get('forecast') or result.get('model_identity') or {})['model_version']
     key = '|'.join([result['symbol'],result['history_provider'],result['history_last_closed_bar'],model_version])
     if result['status']=='ABSTAINED':key+='|ABSTAINED|'+result['reason']
-    existing = conn.execute('SELECT id FROM kraken_research_evidence WHERE evidence_key=%s',(key,)).fetchone()
+    from kraken_research_store import evidence_layout, evidence_sql, LEGACY_TABLE, OVERFLOW_TABLE, LEGACY_LIMIT
+    layout = evidence_layout(conn)
+    source = evidence_sql(layout, 'id,evidence_key')
+    existing = conn.execute(f'SELECT id FROM ({source}) e WHERE evidence_key=%s',(key,)).fetchone()
     if existing:
         raise ResearchUnavailable('BAR_ALREADY_RECORDED')
     compressed = zlib.compress(history.to_csv().encode())
     if len(compressed) > 131072:
         raise ResearchUnavailable('EVIDENCE_TOO_LARGE')
-    row = conn.execute("""INSERT INTO kraken_research_evidence
-        SELECT COALESCE(MAX(id),0)+1,%s,%s,%s::jsonb,%s FROM kraken_research_evidence
-        HAVING COALESCE(MAX(id),0)<5000 ON CONFLICT(evidence_key) DO NOTHING RETURNING id""",
+    highest = conn.execute(f'SELECT COALESCE(MAX(id),0) AS highest_id FROM ({source}) e').fetchone()['highest_id']
+    target = OVERFLOW_TABLE if highest >= LEGACY_LIMIT and OVERFLOW_TABLE in layout['tables'] else LEGACY_TABLE
+    row = conn.execute(f"""INSERT INTO {target}
+        SELECT COALESCE(MAX(id),0)+1,%s,%s,%s::jsonb,%s FROM ({source}) e
+        HAVING COALESCE(MAX(id),0)<{layout['max_id']} ON CONFLICT(evidence_key) DO NOTHING RETURNING id""",
         (key,datetime.now(timezone.utc),json.dumps(result,allow_nan=False),compressed)).fetchone()
     if not row:
         raise ResearchUnavailable('EVIDENCE_CAPACITY_REACHED')
@@ -242,6 +247,8 @@ class PrimaryResearch:
                     conn.execute("SET statement_timeout='3s'")
                     conn.execute(DDL)
                     conn.execute(EVIDENCE_DDL)
+                    from kraken_research_store import ensure_overflow_schema
+                    ensure_overflow_schema(conn)
                     self.stop.wait(10)  # Allow the elected feed to obtain its initial snapshots.
                     while not self.stop.is_set() and enabled():
                         self.cycle(conn)

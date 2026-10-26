@@ -27,6 +27,8 @@ class Reader:
 
     def execute(self, sql):
         self.queries.append(sql)
+        if "overflow_present" in sql:
+            return Result({"overflow_present":False})
         if "MAX(id)" in sql:
             if self.fail:
                 raise RuntimeError("connection details must not be logged")
@@ -57,11 +59,10 @@ def test_immutable_evidence_id_headroom(highest, status, remaining):
         "status": status, "highest_id": highest, "max_id": RESEARCH_EVIDENCE_MAX_ID,
         "remaining_id_slots": remaining, "execution_impact": "NONE",
     }
-    assert len(conn.queries) == 1
-    assert conn.queries[0].strip().startswith("SELECT")
-    assert "MAX(id)" in conn.queries[0]
-    assert "DELETE" not in conn.queries[0]
-    assert "UPDATE" not in conn.queries[0]
+    assert len(conn.queries) == 2
+    assert all(query.strip().startswith("SELECT") for query in conn.queries)
+    assert "MAX(id)" in conn.queries[1]
+    assert all("DELETE" not in query and "UPDATE" not in query for query in conn.queries)
 
 
 @pytest.mark.parametrize("value", [None, -1, 5001, 0.1, "123", True])
@@ -90,5 +91,5 @@ def test_current_brain_receipt_includes_capacity_without_trade_promotion():
     assert receipt["trade_outcomes"] == "NOT_INFERRED"
     assert receipt["profitability"] == "NOT_EVALUATED"
     assert receipt["execution_impact"] == "NONE"
-    assert len(conn.queries) == 4
+    assert len(conn.queries) == 7
     assert all(sql.strip().startswith("SELECT") for sql in conn.queries)

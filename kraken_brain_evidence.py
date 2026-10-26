@@ -19,9 +19,15 @@ def research_source(row):
             raise ValueError('invalid forecast identity')
     elif forecast is not None or not p.get('reason'):
         raise ValueError('invalid abstention receipt')
+    from kraken_research_store import LEGACY_TABLE, OVERFLOW_TABLE, LEGACY_LIMIT, OVERFLOW_LIMIT
+    table = row.get('source_table',LEGACY_TABLE)
+    if (type(row.get('id')) is not int or
+            not ((table == LEGACY_TABLE and 1 <= row['id'] <= LEGACY_LIMIT)
+                 or (table == OVERFLOW_TABLE and LEGACY_LIMIT < row['id'] <= OVERFLOW_LIMIT))):
+        raise ValueError('invalid research storage identity')
     return {'key':'kraken-research:'+str(row['id']),'provider':q['provider'],'symbol':p['symbol'],
         'title':p['symbol']+' '+p['status'],'observed_at':observed,
-        'metadata':{'evidence_id':row['id'],'source_table':'kraken_research_evidence','market':'crypto',
+        'metadata':{'evidence_id':row['id'],'source_table':table,'market':'crypto',
             'evidence':p,'context_only':True,'ranking_eligible':False,'trade_outcome':False,'delivery':'IMMUTABLE_RESEARCH_DECISION','current_quote':False,
             'execution_authority':'NONE','broker_submission':'NONE'}}
 
@@ -30,7 +36,9 @@ def sync_research_sources(conn,limit=250):
     if not 1<=limit<=500:raise ValueError('invalid batch size')
     if not conn.execute("SELECT to_regclass('kraken_research_evidence') AS relation").fetchone()['relation']:
         return {'status':'UNAVAILABLE','inserted':0,'skipped':0,'execution_impact':'NONE'}
-    records=conn.execute('''SELECT e.id,e.observed_at,e.payload FROM kraken_research_evidence e
+    from kraken_research_store import evidence_layout, evidence_sql
+    source = evidence_sql(evidence_layout(conn),'id,observed_at,payload')
+    records=conn.execute(f'''SELECT e.id,e.observed_at,e.payload,e.source_table FROM ({source}) e
         WHERE NOT EXISTS(SELECT 1 FROM oracle_brain_sources s WHERE s.source_key='kraken-research:'||e.id::text)
         ORDER BY e.id LIMIT %s''',(limit,)).fetchall()
     inserted=skipped=0
@@ -43,7 +51,7 @@ def sync_research_sources(conn,limit=250):
             VALUES(%s,'crypto_research_decision',%s,'market_research',%s,%s,
                 'Original research decision; not a trade or execution approval.',%s,%s,0.5,1,0,'active',%s::jsonb,'NONE')
             ON CONFLICT(source_key) DO NOTHING RETURNING source_key''',
-            (s['key'],s['provider'],s['symbol'],s['title'],'kraken_research_evidence:'+str(row['id']),
+            (s['key'],s['provider'],s['symbol'],s['title'],s['metadata']['source_table']+':'+str(row['id']),
              s['observed_at'],json.dumps(s['metadata'],allow_nan=False,default=str))).fetchone()
         inserted+=receipt is not None
     result={'status':'SYNCED','inserted':inserted,'skipped':skipped,'execution_impact':'NONE'}
@@ -60,15 +68,16 @@ RESEARCH_EVIDENCE_MAX_ID = 5000
 def read_evidence_capacity(conn):
     """Observe immutable evidence ID occupancy, never count holes as free slots."""
     try:
-        value = conn.execute(
-            'SELECT COALESCE(MAX(id),0) AS highest_id FROM kraken_research_evidence'
-        ).fetchone()
+        from kraken_research_store import evidence_layout, evidence_sql
+        layout = evidence_layout(conn)
+        source = evidence_sql(layout,'id')
+        value = conn.execute(f'SELECT COALESCE(MAX(id),0) AS highest_id FROM ({source}) e').fetchone()
         highest_id = value['highest_id']
         if (type(highest_id) is not int or highest_id < 0
-                or highest_id > RESEARCH_EVIDENCE_MAX_ID):
+                or highest_id > layout['max_id']):
             return {'status':'UNAVAILABLE','reason':'INVALID_HIGHEST_ID',
                     'execution_impact':'NONE'}
-        remaining = RESEARCH_EVIDENCE_MAX_ID - highest_id
+        remaining = layout['max_id'] - highest_id
         if remaining == 0:
             status = 'CAPACITY_REACHED'
         elif remaining <= 250:
@@ -78,7 +87,7 @@ def read_evidence_capacity(conn):
         else:
             status = 'CAPACITY_NORMAL'
         return {'status':status,'highest_id':highest_id,
-                'max_id':RESEARCH_EVIDENCE_MAX_ID,'remaining_id_slots':remaining,
+                'max_id':layout['max_id'],'remaining_id_slots':remaining,
                 'execution_impact':'NONE'}
     except Exception as exc:
         return {'status':'UNAVAILABLE','reason_class':type(exc).__name__,
@@ -87,15 +96,17 @@ def read_evidence_capacity(conn):
 
 def committed_receipt(conn):
     """Read committed rows after the caller's ingestion transaction has exited."""
-    count=conn.execute('''SELECT COUNT(*) AS matched FROM oracle_brain_sources s
-        JOIN kraken_research_evidence e ON s.source_key='kraken-research:'||e.id::text
-        WHERE s.metadata->'evidence'=e.payload AND s.execution_impact='NONE'
+    from kraken_research_store import evidence_layout, evidence_sql, read_storage_footprint
+    source = evidence_sql(evidence_layout(conn),'id,payload')
+    count=conn.execute(f'''SELECT COUNT(*) AS matched FROM oracle_brain_sources s
+        JOIN ({source}) e ON s.source_key='kraken-research:'||e.id::text
+        WHERE s.metadata->'evidence'=e.payload AND s.metadata->>'source_table'=e.source_table AND s.metadata->>'evidence_id'=e.id::text AND s.source_ref=e.source_table||':'||e.id::text AND s.execution_impact='NONE'
         AND s.metadata->>'execution_authority'='NONE' ''').fetchone()['matched']
-    sample=conn.execute('''SELECT e.id,e.payload->>'symbol' AS symbol,e.payload->>'status' AS decision,
+    sample=conn.execute(f'''SELECT e.id,e.payload->>'symbol' AS symbol,e.payload->>'status' AS decision,
         e.payload->'forecast'->>'forecast_id' AS forecast_id FROM oracle_brain_sources s
-        JOIN kraken_research_evidence e ON s.source_key='kraken-research:'||e.id::text
-        WHERE s.metadata->'evidence'=e.payload ORDER BY e.id DESC LIMIT 10''').fetchall()
-    expected=conn.execute('SELECT COUNT(*) AS n FROM kraken_research_evidence').fetchone()['n']
+        JOIN ({source}) e ON s.source_key='kraken-research:'||e.id::text
+        WHERE s.metadata->'evidence'=e.payload AND s.metadata->>'source_table'=e.source_table AND s.metadata->>'evidence_id'=e.id::text AND s.source_ref=e.source_table||':'||e.id::text AND s.execution_impact='NONE' AND s.metadata->>'execution_authority'='NONE' ORDER BY e.id DESC LIMIT 10''').fetchall()
+    expected=conn.execute(f'SELECT COUNT(*) AS n FROM ({source}) e').fetchone()['n']
     return {'expected':expected,'matched':count,'unmatched':expected-count,'sample':[dict(r) for r in sample],
-        'evidence_capacity':read_evidence_capacity(conn),'execution_impact':'NONE',
+        'evidence_capacity':read_evidence_capacity(conn),'storage_footprint':read_storage_footprint(conn),'execution_impact':'NONE',
         'trade_outcomes':'NOT_INFERRED','profitability':'NOT_EVALUATED'}

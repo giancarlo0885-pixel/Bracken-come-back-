@@ -18,6 +18,8 @@ class Connection:
 
     def execute(self, sql, params=()):
         self.queries.append(sql)
+        if 'overflow_present' in sql:
+            return Mock(fetchone=lambda: {'overflow_present':False})
         if 'MAX(id)' in sql:
             if isinstance(self.highest, Exception):
                 raise self.highest
