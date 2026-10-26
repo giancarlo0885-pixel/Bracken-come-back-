@@ -154,9 +154,18 @@ class PrimaryResearch:
 
     def cycle(self, conn):
         from kraken_reference_runtime import read_kraken_reference_state
+        from kraken_brain_evidence import read_evidence_capacity
+        capacity = read_evidence_capacity(conn)
+        capacity_status = capacity.get('status')
+        blocked = ('EVIDENCE_CAPACITY_REACHED' if capacity_status == 'CAPACITY_REACHED'
+                   else None if capacity_status in {'CAPACITY_NORMAL','CAPACITY_WARNING','CAPACITY_CRITICAL'}
+                   else 'EVIDENCE_CAPACITY_UNAVAILABLE')
         state = read_kraken_reference_state()
         results = {}
         for symbol in list(state.get('subscribed_symbols') or state.get('quotes',{}))[:4]:
+            if blocked:
+                results[symbol] = {'status':'UNAVAILABLE','reason':blocked,'execution_authority':'NONE'}
+                continue
             try:
                 if symbol in state.get('quotes',{}):
                     history = self.data.history(symbol, datetime.now(timezone.utc))
@@ -181,11 +190,26 @@ class PrimaryResearch:
 
                 result['evidence_id'] = persist_evidence(conn, result, history)
                 results[symbol] = result
+                evidence_id = result['evidence_id']
+                if type(evidence_id) is int:
+                    # The existing elected writer serializes slot allocation.
+                    # Stop within this batch when the last durable slot is used.
+                    remaining = max(0, capacity['max_id'] - evidence_id)
+                    capacity = {**capacity, 'highest_id':evidence_id,
+                                'remaining_id_slots':remaining}
+                    if remaining == 0:
+                        blocked = 'EVIDENCE_CAPACITY_REACHED'
+                        capacity['status'] = 'CAPACITY_REACHED'
+                    elif remaining <= 250:
+                        capacity['status'] = 'CAPACITY_CRITICAL'
+                    elif remaining <= 1000:
+                        capacity['status'] = 'CAPACITY_WARNING'
             except Exception as exc:
                 results[symbol] = {'status':'UNAVAILABLE', 'reason':str(exc) if isinstance(exc,ResearchUnavailable) else type(exc).__name__,
                                    'execution_authority':'NONE'}
         now = datetime.now(timezone.utc)
-        payload = {'status':'ACTIVE' if results else 'PRIMARY_UNAVAILABLE', 'primary_policy':'KRAKEN_THEN_COINBASE_RESEARCH_ONLY',
+        payload = {'status':blocked or ('ACTIVE' if results else 'PRIMARY_UNAVAILABLE'),
+                   'evidence_capacity':capacity, 'primary_policy':'KRAKEN_THEN_COINBASE_RESEARCH_ONLY',
                    'symbols':results,'observed_at':now.isoformat(), 'execution_authority':'NONE',
                    'broker_submission':'NONE','profitability_status':'UNPROVEN'}
         conn.execute('''INSERT INTO kraken_research_state VALUES(1,%s,%s::jsonb)
