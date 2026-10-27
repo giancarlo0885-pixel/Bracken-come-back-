@@ -134,6 +134,27 @@ class PaperPricing:
         self._health_attempt_signature = None
         self._health_attempt_monotonic = float('-inf')
 
+    def _expire_stale_health(self):
+        """Never publish an old successful quote as currently valid.
+
+        This only changes diagnostic status. Actual fill eligibility still
+        depends on the original immutable receipt and authentic() checks.
+        """
+        now = self.clock()
+        for record in self.last_health.values():
+            if record.get('status') != 'VALID_PAPER_PRICE':
+                continue
+            try:
+                age = (now - timestamp(record['quote_timestamp'])).total_seconds()
+                expired = age > 5 or age < -2
+                reason = 'QUOTE_TTL_EXPIRED'
+            except (KeyError, TypeError, ValueError, OverflowError):
+                expired = True
+                reason = 'INVALID_QUOTE_TIMESTAMP'
+            if expired:
+                record.update(status='STALE_PAPER_PRICE', reason=reason,
+                              execution_authority='NONE')
+
     def _health_signature(self):
         return tuple(sorted(
             (symbol, record.get('status'), record.get('reason'))
@@ -160,6 +181,7 @@ class PaperPricing:
         return True
 
     def _publish_health(self):
+        self._expire_stale_health()
         if not self._health_publication_due():
             return
         signature = self._health_signature()
