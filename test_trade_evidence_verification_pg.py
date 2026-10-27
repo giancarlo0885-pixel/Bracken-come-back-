@@ -244,6 +244,34 @@ def test_postgres_default_selection_is_bounded_and_includes_orphan_evaluations(c
         assert row["brain_status"] != "MATERIALIZED_EXACT"
 
 
+def test_postgres_recent_aeve_sample_preserves_latest_distinct_observed_order(committed_evidence_db):
+    import psycopg
+    from psycopg.rows import dict_row
+    from trade_evidence_verification import verify_committed_trade_evidence
+
+    dsn, options = committed_evidence_db
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    with psycopg.connect(dsn, options=options, row_factory=dict_row) as writer:
+        writer.executemany("""INSERT INTO paper_aeve_generation_outcomes (
+            generation,trade_id,net_pnl,observed_at) VALUES (3,%s,-0.2,%s)""",
+            [(f"recent-orphan-{index:04d}", start + timedelta(minutes=index))
+             for index in range(540)])
+        # A late insert with an old observation must not displace a newer
+        # observation when the bounded candidate window is ranked.
+        writer.execute("""INSERT INTO paper_aeve_generation_outcomes (
+            generation,trade_id,net_pnl,observed_at) VALUES (3,%s,-0.2,%s)""",
+            ("late-backfill", start - timedelta(days=1)))
+        writer.commit()
+
+    report = verify_committed_trade_evidence(connect_factory=_reader_factory(dsn, options, []))
+    expected = {f"recent-orphan-{index:04d}" for index in range(530, 540)}
+    records = {row["trade_id"]: row for row in report["records"]}
+    assert set(records) == expected
+    assert all(row["ledger_status"] == "MISSING" for row in records.values())
+    assert all(row["aeve_committed_count"] == 1 for row in records.values())
+    assert report["transaction_read_only"] is True
+
+
 def test_postgres_missing_optional_learning_tables_are_unavailable_not_missing(committed_evidence_db):
     import psycopg
     from psycopg.rows import dict_row
