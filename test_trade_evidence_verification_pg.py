@@ -252,10 +252,11 @@ def test_postgres_recent_aeve_sample_preserves_latest_distinct_observed_order(co
     dsn, options = committed_evidence_db
     start = datetime(2026, 1, 1, tzinfo=timezone.utc)
     with psycopg.connect(dsn, options=options, row_factory=dict_row) as writer:
-        writer.executemany("""INSERT INTO paper_aeve_generation_outcomes (
-            generation,trade_id,net_pnl,observed_at) VALUES (3,%s,-0.2,%s)""",
-            [(f"recent-orphan-{index:04d}", start + timedelta(minutes=index))
-             for index in range(540)])
+        with writer.cursor() as cursor:
+            cursor.executemany("""INSERT INTO paper_aeve_generation_outcomes (
+                generation,trade_id,net_pnl,observed_at) VALUES (3,%s,-0.2,%s)""",
+                [(f"recent-orphan-{index:04d}", start + timedelta(minutes=index))
+                 for index in range(540)])
         # A late insert with an old observation must not displace a newer
         # observation when the bounded candidate window is ranked.
         writer.execute("""INSERT INTO paper_aeve_generation_outcomes (
