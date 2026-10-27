@@ -291,6 +291,28 @@ class _ReadSnapshot:
         raise AssertionError(f"unexpected SQL: {normalized}")
 
 
+def test_default_aeve_selection_bounds_primary_key_scan_before_aggregation():
+    class BoundedRecentSnapshot(_ReadSnapshot):
+        def execute(self, sql, params=()):
+            normalized = " ".join(sql.split())
+            if normalized.startswith("SELECT trade_id FROM trade_ledger") and "ORDER BY id DESC LIMIT 2" in normalized:
+                self.statements.append((sql, params))
+                return _Cursor([])
+            if "AS recent_aeve" in normalized:
+                self.statements.append((sql, params))
+                assert "ORDER BY id DESC LIMIT %s" in normalized
+                assert normalized.index("ORDER BY id DESC LIMIT %s") < normalized.index("GROUP BY trade_id")
+                assert params == (verification.AEVE_RECENT_SCAN_LIMIT,)
+                return _Cursor([{"trade_id": TRADE_ID}])
+            return super().execute(sql, params)
+
+    conn = BoundedRecentSnapshot()
+    report = verification.verify_committed_trade_evidence(connect_factory=lambda: conn)
+    assert report["status"] == "ok"
+    assert [record["trade_id"] for record in report["records"]] == [TRADE_ID]
+    assert conn.exited is True
+
+
 def test_independent_read_only_snapshot_emits_exact_receipts_after_transaction_exit():
     conn = _ReadSnapshot()
     result = verification.verify_committed_trade_evidence([TRADE_ID], connect_factory=lambda: conn)
