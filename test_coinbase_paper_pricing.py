@@ -276,3 +276,43 @@ def test_product_coverage_and_market_status_are_not_invented(monkeypatch,change)
     p=provider(monkeypatch)
     product=p.data.request('Coinbase Public Research','products/BTC-USD')
     with pytest.raises(ValueError):pricing.validate_product('BTC-USD',{**product,**change})
+
+
+def test_paper_pricing_health_expires_without_renewing_quote_identity(monkeypatch):
+    p = provider(monkeypatch)
+    quote = p.quote('BTC-USD')
+    assert quote is not None
+    assert p.last_health['BTC-USD']['status'] == 'VALID_PAPER_PRICE'
+    original_timestamp = p.last_health['BTC-USD']['quote_timestamp']
+    original_quote_id = p.last_health['BTC-USD']['quote_id']
+
+    # No refresh from Coinbase: a past successful health record must not
+    # masquerade as current when another symbol publishes diagnostics.
+    p.clock = lambda: NOW + timedelta(seconds=4)
+    p._publish_health()
+    assert p.last_health['BTC-USD']['status'] == 'VALID_PAPER_PRICE'
+
+    p.clock = lambda: NOW + timedelta(seconds=6)
+    p._publish_health()
+    health = p.last_health['BTC-USD']
+    assert health['status'] == 'STALE_PAPER_PRICE'
+    assert health['reason'] == 'QUOTE_TTL_EXPIRED'
+    assert health['execution_authority'] == 'NONE'
+    assert health['quote_timestamp'] == original_timestamp
+    assert health['quote_id'] == original_quote_id
+    assert not p.authentic(quote, 'BTC-USD')
+
+
+def test_paper_pricing_health_invalid_timestamp_fails_closed(monkeypatch):
+    p = provider(monkeypatch)
+    p.last_health['BTC-USD'] = {
+        'status': 'VALID_PAPER_PRICE',
+        'quote_timestamp': 'not-an-exchange-time',
+        'quote_id': 'original',
+        'execution_authority': 'PAPER_SIMULATION_ONLY',
+    }
+    p._publish_health()
+    assert p.last_health['BTC-USD']['status'] == 'STALE_PAPER_PRICE'
+    assert p.last_health['BTC-USD']['reason'] == 'INVALID_QUOTE_TIMESTAMP'
+    assert p.last_health['BTC-USD']['execution_authority'] == 'NONE'
+    p.data.request.assert_not_called()
