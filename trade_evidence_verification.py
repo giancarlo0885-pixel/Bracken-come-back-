@@ -15,6 +15,9 @@ from typing import Any
 
 log = logging.getLogger(__name__)
 MAX_TRADE_IDS = 12
+# Read-only diagnostics sample the latest inserts through the existing id primary key.
+# This is not an exhaustive orphan-history audit; never infer older IDs are absent.
+AEVE_RECENT_SCAN_LIMIT = 512
 MAX_INVENTORY_GROUPS = 64
 
 
@@ -292,8 +295,16 @@ def verify_committed_trade_evidence(trade_ids=None, market: str = "crypto", *, c
                 ORDER BY id DESC LIMIT 2""", (market,)).fetchall()
             # AEVE currently evaluates crypto only; its rows lack a market field.
             # Include orphan IDs so a missing canonical row stays detectable.
-            evaluated = conn.execute("""SELECT trade_id FROM paper_aeve_generation_outcomes
-                GROUP BY trade_id ORDER BY MAX(observed_at) DESC,trade_id LIMIT 10""").fetchall() if available["aeve"] and market == "crypto" else []
+            # Global GROUP BY / MAX(observed_at) scans the entire outcomes table and
+            # timed out in production (2026-10-27). Bound the input first using
+            # the existing id primary-key index; rank distinct IDs only within
+            # that explicit recent-insert sample. No historical rows are changed.
+            evaluated = conn.execute("""SELECT trade_id FROM (
+                    SELECT trade_id, observed_at FROM paper_aeve_generation_outcomes
+                    ORDER BY id DESC LIMIT %s
+                ) AS recent_aeve
+                GROUP BY trade_id ORDER BY MAX(observed_at) DESC,trade_id LIMIT 10""",
+                (AEVE_RECENT_SCAN_LIMIT,)).fetchall() if available["aeve"] and market == "crypto" else []
             requested = _ids([row["trade_id"] for row in recent + evaluated])
         rows = {"ledger": list(conn.execute("""SELECT * FROM trade_ledger
             WHERE trade_id=ANY(%s)""", (requested,)).fetchall()), "metrics": [], "brain": [], "aeve": []}
