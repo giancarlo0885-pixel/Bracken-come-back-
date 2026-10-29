@@ -21,7 +21,7 @@ log = logging.getLogger("paper-aeve-generation-controller")
 _THREAD: threading.Thread | None = None
 _STOP = threading.Event()
 BATCH_SIZE = 1000
-PROVENANCE_VERSION = 8
+PROVENANCE_VERSION = 9
 _REQUIRED_RESEARCH_RELATIONS = ("paper_aeve_generation_outcomes",)
 
 
@@ -264,7 +264,7 @@ def ensure_schema() -> None:
         conn.execute(
             """INSERT INTO paper_aeve_provenance_epochs(
                    provenance_version,input_schema,cost_semantics
-               ) VALUES (%s,'dip_depth_rebound_net_edge_entry_cost_crypto_v8','pre_entry_estimate_scoring_exact_lot_outcomes_crypto_only')
+               ) VALUES (%s,'dip_depth_rebound_net_edge_entry_cost_crypto_v9','pre_entry_estimate_scoring_exact_lot_outcomes_crypto_only')
                ON CONFLICT (provenance_version) DO NOTHING""",
             (PROVENANCE_VERSION,),
         )
@@ -355,6 +355,7 @@ def record_generation_outcomes(limit: int = 250) -> int:
         return 0
     from database import connect
     from paper_aeve_v1_formula import score_entry
+    from paper_regime_economics_shadow import _ENTRY_READY_VERSION
 
     created = 0
     with connect() as conn:
@@ -370,7 +371,7 @@ def record_generation_outcomes(limit: int = 250) -> int:
         if provenance_started_at is None:
             return 0
         log.info(
-            "AEVE EVALUATOR HANDSHAKE | generation=%s | config_hash=%s | provenance_version=%s | input_schema=dip_depth_rebound_net_edge_entry_cost_crypto_v8 | market=crypto | config=%s | mode=shadow | execution_impact=NONE | broker_submission=NONE | live_trading=DISARMED",
+            "AEVE EVALUATOR HANDSHAKE | generation=%s | config_hash=%s | provenance_version=%s | input_schema=dip_depth_rebound_net_edge_entry_cost_crypto_v9 | prior_evidence=ORIGINAL_QUOTE_COST_METRICS_BEFORE_ENTRY | market=crypto | config=%s | mode=shadow | execution_impact=NONE | broker_submission=NONE | live_trading=DISARMED",
             active_cfg.generation,
             active_generation_row.get("config_hash"),
             PROVENANCE_VERSION,
@@ -395,6 +396,7 @@ def record_generation_outcomes(limit: int = 250) -> int:
             WHERE m.market='crypto' AND m.strategy='oracle_council_v3'
               AND m.entry_time IS NOT NULL AND m.exit_time IS NOT NULL
               AND m.entry_time >= %s
+              AND m.schema_version=%s
               AND m.cost_provenance='exact_lot'
               AND m.round_trip_net_pnl IS NOT NULL
               AND m.round_trip_fees IS NOT NULL
@@ -404,7 +406,7 @@ def record_generation_outcomes(limit: int = 250) -> int:
                     AND o.trade_id=m.trade_id
               )
             ORDER BY m.exit_time ASC LIMIT %s
-        """, (provenance_started_at, max(1, int(limit)))).fetchall())
+        """, (provenance_started_at, _ENTRY_READY_VERSION, max(1, int(limit)))).fetchall())
 
         for row in rows:
             generation_row = {
@@ -426,7 +428,8 @@ def record_generation_outcomes(limit: int = 250) -> int:
                 FROM paper_regime_trade_metrics
                 WHERE market='crypto' AND strategy='oracle_council_v3' AND regime=%s AND exit_time < %s
                   AND cost_provenance='exact_lot' AND round_trip_net_pnl IS NOT NULL
-            """, (row.get("regime"), entry_time)).fetchone() or {}
+                  AND created_at < %s AND schema_version=%s
+            """, (row.get("regime"), entry_time, entry_time, _ENTRY_READY_VERSION)).fetchone() or {}
             samples = int(prior.get("samples") or 0)
             # Reconstruct the consecutive Council loss streak strictly as of the
             # candidate entry. Rows closing at/after entry_time are excluded so
@@ -436,9 +439,10 @@ def record_generation_outcomes(limit: int = 250) -> int:
                 FROM paper_regime_trade_metrics
                 WHERE market='crypto' AND strategy='oracle_council_v3' AND exit_time < %s
                   AND cost_provenance='exact_lot' AND round_trip_net_pnl IS NOT NULL
+                  AND created_at < %s AND schema_version=%s
                 ORDER BY exit_time DESC
                 LIMIT %s
-            """, (entry_time, max(1, int(cfg.max_loss_streak) + 1))).fetchall())
+            """, (entry_time, entry_time, _ENTRY_READY_VERSION, max(1, int(cfg.max_loss_streak) + 1))).fetchall())
             loss_streak = 0
             for prior_result in prior_results:
                 if _f(prior_result.get("net_pnl")) < 0:
@@ -492,7 +496,7 @@ def record_generation_outcomes(limit: int = 250) -> int:
                 entry_evidence_complete,entry_time if valid_entry_time else None,
             ))
             log.info(
-                "AEVE SHADOW RESULT | trade_id=%s | generation=%s | config_hash=%s | provenance_version=%s | would_trade=%s | score=%.6f | input_schema=dip_depth_rebound_net_edge_entry_cost_crypto_v8 | dip_depth_pct=%s | rebound_from_low_pct=%s | entry_evidence_complete=%s | market=crypto | mode=shadow | execution_impact=NONE | broker_submission=NONE | live_trading=DISARMED",
+                "AEVE SHADOW RESULT | trade_id=%s | generation=%s | config_hash=%s | provenance_version=%s | would_trade=%s | score=%.6f | input_schema=dip_depth_rebound_net_edge_entry_cost_crypto_v9 | dip_depth_pct=%s | rebound_from_low_pct=%s | entry_evidence_complete=%s | market=crypto | mode=shadow | execution_impact=NONE | broker_submission=NONE | live_trading=DISARMED",
                 row.get("trade_id"), cfg.generation, config_hash, PROVENANCE_VERSION,
                 bool(decision.would_trade if entry_evidence_complete else False), decision.score,
                 max(0.0, _f(dip_depth)) * 100.0 if entry_evidence_complete else None,

@@ -79,3 +79,14 @@ compute and $0 Agent caps remain. Coinbase's exhausted allowance and the need
 for separately validated streaming paper pricing are not resolved by these
 learning-integrity fixes. PRs #392/#393 remain held. Positive independent
 post-cost expectancy still requires genuine forward observations.
+
+## AEVE provenance v9 follow-up
+
+AEVE's evaluator now applies the same original-readiness and pre-entry
+availability checks to prior statistics and loss streaks. Candidate outcomes
+require source-bound metric records as well. Provenance v9 starts a new forward
+epoch and input-schema identity; existing generations, configuration hashes,
+outcomes and earlier provenance epochs are preserved. This does not change
+the AEVE formula, generation configuration, thresholds, execution authority or
+model governance. The evaluator's recomputation is counterfactual research,
+not proof that a live/paper decision consumed those inputs at entry.

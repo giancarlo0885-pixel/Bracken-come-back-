@@ -235,7 +235,7 @@ def test_postgres_shadow_producers_isolate_crypto_priors_and_preserve_history(mo
             assert captured[0]["min_samples"] == 2
             assert captured[0]["loss_streak"] == 2
             result = conn.execute("SELECT * FROM paper_aeve_generation_outcomes").fetchone()
-            assert result["provenance_version"] == 8
+            assert result["provenance_version"] == aeve.PROVENANCE_VERSION
         else:
             assert entry.evaluate_new_closes() == 1
             result = conn.execute("SELECT * FROM paper_entry_edge_challenger_results").fetchone()
@@ -249,3 +249,27 @@ def test_postgres_shadow_producers_isolate_crypto_priors_and_preserve_history(mo
         # All fixtures are connection-local temporary tables. No shared schema
         # or historical production records are created, modified or removed.
         conn.db.close()
+
+
+@pytest.mark.parametrize('kind',['ready','late','originally_incomplete'])
+@pytest.mark.parametrize('postgres',[False,True])
+def test_aeve_prior_statistics_require_original_readiness_and_pre_entry_availability(monkeypatch,kind,postgres,request):
+    import paper_aeve_v1_formula as formula
+    url=os.getenv('DATABASE_URL','') if postgres else None
+    if postgres and not url:pytest.skip('Disposable PostgreSQL required')
+    conn=_history(monkeypatch,'crypto',postgres_url=url)
+    request.addfinalizer(conn.db.close)
+    conn.seed("UPDATE paper_regime_trade_metrics SET created_at=?,schema_version=? WHERE trade_id IN ('own-0','own-1')",
+              ((START+timedelta(minutes=1) if kind=='late' else START-timedelta(minutes=1)).isoformat(),
+               regime._SCHEMA_VERSION if kind=='originally_incomplete' else regime._ENTRY_READY_VERSION))
+    captured=[];score=formula.score_entry
+    def record(**kwargs):
+        captured.append(kwargs)
+        return score(**kwargs)
+    monkeypatch.setattr(formula,'score_entry',record)
+    before=[dict(r) for r in conn.db.execute('SELECT * FROM paper_regime_trade_metrics ORDER BY trade_id')]
+    assert aeve.record_generation_outcomes()==1
+    assert captured[0]['min_samples']==(2 if kind=='ready' else 0)
+    assert captured[0]['loss_streak']==(2 if kind=='ready' else 0)
+    assert aeve.record_generation_outcomes()==0
+    assert [dict(r) for r in conn.db.execute('SELECT * FROM paper_regime_trade_metrics ORDER BY trade_id')]==before
