@@ -112,7 +112,7 @@ def test_regime_shadow_queries_are_market_scoped_not_crypto_hardcoded():
     assert "WHERE market=%s AND COALESCE(quantity,0) > 0" in source
     assert "WHERE market=%s AND side='SELL'" in source
     assert "WHERE market=%s AND symbol=%s" in source
-    assert "VALUES (%s,%s,%s,%s,'canonical_position',%s)" in source
+    assert "verified_quote_v1:" in source
     assert "SELECT observed_at,price FROM paper_regime_price_samples" in source
     assert "time_to_mfe_sec" in source
     assert "time_to_mae_sec" in source

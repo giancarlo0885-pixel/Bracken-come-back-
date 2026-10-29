@@ -10,6 +10,7 @@ import pytest
 
 import paper_aeve_generation_controller as aeve
 import paper_entry_edge_challenger_shadow as entry
+import paper_regime_economics_shadow as regime
 
 
 START = datetime(2026, 10, 15, 12, tzinfo=timezone.utc)
@@ -52,7 +53,7 @@ class _ResearchDB:
             CREATE TABLE paper_regime_trade_metrics(
                 trade_id TEXT,market TEXT,strategy TEXT,regime TEXT,entry_time TEXT,exit_time TEXT,
                 round_trip_net_pnl REAL,round_trip_fees REAL,cost_provenance TEXT,
-                mfe_pct REAL,mae_pct REAL,excursion_sample_count INTEGER);
+                mfe_pct REAL,mae_pct REAL,excursion_sample_count INTEGER,created_at TEXT,schema_version TEXT);
             CREATE TABLE trade_ledger(trade_id TEXT,market TEXT,quantity REAL,entry_price REAL,feature_snapshot TEXT);
             CREATE TABLE paper_aeve_generations(
                 generation INTEGER,started_at TEXT,config_json TEXT,config_hash TEXT,status TEXT);
@@ -72,7 +73,7 @@ class _ResearchDB:
         """
         if self.postgres:
             ddl = ddl.replace("CREATE TABLE", "CREATE TEMP TABLE")
-            for field in ("entry_time", "exit_time", "observed_at", "started_at"):
+            for field in ("entry_time", "exit_time", "observed_at", "started_at", "created_at"):
                 ddl = ddl.replace(field + " TEXT", field + " TIMESTAMPTZ")
             for field in ("feature_snapshot", "config_json"):
                 ddl = ddl.replace(field + " TEXT", field + " JSONB")
@@ -104,10 +105,11 @@ class _ResearchDB:
                         aeve_estimated_round_trip_cost_pct=.1,
                         aeve_cost_estimated_at=(START-timedelta(minutes=1)).isoformat(),
                         aeve_cost_provenance="entry_signal_estimate")
-        self.seed("INSERT INTO paper_regime_trade_metrics VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+        self.seed("INSERT INTO paper_regime_trade_metrics VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                         (trade_id, market, "oracle_council_v3", "range", START.isoformat() if candidate
                          else (exit_at-timedelta(hours=1)).isoformat(), exit_at.isoformat(),
-                         pnl, .1, "exact_lot", 2, -.1, 5))
+                         pnl, .1, "exact_lot", 2, -.1, 5, (exit_at+timedelta(seconds=1)).isoformat(),
+                         regime._ENTRY_READY_VERSION))
         self.seed("INSERT INTO trade_ledger VALUES (?,?,?,?,?)",
                         (trade_id, market, 1, 100, json.dumps(features)))
 
@@ -240,7 +242,7 @@ def test_postgres_shadow_producers_isolate_crypto_priors_and_preserve_history(mo
             assert result["prior_samples"] == 2
             assert result["prior_expectancy"] == -1
             assert result["prior_loss_streak"] == 2
-            assert result["version"] == "entry-edge-challenger-v3-market-scoped"
+            assert result["version"] == entry._VERSION
         assert result["would_trade"] is False
         assert conn.execute("SELECT COUNT(*) AS total FROM paper_regime_trade_metrics").fetchone()["total"] == 44
     finally:

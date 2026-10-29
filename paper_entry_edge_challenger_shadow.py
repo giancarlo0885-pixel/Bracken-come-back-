@@ -8,7 +8,7 @@ import threading
 from typing import Any
 
 log = logging.getLogger("paper-entry-edge-challenger")
-_VERSION = "entry-edge-challenger-v3-market-scoped"
+_VERSION = "entry-edge-challenger-v4-entry-time-evidence"
 _THREAD: threading.Thread | None = None
 _STOP = threading.Event()
 
@@ -32,6 +32,11 @@ def _num(value: Any, default: float = 0.0) -> float:
     except (TypeError, ValueError):
         return default
     return value if math.isfinite(value) else default
+
+
+def _available_metric(value: Any) -> float | None:
+    number = _num(value, float("nan"))
+    return number if math.isfinite(number) else None
 
 
 def entry_edge_score(*, mfe_pct: float, mae_pct: float, round_trip_cost_pct: float,
@@ -104,13 +109,15 @@ def ensure_schema() -> None:
 
 
 def _prior_loss_streak(conn: Any, strategy: str, regime: str, entry_time: datetime) -> int:
+    from paper_regime_economics_shadow import _ENTRY_READY_VERSION
     rows = list(conn.execute("""
         SELECT m.round_trip_net_pnl AS net_pnl
         FROM paper_regime_trade_metrics m
         WHERE m.market='crypto' AND m.strategy=%s AND m.regime=%s AND m.exit_time < %s
           AND m.cost_provenance='exact_lot' AND m.round_trip_net_pnl IS NOT NULL
+          AND m.created_at < %s AND m.schema_version=%s
         ORDER BY m.exit_time DESC LIMIT 6
-    """, (strategy, regime, entry_time)).fetchall())
+    """, (strategy, regime, entry_time, entry_time, _ENTRY_READY_VERSION)).fetchall())
     streak = 0
     for row in rows:
         if _num(row.get("net_pnl")) < 0:
@@ -126,6 +133,7 @@ def evaluate_new_closes(limit: int = 250) -> int:
         return 0
     from database import connect
     from paper_strategy_economics import normalize_strategy_identity
+    from paper_regime_economics_shadow import _ENTRY_READY_VERSION
 
     created = 0
     with connect() as conn:
@@ -168,22 +176,26 @@ def evaluate_new_closes(limit: int = 250) -> int:
                 WHERE m.market='crypto' AND m.strategy=%s AND m.regime=%s AND m.exit_time < %s
                   AND m.cost_provenance='exact_lot'
                   AND m.round_trip_net_pnl IS NOT NULL AND m.round_trip_fees IS NOT NULL
-            """, (strategy, regime, entry_time)).fetchone() or {}
+                  AND m.created_at < %s AND m.schema_version=%s
+            """, (strategy, regime, entry_time, entry_time, _ENTRY_READY_VERSION)).fetchone() or {}
             samples = int(prior.get("samples") or 0)
-            expectancy = _num(prior.get("expectancy"))
-            gross_loss = _num(prior.get("gross_loss"))
-            pf = (_num(prior.get("gross_win")) / gross_loss) if gross_loss > 0 else 0.0
-            mfe = _num(prior.get("mfe"))
-            mae = _num(prior.get("mae"))
-            cost_pct = _num(prior.get("cost_pct"))
+            expectancy = _available_metric(prior.get("expectancy"))
+            gross_win = _available_metric(prior.get("gross_win"))
+            gross_loss = _available_metric(prior.get("gross_loss"))
+            pf = gross_win / gross_loss if gross_win is not None and gross_loss is not None and gross_loss > 0 else None
+            mfe = _available_metric(prior.get("mfe"))
+            mae = _available_metric(prior.get("mae"))
+            cost_pct = _available_metric(prior.get("cost_pct"))
             streak = _prior_loss_streak(conn, strategy, regime, entry_time)
-            bad_regime = samples >= 25 and expectancy < 0
-            score = entry_edge_score(
+            bad_regime = samples >= 25 and expectancy is not None and expectancy < 0
+            score = (entry_edge_score(
                 mfe_pct=mfe, mae_pct=mae, round_trip_cost_pct=cost_pct,
                 loss_streak=streak, bad_regime=bad_regime,
-            )
+            ) if all(value is not None for value in (mfe, mae, cost_pct)) else None)
             # Insufficient history always abstains. This is shadow telemetry only.
-            would_trade = bool(samples >= 25 and expectancy > 0 and pf > 1.0 and score > 0.20)
+            would_trade = bool(samples >= 25
+                and all(value is not None for value in (expectancy, pf, mfe, mae, cost_pct, score))
+                and expectancy > 0 and pf > 1.0 and score > 0.20)
             pnl = _num(row.get("round_trip_net_pnl"))
             avoided_loss = -pnl if (not would_trade and pnl < 0) else 0.0
             missed_winner = pnl if (not would_trade and pnl > 0) else 0.0
