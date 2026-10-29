@@ -241,6 +241,11 @@ class PaperPricing:
                 q.update(quote_id='coinbase-paper:'+identity,source_identity='coinbase-paper:'+identity)
                 self.receipts={k:v for k,v in self.receipts.items() if (self.clock()-timestamp(v['received_at'])).total_seconds()<=5}
                 self.receipts[q['quote_id']]=deepcopy(q)
+                try:
+                    from paper_regime_economics_shadow import observe_paper_quote
+                    observe_paper_quote(self, q)
+                except Exception as exc:
+                    log.warning('PAPER REGIME QUOTE CAPTURE | status=UNAVAILABLE | reason=%s | execution_impact=NONE',type(exc).__name__)
                 self.last_health[symbol]={'status':'VALID_PAPER_PRICE','quote_timestamp':q['quote_timestamp'],
                     'quote_id':q['quote_id'],'execution_authority':'PAPER_SIMULATION_ONLY'}
                 return deepcopy(q)

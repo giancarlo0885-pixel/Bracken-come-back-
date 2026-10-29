@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import logging
+import json
+import hashlib
 import math
 import os
 import threading
@@ -11,9 +13,13 @@ from typing import Any
 
 
 log = logging.getLogger("paper-regime-economics")
-_SCHEMA_VERSION = "regime-economics-v3-temporal-excursion"
+_SCHEMA_VERSION = "regime-economics-v4-quote-observations"
+_ENTRY_READY_VERSION = _SCHEMA_VERSION + "-entry-ready"
 _THREAD: threading.Thread | None = None
 _STOP = threading.Event()
+_QUOTE_LOCK = threading.Lock()
+_QUOTE_OBSERVATIONS: dict[tuple[str, str], dict[str, Any]] = {}
+_MAX_QUOTE_OBSERVATIONS = 64
 
 
 def _truthy(name: str, default: str = "false") -> bool:
@@ -319,38 +325,93 @@ def _round_trip_accounting(
     return net, total_fee, "exact_lot"
 
 
+def observe_paper_quote(provider: Any, quote: dict[str, Any]) -> bool:
+    """Capture an actual authenticated quote now; never authorize execution.
+
+    The sampler may write this historical observation later, at its ORIGINAL
+    event time. It must never claim that a cached observation is a current mark.
+    """
+    if not active():
+        return False
+    from coinbase_paper_pricing import SOURCE, PaperPricing
+    if not isinstance(provider, PaperPricing) or not isinstance(quote, dict):
+        return False
+    symbol = quote.get("symbol")
+    if (not symbol or quote.get("requested_symbol") != symbol or quote.get("provider_symbol") != symbol
+            or quote.get("provider") != SOURCE
+            or quote.get("execution_authority") != "PAPER_SIMULATION_ONLY"
+            or not provider.authentic(quote, symbol)):
+        return False
+    observed = datetime.fromisoformat(quote["quote_timestamp"].replace("Z", "+00:00"))
+    captured = datetime.now(timezone.utc)
+    price = _cost_number(quote.get("price"))
+    sequence = quote.get("sequence")
+    if (observed.tzinfo is None or observed > captured or (captured-observed).total_seconds() > 5 or price is None or price <= 0
+            or type(sequence) is not int or sequence < 0):
+        return False
+    source = {key: quote[key] for key in ("provider", "quote_id", "source_identity",
+                "quote_timestamp", "received_at", "timestamp_basis", "bid", "ask", "sequence")}
+    source.update(execution_authority="NONE", role="OBSERVED_PAPER_QUOTE_ONLY",
+                  captured_at=captured.isoformat())
+    event_key = hashlib.sha256(json.dumps([quote["provider"], symbol, observed.isoformat(), sequence]).encode()).hexdigest()
+    source_prefix = "verified_quote_v1:" + event_key + "|"
+    observation = {"observed_at": observed, "price": price, "sequence": sequence,
+                   "source_prefix": source_prefix,
+                   "source": source_prefix + json.dumps(source, sort_keys=True, allow_nan=False)}
+    key = ("crypto", symbol)
+    with _QUOTE_LOCK:
+        old = _QUOTE_OBSERVATIONS.get(key)
+        if old and (observed < old["observed_at"] or
+                    (observed == old["observed_at"] and sequence <= old["sequence"])):
+            return False
+        if key not in _QUOTE_OBSERVATIONS and len(_QUOTE_OBSERVATIONS) >= _MAX_QUOTE_OBSERVATIONS:
+            _QUOTE_OBSERVATIONS.pop(next(iter(_QUOTE_OBSERVATIONS)))
+        _QUOTE_OBSERVATIONS[key] = observation
+    return True
+
+
+def _cached_observation(market: str, symbol: str) -> dict[str, Any] | None:
+    # Cash marks have no equivalent original quote receipt capture yet. Keep
+    # them unavailable for certified excursions rather than inventing a source.
+    with _QUOTE_LOCK:
+        observation = _QUOTE_OBSERVATIONS.get((market, symbol))
+        return dict(observation) if observation else None
+
+
 def sample_open_positions(market: str = "crypto") -> int:
-    """Persist observed canonical paper prices for forward MFE/MAE measurement."""
+    """Persist original validated quote observations, never retimestamp marks."""
     if not active():
         return 0
     from database import connect
-
     normalized_market = _normalize_market(market)
-    inserted = 0
-    now = datetime.now(timezone.utc)
+    inserted = unavailable = 0
     with connect() as conn:
-        positions = list(
-            conn.execute(
-                """
-                SELECT symbol, current_price, average_price, entry_price
-                FROM positions
-                WHERE market=%s AND COALESCE(quantity,0) > 0
-                """,
-                (normalized_market,),
-            ).fetchall()
-        )
+        positions = list(conn.execute(
+            "SELECT symbol FROM positions WHERE market=%s AND COALESCE(quantity,0) > 0",
+            (normalized_market,),
+        ).fetchall())
         for row in positions:
-            price = _num(row.get("current_price")) or _num(row.get("average_price")) or _num(row.get("entry_price"))
-            if price <= 0:
+            symbol = str(row.get("symbol") or "").upper()
+            observation = _cached_observation(normalized_market, symbol)
+            if not observation:
+                unavailable += 1
                 continue
-            conn.execute(
-                """
+            # Concurrent samplers cannot insert the same original observation twice.
+            owned = conn.execute("SELECT pg_try_advisory_xact_lock(hashtext(%s)) AS owned",
+                                 ("regime_quote_sample:"+normalized_market+":"+symbol,)).fetchone()
+            if not owned or owned.get("owned") is not True:
+                continue
+            recorded = conn.execute("""
                 INSERT INTO paper_regime_price_samples(market,symbol,observed_at,price,source,schema_version)
-                VALUES (%s,%s,%s,%s,'canonical_position',%s)
-                """,
-                (normalized_market, str(row.get("symbol") or "").upper(), now, price, _SCHEMA_VERSION),
-            )
-            inserted += 1
+                SELECT %s,%s,%s,%s,%s,%s
+                WHERE NOT EXISTS (SELECT 1 FROM paper_regime_price_samples
+                    WHERE market=%s AND symbol=%s AND observed_at=%s AND left(source,%s)=%s)
+                RETURNING id
+                """, (normalized_market, symbol, observation["observed_at"], observation["price"],
+                      observation["source"], _SCHEMA_VERSION, normalized_market, symbol,
+                      observation["observed_at"], len(observation["source_prefix"]), observation["source_prefix"])).fetchone()
+            inserted += recorded is not None
+    log.info("PAPER REGIME QUOTE SAMPLING | market=%s | sampled=%s | unavailable=%s | additional_requests=0 | execution_impact=NONE", normalized_market, inserted, unavailable)
     return inserted
 
 
@@ -439,6 +500,7 @@ def finalize_closed_trades(limit: int = 250, market: str = "crypto") -> int:
                     """
                     SELECT observed_at,price FROM paper_regime_price_samples
                     WHERE market=%s AND symbol=%s AND observed_at BETWEEN %s AND %s
+                      AND source LIKE 'verified_quote_v1:%%'
                     ORDER BY observed_at ASC
                     """,
                     (normalized_market, symbol, entry_time, exit_time),
@@ -486,13 +548,18 @@ def finalize_closed_trades(limit: int = 250, market: str = "crypto") -> int:
                     trade_id, normalized_market, symbol, normalize_strategy_identity(trade.get("strategy")), regime, entry_pattern,
                     entry_time, exit_time, entry_price or None, exit_price or None,
                     _num(trade.get("net_pnl")), max(0.0, _num(trade.get("fees"))),
-                    mfe_pct, mae_pct, excursion_count, _SCHEMA_VERSION,
+                    mfe_pct, mae_pct, excursion_count, (_ENTRY_READY_VERSION if cost_provenance == "exact_lot" and excursion_count > 0 else _SCHEMA_VERSION),
                     round_trip_net,round_trip_fees,cost_provenance,
                     time_to_mfe_sec,time_to_mae_sec,mfe_observed_at,mae_observed_at,
                 ),
             )
             created += 1
     return created
+
+
+def _display_metric(value: Any, precision: int = 4) -> str:
+    finite = _cost_number(value)
+    return "NA" if finite is None else f"{finite:.{precision}f}"
 
 
 def emit_summary(market: str | None = None) -> None:
@@ -505,15 +572,27 @@ def emit_summary(market: str | None = None) -> None:
             rows = list(
                 conn.execute(
                     """
+                    WITH evidence AS (
+                        SELECT *, COALESCE(cost_provenance='exact_lot'
+                            AND round_trip_net_pnl > '-Infinity'::double precision
+                            AND round_trip_net_pnl < 'Infinity'::double precision
+                            AND round_trip_fees >= 0 AND round_trip_fees < 'Infinity'::double precision,
+                            FALSE) AS exact_accounting
+                        FROM paper_regime_trade_metrics
+                        WHERE (%s::text IS NULL OR market=%s::text)
+                    )
                     SELECT market, strategy, regime, entry_pattern, COUNT(*) AS samples,
                            SUM(COALESCE(round_trip_net_pnl,net_pnl)) AS net_pnl,
                            SUM(COALESCE(round_trip_fees,fees)) AS fees,
                            AVG(COALESCE(round_trip_net_pnl,net_pnl)) AS expectancy,
+                           COUNT(*) FILTER (WHERE exact_accounting) AS exact_accounting_samples,
+                           COUNT(*) FILTER (WHERE NOT exact_accounting) AS incomplete_accounting_samples,
+                           SUM(round_trip_net_pnl) FILTER (WHERE exact_accounting) AS exact_accounting_net_pnl,
+                           SUM(round_trip_fees) FILTER (WHERE exact_accounting) AS exact_accounting_fees,
                            AVG(mfe_pct) FILTER (WHERE excursion_sample_count > 0) AS avg_mfe_pct,
                            AVG(mae_pct) FILTER (WHERE excursion_sample_count > 0) AS avg_mae_pct,
                            SUM(CASE WHEN excursion_sample_count > 0 THEN 1 ELSE 0 END) AS excursion_trades
-                    FROM paper_regime_trade_metrics
-                    WHERE (%s::text IS NULL OR market=%s::text)
+                    FROM evidence
                     GROUP BY market, strategy, regime, entry_pattern
                     ORDER BY samples DESC
                     LIMIT 20
@@ -523,12 +602,14 @@ def emit_summary(market: str | None = None) -> None:
             )
         for row in rows:
             log.info(
-                "PAPER REGIME ECONOMICS | market=%s | strategy=%s | regime=%s | entry_pattern=%s | samples=%s | net_pnl=%.4f | fees=%.4f | expectancy=%.6f | avg_mfe_pct=%s | avg_mae_pct=%s | excursion_trades=%s | mode=shadow | execution_impact=NONE | live_trading=DISARMED",
+                "PAPER REGIME ECONOMICS | market=%s | strategy=%s | regime=%s | entry_pattern=%s | samples=%s | net_pnl=%s | fees=%s | expectancy=%s | avg_mfe_pct=%s | avg_mae_pct=%s | excursion_trades=%s | exact_accounting_samples=%s | incomplete_accounting_samples=%s | exact_accounting_net_pnl=%s | exact_accounting_fees=%s | evaluation_scope=RETROSPECTIVE_CLOSED_LEDGER_ROWS | independent_episodes=UNAVAILABLE | strategy_qualification=NOT_ESTABLISHED | excursion_verification=NOT_CERTIFIED_BY_SUMMARY | mode=shadow | execution_impact=NONE | live_trading=DISARMED",
                 row.get("market"), row.get("strategy"), row.get("regime"), row.get("entry_pattern"), row.get("samples"),
-                _num(row.get("net_pnl")), _num(row.get("fees")), _num(row.get("expectancy")),
+                _display_metric(row.get("net_pnl")), _display_metric(row.get("fees")), _display_metric(row.get("expectancy"), 6),
                 "NA" if row.get("avg_mfe_pct") is None else f"{_num(row.get('avg_mfe_pct')):.4f}",
                 "NA" if row.get("avg_mae_pct") is None else f"{_num(row.get('avg_mae_pct')):.4f}",
-                row.get("excursion_trades"),
+                row.get("excursion_trades"), row.get("exact_accounting_samples"),
+                row.get("incomplete_accounting_samples"), _display_metric(row.get("exact_accounting_net_pnl")),
+                _display_metric(row.get("exact_accounting_fees")),
             )
     except Exception as exc:
         log.warning("PAPER REGIME ECONOMICS | status=UNAVAILABLE | reason=%s", exc.__class__.__name__)
