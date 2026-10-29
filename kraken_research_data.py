@@ -76,7 +76,10 @@ class PublicResearchData:
         if key not in self.cache and len(self.cache) >= 12:
             self.cache.pop(next(iter(self.cache)))
         self.last_receipt = datetime.now(timezone.utc)
-        self.cache[key] = (now, payload, self.last_receipt)
+        # Cache lifetime starts when the response is received, not before HTTP.
+        # Original provider timestamps and receipt time remain immutable on hits;
+        # quote validators independently enforce exchange-event freshness.
+        self.cache[key] = (time.monotonic(), payload, self.last_receipt)
         return payload
 
     def instruments(self):
