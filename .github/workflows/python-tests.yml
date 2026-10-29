@@ -113,6 +113,7 @@ jobs:
           test_paper_regime_fifo_provenance.py
           test_paper_aeve_generation_controller.py::test_postgres_generation_report_freezes_exact_membership
           test_paper_research_market_isolation.py::test_postgres_shadow_producers_isolate_crypto_priors_and_preserve_history
+          test_paper_research_market_isolation.py::test_aeve_prior_statistics_require_original_readiness_and_pre_entry_availability
           test_aeve_generation_progress_ui.py::test_postgres_progress_displays_current_provenance_and_unknown_profit_only
           test_paper_kelly_postgres.py::test_postgres_kelly_schema_and_immutable_forward_epoch
           test_paper_shadow_exit_challenger.py::test_postgres_forecast_cutoff_and_timestamp_order
