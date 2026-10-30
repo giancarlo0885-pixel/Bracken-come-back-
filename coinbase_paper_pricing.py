@@ -21,7 +21,11 @@ log = logging.getLogger('coinbase-paper-pricing')
 
 def enabled():
     return (os.getenv('COINBASE_PAPER_PRICING_ENABLED','true').lower() == 'true'
-        and os.getenv('EXECUTION_MODE','paper').lower() == 'paper'
+        and paper_context_enabled())
+
+
+def paper_context_enabled():
+    return (os.getenv('EXECUTION_MODE','paper').lower() == 'paper'
         and os.getenv('ENABLE_BROKER_SUBMISSION','false').lower() == 'false'
         and os.getenv('LIVE_TRADING_ARMED','false').lower() == 'false'
         and os.getenv('KRAKEN_REFERENCE_WS_ENABLED','false').lower() == 'true')
@@ -112,7 +116,8 @@ def _depth_price(quote, side, order_value):
     quantity=value/exact_decimal(quote['mid_price']) if side=='SELL' else None
     remaining=value if side=='BUY' else quantity
     cost=units=Decimal(0)
-    for price,size,_ in levels:
+    for row in levels:
+        price,size=row[:2]
         p,q=exact_decimal(price),exact_decimal(size)
         take=min(q,remaining/p) if side=='BUY' else min(q,remaining)
         cost+=take*p;units+=take
@@ -120,10 +125,20 @@ def _depth_price(quote, side, order_value):
         if remaining<=Decimal('1e-24'):break
     if remaining>max(Decimal('1e-24'),value*Decimal('1e-24')):
         raise ResearchUnavailable('INSUFFICIENT_DISPLAYED_DEPTH')
+    if units < exact_decimal(quote.get('min_order_quantity','0')):
+        raise ResearchUnavailable('BELOW_PRODUCT_MINIMUM_QUANTITY')
     return cost/units
 
 
 class PaperPricing:
+    source = SOURCE
+
+    def available(self):
+        return enabled()
+
+    def history(self, symbol):
+        return coinbase_history(self.data, symbol, self.clock())
+
     def __init__(self,data=None,reference=None,clock=now_utc,publish=True):
         from kraken_reference_runtime import read_kraken_reference_state
         self.data=data or PublicResearchData()
@@ -192,7 +207,7 @@ class PaperPricing:
                 with connect() as conn:
                     conn.execute('''INSERT INTO coinbase_paper_price_state VALUES(1,NOW(),%s::jsonb)
                         ON CONFLICT(id) DO UPDATE SET updated_at=EXCLUDED.updated_at,payload=EXCLUDED.payload''',
-                        (json.dumps({'provider':SOURCE,'symbols':self.last_health,'broker_submission':'NONE'}),))
+                        (json.dumps({'provider':self.source,'symbols':self.last_health,'broker_submission':'NONE'}),))
                 publication_status = 'COMMITTED'
             # Exiting connect() includes commit. An attempted write must not
             # acknowledge durable delivery or start the successful throttle.
@@ -205,13 +220,13 @@ class PaperPricing:
             # failures cannot cause immediate catch-up writes.
             self._health_attempt_signature = signature
             self._health_attempt_monotonic = time.monotonic()
-        log.info('COINBASE PAPER PRICING | %s',json.dumps({
+        log.info('%s | %s', 'COINBASE PAPER PRICING' if self.source==SOURCE else 'KRAKEN PAPER PRICING',json.dumps({
             'symbols':self.last_health,'broker_submission':'NONE',
             'health_publication_status':publication_status}))
 
     def quote(self,symbol):
         symbol=str(symbol).upper().strip()
-        if not enabled():return None
+        if not self.available():return None
         with self.lock:
             try:
                 reference=self.reference().get('quotes',{}).get(symbol)
@@ -258,7 +273,7 @@ class PaperPricing:
                 self._publish_health()
 
     def authentic(self,quote,symbol):
-        if not enabled() or not isinstance(quote,dict):return False
+        if not self.available() or not isinstance(quote,dict):return False
         with self.lock:
             original=self.receipts.get(quote.get('quote_id'))
             if not original or original['symbol']!=symbol:return False
@@ -305,12 +320,19 @@ def exact_forecast_link(symbol, signal_id, forecast_id):
 
 
 def install_paper_pricing(worker,provider=None):
-    if not enabled():return False
+    if not paper_context_enabled():return False
     import oracle_bot as oracle
     import paper_execution_reality as reality
     import market_data
     if getattr(worker,'_coinbase_paper_pricing',None) is not None:return False
-    provider=provider or PaperPricing()
+    if provider is None:
+        selected=os.getenv('CRYPTO_PAPER_PRICING_PROVIDER','coinbase').strip().lower()
+        if selected=='kraken':
+            from kraken_paper_pricing import KrakenPaperPricing
+            provider=KrakenPaperPricing()
+        elif selected=='coinbase':provider=PaperPricing()
+        else:return False
+    if not provider.available():return False
     original_guard=oracle._execution_quote_guard;original_verified=oracle._verified_quote_for
     original_history=worker.get_history;original_handoff=worker._execution_quote_payload_from_history
     original_attach=worker._attach_execution_metadata;original_many=worker.get_many_snapshots
@@ -332,12 +354,12 @@ def install_paper_pricing(worker,provider=None):
         if symbol not in provider.reference().get('subscribed_symbols',[]):
             return original_history(symbol,period,interval,*a,**k)
         try:
-            history=coinbase_history(provider.data,symbol,provider.clock())
+            history=provider.history(symbol)
             q=provider.quote(symbol)
             if q:
                 route=history.attrs['provider_route']
                 route.update(analysis_bar_timestamp=history.index[-1].isoformat(),quote_timestamp=q['quote_timestamp'],
-                    quote_provider=SOURCE,quote_verified=True,paper_reference_verified=True,provider_quote_verified=False,
+                    quote_provider=provider.source,quote_verified=True,paper_reference_verified=True,provider_quote_verified=False,
                     paper_quote=q,source_identity=q['source_identity'])
             return history
         except Exception:return original_history(symbol,period,interval,*a,**k)
@@ -369,13 +391,17 @@ def install_paper_pricing(worker,provider=None):
 
     def simulate(**kwargs):
         q=kwargs.get('quote') or {}
-        if q.get('provider')!=SOURCE:return original_simulate(**kwargs)
+        if q.get('provider')!=provider.source:return original_simulate(**kwargs)
         if not provider.authentic(q,q.get('symbol')):raise ResearchUnavailable('PAPER_PRICE_UNVERIFIED_OR_STALE')
         side=kwargs['side'];vwap=float(depth_price(q,side,kwargs.get('order_value')))
         depth_quote=deepcopy(q);depth_quote['ask' if side=='BUY' else 'bid']=vwap
         q['paper_original_price_quote']=deepcopy(provider.receipts[q['quote_id']])
         q.update(paper_depth_vwap=vwap,paper_depth_order_value=kwargs.get('order_value'),paper_depth_side=side)
-        fill=original_simulate(**{**kwargs,'quote':depth_quote,'market_impact_pct':0.0})
+        pricing=original_simulate
+        if provider.source!='Coinbase Exchange paper pricing':
+            from paper_execution_accounting import _simulate_fill_explicit_fee
+            pricing=_simulate_fill_explicit_fee
+        fill=pricing(**{**kwargs,'quote':depth_quote,'market_impact_pct':0.0})
         with provider.lock:
             if len(provider.fill_receipts)>=128:provider.fill_receipts.pop(next(iter(provider.fill_receipts)))
             provider.fill_receipts[(q['quote_id'],side,str(kwargs.get('order_value')))]=dict(price=fill.fill_price,vwap=vwap)
@@ -386,7 +412,7 @@ def install_paper_pricing(worker,provider=None):
         q=provider.quote(symbol)
         if not q:return None
         value=market_data.MarketSnapshot(symbol=symbol,price=q['price'],change_pct=0,volume=0,timestamp=q['quote_timestamp'],
-            provider=SOURCE,interval='1m',fetched_at=q['received_at'],requested_symbol=symbol,provider_symbol=symbol,
+            provider=provider.source,interval='1m',fetched_at=q['received_at'],requested_symbol=symbol,provider_symbol=symbol,
             bid=q['bid'],ask=q['ask'],quote_verified=True,stale=False,provider_quote_verified=False,
             paper_reference_verified=True,execution_quote_eligible=True,source_identity=q['source_identity'])
         value.to_quote_payload=lambda:deepcopy(q)
@@ -409,7 +435,7 @@ def install_paper_pricing(worker,provider=None):
     worker._coinbase_paper_pricing=provider
     from crypto_execution_source import install_crypto_candidate_source_guard
     install_crypto_candidate_source_guard(worker,provider.authentic,'PAPER_PRICE_UNVERIFIED_OR_STALE')
-    log.info('COINBASE PAPER PRICING | status=INSTALLED | authority=PAPER_SIMULATION_ONLY | live_trading=DISARMED')
+    log.info('PAPER PRICING | status=INSTALLED | provider=%s | authority=PAPER_SIMULATION_ONLY | live_trading=DISARMED',provider.source)
     return True
 
 

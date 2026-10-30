@@ -278,12 +278,12 @@ def _record_order_and_fill(
 
     fee_pct = fee / filled_notional
     data = dict(quote or {})
-    if data.get("provider") == "Coinbase Exchange paper pricing":
+    if data.get("provider") in {"Coinbase Exchange paper pricing", "Kraken WebSocket v2 paper pricing"}:
         if (data.get("symbol")!=symbol or data.get("requested_symbol")!=symbol
                 or data.get("provider_symbol")!=symbol or data.get("paper_fee_pct")!=0.006
                 or abs(fee_pct-0.006)>1e-10):
             raise ValueError("paper price identity or modeled fee mismatch")
-    pricing = reality.simulate_fill if data.get("provider") == "Coinbase Exchange paper pricing" else _simulate_fill_explicit_fee
+    pricing = reality.simulate_fill if data.get("provider") in {"Coinbase Exchange paper pricing", "Kraken WebSocket v2 paper pricing"} else _simulate_fill_explicit_fee
     fill = pricing(
         side=side, market=market, reference_price=reference, quote=data,
         order_value=data.get("paper_depth_order_value", filled_notional), fee_pct=fee_pct,
@@ -339,7 +339,7 @@ def _record_order_and_fill(
             data.get("quote_timestamp") or data.get("timestamp"), now,
         ),
     )
-    if data.get("provider") == "Coinbase Exchange paper pricing":
+    if data.get("provider") in {"Coinbase Exchange paper pricing", "Kraken WebSocket v2 paper pricing"}:
         import json
         original=data["paper_original_price_quote"]
         if original.get("quote_id")!=data["quote_id"] or original.get("book")!=data.get("book"):

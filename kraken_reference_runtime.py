@@ -276,6 +276,11 @@ class KrakenReferenceService:
                     reference = current
                 comparison = (compare_reference(reference, observed, now) if self.primary_observer_available else
                     {"status": "EXECUTION_SOURCE_NOT_CONFIGURED", "reason": "NO_EXECUTION_PROVIDER", "execution_impact": "NONE"})
+                if not self.primary_observer_available:
+                    from kraken_paper_pricing import enabled as kraken_paper_enabled
+                    if kraken_paper_enabled():
+                        comparison = {"status": "SINGLE_VENUE_PAPER_MODEL_SELECTED",
+                            "reason": "NO_INDEPENDENT_EXECUTION_VENUE_COMPARISON", "execution_impact": "NONE"}
                 comparisons[symbol] = {**comparison, "checked_at": now.isoformat()}
             payload["comparisons"] = comparisons
             # This wall phase includes JSON, network, commit and process resume;

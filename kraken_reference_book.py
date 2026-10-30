@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation, localcontext
 import json
 import zlib
+import uuid
 
 SOURCE = "Kraken WebSocket v2 reference"
 SYMBOLS = {"BTC/USD": "BTC-USD", "ETH/USD": "ETH-USD"}
@@ -74,6 +75,7 @@ class ReferenceBooks:
         self.subscribed = set()
         self.stale_seen = set()
         self.status = "DISCONNECTED"
+        self.session_id = None
 
     def invalidate(self, reason="DISCONNECTED"):
         self.books.clear()
@@ -83,6 +85,7 @@ class ReferenceBooks:
 
     def opened(self, now):
         self.invalidate("AWAITING_SNAPSHOT")
+        self.session_id = str(uuid.uuid4())
         self.connected = True
         self.last_message = now
 
@@ -168,7 +171,7 @@ class ReferenceBooks:
         self.counts[kind + "s"] += 1
         self.status = "STREAMING"
 
-    def quote(self, symbol, now):
+    def quote(self, symbol, now, *, include_depth=False):
         book = self.books.get(symbol)
         if not self.connected or book is None:
             return None
@@ -182,7 +185,7 @@ class ReferenceBooks:
             ctx.prec = 80
             mid, spread = (bid + ask) / 2, ask - bid
             spread_pct = spread / mid * 100
-        return {
+        result = {
             "provider": SOURCE, "source": SOURCE, "venue": "Kraken", "symbol": self.symbols[symbol],
             "exchange_symbol": symbol, "bid": str(bid), "ask": str(ask),
             "bid_quantity": str(book["bids"][bid]), "ask_quantity": str(book["asks"][ask]),
@@ -194,9 +197,14 @@ class ReferenceBooks:
             "provider_quote_verified": False, "paper_reference_verified": False,
             "quote_eligible": False, "execution_quote_eligible": False, "execution_authority": "NONE",
         }
+        if include_depth:
+            result["session_id"] = self.session_id
+            result["book"] = {side: [[str(p), str(q)] for p, q in
+                sorted(book[side].items(), reverse=side == "bids")] for side in ("bids", "asks")}
+        return result
 
     def health(self, now):
-        quotes = {self.symbols[s]: q for s in self.symbols if (q := self.quote(s, now)) is not None}
+        quotes = {self.symbols[s]: q for s in self.symbols if (q := self.quote(s, now, include_depth=True)) is not None}
         status = self.status
         if self.connected and len(quotes) != len(self.symbols):
             status = "STALE_OR_AWAITING_SNAPSHOT"

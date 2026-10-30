@@ -14,7 +14,12 @@ def pricing_receipt_evidence(fill, receipts, *, execution_time, entry=None):
               'decision_time_commit_proof': 'NOT_ESTABLISHED',
               'fee_provenance': 'MODELED_NOT_ACCOUNT_VERIFIED'}
     reasons = result['reasons']
+    from kraken_paper_pricing import MODEL as KRAKEN_MODEL, SOURCE as KRAKEN_SOURCE
+    kraken = fill.get('quote_provider') == KRAKEN_SOURCE
+    if kraken:
+        MODEL, SOURCE = KRAKEN_MODEL, KRAKEN_SOURCE
     if fill.get('quote_provider') != SOURCE:
+
         reasons.append('no_supported_original_pricing_receipt_contract')
         return result
     matches = [r for r in receipts if r.get('fill_id') == fill.get('fill_id')]
@@ -63,6 +68,8 @@ def pricing_receipt_evidence(fill, receipts, *, execution_time, entry=None):
         reasons.append('quote_not_available_at_original_decision')
     if _time(fill.get('quote_timestamp')) != observed:
         reasons.append('fill_quote_timestamp_mismatch')
+    if kraken:
+        return _kraken_pricing_receipt(result, quote, execution, fill, received, event, decision)
     comparison = quote.get('independent_comparison')
     comparison = comparison if isinstance(comparison, dict) else {}
     reference = comparison.get('reference_quote')
@@ -102,6 +109,29 @@ def pricing_receipt_evidence(fill, receipts, *, execution_time, entry=None):
             reasons.append('original_depth_vwap_mismatch')
     except (ValueError, KeyError, TypeError, ArithmeticError, AttributeError):
         reasons.append('invalid_original_pricing_book_or_reference')
+    if not reasons:
+        result['status'] = 'CONSISTENT_ORIGINAL_PAPER_RECEIPT'
+    return result
+
+
+def _kraken_pricing_receipt(result, quote, execution, fill, received, event, decision):
+    from kraken_paper_pricing import validate_kraken_book
+    from coinbase_paper_pricing import depth_price
+    reasons = result['reasons']
+    try:
+        metadata_time = _time(quote.get('product_metadata_received_at'))
+        if decision is None or metadata_time is None or metadata_time > decision:
+            reasons.append('product_rules_not_available_at_original_decision')
+        checked = validate_kraken_book(fill['symbol'], quote['original_reference'],
+            quote['product_rules'], quote['product_metadata_received_at'], event)
+        if any(not _same_json(quote.get(k), v) for k, v in checked.items()):
+            reasons.append('original_pricing_book_or_provenance_mismatch')
+        if not close(execution.get('reference_price'), quote.get('price')):
+            reasons.append('original_reference_price_mismatch')
+        if not close(depth_price(quote, fill['side'], execution.get('depth_order_value')), execution.get('depth_vwap')):
+            reasons.append('original_depth_vwap_mismatch')
+    except (ValueError, KeyError, TypeError, ArithmeticError, AttributeError):
+        reasons.append('invalid_original_kraken_pricing_book')
     if not reasons:
         result['status'] = 'CONSISTENT_ORIGINAL_PAPER_RECEIPT'
     return result
