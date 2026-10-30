@@ -9,9 +9,44 @@ trading.
 """
 
 import math
+import json
+import hashlib
 from typing import Any
 
 from paper_strategy_economics import normalize_strategy_identity, strategy_identity
+
+
+def signal_feedback_evidence(signal: Any) -> dict[str, Any]:
+    """Bounded copy of the ranking assessment available when a signal is saved.
+
+    This is not an immutable Brain snapshot/consumption receipt, model approval,
+    or evidence that an eventual order passed its independent execution gates.
+    """
+    context = _value(signal, 'brain_outcome_context')
+    if context is None:
+        return {}
+    try:
+        adjustment = float(_value(signal, 'brain_outcome_adjustment'))
+        if not math.isfinite(adjustment):
+            adjustment = None
+    except (ValueError, TypeError, OverflowError):
+        adjustment = None
+    digest = None
+    try:
+        if not isinstance(context, dict):
+            raise ValueError('invalid context')
+        encoded = json.dumps(context, sort_keys=True, allow_nan=False)
+        if len(encoded.encode('utf-8')) > 8192:
+            raise ValueError('oversized context')
+        copied = json.loads(encoded)
+        digest = hashlib.sha256(encoded.encode('utf-8')).hexdigest()
+    except (ValueError, TypeError, OverflowError, RecursionError):
+        copied = {'status': 'UNAVAILABLE', 'reason': 'INVALID_OR_OVERSIZED_RUNTIME_ASSESSMENT'}
+    return {'brain_outcome_adjustment': adjustment, 'brain_outcome_context': copied,
+        'brain_feedback_provenance': {
+            'scope': 'AVAILABLE_AT_SIGNAL_PERSISTENCE', 'assessment_sha256': digest,
+            'immutable_consumption_proof': False, 'execution_authority': 'NONE',
+            'source_episode_identity': 'NOT_ESTABLISHED_BY_AGGREGATE'}}
 
 
 def _value(obj: Any, name: str, default: Any = None) -> Any:
