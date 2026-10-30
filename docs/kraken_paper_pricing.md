@@ -108,3 +108,20 @@ Official specifications checked during implementation:
 - https://docs.kraken.com/api/docs/websocket-v2/book/
 - https://docs.kraken.com/api/docs/guides/spot-ws-book-v2/
 - https://docs.kraken.com/api/docs/rest-api/get-tradable-asset-pairs/
+
+## Analysis-to-forecast timing
+
+A quote captured during history retrieval can expire while parallel discovery,
+news or Council analysis runs. The Kraken adapter captures a new authentic book
+at metadata attachment, before forecast generation, when the old receipt is no
+longer authentic. This applies only to exact-symbol five-minute Kraken OHLC
+history. It copies the route, preserves the original receipt and raw analysis
+price, and records the new book's actual ID and timestamps. It never changes bar
+values or extends the five-second TTL. Existing forecast IDs prohibit rebinding.
+
+`PAPER QUOTE ANALYSIS HANDOFF` distinguishes a newly captured current book from
+unavailability. This is preparation for a forecast, not trade authorization.
+No fresh valid book, wrong history provider, armed runtime or existing forecast
+continues to fail closed. Model/forecast persistence and final execution guards
+still run normally. `test_paper_quote_analysis_handoff.py` reproduces delayed
+analysis and verifies stale-source, existing-forecast and Yahoo boundaries.
