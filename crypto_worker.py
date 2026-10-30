@@ -136,7 +136,11 @@ if __name__ == "__main__":
     install_coinbase_shadow_probes(market_worker)
     from kraken_primary_research import PrimaryResearch, enabled as kraken_research_enabled
     if kraken_research_enabled():
-        market_worker._kraken_primary_research = PrimaryResearch()
+        pricing = getattr(market_worker, '_coinbase_paper_pricing', None)
+        # Reuse the bounded OHLC/metadata cache rather than issuing duplicate
+        # requests from the paper adapter and background research in this worker.
+        research_data = pricing.data if getattr(pricing, 'source', None) == 'Kraken WebSocket v2 paper pricing' else None
+        market_worker._kraken_primary_research = PrimaryResearch(data=research_data)
         market_worker._kraken_primary_research.start()
     emit_capital_readiness_report(logger)
     if os.getenv("EXECUTION_MODE", "paper").strip().lower() == "paper":

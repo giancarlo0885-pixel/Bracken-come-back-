@@ -333,12 +333,12 @@ def observe_paper_quote(provider: Any, quote: dict[str, Any]) -> bool:
     """
     if not active():
         return False
-    from coinbase_paper_pricing import SOURCE, PaperPricing
+    from coinbase_paper_pricing import PaperPricing
     if not isinstance(provider, PaperPricing) or not isinstance(quote, dict):
         return False
     symbol = quote.get("symbol")
     if (not symbol or quote.get("requested_symbol") != symbol or quote.get("provider_symbol") != symbol
-            or quote.get("provider") != SOURCE
+            or quote.get("provider") != provider.source
             or quote.get("execution_authority") != "PAPER_SIMULATION_ONLY"
             or not provider.authentic(quote, symbol)):
         return False
@@ -346,14 +346,21 @@ def observe_paper_quote(provider: Any, quote: dict[str, Any]) -> bool:
     captured = datetime.now(timezone.utc)
     price = _cost_number(quote.get("price"))
     sequence = quote.get("sequence")
+    kraken = quote.get("provider") == "Kraken WebSocket v2 paper pricing"
     if (observed.tzinfo is None or observed > captured or (captured-observed).total_seconds() > 5 or price is None or price <= 0
-            or type(sequence) is not int or sequence < 0):
+            or (not kraken and (type(sequence) is not int or sequence < 0))):
         return False
     source = {key: quote[key] for key in ("provider", "quote_id", "source_identity",
-                "quote_timestamp", "received_at", "timestamp_basis", "bid", "ask", "sequence")}
+                "quote_timestamp", "received_at", "timestamp_basis", "bid", "ask")}
+    if kraken:
+        source.update(session_id=quote["session_id"], checksum=quote["checksum"], checksum_status=quote["checksum_status"])
+        event_identity = [quote["session_id"], quote["checksum"]]
+    else:
+        source["sequence"] = sequence
+        event_identity = sequence
     source.update(execution_authority="NONE", role="OBSERVED_PAPER_QUOTE_ONLY",
                   captured_at=captured.isoformat())
-    event_key = hashlib.sha256(json.dumps([quote["provider"], symbol, observed.isoformat(), sequence]).encode()).hexdigest()
+    event_key = hashlib.sha256(json.dumps([quote["provider"], symbol, observed.isoformat(), event_identity]).encode()).hexdigest()
     source_prefix = "verified_quote_v1:" + event_key + "|"
     observation = {"observed_at": observed, "price": price, "sequence": sequence,
                    "source_prefix": source_prefix,
@@ -362,7 +369,9 @@ def observe_paper_quote(provider: Any, quote: dict[str, Any]) -> bool:
     with _QUOTE_LOCK:
         old = _QUOTE_OBSERVATIONS.get(key)
         if old and (observed < old["observed_at"] or
-                    (observed == old["observed_at"] and sequence <= old["sequence"])):
+                    (observed == old["observed_at"] and (
+                        observation["source_prefix"] == old["source_prefix"] or
+                        (not kraken and old["sequence"] is not None and sequence <= old["sequence"])))):
             return False
         if key not in _QUOTE_OBSERVATIONS and len(_QUOTE_OBSERVATIONS) >= _MAX_QUOTE_OBSERVATIONS:
             _QUOTE_OBSERVATIONS.pop(next(iter(_QUOTE_OBSERVATIONS)))

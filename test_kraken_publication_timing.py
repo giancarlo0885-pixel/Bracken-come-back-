@@ -93,6 +93,9 @@ def setup_publication(monkeypatch, failure_stage=None, timing_log_error=False):
 def test_publish_attributes_local_wall_phases_without_changing_payload(monkeypatch):
     service, conn, clock, records, _, stored, _ = setup_publication(monkeypatch)
     expected = ready().health(NOW)
+    # Session identity belongs to the actual producer, not a second fixture.
+    for quote in expected['quotes'].values():
+        quote['session_id'] = service.state.session_id
     expected['subscribed_symbols'] = list(runtime.SYMBOLS.values())
     expected['comparisons'] = {symbol: {
         'status': 'UNAVAILABLE_OR_UNALIGNED', 'reason': 'PRIMARY_NOT_OBSERVED',
