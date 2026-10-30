@@ -365,10 +365,15 @@ def install_paper_pricing(worker,provider=None):
         except Exception:return original_history(symbol,period,interval,*a,**k)
 
     def attach(signal,history,scan_type):
+        prepare=getattr(provider,'prepare_analysis_quote',None)
+        if prepare is not None:
+            prepare(signal,history,scan_type)
         route=original_attach(signal,history,scan_type)
         q=route.get('paper_quote')
         if q and provider.authentic(q,str(getattr(signal,'symbol','')).upper()):
-            setattr(signal,'analysis_price',getattr(signal,'price',None));setattr(signal,'price',q['price'])
+            if prepare is None or not hasattr(signal,'analysis_price'):
+                setattr(signal,'analysis_price',getattr(signal,'price',None))
+            setattr(signal,'price',q['price'])
         return route
 
     def verified(symbol,quotes,market='cash'):

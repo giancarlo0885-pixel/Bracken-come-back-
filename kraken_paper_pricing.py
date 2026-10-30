@@ -9,6 +9,7 @@ from decimal import Decimal, localcontext
 import hashlib
 import json
 import os
+import logging
 
 from coinbase_paper_pricing import PaperPricing, FEE, paper_context_enabled
 from kraken_research_data import ResearchUnavailable
@@ -18,6 +19,7 @@ from kraken_reference_book import (SOURCE as REFERENCE_SOURCE, DEPTH, book_check
 SOURCE = 'Kraken WebSocket v2 paper pricing'
 MODEL = 'kraken-depth10-paper-v1'
 FEE_MODEL = 'conservative_simulation_60bps_per_side_not_account_verified'
+log = logging.getLogger('kraken-paper-pricing')
 
 
 def enabled():
@@ -138,6 +140,37 @@ class KrakenPaperPricing(PaperPricing):
 
     def history(self, symbol):
         return self.data.history(symbol, self.clock())
+
+    def prepare_analysis_quote(self, signal, history, scan_type):
+        """Capture a real current book AFTER analysis, BEFORE a forecast exists.
+
+        Parallel discovery and Council/news work can outlive the original
+        five-second receipt. Never extend it or rebind an existing forecast.
+        """
+        symbol = str(getattr(signal, 'symbol', '')).upper()
+        route = getattr(history, 'attrs', {}).get('provider_route') or {}
+        if (getattr(signal, 'forecast_id', None) or not self.available()
+                or getattr(history, 'attrs', {}).get('provider') != 'Kraken Public OHLC'
+                or route.get('provider') != 'Kraken Public OHLC'
+                or route.get('interval') != '5m'
+                or route.get('requested_symbol') != symbol or route.get('provider_symbol') != symbol):
+            return
+        if not hasattr(signal, 'analysis_price'):
+            signal.analysis_price = getattr(signal, 'price', None)
+        old = route.get('paper_quote')
+        if self.authentic(old, symbol):
+            return
+        current = self.quote(symbol)
+        if not current or not self.authentic(current, symbol):
+            log.info('PAPER QUOTE ANALYSIS HANDOFF | symbol=%s | scan=%s | status=UNAVAILABLE | execution_impact=NONE', symbol, scan_type)
+            return
+        # Copy the route: previous quote/route evidence is not rewritten.
+        history.attrs['provider_route'] = {**route, 'paper_quote': current,
+            'quote_timestamp': current['quote_timestamp'], 'quote_age_seconds': (self.clock()-timestamp(current['quote_timestamp'])).total_seconds(),
+            'quote_provider': self.source, 'source_identity': current['source_identity'],
+            'quote_verified': True, 'paper_reference_verified': True, 'provider_quote_verified': False}
+        log.info('PAPER QUOTE ANALYSIS HANDOFF | symbol=%s | scan=%s | status=CAPTURED_CURRENT_BOOK | quote_id=%s | source_timestamp=%s | forecast_binding=NOT_YET_CREATED | execution_impact=NONE',
+                 symbol, scan_type, current['quote_id'], current['quote_timestamp'])
 
     def quote(self, symbol):
         symbol = str(symbol).upper().strip()
