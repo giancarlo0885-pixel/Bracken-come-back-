@@ -385,6 +385,10 @@ def _signal_payload(signal: Any, route: dict[str, Any], scan_type: str, **extra:
         payload["edge_provenance"] = "predecision_forecast_expected_move_pct"
         payload["forecast_id"] = getattr(signal, "forecast_id", None)
     payload.update(extra)
+    # OracleSignal.to_dict() serializes dataclass fields only. Brain feedback is
+    # runtime enrichment, so preserve its actual bounded assessment explicitly.
+    from oracle_brain_feedback import signal_feedback_evidence
+    payload.update(signal_feedback_evidence(signal))
     return payload
 
 
