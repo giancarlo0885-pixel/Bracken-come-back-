@@ -143,10 +143,11 @@ def read_research(fetch_rows, now=None):
 
 
 class PrimaryResearch:
-    def __init__(self, connect_factory=None, data=None):
+    def __init__(self, connect_factory=None, data=None, paper_pricing=None):
         from database import connect
         self.connect = connect_factory or connect
         self.data = data or PublicResearchData()
+        self.paper_pricing = paper_pricing
         self.stop = threading.Event()
         self.thread = None
 
@@ -161,6 +162,24 @@ class PrimaryResearch:
         from kraken_reference_runtime import read_kraken_reference_state
         from kraken_brain_evidence import read_evidence_capacity
         capacity = read_evidence_capacity(conn)
+        # Separate, explicit opt-in. Reuse the installed pricer and shared feed;
+        # no orders, new connections, canonical fills or strategy approvals.
+        import prospective_paper_research as prospective
+        pilot = None
+        prospective_status = {'status':'DISABLED','execution_authority':'NONE'}
+        if prospective.enabled() and self.paper_pricing is not None:
+            try:
+                with conn.transaction():
+                    pilot = prospective.pilot_config(conn,capacity,datetime.now(timezone.utc))
+                    if pilot:
+                        prospective.evaluate_pending(conn,self.paper_pricing,pilot,datetime.now(timezone.utc))
+                        prospective_status = prospective.summarize(conn,pilot)
+                    else:
+                        prospective_status = {'status':'NO_UNUSED_SOURCE_CAPACITY','execution_authority':'NONE'}
+            except Exception as exc:
+                pilot = None
+                prospective_status = {'status':'UNAVAILABLE','reason_class':type(exc).__name__,
+                                      'execution_authority':'NONE'}
         capacity_status = capacity.get('status')
         blocked = ('EVIDENCE_CAPACITY_REACHED' if capacity_status == 'CAPACITY_REACHED'
                    else None if capacity_status in {'CAPACITY_NORMAL','CAPACITY_WARNING','CAPACITY_CRITICAL'}
@@ -193,6 +212,14 @@ class PrimaryResearch:
                     result['independent_comparison'] = {'status':'UNAVAILABLE',
                         'reason':str(exc) if isinstance(exc,ResearchUnavailable) else type(exc).__name__}
 
+                if pilot and pilot['first_source_id'] <= capacity['highest_id']+1 <= pilot['last_source_id']:
+                    try:
+                        result['forward_trial'] = prospective.capture_trial(result,self.paper_pricing,datetime.now(timezone.utc))
+                        if len(json.dumps(result,allow_nan=False).encode()) > 24000:
+                            raise ResearchUnavailable('PROSPECTIVE_SOURCE_PAYLOAD_TOO_LARGE')
+                    except Exception as exc:
+                        result['forward_trial'] = {'version':prospective.VERSION,'status':'UNAVAILABLE',
+                            'reason_class':type(exc).__name__,'execution_authority':'NONE','canonical_trade':False}
                 result['evidence_id'] = persist_evidence(conn, result, history)
                 results[symbol] = result
                 evidence_id = result['evidence_id']
@@ -214,6 +241,7 @@ class PrimaryResearch:
                                    'execution_authority':'NONE'}
         now = datetime.now(timezone.utc)
         payload = {'status':blocked or ('ACTIVE' if results else 'PRIMARY_UNAVAILABLE'),
+                   'prospective_paper':prospective_status,
                    'evidence_capacity':capacity, 'primary_policy':'KRAKEN_THEN_COINBASE_RESEARCH_ONLY',
                    'symbols':results,'observed_at':now.isoformat(), 'execution_authority':'NONE',
                    'broker_submission':'NONE','profitability_status':'UNPROVEN'}
@@ -230,6 +258,7 @@ class PrimaryResearch:
         except Exception as exc:
             log.warning('KRAKEN BRAIN RECEIPT | status=UNAVAILABLE | reason=%s | execution_impact=NONE',type(exc).__name__)
         log.info('KRAKEN PRIMARY RESEARCH | %s', json.dumps({'status':payload['status'],
+            'prospective_paper':prospective_status,
             'symbols':{s:{'status':r['status'],'reason':r.get('reason'),
                 'data_role':r.get('data_role'),'quote_timestamp':r.get('primary_quote',{}).get('quote_timestamp'),
                 'evidence_id':r.get('evidence_id'),
