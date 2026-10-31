@@ -482,6 +482,8 @@ def estimated_round_trip_cost_pct(signal: Any) -> float:
             return signal.get(name, default)
         return getattr(signal, name, default)
 
+    if value('paper_pricing_cost_unavailable', False) is True:
+        return float('inf')
     explicit = value("estimated_cost_pct", None)
     if explicit is not None:
         return max(0.0, _number(explicit))
@@ -502,6 +504,8 @@ def fee_edge_allows_entry(signal: Any) -> tuple[bool, str, float | None, float]:
     """
     edge = expected_edge_pct(signal)
     cost = estimated_round_trip_cost_pct(signal)
+    if not math.isfinite(cost):
+        return False, 'paper_pricing_cost_unavailable', edge, cost
     min_samples = max(3, int(os.getenv("PAPER_KNOWN_NEGATIVE_EDGE_MIN_SAMPLES", "30")))
     economics: StrategyEconomics | None = None
 
