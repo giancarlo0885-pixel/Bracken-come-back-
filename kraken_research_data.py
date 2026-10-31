@@ -72,8 +72,9 @@ class PublicResearchData:
                     mark_provider_cooldown_live(provider, seconds=300, reason='Kraken API rate limit')
                 raise ResearchUnavailable('KRAKEN_API_ERROR')
             payload = payload['result']
-        # This client is scoped to <=4 instruments; cache cannot grow with ticks.
-        if key not in self.cache and len(self.cache) >= 12:
+        # Four-symbol Kraken/Coinbase research can use 13 distinct bounded keys.
+        # Retain all fresh keys without repeated HTTP reservations; never cache ticks unboundedly.
+        if key not in self.cache and len(self.cache) >= 16:
             self.cache.pop(next(iter(self.cache)))
         self.last_receipt = datetime.now(timezone.utc)
         # Cache lifetime starts when the response is received, not before HTTP.
