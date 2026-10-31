@@ -1,3 +1,5 @@
+import pytest
+
 import engine
 
 
@@ -47,9 +49,6 @@ def test_invalid_crossed_learning_band_is_repaired(monkeypatch):
     buy, sell = engine._signal_thresholds("SOL-USD")
     assert sell < buy
     assert sell < 0.5 < buy
-
-
-import pytest
 
 
 @pytest.mark.parametrize("missing", [
