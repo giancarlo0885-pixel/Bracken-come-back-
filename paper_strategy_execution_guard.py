@@ -358,6 +358,11 @@ def _with_entry_economics_provenance(
                 updates['estimated_cost_pct'] = max(floor, economics.estimated_round_trip_cost_pct(prior))
                 updates['paper_cost_floor_pct'] = floor
                 updates['paper_cost_floor_quote_id'] = verified_quote.get('quote_id')
+                # A costed Kraken paper entry without a measurable gross edge
+                # cannot qualify as a post-cost opportunity. Keep other
+                # providers' existing exploratory policy unchanged.
+                if economics.expected_edge_pct(prior) is None:
+                    updates['paper_pricing_edge_unavailable'] = True
         except (ValueError, TypeError, KeyError, ArithmeticError):
             updates['paper_pricing_cost_unavailable'] = True
 
