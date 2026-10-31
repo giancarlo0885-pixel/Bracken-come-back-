@@ -19,11 +19,13 @@ def research_source(row):
             raise ValueError('invalid forecast identity')
     elif forecast is not None or not p.get('reason'):
         raise ValueError('invalid abstention receipt')
-    from kraken_research_store import LEGACY_TABLE, OVERFLOW_TABLE, LEGACY_LIMIT, OVERFLOW_LIMIT
+    from kraken_research_store import (LEGACY_TABLE, OVERFLOW_TABLE, EXTENSION_TABLE,
+        LEGACY_LIMIT, OVERFLOW_LIMIT, EXTENSION_LIMIT)
     table = row.get('source_table',LEGACY_TABLE)
     if (type(row.get('id')) is not int or
             not ((table == LEGACY_TABLE and 1 <= row['id'] <= LEGACY_LIMIT)
-                 or (table == OVERFLOW_TABLE and LEGACY_LIMIT < row['id'] <= OVERFLOW_LIMIT))):
+                 or (table == OVERFLOW_TABLE and LEGACY_LIMIT < row['id'] <= OVERFLOW_LIMIT)
+                 or (table == EXTENSION_TABLE and OVERFLOW_LIMIT < row['id'] <= EXTENSION_LIMIT))):
         raise ValueError('invalid research storage identity')
     return {'key':'kraken-research:'+str(row['id']),'provider':q['provider'],'symbol':p['symbol'],
         'title':p['symbol']+' '+p['status'],'observed_at':observed,
