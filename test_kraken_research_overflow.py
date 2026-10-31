@@ -32,6 +32,28 @@ def test_creation_requires_explicit_paper_only_gate(monkeypatch,key,value):
     conn.transaction.assert_not_called()
 
 
+@pytest.mark.parametrize('missing_key', [
+    'EXECUTION_MODE', 'ENABLE_BROKER_SUBMISSION', 'LIVE_TRADING_ARMED',
+])
+def test_overflow_creation_fails_closed_if_safety_setting_missing(monkeypatch, missing_key):
+    activate(monkeypatch)
+    monkeypatch.delenv(missing_key)
+    conn = Mock()
+    assert ensure_overflow_schema(conn) is False
+    conn.transaction.assert_not_called()
+    conn.execute.assert_not_called()
+
+
+def test_overflow_creation_fails_closed_if_all_safety_settings_missing(monkeypatch):
+    activate(monkeypatch)
+    for key in ('EXECUTION_MODE', 'ENABLE_BROKER_SUBMISSION', 'LIVE_TRADING_ARMED'):
+        monkeypatch.delenv(key)
+    conn = Mock()
+    assert ensure_overflow_schema(conn) is False
+    conn.transaction.assert_not_called()
+    conn.execute.assert_not_called()
+
+
 @pytest.mark.parametrize('table,identity', [('kraken_research_evidence',5001),
     ('kraken_research_evidence_overflow',5000),('kraken_research_evidence_overflow',10001),
     ('untrusted_table',1),('kraken_research_evidence',True)])

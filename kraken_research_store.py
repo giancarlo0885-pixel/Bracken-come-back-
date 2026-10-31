@@ -54,9 +54,9 @@ def ensure_overflow_schema(conn):
     Rollback to older code stops the old full producer and preserves overflow rows.
     """
     if not (os.getenv('KRAKEN_RESEARCH_OVERFLOW_CREATE_ENABLED','false').strip().lower() == 'true'
-            and os.getenv('EXECUTION_MODE','paper').strip().lower() == 'paper'
-            and os.getenv('ENABLE_BROKER_SUBMISSION','false').strip().lower() == 'false'
-            and os.getenv('LIVE_TRADING_ARMED','false').strip().lower() == 'false'):
+            and os.getenv('EXECUTION_MODE','').strip().lower() == 'paper'
+            and os.getenv('ENABLE_BROKER_SUBMISSION','').strip().lower() == 'false'
+            and os.getenv('LIVE_TRADING_ARMED','').strip().lower() == 'false'):
         return False
     with conn.transaction():
         conn.execute("SET LOCAL lock_timeout='1s'")
