@@ -25,9 +25,9 @@ def enabled():
 
 
 def paper_context_enabled():
-    return (os.getenv('EXECUTION_MODE','paper').lower() == 'paper'
-        and os.getenv('ENABLE_BROKER_SUBMISSION','false').lower() == 'false'
-        and os.getenv('LIVE_TRADING_ARMED','false').lower() == 'false'
+    return (os.getenv('EXECUTION_MODE','').strip().lower() == 'paper'
+        and os.getenv('ENABLE_BROKER_SUBMISSION','').strip().lower() == 'false'
+        and os.getenv('LIVE_TRADING_ARMED','').strip().lower() == 'false'
         and os.getenv('KRAKEN_REFERENCE_WS_ENABLED','false').lower() == 'true')
 
 
