@@ -53,7 +53,9 @@ def test_generic_quotes_and_existing_non_kraken_semantics_unchanged():
 
 
 @pytest.mark.parametrize('patch',[{'symbol':'ETH-USD'},{'paper_fee_pct':None},
-    {'paper_price_model':'unknown'},{'execution_authority':'NONE'}])
+    {'paper_price_model':'unknown'},{'execution_authority':'NONE'},
+    {'estimated_fees_pct':0.0},{'estimated_fees_pct':None},
+    {'estimated_fees_pct':.002},{'fee_model':'unverified'}])
 @pytest.mark.parametrize('edge',[None,100.0])
 def test_ambiguous_selected_pricing_cost_blocks_even_missing_edge_exploration(monkeypatch,patch,edge):
     p,_=provider(monkeypatch);q=p.quote('BTC-USD');q.update(patch)
