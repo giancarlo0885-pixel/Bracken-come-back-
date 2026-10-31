@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 from datetime import datetime, timezone
 import logging
+import math
 import os
 from typing import Any
 
@@ -229,6 +230,34 @@ def _remaining_cumulative_tier_capacity(symbol: str, tier_target: float) -> tupl
     return max(0.0, round(cap - current_value, 2)), current_value
 
 
+def _kraken_paper_cost_floor(quote: dict[str, Any], symbol: str) -> float | None:
+    """Current top-book break-even lower bound, not a future executable quote.
+
+    Depth can only make these prices worse. Reuse the exact installed paper
+    fill calculation, with fees separately charged once. This never authenticates
+    a quote or relaxes the downstream adapter/model/forecast/risk guards.
+    """
+    from kraken_paper_pricing import SOURCE, MODEL
+    if quote.get('provider') != SOURCE:
+        return None
+    if (quote.get('symbol') != str(symbol).upper() or quote.get('paper_price_model') != MODEL
+            or quote.get('execution_authority') != 'PAPER_SIMULATION_ONLY'
+            or quote.get('paper_fee_pct') != .006):
+        raise ValueError('Kraken paper cost identity unavailable')
+    from paper_execution_accounting import _simulate_fill_explicit_fee
+    buy = _simulate_fill_explicit_fee(side='BUY', market='crypto', reference_price=quote['price'],
+                                     quote=quote, market_impact_pct=0.0)
+    sell = _simulate_fill_explicit_fee(side='SELL', market='crypto', reference_price=quote['price'],
+                                      quote=quote, market_impact_pct=0.0)
+    if (not all(math.isfinite(v) and v > 0 for v in (buy.fill_price, sell.fill_price))
+            or not 0 <= buy.fee_pct < 1 or not 0 <= sell.fee_pct < 1):
+        raise ValueError('Kraken paper cost components unavailable')
+    result = (buy.fill_price * (1 + buy.fee_pct) / (sell.fill_price * (1 - sell.fee_pct)) - 1) * 100
+    if not math.isfinite(result) or result < 0:
+        raise ValueError('Kraken paper cost unavailable')
+    return result
+
+
 def _with_entry_economics_provenance(
     signal: Any,
     verified_quote: dict[str, Any] | None,
@@ -241,10 +270,10 @@ def _with_entry_economics_provenance(
     gross edge and execution cost separate. net_expected_value_pct is already
     post-cost, so it must never be handed to a later cost gate as gross edge.
     When the optimizer has already resolved a cost for this exact candidate,
-    preserve that cost through final execution so planning and execution use the
-    same economics.
+    preserve that cost unless the actual selected paper-pricing model establishes
+    a higher minimum. Raising this floor never changes the forecast's gross edge.
     """
-    updates: dict[str, float] = {}
+    updates: dict[str, Any] = {}
 
     # Prefer the exact optimizer cost already used to allocate this candidate.
     allocation = _value(signal, "v39_optimizer_allocation", None)
@@ -309,6 +338,25 @@ def _with_entry_economics_provenance(
             spread = float("nan")
         if spread == spread and spread >= 0 and spread != float("inf"):
             updates["spread_pct"] = spread
+
+    if isinstance(verified_quote, dict):
+        try:
+            floor = _kraken_paper_cost_floor(verified_quote, _value(signal, 'symbol', ''))
+            if floor is not None:
+                # The adapter's spread is a ratio; economics fields are percent
+                # points. Preserve an existing higher cost, never add costs twice.
+                if _value(signal, 'spread_pct', None) is None:
+                    updates['spread_pct'] = float(verified_quote['spread_pct']) * 100
+                prior = dict(signal) if isinstance(signal, dict) else copy.copy(signal)
+                if isinstance(prior, dict):
+                    prior.update(updates)
+                else:
+                    for key, value in updates.items():setattr(prior,key,value)
+                updates['estimated_cost_pct'] = max(floor, economics.estimated_round_trip_cost_pct(prior))
+                updates['paper_cost_floor_pct'] = floor
+                updates['paper_cost_floor_quote_id'] = verified_quote.get('quote_id')
+        except (ValueError, TypeError, KeyError, ArithmeticError):
+            updates['paper_pricing_cost_unavailable'] = True
 
     if not updates:
         return signal
