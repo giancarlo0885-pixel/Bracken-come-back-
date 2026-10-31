@@ -237,12 +237,15 @@ def _kraken_paper_cost_floor(quote: dict[str, Any], symbol: str) -> float | None
     fill calculation, with fees separately charged once. This never authenticates
     a quote or relaxes the downstream adapter/model/forecast/risk guards.
     """
-    from kraken_paper_pricing import SOURCE, MODEL
+    from kraken_paper_pricing import SOURCE, MODEL, FEE_MODEL
+    from coinbase_paper_pricing import FEE
     if quote.get('provider') != SOURCE:
         return None
     if (quote.get('symbol') != str(symbol).upper() or quote.get('paper_price_model') != MODEL
             or quote.get('execution_authority') != 'PAPER_SIMULATION_ONLY'
-            or quote.get('paper_fee_pct') != .006):
+            or quote.get('paper_fee_pct') != FEE
+            or quote.get('estimated_fees_pct') != FEE
+            or quote.get('fee_model') != FEE_MODEL):
         raise ValueError('Kraken paper cost identity unavailable')
     from paper_execution_accounting import _simulate_fill_explicit_fee
     buy = _simulate_fill_explicit_fee(side='BUY', market='crypto', reference_price=quote['price'],
@@ -250,7 +253,7 @@ def _kraken_paper_cost_floor(quote: dict[str, Any], symbol: str) -> float | None
     sell = _simulate_fill_explicit_fee(side='SELL', market='crypto', reference_price=quote['price'],
                                       quote=quote, market_impact_pct=0.0)
     if (not all(math.isfinite(v) and v > 0 for v in (buy.fill_price, sell.fill_price))
-            or not 0 <= buy.fee_pct < 1 or not 0 <= sell.fee_pct < 1):
+            or buy.fee_pct != FEE or sell.fee_pct != FEE):
         raise ValueError('Kraken paper cost components unavailable')
     result = (buy.fill_price * (1 + buy.fee_pct) / (sell.fill_price * (1 - sell.fee_pct)) - 1) * 100
     if not math.isfinite(result) or result < 0:
