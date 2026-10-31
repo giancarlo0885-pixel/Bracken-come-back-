@@ -78,3 +78,28 @@ def test_rebound_changes_only_rebound_component():
     strong = score_entry(**candidate(dip_depth_pct=0.25, rebound_from_low_pct=0.20))
     assert weak.rebound_quality < strong.rebound_quality
     assert weak.dip_quality == strong.dip_quality
+
+
+def test_v11_shadow_challenger_does_not_mutate_baseline():
+    from paper_aeve_v1_formula import score_breakout_guard_research
+    c = candidate(mfe_pct=0.9, mae_pct=-0.5, rebound_from_low_pct=0.20)
+    before = score_entry(**c)
+    research = score_breakout_guard_research(**c, high_vol_breakout=True)
+    after = score_entry(**c)
+    assert before == after
+    assert isinstance(research.would_trade, bool)
+
+
+def test_v11_rejects_asymmetric_excursion_even_when_baseline_accepts():
+    from paper_aeve_v1_formula import score_breakout_guard_research
+    c = candidate(mfe_pct=0.60, mae_pct=-0.50)
+    assert score_entry(**c).would_trade is True
+    assert score_breakout_guard_research(**c).would_trade is False
+
+
+def test_v11_high_vol_negative_regime_receives_extra_penalty():
+    from paper_aeve_v1_formula import score_breakout_guard_research
+    c = candidate(regime_expectancy_positive=False)
+    standard = score_breakout_guard_research(**c, high_vol_breakout=False)
+    high_vol = score_breakout_guard_research(**c, high_vol_breakout=True)
+    assert round(standard.score - high_vol.score, 8) == 0.25
