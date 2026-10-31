@@ -67,11 +67,11 @@ def ensure_overflow_schema(conn):
 
 
 def ensure_extension_schema(conn):
-    """Opt-in additive capacity only; original 10,000 rows and IDs never move."""
+    """Opt-in additive capacity; require explicit paper-only safety variables."""
     if not (os.getenv('KRAKEN_RESEARCH_EXTENSION_CREATE_ENABLED','false').strip().lower() == 'true'
-            and os.getenv('EXECUTION_MODE','paper').strip().lower() == 'paper'
-            and os.getenv('ENABLE_BROKER_SUBMISSION','false').strip().lower() == 'false'
-            and os.getenv('LIVE_TRADING_ARMED','false').strip().lower() == 'false'):
+            and os.getenv('EXECUTION_MODE','').strip().lower() == 'paper'
+            and os.getenv('ENABLE_BROKER_SUBMISSION','').strip().lower() == 'false'
+            and os.getenv('LIVE_TRADING_ARMED','').strip().lower() == 'false'):
         return False
     with conn.transaction():
         conn.execute("SET LOCAL lock_timeout='1s'")
