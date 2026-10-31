@@ -84,7 +84,8 @@ def persist_evidence(conn, result, history):
     model_version=(result.get('forecast') or result.get('model_identity') or {})['model_version']
     key = '|'.join([result['symbol'],result['history_provider'],result['history_last_closed_bar'],model_version])
     if result['status']=='ABSTAINED':key+='|ABSTAINED|'+result['reason']
-    from kraken_research_store import evidence_layout, evidence_sql, LEGACY_TABLE, OVERFLOW_TABLE, LEGACY_LIMIT
+    from kraken_research_store import (evidence_layout, evidence_sql, LEGACY_TABLE, OVERFLOW_TABLE,
+        EXTENSION_TABLE, LEGACY_LIMIT, OVERFLOW_LIMIT)
     layout = evidence_layout(conn)
     source = evidence_sql(layout, 'id,evidence_key')
     existing = conn.execute(f'SELECT id FROM ({source}) e WHERE evidence_key=%s',(key,)).fetchone()
@@ -94,7 +95,8 @@ def persist_evidence(conn, result, history):
     if len(compressed) > 131072:
         raise ResearchUnavailable('EVIDENCE_TOO_LARGE')
     highest = conn.execute(f'SELECT COALESCE(MAX(id),0) AS highest_id FROM ({source}) e').fetchone()['highest_id']
-    target = OVERFLOW_TABLE if highest >= LEGACY_LIMIT and OVERFLOW_TABLE in layout['tables'] else LEGACY_TABLE
+    target = (EXTENSION_TABLE if highest >= OVERFLOW_LIMIT and EXTENSION_TABLE in layout['tables'] else
+              OVERFLOW_TABLE if highest >= LEGACY_LIMIT and OVERFLOW_TABLE in layout['tables'] else LEGACY_TABLE)
     row = conn.execute(f"""INSERT INTO {target}
         SELECT COALESCE(MAX(id),0)+1,%s,%s,%s::jsonb,%s FROM ({source}) e
         HAVING COALESCE(MAX(id),0)<{layout['max_id']} ON CONFLICT(evidence_key) DO NOTHING RETURNING id""",
@@ -247,8 +249,9 @@ class PrimaryResearch:
                     conn.execute("SET statement_timeout='3s'")
                     conn.execute(DDL)
                     conn.execute(EVIDENCE_DDL)
-                    from kraken_research_store import ensure_overflow_schema
+                    from kraken_research_store import ensure_overflow_schema, ensure_extension_schema
                     ensure_overflow_schema(conn)
+                    ensure_extension_schema(conn)
                     self.stop.wait(10)  # Allow the elected feed to obtain its initial snapshots.
                     while not self.stop.is_set() and enabled():
                         self.cycle(conn)
