@@ -506,6 +506,9 @@ def fee_edge_allows_entry(signal: Any) -> tuple[bool, str, float | None, float]:
     cost = estimated_round_trip_cost_pct(signal)
     if not math.isfinite(cost):
         return False, 'paper_pricing_cost_unavailable', edge, cost
+    if (isinstance(signal, dict) and signal.get('paper_pricing_edge_unavailable') is True
+            or not isinstance(signal, dict) and getattr(signal, 'paper_pricing_edge_unavailable', False) is True):
+        return False, 'kraken_paper_gross_edge_unavailable', edge, cost
     min_samples = max(3, int(os.getenv("PAPER_KNOWN_NEGATIVE_EDGE_MIN_SAMPLES", "30")))
     economics: StrategyEconomics | None = None
 
