@@ -63,7 +63,8 @@ def test_original_evidence_and_brain_preserved_across_10000_handoff(pg, monkeypa
         assert ensure_extension_schema(conn)
         assert ensure_extension_schema(conn)
         assert read_evidence_capacity(conn)['remaining_id_slots'] == 5000
-        other = {**result, 'symbol': 'ETH-USD'}
+        other = {**result, 'forecast': {**result['forecast'],
+                 'model_version': result['forecast']['model_version'] + '-extension-fixture'}}
         assert persist_evidence(conn, other, history()) == 10001
         assert sync_research_sources(conn)['inserted'] == 1
         receipt = committed_receipt(conn)
