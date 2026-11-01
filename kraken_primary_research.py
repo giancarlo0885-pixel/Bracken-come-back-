@@ -260,6 +260,15 @@ class PrimaryResearch:
                         except Exception as exc:
                             log.warning('PUBLIC RESEARCH BUDGET | status=UNAVAILABLE | reason=%s | execution_impact=NONE',
                                         type(exc).__name__)
+                        # Bounded process-local attribution only; no provider HTTP
+                        # calls, ledger writes or sensitive request/response details.
+                        try:
+                            diagnostic = self.data.drain_request_diagnostics()
+                            log.info('PUBLIC RESEARCH ENDPOINT ATTRIBUTION | %s | execution_impact=NONE',
+                                     json.dumps(diagnostic, sort_keys=True))
+                        except Exception as exc:
+                            log.warning('PUBLIC RESEARCH ENDPOINT ATTRIBUTION | status=UNAVAILABLE | reason=%s | execution_impact=NONE',
+                                        type(exc).__name__)
                         self.stop.wait(300)
             except Exception as exc:
                 log.warning('KRAKEN PRIMARY RESEARCH | status=STORAGE_OR_CYCLE_UNAVAILABLE | reason=%s | execution_authority=NONE',type(exc).__name__)
