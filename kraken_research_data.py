@@ -13,6 +13,11 @@ class ResearchUnavailable(ValueError):
 
 
 class PublicResearchData:
+    # Include all clients in this worker process, including short-lived
+    # discovery clients. Never store request paths or provider payloads.
+    _process_diagnostic_lock = threading.RLock()
+    _process_request_diagnostics = {}
+
     def __init__(self, get=requests.get):
         self.get = get
         self.cooldowns = {}
@@ -32,12 +37,31 @@ class PublicResearchData:
                     'CANDLES' if path.endswith('/candles') else 'OTHER')
         return ('OTHER', 'OTHER')
 
+    @staticmethod
+    def _new_diagnostic_row():
+        return {'cache_hits': 0, 'cache_misses': 0, 'reservation_attempts': 0,
+                'reservations_granted': 0, 'reservations_denied': 0}
+
     def _record_request_diagnostic(self, provider, path, metric):
         bucket = self._diagnostic_bucket(provider, path)
-        row = self._request_diagnostics.setdefault(bucket, {
-            'cache_hits': 0, 'cache_misses': 0, 'reservation_attempts': 0,
-            'reservations_granted': 0, 'reservations_denied': 0})
+        row = self._request_diagnostics.setdefault(bucket, self._new_diagnostic_row())
         row[metric] += 1
+        # The elected reporter and paper-pricing adapter use different
+        # PublicResearchData instances. Per-instance counters alone cannot
+        # explain provider-wide reservations while primary research is blocked.
+        with PublicResearchData._process_diagnostic_lock:
+            process_row = PublicResearchData._process_request_diagnostics.setdefault(
+                bucket, self._new_diagnostic_row())
+            process_row[metric] += 1
+
+    @classmethod
+    def drain_process_diagnostics(cls):
+        """Atomic bounded counters across clients in this process only."""
+        with cls._process_diagnostic_lock:
+            rows = [dict(provider=provider, endpoint=endpoint, **values)
+                    for (provider, endpoint), values in sorted(cls._process_request_diagnostics.items())]
+            cls._process_request_diagnostics.clear()
+            return {'scope': 'PROCESS_LOCAL_ALL_CLIENTS', 'rows': rows}
 
     def drain_request_diagnostics(self):
         """Atomic process-local counters since last drain; not provider-wide totals."""
