@@ -192,6 +192,13 @@ def test_postgres_storage_report_and_retention_protects_canonical_tables():
     assert trade_count >= 1
     assert report["database_bytes"] > 0
     assert report["largest_tables"]
+    for relation in report["largest_tables"]:
+        assert relation["total_bytes"] == sum(relation[key] for key in (
+            "table_bytes", "index_bytes", "toast_table_bytes",
+            "toast_index_bytes", "other_bytes",
+        ))
+        assert relation["toast_table_bytes"] >= 0
+        assert relation["toast_index_bytes"] >= 0
 
 
 @pytest.mark.skipif(not os.getenv("DATABASE_URL"), reason="PostgreSQL integration test runs in CI service container")
