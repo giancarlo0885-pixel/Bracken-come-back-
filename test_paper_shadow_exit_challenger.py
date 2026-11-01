@@ -805,3 +805,21 @@ def test_profit_within_stored_risk_and_r_rounding_error_cannot_qualify():
     assert report["challenger_dollar_rounding_error_bound_usd"] > report["challenger_post_cost_net_pnl_usd"]
     assert report["conditions"]["dollar_profit_exceeds_rounding_uncertainty"] is False
     assert report["promotion_evidence_ready"] is False
+
+
+def test_missing_paper_safety_controls_fail_closed_for_exit_shadow(monkeypatch):
+    import paper_shadow_exit_challenger as challenger
+
+    required = {"EXECUTION_MODE": "paper", "ENABLE_BROKER_SUBMISSION": "false",
+                "LIVE_TRADING_ARMED": "false"}
+    monkeypatch.setenv("PAPER_AUTONOMOUS_LEARNING", "true")
+    for name, value in required.items():
+        monkeypatch.setenv(name, value)
+    assert challenger.active() is True
+    for missing in required:
+        monkeypatch.delenv(missing, raising=False)
+        assert challenger.active() is False
+        monkeypatch.setenv(missing, required[missing])
+    for name in required:
+        monkeypatch.delenv(name, raising=False)
+    assert challenger.active() is False
