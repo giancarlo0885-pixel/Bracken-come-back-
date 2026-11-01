@@ -118,6 +118,47 @@ def test_storage_report_capacity_status(monkeypatch):
     assert report["capacity_projection"]["projected_30d_bytes"] == int(int(0.8 * 1024**3) * 1.10)
 
 
+
+@pytest.mark.parametrize("toast_heap,toast_indexes", [(33 * 1024**3, 256 * 1024**2), (0, 0)])
+def test_storage_report_attributes_toast_without_changing_evidence(monkeypatch, toast_heap, toast_indexes):
+    # Synthetic read-only accounting; a large TOAST relation must not be called unexplained bloat.
+    base_heap, base_indexes, other = 80 * 1024**2, 10 * 1024**2, 2 * 1024**2
+    total = base_heap + base_indexes + toast_heap + toast_indexes + other
+    sql_seen = []
+
+    class FakeConn:
+        def execute(self, sql, params=()):
+            sql_seen.append(sql)
+            if "pg_database_size" in sql:
+                return SimpleNamespace(fetchone=lambda: {"name": "unit", "bytes": total})
+            return SimpleNamespace(fetchall=lambda: [{
+                "table": "oracle_decision_replays", "total_bytes": total,
+                "table_bytes": base_heap, "index_bytes": base_indexes,
+                "toast_table_bytes": toast_heap, "toast_index_bytes": toast_indexes,
+                "live_rows": 500000, "dead_rows": 1200,
+                "last_autovacuum": None, "last_autoanalyze": None,
+            }])
+
+    class Ctx:
+        def __enter__(self): return FakeConn()
+        def __exit__(self, *args): return False
+
+    monkeypatch.setattr(database, "connect", lambda: Ctx())
+    result = database.database_storage_report()
+    row = next(item for item in result["largest_tables"] if item["table"] == "oracle_decision_replays")
+    assert row["toast_table_bytes"] == toast_heap
+    assert row["toast_index_bytes"] == toast_indexes
+    assert row["other_bytes"] == other
+    assert row["toast_table_size"] == database._human_bytes(toast_heap)
+    assert row["toast_index_size"] == database._human_bytes(toast_indexes)
+    assert row["other_size"] == database._human_bytes(other)
+    assert row["total_bytes"] == sum(row[k] for k in (
+        "table_bytes", "index_bytes", "toast_table_bytes", "toast_index_bytes", "other_bytes"
+    ))
+    assert any("reltoastrelid" in sql and "pg_indexes_size" in sql for sql in sql_seen)
+    assert all(not any(word in sql.upper() for word in ("DELETE ", "UPDATE ", "TRUNCATE ", "ALTER ")) for sql in sql_seen)
+
+
 def test_maintenance_lock_skip_does_not_crash(monkeypatch):
     class LockCtx:
         def __enter__(self): return False
