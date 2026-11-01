@@ -32,6 +32,9 @@ def _time(value):
 
 
 def _finite(value):
+    # Python and NumPy booleans are not verified numeric P&L or notionals.
+    if isinstance(value, (bool, np.bool_)):
+        return None
     try:
         result = float(value)
         return result if math.isfinite(result) else None
