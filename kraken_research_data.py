@@ -19,6 +19,33 @@ class PublicResearchData:
         self.cache = {}
         self.last_receipt = None
         self.lock = threading.RLock()
+        self._request_diagnostics = {}
+
+    @staticmethod
+    def _diagnostic_bucket(provider, path):
+        # Fixed classes only: no symbols, URLs, prices, payloads or credentials.
+        if provider == 'Kraken Public Research':
+            return ('KRAKEN', 'ASSET_PAIRS' if path == 'AssetPairs' else
+                    'OHLC' if path == 'OHLC' else 'OTHER')
+        if provider == 'Coinbase Public Research':
+            return ('COINBASE', 'L1_BOOK' if path.endswith('/book') else
+                    'CANDLES' if path.endswith('/candles') else 'OTHER')
+        return ('OTHER', 'OTHER')
+
+    def _record_request_diagnostic(self, provider, path, metric):
+        bucket = self._diagnostic_bucket(provider, path)
+        row = self._request_diagnostics.setdefault(bucket, {
+            'cache_hits': 0, 'cache_misses': 0, 'reservation_attempts': 0,
+            'reservations_granted': 0, 'reservations_denied': 0})
+        row[metric] += 1
+
+    def drain_request_diagnostics(self):
+        """Atomic process-local counters since last drain; not provider-wide totals."""
+        with self.lock:
+            rows = [dict(provider=provider, endpoint=endpoint, **values)
+                    for (provider, endpoint), values in sorted(self._request_diagnostics.items())]
+            self._request_diagnostics.clear()
+            return {'scope': 'PROCESS_LOCAL_CLIENT', 'rows': rows}
 
     def request(self, provider, path, params=None):
         with self.lock:
@@ -29,8 +56,10 @@ class PublicResearchData:
         now = time.monotonic()
         ttl = 2 if path.endswith('/book') else 300
         if key in self.cache and now-self.cache[key][0] < ttl:
+            self._record_request_diagnostic(provider, path, 'cache_hits')
             self.last_receipt = self.cache[key][2]
             return self.cache[key][1]
+        self._record_request_diagnostic(provider, path, 'cache_misses')
         if self.cooldowns.get(provider, 0) > now:
             raise ResearchUnavailable('PROVIDER_COOLDOWN')
         shared_cooldown = provider_cooldown_active_live(provider)
@@ -39,11 +68,13 @@ class PublicResearchData:
             if str(shared_cooldown.get('reason') or '').startswith('shared provider cooldown unavailable'):
                 raise ResearchUnavailable('PROVIDER_LEDGER_UNAVAILABLE')
             raise ResearchUnavailable('PROVIDER_COOLDOWN')
+        self._record_request_diagnostic(provider, path, 'reservation_attempts')
         reservation = reserve_provider_budget_live(
             provider, '__provider__',
             daily_budget=1200 if provider == 'Kraken Public Research' else 2400,
             entitlement='public', data_mode='shadow_research')
         if not reservation.get('reserved'):
+            self._record_request_diagnostic(provider, path, 'reservations_denied')
             # Public, bounded diagnostic codes only; do not log database exception text.
             reason = str(reservation.get('reason') or '').lower()
             if reason == 'provider capability budget exhausted':
@@ -54,6 +85,7 @@ class PublicResearchData:
             if reason == 'provider capability in cooldown':
                 raise ResearchUnavailable('PROVIDER_COOLDOWN')
             raise ResearchUnavailable('PROVIDER_BUDGET_BLOCKED')
+        self._record_request_diagnostic(provider, path, 'reservations_granted')
         root = 'https://api.kraken.com/0/public/' if provider == 'Kraken Public Research' else 'https://api.exchange.coinbase.com/'
         response = self.get(root+path, params=params, timeout=6,
                             headers={'User-Agent':'GARIBALDI-MARKET-ORACLE/1.0','Cache-Control':'no-cache'})
