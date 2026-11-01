@@ -218,6 +218,12 @@ def verified_ledger_inputs(ledger, fills, *, as_of, fifo_report=None, allocation
                 or any(_time(part.get("entry_time")) != original_entry for part in parts)):
             exclusions["mismatched_or_missing_buy_entry_time"] += 1
             continue
+        # Validate every partial exit before combining a lot. Lexical ISO
+        # ordering is not chronological across different UTC offsets.
+        exit_times = [_time(part.get("exit_time")) for part in parts]
+        if any(t is None or t < original_entry or t > as_of for t in exit_times):
+            exclusions["invalid_or_future_partial_exit_time"] += 1
+            continue
         from paper_fill_provenance import number
         opened = number(buys.get(buy_id, {}).get("quantity"))
         quantities = [number(part["members"][0].get("quantity")) for part in parts]
@@ -241,7 +247,7 @@ def verified_ledger_inputs(ledger, fills, *, as_of, fifo_report=None, allocation
             exclusions["unverified_exact_fill_lot_linkage"] += 1
             continue
         close = {**parts[0], "trade_id": buy_id,
-                 "exit_time": max(part["exit_time"] for part in parts),
+                 "exit_time": max(exit_times).isoformat(),
                  "net_pnl": sum(part["net_pnl"] for part in parts),
                  "entry_fees": _sum_cost_components(parts, "entry_fees"),
                  "exit_fees": _sum_cost_components(parts, "exit_fees"),
