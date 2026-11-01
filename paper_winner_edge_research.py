@@ -212,6 +212,12 @@ def verified_ledger_inputs(ledger, fills, *, as_of, fifo_report=None, allocation
         if buy_id not in buys:
             exclusions["missing_or_conflicting_entry_identity"] += 1
             continue
+        # Reused FIFO snapshots must not replace the original BUY entry time.
+        original_entry = _time(buys[buy_id].get("entry_time"))
+        if (original_entry is None
+                or any(_time(part.get("entry_time")) != original_entry for part in parts)):
+            exclusions["mismatched_or_missing_buy_entry_time"] += 1
+            continue
         from paper_fill_provenance import number
         opened = number(buys.get(buy_id, {}).get("quantity"))
         quantities = [number(part["members"][0].get("quantity")) for part in parts]
