@@ -18,6 +18,7 @@ def _exact_fill_lot_identity(buy_id, parts):
            for value in (buy_id, lot_id, buy_fill_id)):
         return False
     seen_sell_ids = set()
+    seen_sell_fill_ids = set()
     for close, member in parts:
         if (close.get('exact_fill_lot_linkage_verified') is not True
                 or member.get('lot_id') != lot_id
@@ -29,9 +30,13 @@ def _exact_fill_lot_identity(buy_id, parts):
                 or close.get('market') != first_close.get('market')
                 or close.get('symbol') != first_close.get('symbol')):
             return False
-        if close['trade_id'] in seen_sell_ids:
+        # One original SELL fill cannot close the same BUY lot twice,
+        # even if a duplicated allocation uses another SELL trade ID.
+        if (close['trade_id'] in seen_sell_ids
+                or close['exit_fill_id'] in seen_sell_fill_ids):
             return False
         seen_sell_ids.add(close['trade_id'])
+        seen_sell_fill_ids.add(close['exit_fill_id'])
     return True
 
 
