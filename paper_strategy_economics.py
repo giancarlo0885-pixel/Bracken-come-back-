@@ -491,9 +491,24 @@ def estimated_round_trip_cost_pct(signal: Any) -> float:
         except (TypeError, ValueError, OverflowError):
             return float("inf")
         return parsed if math.isfinite(parsed) and parsed >= 0 else float("inf")
-    slippage = max(0.0, _number(value("expected_slippage_pct", value("slippage_pct", 0.165)), 0.165))
-    spread = max(0.0, _number(value("spread_pct", 0.0)))
-    fee = max(0.0, _number(value("fee_pct", os.getenv("PAPER_ESTIMATED_FEE_PCT", "0.10")), 0.10))
+    def cost_component(raw: Any, default: float) -> float:
+        # A missing component retains its existing default. An explicitly
+        # invalid component cannot be silently converted to zero friction.
+        if raw is None:
+            return default
+        try:
+            parsed = float(raw)
+        except (TypeError, ValueError, OverflowError):
+            return float("inf")
+        return parsed if math.isfinite(parsed) and parsed >= 0 else float("inf")
+
+    slippage = cost_component(
+        value("expected_slippage_pct", value("slippage_pct", 0.165)), 0.165
+    )
+    spread = cost_component(value("spread_pct", 0.0), 0.0)
+    fee = cost_component(
+        value("fee_pct", os.getenv("PAPER_ESTIMATED_FEE_PCT", "0.10")), 0.10
+    )
     return (2.0 * slippage) + (2.0 * fee) + spread
 
 
