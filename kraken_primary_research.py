@@ -260,10 +260,10 @@ class PrimaryResearch:
                         except Exception as exc:
                             log.warning('PUBLIC RESEARCH BUDGET | status=UNAVAILABLE | reason=%s | execution_impact=NONE',
                                         type(exc).__name__)
-                        # Bounded process-local attribution only; no provider HTTP
-                        # calls, ledger writes or sensitive request/response details.
+                        # Include paper-pricing and transient discovery clients
+                        # in this process; no HTTP, ledger writes or sensitive data.
                         try:
-                            diagnostic = self.data.drain_request_diagnostics()
+                            diagnostic = PublicResearchData.drain_process_diagnostics()
                             log.info('PUBLIC RESEARCH ENDPOINT ATTRIBUTION | %s | execution_impact=NONE',
                                      json.dumps(diagnostic, sort_keys=True))
                         except Exception as exc:
