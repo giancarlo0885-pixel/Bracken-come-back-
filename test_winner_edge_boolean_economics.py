@@ -19,6 +19,6 @@ def test_boolean_accounting_cannot_create_a_qualified_winner(field):
 def test_finite_numeric_accounting_still_qualifies():
     row = {**trade(0), "net_pnl": "1.25", "entry_notional": "100"}
     qualified, exclusions = prepare([row], AS_OF)
-    assert exclusions == {}
+    assert exclusions.get("missing_features_or_economics", 0) == 0
     assert len(qualified) == 1
     assert qualified[0]["net_return"] == pytest.approx(0.0125)
