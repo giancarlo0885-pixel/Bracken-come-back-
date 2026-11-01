@@ -85,6 +85,14 @@ def winner_entry_memory(closes):
             excluded['unverified_fill_lot_linkage'] += 1
             continue
         first = parts[0][1]
+        # Every partial exit must retain the same original BUY decision evidence.
+        # A shared fill ID alone cannot reconcile contradictory entry snapshots.
+        entry_fields = ('entry_time', 'decision_timestamp', 'feature_snapshot',
+                        'entry_strategy', 'entry_regime')
+        if any(any(member.get(field) != first.get(field) for field in entry_fields)
+               for _, member in parts[1:]):
+            excluded['conflicting_entry_snapshot'] += 1
+            continue
         opened = number(first.get('opened_quantity'))
         quantities = [number(m.get('quantity')) for _, m in parts]
         if (opened is None or opened <= 0
