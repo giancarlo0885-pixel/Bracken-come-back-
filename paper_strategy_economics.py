@@ -484,7 +484,13 @@ def estimated_round_trip_cost_pct(signal: Any) -> float:
 
     explicit = value("estimated_cost_pct", None)
     if explicit is not None:
-        return max(0.0, _number(explicit))
+        # An explicit but malformed/nonfinite/negative estimate is unknown cost,
+        # not a free trade. Preserve legitimate zero and positive estimates.
+        try:
+            parsed = float(explicit)
+        except (TypeError, ValueError, OverflowError):
+            return float("inf")
+        return parsed if math.isfinite(parsed) and parsed >= 0 else float("inf")
     slippage = max(0.0, _number(value("expected_slippage_pct", value("slippage_pct", 0.165)), 0.165))
     spread = max(0.0, _number(value("spread_pct", 0.0)))
     fee = max(0.0, _number(value("fee_pct", os.getenv("PAPER_ESTIMATED_FEE_PCT", "0.10")), 0.10))
@@ -502,6 +508,8 @@ def fee_edge_allows_entry(signal: Any) -> tuple[bool, str, float | None, float]:
     """
     edge = expected_edge_pct(signal)
     cost = estimated_round_trip_cost_pct(signal)
+    if not math.isfinite(cost):
+        return False, "paper_explicit_cost_invalid", edge, cost
     min_samples = max(3, int(os.getenv("PAPER_KNOWN_NEGATIVE_EDGE_MIN_SAMPLES", "30")))
     economics: StrategyEconomics | None = None
 
