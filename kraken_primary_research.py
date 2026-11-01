@@ -24,9 +24,9 @@ RESEARCH_LOCK = 73420261604
 def enabled():
     return (os.getenv('KRAKEN_REFERENCE_WS_ENABLED','false').lower() == 'true'
         and os.getenv('KRAKEN_PRIMARY_RESEARCH_ENABLED','false').lower() == 'true'
-        and os.getenv('EXECUTION_MODE','paper').lower() == 'paper'
-        and os.getenv('ENABLE_BROKER_SUBMISSION','false').lower() == 'false'
-        and os.getenv('LIVE_TRADING_ARMED','false').lower() == 'false')
+        and os.getenv('EXECUTION_MODE','').lower() == 'paper'
+        and os.getenv('ENABLE_BROKER_SUBMISSION','').lower() == 'false'
+        and os.getenv('LIVE_TRADING_ARMED','').lower() == 'false')
 
 
 def research_forecast(quote, history, now, forecast=None):
