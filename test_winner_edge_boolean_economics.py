@@ -2,6 +2,7 @@
 
 These are synthetic research inputs, never executed fills or live orders.
 """
+import numpy as np
 import pytest
 
 from paper_winner_edge_research import prepare
@@ -9,8 +10,9 @@ from test_paper_winner_edge_research import AS_OF, trade
 
 
 @pytest.mark.parametrize("field", ("net_pnl", "entry_notional"))
-def test_boolean_accounting_cannot_create_a_qualified_winner(field):
-    row = {**trade(0), field: True}
+@pytest.mark.parametrize("boolean_value", (True, np.bool_(True)))
+def test_boolean_accounting_cannot_create_a_qualified_winner(field, boolean_value):
+    row = {**trade(0), field: boolean_value}
     qualified, exclusions = prepare([row], AS_OF)
     assert qualified == []
     assert exclusions["missing_features_or_economics"] == 1
