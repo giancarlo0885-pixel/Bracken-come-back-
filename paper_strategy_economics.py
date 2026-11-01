@@ -502,13 +502,17 @@ def estimated_round_trip_cost_pct(signal: Any) -> float:
             return float("inf")
         return parsed if math.isfinite(parsed) and parsed >= 0 else float("inf")
 
-    slippage = cost_component(
-        value("expected_slippage_pct", value("slippage_pct", 0.165)), 0.165
-    )
+    # A null higher-priority estimate means "unavailable", not "use a
+    # cheaper hardcoded default". Preserve the actual fallback estimate.
+    slippage_source = value("expected_slippage_pct", None)
+    if slippage_source is None:
+        slippage_source = value("slippage_pct", 0.165)
+    slippage = cost_component(slippage_source, 0.165)
     spread = cost_component(value("spread_pct", 0.0), 0.0)
-    fee = cost_component(
-        value("fee_pct", os.getenv("PAPER_ESTIMATED_FEE_PCT", "0.10")), 0.10
-    )
+    fee_source = value("fee_pct", None)
+    if fee_source is None:
+        fee_source = os.getenv("PAPER_ESTIMATED_FEE_PCT", "0.10")
+    fee = cost_component(fee_source, 0.10)
     return (2.0 * slippage) + (2.0 * fee) + spread
 
 
