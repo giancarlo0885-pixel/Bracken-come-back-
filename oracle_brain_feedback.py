@@ -398,6 +398,27 @@ def outcome_memory_for_signal(
             "execution_impact": "NONE",
         }
 
+    # A ranking decision may use only episodes that had already closed.
+    # Missing timestamps on live signals use current UTC; malformed explicit
+    # provenance fails closed rather than treating a historical signal as now.
+    from datetime import datetime, timezone
+    from paper_exit_research import timestamp
+
+    now = datetime.now(timezone.utc)
+    original_decision = _value(signal, "decision_timestamp")
+    if original_decision is None:
+        cutoff = now
+    else:
+        parsed = timestamp(original_decision)
+        if parsed is None:
+            return {
+                "status": "invalid_decision_time",
+                "market": normalized_market, "symbol": target_symbol,
+                "strategy": target_strategy, "regime": target_regime,
+                "ranking_adjustment": 0.0, "execution_impact": "NONE",
+            }
+        cutoff = min(parsed, now)
+
     # Feature-dependent ranking must be recomputed for each signal, even within
     # the same symbol/strategy/regime cache interval.
 
@@ -413,10 +434,11 @@ def outcome_memory_for_signal(
                 WHERE market=%s AND provenance_status='exact'
                   AND outcome_snapshot->>'accounting_version'='exact_round_trip_v1'
                   AND outcome_snapshot->>'cost_provenance'='exact_lot'
+                  AND exit_time < %s
                 ORDER BY exit_time DESC
                 LIMIT %s
             """
-            params = (normalized_market, limit)
+            params = (normalized_market, cutoff, limit)
         else:
             # Retain legacy episodes as history, but ranking can consume only
             # outcomes reconciled to canonical full round-trip costs.
@@ -427,9 +449,10 @@ def outcome_memory_for_signal(
                 WHERE market=%s AND provenance_status='exact'
                   AND outcome_snapshot->>'accounting_version'='exact_round_trip_v1'
                   AND outcome_snapshot->>'cost_provenance'='exact_lot'
+                  AND exit_time < %s
                 ORDER BY exit_time DESC
             """
-            params = (normalized_market,)
+            params = (normalized_market, cutoff)
         records = [dict(row) for row in fetch_rows(sql, params)]
     except Exception as exc:
         return {
