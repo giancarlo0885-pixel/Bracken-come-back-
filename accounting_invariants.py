@@ -88,6 +88,8 @@ def _market_invariant(market: str, tolerance_pct: float) -> MarketAccountingInva
     source_evidence_valid = (
         bool(portfolio)
         and _finite_canonical_value(portfolio.get("cash"))
+        and _finite_canonical_value(portfolio.get("margin_debt"))
+        and _finite_canonical_value(portfolio.get("margin_interest_accrued"))
         and _finite_canonical_value(position_stats.get("positions_value"))
         and _finite_canonical_value(snapshot.get("equity"))
     )
