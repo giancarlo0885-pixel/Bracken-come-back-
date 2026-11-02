@@ -107,7 +107,9 @@ class CandleStream:
                 for symbol,begin,values,trades in sorted(parsed,key=lambda r:(r[0],r[1])):
                     previous = self.rows[symbol].get(begin)
                     latest = self.latest.get(symbol)
-                    if latest is not None and begin < latest and previous != values:
+                    if (latest is not None and begin < latest
+                            and (previous != values
+                                 or self.trade_counts[symbol].get(begin, trades) != trades)):
                         raise ValueError('CLOSED_CANDLE_REVISION')
                     if previous is not None and begin == latest:
                         if (values[0] != previous[0] or values[1] < previous[1]
