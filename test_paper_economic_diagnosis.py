@@ -101,3 +101,21 @@ def test_brain_shows_only_persisted_worker_diagnosis():
     assert "Winner formula:" not in page
     assert 'report.get("winner_edge_research")' in page
     assert "Unexecuted opportunities are not inferred" in page
+
+
+def test_verified_numeric_string_net_pnl_is_normalized_before_aggregation():
+    """Accepted numeric strings must not crash or misclassify winners and losers."""
+    rows = [lot(20, 4), lot(21, -2)]
+    for row in rows:
+        row["net_pnl"] = str(row["net_pnl"])
+    report = diagnose(rows)
+    assert report["qualified_entry_lots"] == 2
+    assert report["accounting"]["gross_fill_price_pnl"] == pytest.approx(2)
+    assert report["accounting"]["explicit_fees"] == pytest.approx(2.4)
+    assert report["accounting"]["net_pnl"] == pytest.approx(-0.4)
+    assert report["expectancy"]["win_rate"] == pytest.approx(0.5)
+    assert report["expectancy"]["loss_rate"] == pytest.approx(0.5)
+    assert report["expectancy"]["profit_factor_usd"] == pytest.approx(2.8 / 3.2)
+    assert report["promotion_action"] == "NONE"
+    assert all(isinstance(row["net_pnl"], str) for row in rows)
+    json.dumps(report, allow_nan=False)
