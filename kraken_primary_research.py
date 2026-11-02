@@ -62,6 +62,11 @@ def research_forecast(quote, history, now, forecast=None):
         'history_bars':len(history), 'history_fingerprint':hashlib.sha256(history.to_csv().encode()).hexdigest(),
         'model_governance':'UNCHANGED_NOT_APPROVED_FOR_EXECUTION', 'execution_authority':'NONE',
         'broker_submission':'NONE', 'profitability_status':'UNPROVEN', 'qualified_post_cost_outcomes':None}
+    if route.get('transport') == 'REST_BOOTSTRAP_AND_WEBSOCKET_V2_OHLC':
+        result['history_source'] = {'transport':route['transport'],
+            'ohlc_session_id':route.get('ohlc_session_id'),
+            'bootstrap_received_at':route.get('bootstrap_received_at'),
+            'ohlc_crc_status':route.get('ohlc_crc_status')}
     if prediction is None:
         result.update(status='ABSTAINED', reason=diagnostics.get('unavailable_reason','model_abstention'), forecast=None)
         return result

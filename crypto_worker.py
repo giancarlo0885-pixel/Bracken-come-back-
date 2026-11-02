@@ -141,6 +141,11 @@ if __name__ == "__main__":
         # requests from the paper adapter and background research in this worker.
         research_data = pricing.data if getattr(pricing, 'source', None) == 'Kraken WebSocket v2 paper pricing' else None
         market_worker._kraken_primary_research = PrimaryResearch(data=research_data)
+        # The optional OHLC channel belongs to the elected shared feed. Research
+        # clients reuse its bounded history even with a different pricing source.
+        candles = getattr(getattr(market_worker,'_kraken_reference_service',None),'candles',None)
+        if candles is not None:
+            market_worker._kraken_primary_research.data.ohlc_stream = candles
         market_worker._kraken_primary_research.start()
     emit_capital_readiness_report(logger)
     if os.getenv("EXECUTION_MODE", "paper").strip().lower() == "paper":
