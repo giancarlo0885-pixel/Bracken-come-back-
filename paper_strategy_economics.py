@@ -442,22 +442,8 @@ def strategy_economics(signal: Any) -> StrategyEconomics:
     return result
 
 
-def expected_edge_pct(signal: Any) -> float | None:
-    """Return the signed explicit directional edge for a long paper entry.
-
-    Cost-aware execution must compare the forecast in the proposed trade direction
-    against round-trip costs. Converting a negative expected return to its absolute
-    value can turn evidence against a BUY into a false positive edge. Preserve the
-    sign of every explicit edge field; missing evidence remains exploratory.
-    """
-    def value(name: str, default: Any = None) -> Any:
-        if isinstance(signal, dict):
-            return signal.get(name, default)
-        return getattr(signal, name, default)
-
-    # This function feeds a gate that compares edge against execution cost.
-    # A field explicitly named net_expected_value_pct has already had cost
-    # deducted and therefore must not be treated as gross edge here.
+def _gross_edge_values(signal: Any):
+    """Read explicit directional edge fields without coercing their types."""
     for name in (
         "expected_edge_pct",
         "calibrated_expected_edge_pct",
@@ -467,8 +453,18 @@ def expected_edge_pct(signal: Any) -> float | None:
         "expected_move_pct",
         "edge_pct",
     ):
-        raw = value(name, None)
-        if raw is None:
+        yield signal.get(name) if isinstance(signal, dict) else getattr(signal, name, None)
+
+
+def expected_edge_pct(signal: Any) -> float | None:
+    """Return a signed explicit gross directional edge for a long paper entry.
+
+    Never treat boolean flags as percentage returns. The final entry gate
+    separately rejects their presence instead of permitting missing-edge
+    exploratory treatment. Net expected value is not a gross edge.
+    """
+    for raw in _gross_edge_values(signal):
+        if raw is None or isinstance(raw, bool):
             continue
         parsed = _number(raw, float("nan"))
         if math.isfinite(parsed):
@@ -502,6 +498,10 @@ def fee_edge_allows_entry(signal: Any) -> tuple[bool, str, float | None, float]:
     """
     edge = expected_edge_pct(signal)
     cost = estimated_round_trip_cost_pct(signal)
+    # A boolean gross edge is malformed evidence, not a 1%/0% forecast.
+    # Reject before cohort lookup or any missing-edge exploration exception.
+    if any(isinstance(raw, bool) for raw in _gross_edge_values(signal)):
+        return False, "invalid_explicit_gross_edge_type", None, cost
     min_samples = max(3, int(os.getenv("PAPER_KNOWN_NEGATIVE_EDGE_MIN_SAMPLES", "30")))
     economics: StrategyEconomics | None = None
 
