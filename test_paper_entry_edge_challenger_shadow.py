@@ -80,7 +80,6 @@ def test_shadow_challenger_startup_failure_does_not_block_worker(monkeypatch):
 
 def test_entry_edge_shadow_fails_closed_on_missing_or_ambiguous_execution_controls(monkeypatch):
     """A missing or unrecognized safety switch is not evidence that it is off."""
-    import pytest
 
     for missing in ("EXECUTION_MODE", "ENABLE_BROKER_SUBMISSION", "LIVE_TRADING_ARMED"):
         for name, value in (
