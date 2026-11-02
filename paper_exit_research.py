@@ -302,8 +302,16 @@ def chronological_oos_report(experiments: list[dict[str, Any]], cutoff: datetime
     as_of = as_of or datetime.now(timezone.utc)
     if cutoff.tzinfo is None or as_of.tzinfo is None or cutoff > as_of:
         raise ValueError("cutoff and as_of must be ordered timezone-aware timestamps")
-    training_episodes = {str(r.get("episode_id")) for r in experiments
-                         if timestamp(r.get("exit_time")) is not None and timestamp(r["exit_time"]) <= cutoff}
+    # An episode belongs to discovery as soon as its entry is observed.
+    # Waiting for its exit to precede the freeze leaks cross-cutoff episodes
+    # into the purported independent forward cohort.
+    training_episodes = set()
+    for row in experiments:
+        episode_id = row.get("episode_id")
+        entry, exit_time = timestamp(row.get("entry_time")), timestamp(row.get("exit_time"))
+        if episode_id and ((entry is not None and entry <= cutoff)
+                           or (exit_time is not None and exit_time <= cutoff)):
+            training_episodes.add(str(episode_id))
     valid, exclusions = [], defaultdict(int)
     for raw in experiments:
         row = dict(raw)
