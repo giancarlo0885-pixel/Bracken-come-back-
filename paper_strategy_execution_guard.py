@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 from datetime import datetime, timezone
 import logging
+import math
 import os
 from typing import Any
 
@@ -216,16 +217,39 @@ def _remaining_cumulative_tier_capacity(symbol: str, tier_target: float) -> tupl
     if not position:
         return round(cap, 2), 0.0
 
-    quantity = max(0.0, _number(position.get("quantity")))
-    basis_price = max(
-        0.0,
-        _number(
+    # A persisted open position with unknown exposure is not a zero position.
+    # Treat missing, boolean, nonfinite and nonpositive values as unavailable;
+    # otherwise a corrupted row could restore the entire research allocation.
+    try:
+        raw_quantity = position.get("quantity")
+        raw_basis = (
             position.get("average_price")
             or position.get("entry_price")
             or position.get("current_price")
-        ),
-    )
-    current_value = max(0.0, quantity * basis_price)
+        )
+        if isinstance(raw_quantity, bool) or isinstance(raw_basis, bool):
+            raise ValueError("boolean position evidence")
+        quantity = float(raw_quantity)
+        basis_price = float(raw_basis)
+        if (
+            not math.isfinite(quantity)
+            or not math.isfinite(basis_price)
+            or quantity <= 0
+            or basis_price <= 0
+        ):
+            raise ValueError("invalid open-position exposure")
+    except (TypeError, ValueError, OverflowError, AttributeError) as exc:
+        log.warning(
+            "PAPER TIER CUMULATIVE CAP | symbol=%s | state=INVALID_POSITION_EVIDENCE | "
+            "reason=%s | action=BLOCK",
+            str(symbol or "").upper(),
+            exc.__class__.__name__,
+        )
+        return None, 0.0
+
+    current_value = quantity * basis_price
+    if not math.isfinite(current_value):
+        return None, 0.0
     return max(0.0, round(cap - current_value, 2)), current_value
 
 
