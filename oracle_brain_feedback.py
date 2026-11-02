@@ -330,8 +330,18 @@ def _counterfactual_memory_for_signal(signal: Any, *, market: str, symbol: str, 
                 if candidate is not None and math.isfinite(candidate) and candidate > 0:
                     order_value = candidate
                     break
-            buy = simulate_fill(side="BUY", market=market, reference_price=entry, order_value=order_value)
-            sell = simulate_fill(side="SELL", market=market, reference_price=horizon, order_value=order_value)
+            # Both installed crypto paper-pricing venues use the same conservative
+            # simulated taker fee. Generic crypto defaults understate this cost.
+            # These are research counterfactuals, not account-verified fees.
+            if market == "crypto":
+                from coinbase_paper_pricing import FEE as paper_crypto_fee
+                fee_pct = paper_crypto_fee
+            else:
+                fee_pct = None
+            buy = simulate_fill(side="BUY", market=market, reference_price=entry,
+                                order_value=order_value, fee_pct=fee_pct)
+            sell = simulate_fill(side="SELL", market=market, reference_price=horizon,
+                                 order_value=order_value, fee_pct=fee_pct)
             net_return_pct = ((sell.fill_price / buy.fill_price) - 1.0) * 100.0
             record["simulated_post_cost_return_pct"] = net_return_pct
             if net_return_pct < 0:
