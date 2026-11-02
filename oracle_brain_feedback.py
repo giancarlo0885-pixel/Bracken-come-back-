@@ -270,7 +270,21 @@ def summarize_outcome_memory(
 
 
 def _counterfactual_memory_for_signal(signal: Any, *, market: str, symbol: str, min_samples: int, max_rows: int = 0) -> dict[str, Any]:
-    """Learn from rejected decisions only when simulated round-trip economics are known."""
+    """Learn only from counterfactual horizons available before this decision."""
+    from datetime import datetime, timezone
+    from paper_exit_research import timestamp
+
+    now = datetime.now(timezone.utc)
+    original_decision = _value(signal, "decision_timestamp")
+    if original_decision is None:
+        cutoff = now
+    else:
+        parsed = timestamp(original_decision)
+        if parsed is None:
+            return {"status": "invalid_decision_time", "samples": 0,
+                    "adjustment": 0.0, "execution_impact": "NONE"}
+        cutoff = min(parsed, now)
+
     try:
         from database import rows as fetch_rows
         from paper_execution_reality import simulate_fill
@@ -279,12 +293,15 @@ def _counterfactual_memory_for_signal(signal: Any, *, market: str, symbol: str, 
                     FROM oracle_counterfactual_outcomes c
                     JOIN oracle_decision_audit d ON d.id=c.decision_id
                     WHERE c.market=%s AND c.symbol=%s
+                      AND c.decision_time < %s AND c.evaluated_at < %s
                     ORDER BY c.decision_time DESC"""
+        # Both the original decision and its later horizon evaluation must
+        # predate the signal; filtering only decision_time leaks future labels.
         if limit:
             select += " LIMIT %s"
-            params = (market, symbol, limit)
+            params = (market, symbol, cutoff, cutoff, limit)
         else:
-            params = (market, symbol)
+            params = (market, symbol, cutoff, cutoff)
         records = [dict(row) for row in fetch_rows(select, params)]
     except Exception as exc:
         return {"status": "unavailable", "samples": 0, "adjustment": 0.0, "reason": exc.__class__.__name__}
