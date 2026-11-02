@@ -32,6 +32,16 @@ def _finite(value: Any, default: float = 0.0) -> float:
     return number if math.isfinite(number) else default
 
 
+def _finite_canonical_value(value: Any) -> bool:
+    """Validate source evidence before display-only numeric defaults are applied."""
+    if isinstance(value, bool):
+        return False
+    try:
+        return math.isfinite(float(value))
+    except (TypeError, ValueError, OverflowError):
+        return False
+
+
 def equity_equation(
     *,
     cash: float,
@@ -73,6 +83,14 @@ def _market_invariant(market: str, tolerance_pct: float) -> MarketAccountingInva
         (market,),
     ) or {}
 
+    # Do not allow missing/nonfinite canonical evidence to turn into a false
+    # zero-equity PASS merely because _finite supplies display defaults.
+    source_evidence_valid = (
+        bool(portfolio)
+        and _finite_canonical_value(portfolio.get("cash"))
+        and _finite_canonical_value(position_stats.get("positions_value"))
+        and _finite_canonical_value(snapshot.get("equity"))
+    )
     cash = _finite(portfolio.get("cash"))
     positions_value = _finite(position_stats.get("positions_value"))
     debt = max(0.0, _finite(portfolio.get("margin_debt")))
@@ -86,7 +104,7 @@ def _market_invariant(market: str, tolerance_pct: float) -> MarketAccountingInva
     snapshot_equity = None if snapshot.get("equity") is None else _finite(snapshot.get("equity"))
     difference = None if snapshot_equity is None else abs(snapshot_equity - computed)
     tolerance = max(0.05, abs(computed) * max(0.0, tolerance_pct))
-    ok = int(position_stats.get("invalid_positions") or 0) == 0 and snapshot_equity is not None and difference is not None and difference <= tolerance
+    ok = source_evidence_valid and int(position_stats.get("invalid_positions") or 0) == 0 and snapshot_equity is not None and difference is not None and difference <= tolerance
     return MarketAccountingInvariant(
         market=market,
         ok=ok,
