@@ -337,10 +337,15 @@ def chronological_oos_report(experiments: list[dict[str, Any]], cutoff: datetime
             exclusions["invalid_outcome_evidence"] += 1
         else:
             valid.append(row)
+    analyzer_report = BrainCohortAnalyzerV4(valid).evaluate_portfolio_safety_gate()
+    # These filters operate on disjoint populations. Preserve both stages:
+    # expanding the analyzer report used to overwrite the prefilter counts.
+    for reason, count in analyzer_report.get("exclusions", {}).items():
+        exclusions[reason] += int(count)
     return {"cutoff": cutoff.isoformat(), "as_of": as_of.isoformat(),
             "cutoff_basis": "persisted frozen-model epoch start",
+            **analyzer_report,
             "exclusions": dict(exclusions),
-            **BrainCohortAnalyzerV4(valid).evaluate_portfolio_safety_gate(),
             "avoided_loss_candidates": sum(float(r["actual_realized_r_net"]) < 0 and float(r["challenger_counterfactual_r_net"]) > float(r["actual_realized_r_net"]) for r in valid),
             "harmed_winner_candidates": sum(float(r["actual_realized_r_net"]) > 0 and float(r["challenger_counterfactual_r_net"]) < float(r["actual_realized_r_net"]) for r in valid),
             "promotion_action": "NONE", "execution_impact": "NONE"}
