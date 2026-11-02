@@ -83,3 +83,33 @@ def test_valid_numeric_kelly_controls_remain_eligible():
     assert result.eligible is True
     assert result.reason == "shadow_only"
     assert 0 < result.proposed_fraction <= 0.10
+
+
+@pytest.mark.parametrize("field", [
+    "round_trip_net_pnl", "quantity", "entry_price", "round_trip_fees",
+])
+@pytest.mark.parametrize("boolean", [True, False])
+def test_boolean_raw_fill_cost_or_quantity_cannot_become_kelly_return(field, boolean):
+    from paper_kelly_challenger_shadow import _net_return_pct
+
+    row = {
+        "round_trip_net_pnl": 1.0,
+        "quantity": 1.0,
+        "entry_price": 100.0,
+        "round_trip_fees": 0.10,
+        "cost_provenance": "exact_lot",
+    }
+    row[field] = boolean
+    assert _net_return_pct(row) is None
+
+
+@pytest.mark.parametrize("boolean", [True, False])
+def test_boolean_episode_return_cannot_count_as_calibrated_win(boolean):
+    from paper_kelly_challenger_shadow import episode_win_lower_bound
+
+    entry = datetime(2026, 11, 1, 12, tzinfo=timezone.utc)
+    row = CompletedPaperOutcome(
+        "paper-bool", "generation-1", "episode-1",
+        entry, entry + timedelta(minutes=5), boolean,
+    )
+    assert episode_win_lower_bound([row]) is None
