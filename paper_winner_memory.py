@@ -1,6 +1,7 @@
 """Winner entry evidence from fully closed, independently cost-reconciled BUY lots."""
 from collections import defaultdict
 from decimal import Decimal
+import math
 from paper_exit_research import timestamp, number
 
 
@@ -66,6 +67,18 @@ def winner_entry_memory(closes):
         if entry is None or decision is None or decision > entry or not isinstance(features, dict) or not features:
             excluded['missing_or_late_entry_features'] += 1
             continue
+        # Do not turn absent, future-inverted, boolean, or nonfinite outcomes
+        # into winner/loser training evidence. Validate every partial close.
+        exits = [timestamp(c.get('exit_time')) for c, _ in parts]
+        pnls = [number(c.get('net_pnl')) for c, _ in parts]
+        if (any(t is None or t < entry for t in exits)
+                or any(p is None for p in pnls)):
+            excluded['invalid_exit_or_pnl_evidence'] += 1
+            continue
+        net_pnl = float(sum(pnls, start=Decimal(0)))
+        if not math.isfinite(net_pnl):
+            excluded['invalid_exit_or_pnl_evidence'] += 1
+            continue
         c = parts[0][0]
         from paper_regime_economics_shadow import classify_regime
         records.append(dict(buy_trade_id=buy_id, lot_id=first['lot_id'], buy_fill_id=first['buy_fill_id'],
@@ -74,8 +87,8 @@ def winner_entry_memory(closes):
                             regime=first.get('entry_regime') or classify_regime(feature_snapshot=features),
                             entry_pattern=features.get('entry_pattern') or features.get('schwager_pattern_tag') or 'unknown',
                             entry_time=entry.isoformat(), decision_timestamp=decision.isoformat(),
-                            exit_time=max(timestamp(c['exit_time']) for c, _ in parts).isoformat(),
-                            net_pnl=sum(c['net_pnl'] for c, _ in parts),
+                            exit_time=max(exits).isoformat(),
+                            net_pnl=net_pnl,
                             feature_snapshot=features, sell_trade_ids=[c['trade_id'] for c, _ in parts]))
     return dict(version='canonical-winner-entry-v1', records=records,
                 winners=sum(r['net_pnl'] > 0 for r in records),
