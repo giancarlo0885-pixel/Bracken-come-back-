@@ -71,6 +71,17 @@ def test_invalid_updates_invalidate_stream_history_without_invented_data(change)
     assert not s.connected and not s.seeded
 
 
+def test_same_interval_trade_count_regression_invalidates_optional_history():
+    # Kraken's trades field is cumulative within an interval. An update with
+    # higher volume but fewer trades cannot be a valid incremental candle.
+    s = ready()
+    s.consume(packet(volume='3', trades=3), NOW + timedelta(seconds=1))
+    assert s.connected
+    s.consume(packet(volume='4', trades=2), NOW + timedelta(seconds=2))
+    assert not s.connected
+    assert s.history('BTC-USD', NOW + timedelta(seconds=2)) is None
+
+
 def test_gap_closed_revision_and_volume_regression_require_resnapshot():
     for kind in ('gap','revision','regression'):
         s=ready()
