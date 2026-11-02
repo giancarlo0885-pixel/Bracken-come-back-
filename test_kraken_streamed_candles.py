@@ -90,6 +90,16 @@ def test_cumulative_trade_count_resets_only_at_new_interval():
     assert len(s.history('BTC-USD', NOW + timedelta(minutes=5))) == 61
 
 
+def test_closed_candle_trade_count_revision_requires_resnapshot():
+    s = ready()
+    s.consume(packet(NOW + timedelta(minutes=5)), NOW + timedelta(minutes=5))
+    assert s.connected
+    # Identical OHLC/volume cannot conceal a changed cumulative trade count.
+    s.consume(packet(NOW, trades=3), NOW + timedelta(minutes=5, seconds=1))
+    assert not s.connected
+    assert s.history('BTC-USD', NOW + timedelta(minutes=5, seconds=1)) is None
+
+
 def test_gap_closed_revision_and_volume_regression_require_resnapshot():
     for kind in ('gap','revision','regression'):
         s=ready()
