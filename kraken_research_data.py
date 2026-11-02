@@ -18,6 +18,7 @@ class PublicResearchData:
         self.cooldowns = {}
         self.cache = {}
         self.last_receipt = None
+        self.ohlc_stream = None
         self.lock = threading.RLock()
 
     def request(self, provider, path, params=None):
@@ -86,8 +87,16 @@ class PublicResearchData:
         return self.request('Kraken Public Research', 'AssetPairs', {'assetVersion':1})
 
     def history(self, symbol, now):
-        result = self.request('Kraken Public Research', 'OHLC',
-                              {'pair':symbol.replace('-','/'), 'assetVersion':1, 'interval':5})
+        from kraken_streamed_candles import enabled as streaming_enabled
+        stream = self.ohlc_stream if streaming_enabled() else None
+        generation = stream.generation() if stream is not None else None
+        if stream is not None:
+            current = stream.history(symbol,now)
+            if current is not None:return current
+        with self.lock:
+            result = self.request('Kraken Public Research', 'OHLC',
+                                  {'pair':symbol.replace('-','/'), 'assetVersion':1, 'interval':5})
+            history_received = self.last_receipt
         pair = symbol.replace('-','/')
         if set(result)-{'last'} != {pair}:
             raise ResearchUnavailable('HISTORY_SYMBOL_MISMATCH')
@@ -104,6 +113,11 @@ class PublicResearchData:
                            provider_route={'provider':'Kraken Public OHLC','requested_symbol':symbol,
                               'provider_symbol':symbol,'interval':'5m','quote_verified':False,
                               'quote_timestamp':frame.index[-1].isoformat()})
+        if stream is not None:
+            current_time = datetime.now(timezone.utc)
+            stream.seed(symbol,frame,current_time,history_received,expected_session=generation)
+            current = stream.history(symbol,current_time)
+            if current is not None:return current
         return frame
 
 
