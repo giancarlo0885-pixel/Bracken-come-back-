@@ -170,3 +170,45 @@ def test_historical_conflicting_identity_still_taints_fifo():
     result = reconcile_fifo([opening, conflicting, close], as_of=START + timedelta(hours=1))
     assert result["qualified_fifo_closes"] == 0
     assert result["diagnostics"]["conflicting_fill_identity"] == 1
+
+@pytest.mark.parametrize("reverse_input_order", [False, True])
+def test_oos_purges_open_training_episode_spanning_cutoff(reverse_input_order):
+    """A pre-freeze entry remains a training episode even if it closes later."""
+    cutoff = START + timedelta(hours=1)
+    as_of = cutoff + timedelta(hours=6)
+
+    def experiment(trade_id, episode_id, entry, trigger, exit_):
+        return {
+            "trade_id": trade_id, "episode_id": episode_id,
+            "entry_time": entry, "exit_time": exit_,
+            "actual_realized_r_net": -0.2,
+            "challenger_counterfactual_r_net": -0.1,
+            "entry_pattern": "dip_rebound", "regime": "range",
+            "challenger_exit_type": "FORWARD_EVIDENCE_EXIT",
+            "risk_basis_source": "entry_stop_price", "initial_risk_usd": 10,
+            "trigger_snapshot": {
+                "challenger_trigger_at": trigger,
+                "risk_basis_source": "exact_entry_stop_lots",
+            },
+        }
+
+    spanning = experiment("pre", "shared-episode",
+                          cutoff - timedelta(minutes=20),
+                          cutoff - timedelta(minutes=10),
+                          cutoff + timedelta(minutes=20))
+    contaminated = experiment("forward-same-window", "shared-episode",
+                              cutoff + timedelta(minutes=5),
+                              cutoff + timedelta(minutes=10),
+                              cutoff + timedelta(minutes=35))
+    independent = experiment("forward-new-window", "independent-episode",
+                             cutoff + timedelta(hours=4),
+                             cutoff + timedelta(hours=4, minutes=10),
+                             cutoff + timedelta(hours=4, minutes=30))
+    rows = [spanning, contaminated, independent]
+    if reverse_input_order:
+        rows.reverse()
+    report = chronological_oos_report(rows, cutoff, as_of=as_of)
+    assert report["avoided_loss_candidates"] == 1
+    assert report["trade_count"] == 1
+    assert report["promotion_action"] == "NONE"
+    assert report["execution_impact"] == "NONE"

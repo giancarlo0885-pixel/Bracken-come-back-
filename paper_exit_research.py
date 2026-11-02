@@ -295,11 +295,23 @@ def attach_fill_fee_evidence(
     return attach_exact_fill_lot_evidence(ledger, allocations or [], as_of=as_of)
 
 
-def chronological_oos_report(experiments: list[dict[str, Any]], cutoff: datetime) -> dict[str, Any]:
-    """Evaluate frozen-model forward treatment evidence; purge boundary overlaps."""
+def chronological_oos_report(experiments: list[dict[str, Any]], cutoff: datetime,
+                             *, as_of: datetime | None = None) -> dict[str, Any]:
+    """Evaluate only observed frozen-model outcomes; purge future and boundary leaks."""
     from paper_shadow_exit_challenger import BrainCohortAnalyzerV4
-    training_episodes = {str(r.get("episode_id")) for r in experiments
-                         if timestamp(r.get("exit_time")) is not None and timestamp(r["exit_time"]) <= cutoff}
+    as_of = as_of or datetime.now(timezone.utc)
+    if cutoff.tzinfo is None or as_of.tzinfo is None or cutoff > as_of:
+        raise ValueError("cutoff and as_of must be ordered timezone-aware timestamps")
+    # An episode belongs to discovery as soon as its entry is observed.
+    # Waiting for its exit to precede the freeze leaks cross-cutoff episodes
+    # into the purported independent forward cohort.
+    training_episodes = set()
+    for row in experiments:
+        episode_id = row.get("episode_id")
+        entry, exit_time = timestamp(row.get("entry_time")), timestamp(row.get("exit_time"))
+        if episode_id and ((entry is not None and entry <= cutoff)
+                           or (exit_time is not None and exit_time <= cutoff)):
+            training_episodes.add(str(episode_id))
     valid, exclusions = [], defaultdict(int)
     for raw in experiments:
         row = dict(raw)
@@ -313,6 +325,9 @@ def chronological_oos_report(experiments: list[dict[str, Any]], cutoff: datetime
         trigger_time = timestamp(trigger.get("challenger_trigger_at")) if isinstance(trigger, dict) else None
         if entry is None or exit_time is None or trigger_time is None or not entry <= trigger_time <= exit_time:
             exclusions["invalid_temporal_evidence"] += 1
+        elif entry > as_of or trigger_time > as_of or exit_time > as_of:
+            # A persisted future timestamp is not an observed completed outcome.
+            exclusions["future_or_open_outcome"] += 1
         elif entry <= cutoff or str(row.get("episode_id")) in training_episodes:
             exclusions["pre_cutoff_or_overlapping_episode"] += 1
         elif row.get("challenger_exit_type") != "FORWARD_EVIDENCE_EXIT":
@@ -322,7 +337,8 @@ def chronological_oos_report(experiments: list[dict[str, Any]], cutoff: datetime
             exclusions["invalid_outcome_evidence"] += 1
         else:
             valid.append(row)
-    return {"cutoff": cutoff.isoformat(), "cutoff_basis": "persisted frozen-model epoch start",
+    return {"cutoff": cutoff.isoformat(), "as_of": as_of.isoformat(),
+            "cutoff_basis": "persisted frozen-model epoch start",
             "exclusions": dict(exclusions),
             **BrainCohortAnalyzerV4(valid).evaluate_portfolio_safety_gate(),
             "avoided_loss_candidates": sum(float(r["actual_realized_r_net"]) < 0 and float(r["challenger_counterfactual_r_net"]) > float(r["actual_realized_r_net"]) for r in valid),

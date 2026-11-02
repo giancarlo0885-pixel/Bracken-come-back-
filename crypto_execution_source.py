@@ -6,9 +6,18 @@ Historical order/quote parsers and permanent evidence are unaffected.
 from asset_routing import infer_asset_class
 
 
-def install_crypto_candidate_source_guard(worker, eligible, reason):
+def entry_evidence_rejection(signal, *, require_forecast=False):
+    """Presence contract only; exact persistence/model approval remain mandatory."""
+    value = lambda key: signal.get(key) if isinstance(signal, dict) else getattr(signal, key, None)
+    if require_forecast and (not value('signal_id') or not value('forecast_id')):
+        return 'ENTRY_FORECAST_LINK_REQUIRED'
+    return None
+
+
+def install_crypto_candidate_source_guard(worker, eligible, reason, *, require_forecast=False):
     """Apply the active pricing source's identity check to capital candidates too."""
     worker._crypto_execution_source_eligible = eligible
+    worker._crypto_entry_requires_forecast = require_forecast is True
     original = worker._v39_signal_opportunity
 
     def opportunity(market, signal, prices, ranked_by_symbol, scan_type):
@@ -25,6 +34,12 @@ def install_crypto_candidate_source_guard(worker, eligible, reason):
         if not valid:
             result['qualified_for_capital'] = False
             result['execution_source_rejection'] = reason
+        elif require_forecast:
+            rejection = entry_evidence_rejection(signal, require_forecast=True)
+            result['entry_evidence_eligible'] = rejection is None
+            if rejection:
+                result['qualified_for_capital'] = False
+                result['entry_evidence_rejection'] = rejection
         return result
 
     worker._v39_signal_opportunity = opportunity
