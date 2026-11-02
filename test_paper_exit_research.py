@@ -95,11 +95,11 @@ def test_postgres_source_query_and_bounded_report_schema():
         pytest.skip("PostgreSQL integration only")
     with psycopg.connect(url, row_factory=dict_row) as conn:
         conn.execute("CREATE TEMP TABLE trade_ledger(trade_id text,market text,side text,broker_mode text,account_environment text)")
-        conn.execute("CREATE TEMP TABLE paper_regime_trade_metrics(trade_id text,entry_time timestamptz,exit_time timestamptz,cost_provenance text,round_trip_net_pnl float8)")
+        conn.execute("CREATE TEMP TABLE paper_regime_trade_metrics(trade_id text,market text,entry_time timestamptz,exit_time timestamptz,cost_provenance text,round_trip_net_pnl float8)")
         conn.execute("CREATE TEMP TABLE garibaldi_shadow_exit_epochs(model_version text,started_at timestamptz)")
         conn.execute("INSERT INTO trade_ledger VALUES ('missing','crypto','SELL','PAPER','PAPER'),('good','crypto','SELL','PAPER','PAPER'),('legacy','crypto','SELL','PAPER','PAPER')")
         conn.execute("INSERT INTO garibaldi_shadow_exit_epochs VALUES ('test','2026-10-08T11:00:00Z')")
-        conn.execute("INSERT INTO paper_regime_trade_metrics VALUES ('good','2026-10-08T12:00:00Z','2026-10-08T13:00:00Z','exact_lot',1),('legacy','2026-10-08T12:00:00Z','2026-10-08T13:00:00Z','unknown',NULL)")
+        conn.execute("INSERT INTO paper_regime_trade_metrics VALUES ('good','crypto','2026-10-08T12:00:00Z','2026-10-08T13:00:00Z','exact_lot',1),('legacy','crypto','2026-10-08T12:00:00Z','2026-10-08T13:00:00Z','unknown',NULL),('missing','cash','2026-10-08T12:00:00Z','2026-10-08T13:00:00Z','exact_lot',1),('good','cash','2026-10-08T12:00:00Z','2026-10-08T13:00:00Z','exact_lot',1)")
         counts = source_query_diagnostics(conn, "crypto", "test")
         assert counts == dict(missing_regime_metric=1, eligible_source_close=1, unqualified_cost_provenance=1)
         with conn.transaction(force_rollback=True):
