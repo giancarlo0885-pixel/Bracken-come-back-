@@ -33,6 +33,7 @@ class CandleStream:
         self.session = None
         self.symbols = {}
         self.rows = {}
+        self.trade_counts = {}
         self.latest = {}
         self.acked = set()
         self.snapshots = set()
@@ -47,6 +48,7 @@ class CandleStream:
         with self.lock:
             self.symbols = dict(symbols)
             self.rows = {s:{} for s in symbols.values()}
+            self.trade_counts = {s:{} for s in symbols.values()}
             self.latest = {}
             self.acked = set(); self.snapshots = set(); self.seeded = set()
             self.bootstrap_receipts = {}
@@ -60,6 +62,7 @@ class CandleStream:
             self.connected = False
             self.reason = reason
             self.rows = {s:{} for s in self.symbols.values()}
+            self.trade_counts = {s:{} for s in self.symbols.values()}
             self.seeded.clear()
 
     def wire(self, now):
@@ -100,23 +103,31 @@ class CandleStream:
                     o,h,l,c,v = values
                     if min(o,h,l,c) <= 0 or v < 0 or h < max(o,l,c) or l > min(o,h,c) or type(row.get('trades')) is not int or row['trades'] < 0:
                         raise ValueError('INVALID_OHLC_VALUES')
-                    parsed.append((symbol,begin,values))
-                for symbol,begin,values in sorted(parsed,key=lambda r:(r[0],r[1])):
+                    parsed.append((symbol,begin,values,row['trades']))
+                for symbol,begin,values,trades in sorted(parsed,key=lambda r:(r[0],r[1])):
                     previous = self.rows[symbol].get(begin)
                     latest = self.latest.get(symbol)
-                    if latest is not None and begin < latest and previous != values:
+                    if (latest is not None and begin < latest
+                            and (previous != values
+                                 or self.trade_counts[symbol].get(begin, trades) != trades)):
                         raise ValueError('CLOSED_CANDLE_REVISION')
                     if previous is not None and begin == latest:
                         if (values[0] != previous[0] or values[1] < previous[1]
-                                or values[2] > previous[2] or values[4] < previous[4]):
+                                or values[2] > previous[2] or values[4] < previous[4]
+                                or trades < self.trade_counts[symbol].get(begin, 0)):
                             raise ValueError('OHLC_TIMESTAMP_OR_VOLUME_REGRESSION')
                     if latest is not None and begin > latest+timedelta(minutes=5):
                         raise ValueError('OHLC_GAP_REQUIRES_RESNAPSHOT')
                     self.rows[symbol][begin] = values
+                    # Kraken OHLC trade count is cumulative within each interval.
+                    # A decreasing count invalidates this optional research stream.
+                    self.trade_counts[symbol][begin] = trades
                     self.latest[symbol] = max(begin,latest) if latest else begin
                     if kind == 'snapshot':self.snapshots.add(symbol)
                     while len(self.rows[symbol]) > MAX_ROWS:
-                        del self.rows[symbol][min(self.rows[symbol])]
+                        oldest = min(self.rows[symbol])
+                        del self.rows[symbol][oldest]
+                        self.trade_counts[symbol].pop(oldest, None)
                     self.updates += 1
                 self.last_wire = now
             except (ValueError,KeyError,TypeError,OverflowError,ArithmeticError):

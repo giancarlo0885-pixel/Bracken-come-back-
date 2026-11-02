@@ -71,6 +71,35 @@ def test_invalid_updates_invalidate_stream_history_without_invented_data(change)
     assert not s.connected and not s.seeded
 
 
+def test_same_interval_trade_count_regression_invalidates_optional_history():
+    # Kraken's trades field is cumulative within an interval. An update with
+    # higher volume but fewer trades cannot be a valid incremental candle.
+    s = ready()
+    s.consume(packet(volume='3', trades=3), NOW + timedelta(seconds=1))
+    assert s.connected
+    s.consume(packet(volume='4', trades=2), NOW + timedelta(seconds=2))
+    assert not s.connected
+    assert s.history('BTC-USD', NOW + timedelta(seconds=2)) is None
+
+
+def test_cumulative_trade_count_resets_only_at_new_interval():
+    s = ready()
+    s.consume(packet(volume='3', trades=5), NOW + timedelta(seconds=1))
+    s.consume(packet(NOW + timedelta(minutes=5), trades=1), NOW + timedelta(minutes=5))
+    assert s.connected
+    assert len(s.history('BTC-USD', NOW + timedelta(minutes=5))) == 61
+
+
+def test_closed_candle_trade_count_revision_requires_resnapshot():
+    s = ready()
+    s.consume(packet(NOW + timedelta(minutes=5)), NOW + timedelta(minutes=5))
+    assert s.connected
+    # Identical OHLC/volume cannot conceal a changed cumulative trade count.
+    s.consume(packet(NOW, trades=3), NOW + timedelta(minutes=5, seconds=1))
+    assert not s.connected
+    assert s.history('BTC-USD', NOW + timedelta(minutes=5, seconds=1)) is None
+
+
 def test_gap_closed_revision_and_volume_regression_require_resnapshot():
     for kind in ('gap','revision','regression'):
         s=ready()
@@ -103,6 +132,7 @@ def test_bounded_memory_and_five_minute_closed_history():
         at=NOW+timedelta(minutes=5*i);s.consume(packet(at),at)
     h=s.history('BTC-USD',at)
     assert len(s.rows['BTC-USD'])==MAX_ROWS and len(h)==720
+    assert len(s.trade_counts['BTC-USD'])==MAX_ROWS
     with pytest.raises(ValueError):s.opened({str(i):str(i) for i in range(5)},NOW)
 
 
