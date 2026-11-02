@@ -105,3 +105,17 @@ def test_cash_counterfactual_is_not_charged_crypto_paper_fee_floor(monkeypatch):
     )
     assert result["simulated_post_cost_profitable_missed"] == 30
     assert result["adjustment"] > 0.0
+
+
+def test_crypto_fee_cannot_be_truncated_by_adverse_price_cap(monkeypatch):
+    """A price-friction cap must not erase explicit 60-bps-per-side paper fees."""
+    monkeypatch.setenv("PAPER_MAX_ADVERSE_FILL_PCT", "0.001")
+    rows = [_row(100.0, 100.5) for _ in range(30)]
+    monkeypatch.setattr("database.rows", lambda sql, params: rows)
+    result = f._counterfactual_memory_for_signal(
+        {}, market="crypto", symbol="TEST-USD", min_samples=10,
+    )
+    assert result["status"] == "ok"
+    assert result["simulated_post_cost_profitable_missed"] == 0
+    assert result["avoided_losses"] == 30
+    assert result["adjustment"] < 0.0
