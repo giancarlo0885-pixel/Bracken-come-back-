@@ -116,6 +116,7 @@ def test_tiny_unmatched_fill_cannot_pass_dollar_tolerance():
 def test_post_exit_signal_samples_require_observed_identity_and_time():
     from paper_exit_research import signal_price_samples
     base = dict(market="crypto", symbol="TEST-USD", price=110,
+                created_at=(START + timedelta(seconds=1)).isoformat(),
                 details={"quote_verified": True, "symbol": "TEST-USD", "quote_timestamp": START.isoformat()})
     rows = [base, {**base, "details": {**base["details"], "symbol": "OTHER-USD"}},
             {**base, "details": {**base["details"], "quote_timestamp": (START + timedelta(days=2)).isoformat()}},
