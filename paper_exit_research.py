@@ -341,6 +341,7 @@ def source_query_diagnostics(conn: Any, market: str, model_version: str) -> dict
         SELECT CASE WHEN m.trade_id IS NULL THEN 'missing_regime_metric'
             WHEN m.entry_time IS NULL OR m.exit_time IS NULL THEN 'missing_event_time'
             WHEN e.started_at IS NULL THEN 'missing_model_epoch'
+            WHEN m.exit_time < m.entry_time THEN 'invalid_event_order'
             WHEN m.entry_time < e.started_at OR m.exit_time < e.started_at THEN 'before_model_epoch'
             WHEN COALESCE(m.cost_provenance,'') <> 'exact_lot' THEN 'unqualified_cost_provenance'
             WHEN m.round_trip_net_pnl IS NULL THEN 'missing_round_trip_pnl'
