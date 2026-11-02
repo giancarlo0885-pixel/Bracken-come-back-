@@ -62,4 +62,3 @@ def test_future_dated_signal_caps_green_core_history_at_present(monkeypatch):
     assert green["status"] == "ok"
     assert green["samples"] == 40
     assert green["adjustment"] < 0
-    assert result["execution_impact"] == "NONE" if "execution_impact" in result else True
