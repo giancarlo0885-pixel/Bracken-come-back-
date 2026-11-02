@@ -86,15 +86,15 @@ def _open_position_accumulation_allows(symbol: str) -> tuple[bool, str]:
         ) or {}
     except Exception as exc:
         log.warning(
-            "PAPER OPEN POSITION ACCUMULATION | symbol=%s | state=UNAVAILABLE | reason=%s | action=ALLOW_EXISTING_GUARDS",
+            "PAPER OPEN POSITION ACCUMULATION | symbol=%s | state=UNAVAILABLE | reason=%s | action=BLOCK",
             str(symbol or "").upper(),
             exc.__class__.__name__,
         )
-        return True, "open_position_state_unavailable"
+        return False, "open_position_state_unavailable"
 
     last_buy = _parse_time(latest_buy.get("created_at"))
     if last_buy is None:
-        return True, "open_position_buy_timestamp_unavailable"
+        return False, "open_position_buy_timestamp_unavailable"
 
     age_minutes = max(0.0, (datetime.now(timezone.utc) - last_buy).total_seconds() / 60.0)
     if age_minutes < interval:
