@@ -25,9 +25,9 @@ def enabled():
 
 
 def paper_context_enabled():
-    return (os.getenv('EXECUTION_MODE','paper').lower() == 'paper'
-        and os.getenv('ENABLE_BROKER_SUBMISSION','false').lower() == 'false'
-        and os.getenv('LIVE_TRADING_ARMED','false').lower() == 'false'
+    return (os.getenv('EXECUTION_MODE','').strip().lower() == 'paper'
+        and os.getenv('ENABLE_BROKER_SUBMISSION','').strip().lower() == 'false'
+        and os.getenv('LIVE_TRADING_ARMED','').strip().lower() == 'false'
         and os.getenv('KRAKEN_REFERENCE_WS_ENABLED','false').lower() == 'true')
 
 
@@ -387,7 +387,9 @@ def install_paper_pricing(worker,provider=None):
             if not provider.authentic(quote_metadata,str(symbol).upper()):return False,'PAPER_PRICE_UNVERIFIED_OR_STALE'
             if position is None:
                 value=lambda k:signal.get(k) if isinstance(signal,dict) else getattr(signal,k,None)
-                if not value('signal_id') or not value('forecast_id'):return False,'ENTRY_FORECAST_LINK_REQUIRED'
+                from crypto_execution_source import entry_evidence_rejection
+                missing = entry_evidence_rejection(signal, require_forecast=True)
+                if missing:return False,missing
                 approved,reason=model_approved(symbol)
                 if not approved:return False,reason
                 if not exact_forecast_link(symbol,value('signal_id'),value('forecast_id')):
@@ -439,7 +441,7 @@ def install_paper_pricing(worker,provider=None):
     reality.simulate_fill=simulate;oracle.simulate_fill=simulate
     worker._coinbase_paper_pricing=provider
     from crypto_execution_source import install_crypto_candidate_source_guard
-    install_crypto_candidate_source_guard(worker,provider.authentic,'PAPER_PRICE_UNVERIFIED_OR_STALE')
+    install_crypto_candidate_source_guard(worker,provider.authentic,'PAPER_PRICE_UNVERIFIED_OR_STALE',require_forecast=True)
     log.info('PAPER PRICING | status=INSTALLED | provider=%s | authority=PAPER_SIMULATION_ONLY | live_trading=DISARMED',provider.source)
     return True
 

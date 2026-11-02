@@ -186,6 +186,20 @@ def install_paper_core_rebalance_qualification(worker: Any) -> None:
                 opportunity["execution_source_eligible"] = False
                 return opportunity
 
+        # An installed pricing source may require original forecast provenance.
+        # Paper-learning exceptions must not promise allocations that its final
+        # execution guard will unconditionally reject. Check before success logs
+        # or either bounded/unbounded qualification branch, in any wrapper order.
+        from crypto_execution_source import entry_evidence_rejection
+        requires_forecast = getattr(worker, '_crypto_entry_requires_forecast', False) is True
+        if requires_forecast:
+            rejection = entry_evidence_rejection(signal, require_forecast=True)
+            opportunity['entry_evidence_eligible'] = rejection is None
+            if rejection:
+                opportunity['qualified_for_capital'] = False
+                opportunity['entry_evidence_rejection'] = rejection
+                return opportunity
+
         target_amount = _finite(patch._signal_value(signal, "core_target_amount", None))
         if target_amount is not None and target_amount > 0:
             opportunity["core_target_amount"] = target_amount
