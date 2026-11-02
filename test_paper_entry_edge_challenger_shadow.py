@@ -76,3 +76,19 @@ def test_shadow_challenger_startup_failure_does_not_block_worker(monkeypatch):
     monkeypatch.setattr(challenger, "ensure_schema", broken_schema)
 
     assert challenger.install_paper_entry_edge_challenger_shadow() is False
+
+
+def test_missing_paper_safety_controls_fail_closed_for_entry_edge_shadow(monkeypatch):
+    required = {"EXECUTION_MODE": "paper", "ENABLE_BROKER_SUBMISSION": "false",
+                "LIVE_TRADING_ARMED": "false"}
+    monkeypatch.setenv("PAPER_AUTONOMOUS_LEARNING", "true")
+    for name, value in required.items():
+        monkeypatch.setenv(name, value)
+    assert challenger.active() is True
+    for missing in required:
+        monkeypatch.delenv(missing, raising=False)
+        assert challenger.active() is False
+        monkeypatch.setenv(missing, required[missing])
+    for name in required:
+        monkeypatch.delenv(name, raising=False)
+    assert challenger.active() is False
