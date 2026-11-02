@@ -212,3 +212,59 @@ def test_oos_purges_open_training_episode_spanning_cutoff(reverse_input_order):
     assert report["trade_count"] == 1
     assert report["promotion_action"] == "NONE"
     assert report["execution_impact"] == "NONE"
+
+
+@pytest.mark.parametrize("reverse_input_order", [False, True])
+def test_oos_preserves_prefilter_and_analyzer_exclusion_counts(reverse_input_order):
+    """Rejected forward evidence must remain auditable when valid pairs exist."""
+    cutoff = START + timedelta(hours=1)
+    as_of = cutoff + timedelta(hours=6)
+
+    def row(trade_id, episode_id, entry, trigger, exit_, *, treatment=True, risk=True):
+        return {
+            "trade_id": trade_id, "episode_id": episode_id,
+            "entry_time": entry, "exit_time": exit_,
+            "actual_realized_r_net": -0.2,
+            "challenger_counterfactual_r_net": -0.1,
+            "entry_pattern": "dip_rebound", "regime": "range",
+            "challenger_exit_type": "FORWARD_EVIDENCE_EXIT" if treatment else "ACTUAL_EXIT_FALLBACK",
+            "risk_basis_source": "entry_stop_price" if risk else "unknown",
+            "initial_risk_usd": 10,
+            "trigger_snapshot": {
+                "challenger_trigger_at": trigger,
+                "risk_basis_source": "exact_entry_stop_lots",
+            },
+        }
+
+    valid = row("valid", "forward-independent",
+                cutoff + timedelta(hours=4),
+                cutoff + timedelta(hours=4, minutes=10),
+                cutoff + timedelta(hours=4, minutes=30))
+    training = row("training", "discovery",
+                   cutoff - timedelta(minutes=40),
+                   cutoff - timedelta(minutes=30),
+                   cutoff - timedelta(minutes=20))
+    no_treatment = row("fallback", "forward-fallback",
+                       cutoff + timedelta(hours=2),
+                       cutoff + timedelta(hours=2, minutes=10),
+                       cutoff + timedelta(hours=2, minutes=20), treatment=False)
+    invalid_time = row("bad-time", "forward-invalid",
+                       cutoff + timedelta(hours=3),
+                       cutoff + timedelta(hours=3, minutes=30),
+                       cutoff + timedelta(hours=3, minutes=20))
+    bad_risk = row("bad-risk", "forward-risk",
+                   cutoff + timedelta(hours=5),
+                   cutoff + timedelta(hours=5, minutes=10),
+                   cutoff + timedelta(hours=5, minutes=20), risk=False)
+    rows = [valid, training, no_treatment, invalid_time, bad_risk]
+    if reverse_input_order:
+        rows.reverse()
+    report = chronological_oos_report(rows, cutoff, as_of=as_of)
+    assert report["avoided_loss_candidates"] == 2  # pre-analyzer candidate count
+    assert report["trade_count"] == 1
+    assert report["exclusions"]["pre_cutoff_or_overlapping_episode"] == 1
+    assert report["exclusions"]["invalid_temporal_evidence"] == 1
+    assert report["exclusions"]["no_qualified_treatment"] == 1
+    assert report["exclusions"]["unqualified_risk_provenance"] == 1
+    assert report["promotion_action"] == "NONE"
+    assert report["execution_impact"] == "NONE"
