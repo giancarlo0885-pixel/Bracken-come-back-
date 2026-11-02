@@ -10,7 +10,9 @@ def test_raw_small_upside_does_not_become_positive_learning_after_costs(monkeypa
     monkeypatch.setattr("database.rows", lambda sql, params: rows)
     result = f._counterfactual_memory_for_signal({}, market="crypto", symbol="TEST-USD", min_samples=10)
     assert result["simulated_post_cost_profitable_missed"] == 0
-    assert result["adjustment"] == 0.0
+    # A raw positive move below round-trip costs is a rejected net loss.
+    assert result["avoided_losses"] == 30
+    assert result["adjustment"] < 0.0
     assert result["economics"] == "SIMULATED_POST_COST"
 
 
