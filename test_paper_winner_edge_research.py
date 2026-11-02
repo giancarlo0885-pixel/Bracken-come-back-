@@ -262,7 +262,8 @@ def test_frozen_runtime_preserves_boundary_episode_purge(monkeypatch, market):
 def test_runtime_reuses_reconciled_snapshot_and_classifies_observed_entry_features():
     from paper_winner_edge_research import verified_ledger_inputs
     opening = {"trade_id": "b", "side": "BUY", "quantity": 2, "entry_price": 100,
-               "strategy": "council", "decision_timestamp": START.isoformat(),
+               "strategy": "council", "entry_time": START.isoformat(),
+               "decision_timestamp": START.isoformat(),
                "feature_snapshot": {"trend_strength": 0.1, "volatility_20d": 0.7,
                                     "schwager_pattern_tag": "resistance_test"}}
     close = dict(trade_id="s", market="crypto", entry_time=START.isoformat(),
@@ -319,7 +320,8 @@ def test_legacy_fill_fee_flag_without_exact_lot_linkage_cannot_enter_discovery()
 def test_reused_fifo_snapshot_requires_explicit_identity_receipts_not_only_boolean_flag(missing):
     from paper_winner_edge_research import verified_ledger_inputs
     opening = {"trade_id": "b", "side": "BUY", "quantity": 2, "entry_price": 100,
-               "strategy": "council", "decision_timestamp": START.isoformat(),
+               "strategy": "council", "entry_time": START.isoformat(),
+               "decision_timestamp": START.isoformat(),
                "feature_snapshot": {"regime": "trend_up", "entry_pattern": "dip_rebound"}}
     close = dict(trade_id="s", market="crypto", entry_time=START.isoformat(),
                  exit_time=(START+timedelta(hours=1)).isoformat(), fifo_complete=True,
