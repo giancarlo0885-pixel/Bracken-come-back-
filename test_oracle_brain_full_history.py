@@ -21,7 +21,10 @@ def test_outcome_memory_defaults_to_full_retained_history(monkeypatch):
     assert episode_calls
     sql, params = episode_calls[-1]
     assert "LIMIT" not in sql.upper()
-    assert params == ("crypto",)
+    assert params[0] == "crypto"
+    assert len(params) == 2
+    assert params[1].tzinfo is not None
+    assert "exit_time < %s" in sql
 
 
 def test_outcome_memory_can_be_bounded_for_diagnostics(monkeypatch):
@@ -45,4 +48,8 @@ def test_outcome_memory_can_be_bounded_for_diagnostics(monkeypatch):
     assert episode_calls
     sql, params = episode_calls[-1]
     assert "LIMIT %s" in sql
-    assert params == ("crypto", 500)
+    assert params[0] == "crypto"
+    assert len(params) == 3
+    assert params[1].tzinfo is not None
+    assert params[2] == 500
+    assert "exit_time < %s" in sql
