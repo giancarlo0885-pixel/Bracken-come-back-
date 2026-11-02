@@ -79,6 +79,17 @@ def winner_entry_memory(closes):
         if not math.isfinite(net_pnl):
             excluded['invalid_exit_or_pnl_evidence'] += 1
             continue
+        # Every partial close must refer to the same original decision and
+        # immutable entry fingerprint. A mismatched sibling cannot supply
+        # outcome evidence for the first sibling's features.
+        if any(timestamp(m.get('entry_time')) != entry
+               or timestamp(m.get('decision_timestamp')) != decision
+               or m.get('feature_snapshot') != features
+               or m.get('entry_strategy') != first.get('entry_strategy')
+               or m.get('entry_regime') != first.get('entry_regime')
+               for _, m in parts):
+            excluded['conflicting_entry_evidence'] += 1
+            continue
         c = parts[0][0]
         from paper_regime_economics_shadow import classify_regime
         records.append(dict(buy_trade_id=buy_id, lot_id=first['lot_id'], buy_fill_id=first['buy_fill_id'],
