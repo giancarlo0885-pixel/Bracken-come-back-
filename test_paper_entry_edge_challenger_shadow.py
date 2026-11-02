@@ -76,3 +76,37 @@ def test_shadow_challenger_startup_failure_does_not_block_worker(monkeypatch):
     monkeypatch.setattr(challenger, "ensure_schema", broken_schema)
 
     assert challenger.install_paper_entry_edge_challenger_shadow() is False
+
+
+def test_entry_edge_shadow_fails_closed_on_missing_or_ambiguous_execution_controls(monkeypatch):
+    """A missing or unrecognized safety switch is not evidence that it is off."""
+    import pytest
+
+    for missing in ("EXECUTION_MODE", "ENABLE_BROKER_SUBMISSION", "LIVE_TRADING_ARMED"):
+        for name, value in (
+            ("EXECUTION_MODE", "paper"),
+            ("ENABLE_BROKER_SUBMISSION", "false"),
+            ("LIVE_TRADING_ARMED", "false"),
+            ("PAPER_AUTONOMOUS_LEARNING", "true"),
+        ):
+            monkeypatch.setenv(name, value)
+        monkeypatch.delenv(missing)
+        assert challenger.active() is False, missing
+
+    for name in ("ENABLE_BROKER_SUBMISSION", "LIVE_TRADING_ARMED"):
+        for value in ("unknown", "", "maybe"):
+            monkeypatch.setenv("EXECUTION_MODE", "paper")
+            monkeypatch.setenv("ENABLE_BROKER_SUBMISSION", "false")
+            monkeypatch.setenv("LIVE_TRADING_ARMED", "false")
+            monkeypatch.setenv("PAPER_AUTONOMOUS_LEARNING", "true")
+            monkeypatch.setenv(name, value)
+            assert challenger.active() is False, (name, value)
+
+
+def test_entry_edge_shadow_accepts_explicit_disabled_spellings(monkeypatch):
+    monkeypatch.setenv("EXECUTION_MODE", "paper")
+    monkeypatch.setenv("PAPER_AUTONOMOUS_LEARNING", "true")
+    for disabled in ("false", "0", "no", "off"):
+        monkeypatch.setenv("ENABLE_BROKER_SUBMISSION", disabled)
+        monkeypatch.setenv("LIVE_TRADING_ARMED", disabled)
+        assert challenger.active() is True
