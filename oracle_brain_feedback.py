@@ -483,10 +483,8 @@ def outcome_memory_for_signal(
         from paper_exit_research import REPORT_VERSION, timestamp
         reports = fetch_rows("SELECT report FROM paper_exit_research_reports WHERE market=%s AND version=%s",
                              (normalized_market, REPORT_VERSION))
-        cutoff = timestamp(_value(signal, "decision_timestamp"))
-        if cutoff is None:
-            from datetime import datetime, timezone
-            cutoff = datetime.now(timezone.utc)
+        # Use the already validated decision cutoff, capped at current UTC.
+        # Re-reading a future-dated raw signal timestamp leaks future lots.
         memory = _json_obj(reports[0].get("report")) if reports else {}
         candidates = memory.get("winner_entry_memory", {}).get("records", [])
         from paper_regime_economics_shadow import classify_regime
