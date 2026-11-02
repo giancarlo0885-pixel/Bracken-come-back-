@@ -345,7 +345,8 @@ def source_query_diagnostics(conn: Any, market: str, model_version: str) -> dict
             WHEN COALESCE(m.cost_provenance,'') <> 'exact_lot' THEN 'unqualified_cost_provenance'
             WHEN m.round_trip_net_pnl IS NULL THEN 'missing_round_trip_pnl'
             ELSE 'eligible_source_close' END AS reason
-        FROM trade_ledger l LEFT JOIN paper_regime_trade_metrics m ON m.trade_id=l.trade_id
+        FROM trade_ledger l LEFT JOIN paper_regime_trade_metrics m
+            ON m.trade_id=l.trade_id AND m.market=l.market
         LEFT JOIN garibaldi_shadow_exit_epochs e ON e.model_version=%s
         WHERE l.market=%s AND l.side='SELL' AND l.broker_mode='PAPER' AND l.account_environment='PAPER'
         ) source GROUP BY reason""", (model_version, market)).fetchall()
