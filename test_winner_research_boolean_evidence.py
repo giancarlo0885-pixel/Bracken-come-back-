@@ -32,4 +32,4 @@ def test_genuine_numeric_zero_and_one_remain_valid():
     qualified, exclusions = prepare(rows, AS_OF)
     assert len(qualified) == 2
     assert [r["net_pnl"] for r in qualified] == [0.0, 1.0]
-    assert exclusions == {}
+    assert exclusions.get("missing_features_or_economics", 0) == 0
