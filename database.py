@@ -1975,6 +1975,10 @@ def database_storage_report(limit: int = 12) -> dict[str, Any]:
                    pg_total_relation_size(c.oid) AS total_bytes,
                    pg_relation_size(c.oid) AS table_bytes,
                    pg_indexes_size(c.oid) AS index_bytes,
+                   CASE WHEN c.reltoastrelid <> 0
+                        THEN pg_relation_size(c.reltoastrelid) ELSE 0 END AS toast_table_bytes,
+                   CASE WHEN c.reltoastrelid <> 0
+                        THEN pg_indexes_size(c.reltoastrelid) ELSE 0 END AS toast_index_bytes,
                    COALESCE(s.n_live_tup, 0) AS live_rows,
                    COALESCE(s.n_dead_tup, 0) AS dead_rows,
                    s.last_autovacuum,
@@ -1997,11 +2001,20 @@ def database_storage_report(limit: int = 12) -> dict[str, Any]:
     tables = []
     for record in records:
         item = dict(record)
-        for key in ("total_bytes", "table_bytes", "index_bytes", "live_rows", "dead_rows"):
+        for key in ("total_bytes", "table_bytes", "index_bytes",
+                    "toast_table_bytes", "toast_index_bytes", "live_rows", "dead_rows"):
             item[key] = int(item.get(key) or 0)
+        # Includes auxiliary forks and other storage not covered by the main
+        # heap/index and TOAST heap/index measurements; do not call it bloat.
+        item["other_bytes"] = item["total_bytes"] - sum(item[key] for key in (
+            "table_bytes", "index_bytes", "toast_table_bytes", "toast_index_bytes"
+        ))
         item["total_size"] = _human_bytes(item["total_bytes"])
         item["table_size"] = _human_bytes(item["table_bytes"])
         item["index_size"] = _human_bytes(item["index_bytes"])
+        item["toast_table_size"] = _human_bytes(item["toast_table_bytes"])
+        item["toast_index_size"] = _human_bytes(item["toast_index_bytes"])
+        item["other_size"] = _human_bytes(item["other_bytes"])
         tables.append(item)
     archive_candidates = []
     for item in tables:
