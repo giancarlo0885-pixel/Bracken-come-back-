@@ -157,6 +157,9 @@ def _research_entry_confirmation_allows(
         _RESEARCH_ENTRY_CONFIRMATIONS.pop(key, None)
         return False, "research_entry_confirmation_requires_verified_quote_timestamp"
 
+    # Two observations must confirm the same strategy and model generation.
+    # A shared symbol alone is not sufficient evidence of candidate continuity.
+    candidate_identity = (economics.strategy_identity(signal),) + economics._model_identity(signal)
     previous = _RESEARCH_ENTRY_CONFIRMATIONS.get(key)
     now = datetime.now(timezone.utc)
     max_gap_minutes = max(
@@ -172,12 +175,17 @@ def _research_entry_confirmation_allows(
             age_minutes = max(0.0, (now - seen_at).total_seconds() / 60.0)
         else:
             age_minutes = max_gap_minutes + 1.0
-        if age_minutes <= max_gap_minutes and previous.get("observation_id") != observation_id:
+        if (
+            age_minutes <= max_gap_minutes
+            and previous.get("candidate_identity") == candidate_identity
+            and previous.get("observation_id") != observation_id
+        ):
             _RESEARCH_ENTRY_CONFIRMATIONS.pop(key, None)
             return True, "research_entry_confirmation_passed:2/2"
 
     _RESEARCH_ENTRY_CONFIRMATIONS[key] = {
         "observation_id": observation_id,
+        "candidate_identity": candidate_identity,
         "seen_at": now,
         "action": action,
         "edge": float(edge),
