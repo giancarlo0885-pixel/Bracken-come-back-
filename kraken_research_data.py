@@ -125,10 +125,13 @@ def coinbase_quote(client, symbol, received=None, *, now=None):
     from kraken_reference_book import timestamp, fresh, exact_decimal
     if not symbol.endswith('-USD') or not symbol[:-4].isalnum():
         raise ResearchUnavailable('UNSUPPORTED_SYMBOL')
-    current = now or received or datetime.now(timezone.utc)
+    # Preserve explicitly supplied as-of inputs, but sample the default clock
+    # after HTTP I/O so a newly received quote is never falsely future-dated.
+    supplied_received = received
     with client.lock:
         data = client.request('Coinbase Public Research', 'products/'+symbol+'/book', {'level':1})
         received = received or client.last_receipt
+    current = now or supplied_received or datetime.now(timezone.utc)
     if data.get('auction_mode') is True:
         raise ResearchUnavailable('COINBASE_AUCTION')
     event = timestamp(data.get('time'))
