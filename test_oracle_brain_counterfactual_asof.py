@@ -24,8 +24,8 @@ def test_counterfactual_cannot_consume_outcomes_evaluated_after_signal(monkeypat
             entry_price REAL, horizon_price REAL
         );
     """)
-    # All original decisions predate the target signal. Only the first cohort's
-    # horizons were evaluated before the signal; the others are future labels.
+    # Thirty horizons were evaluated before the signal; another thirty have
+    # future evaluations and thirty also have future original decisions.
     for idx in range(90):
         before = idx < 30
         conn.execute("INSERT INTO oracle_decision_audit VALUES (?, ?)", (idx, "{}"))
