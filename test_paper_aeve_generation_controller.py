@@ -537,3 +537,42 @@ def test_postgres_generation_report_freezes_exact_membership():
             VALUES (1,'test-hash',%s,'2026-10-08T09:00:00Z',TRUE,TRUE,-9999,2,-1,1,0.1)
         """, (controller.PROVENANCE_VERSION,))
         assert controller.generation_research_report(conn, 1, "test-hash") == report
+
+
+# Fail-closed research activation: missing/ambiguous execution controls must not
+# start AEVE shadow generation even when autonomous learning is opted in.
+import pytest
+
+
+@pytest.mark.parametrize("missing", (
+    "EXECUTION_MODE", "ENABLE_BROKER_SUBMISSION", "LIVE_TRADING_ARMED",
+))
+def test_aeve_generation_rejects_missing_execution_control(monkeypatch, missing):
+    import paper_aeve_generation_controller as controller
+    monkeypatch.setenv("EXECUTION_MODE", "paper")
+    monkeypatch.setenv("ENABLE_BROKER_SUBMISSION", "false")
+    monkeypatch.setenv("LIVE_TRADING_ARMED", "false")
+    monkeypatch.setenv("PAPER_AUTONOMOUS_LEARNING", "true")
+    monkeypatch.delenv(missing)
+    assert controller.active() is False
+
+
+@pytest.mark.parametrize("name", ("ENABLE_BROKER_SUBMISSION", "LIVE_TRADING_ARMED"))
+def test_aeve_generation_rejects_ambiguous_broker_control(monkeypatch, name):
+    import paper_aeve_generation_controller as controller
+    monkeypatch.setenv("EXECUTION_MODE", "paper")
+    monkeypatch.setenv("ENABLE_BROKER_SUBMISSION", "false")
+    monkeypatch.setenv("LIVE_TRADING_ARMED", "false")
+    monkeypatch.setenv("PAPER_AUTONOMOUS_LEARNING", "true")
+    monkeypatch.setenv(name, "unknown")
+    assert controller.active() is False
+
+
+@pytest.mark.parametrize("disabled", ("false", "0", "off", "no"))
+def test_aeve_generation_accepts_explicit_disarmed_controls(monkeypatch, disabled):
+    import paper_aeve_generation_controller as controller
+    monkeypatch.setenv("EXECUTION_MODE", "paper")
+    monkeypatch.setenv("ENABLE_BROKER_SUBMISSION", disabled)
+    monkeypatch.setenv("LIVE_TRADING_ARMED", disabled)
+    monkeypatch.setenv("PAPER_AUTONOMOUS_LEARNING", "true")
+    assert controller.active() is True
