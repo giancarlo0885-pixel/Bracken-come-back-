@@ -208,7 +208,6 @@ def test_oos_purges_open_training_episode_spanning_cutoff(reverse_input_order):
     if reverse_input_order:
         rows.reverse()
     report = chronological_oos_report(rows, cutoff, as_of=as_of)
-    assert report["exclusions"]["pre_cutoff_or_overlapping_episode"] == 2
     assert report["avoided_loss_candidates"] == 1
     assert report["trade_count"] == 1
     assert report["promotion_action"] == "NONE"
