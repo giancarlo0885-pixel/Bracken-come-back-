@@ -52,4 +52,4 @@ def test_finite_numeric_and_numeric_text_controls_remain_qualified():
         valid, excluded = prepare([verified_lot(net_pnl=value)], AS_OF)
         assert len(valid) == 1
         assert valid[0]["net_return"] == pytest.approx(float(value) / 100.0)
-        assert not excluded
+        assert all(count == 0 for count in excluded.values())
