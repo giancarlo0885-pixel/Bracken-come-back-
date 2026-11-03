@@ -305,7 +305,7 @@ def _paper_trade_economics(model: str, model_version: str) -> dict[str, Any]:
     """Read-only, fail-closed paper economics for model qualification.
 
     Every close in the bounded, predeclared recent cohort must have independently
-    recorded exact-lot costs matching its ledger P&L. Excluding unknown losers
+    recorded exact-lot costs reconcilable to the ledger gross and exit fees. Excluding unknown losers
     would turn incomplete evidence into a spuriously positive model score.
     This gate does not replace full canonical fill/lot provenance certification.
     """
@@ -317,7 +317,9 @@ def _paper_trade_economics(model: str, model_version: str) -> dict[str, Any]:
     try:
         realized = rows(
             """
-            SELECT l.net_pnl AS net_pnl,
+            SELECT l.gross_pnl AS gross_pnl,
+                   l.net_pnl AS net_pnl,
+                   l.fees AS exit_fees,
                    m.round_trip_net_pnl AS verified_net_pnl,
                    m.round_trip_fees AS verified_fees,
                    m.cost_provenance AS cost_provenance
@@ -343,17 +345,25 @@ def _paper_trade_economics(model: str, model_version: str) -> dict[str, Any]:
             evidence = dict(item)
         except (TypeError, ValueError):
             return unavailable
-        # bool is a Python number but not an accounting observation.
+        # SELL ledger net is exit-only; exact-lot net includes original entry fees.
+        # Reconcile both to the same gross basis, never to each other directly.
         if any(isinstance(evidence.get(field), bool)
-               for field in ("net_pnl", "verified_net_pnl", "verified_fees")):
+               for field in ("gross_pnl", "net_pnl", "exit_fees",
+                             "verified_net_pnl", "verified_fees")):
             return unavailable
+        gross = _finite(evidence.get("gross_pnl"))
         ledger_net = _finite(evidence.get("net_pnl"))
+        exit_fees = _finite(evidence.get("exit_fees"))
         verified_net = _finite(evidence.get("verified_net_pnl"))
         verified_fees = _finite(evidence.get("verified_fees"))
         if (evidence.get("cost_provenance") != "exact_lot"
-                or ledger_net is None or verified_net is None
-                or verified_fees is None or verified_fees < 0
-                or abs(ledger_net - verified_net) > 0.000001):
+                or any(value is None for value in (
+                    gross, ledger_net, exit_fees, verified_net, verified_fees
+                ))
+                or exit_fees < 0 or verified_fees < 0
+                or verified_fees + 0.000000001 < exit_fees
+                or abs(ledger_net - (gross - exit_fees)) > 0.000001
+                or abs(verified_net - (gross - verified_fees)) > 0.000001):
             return unavailable
         pnls.append(verified_net)
 
