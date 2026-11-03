@@ -79,6 +79,11 @@ def score_entry(
     economic_evidence_valid = (
         _valid_economic(expected_net_edge_pct)
         and _valid_economic(round_trip_cost_pct, nonnegative=True)
+        # A boolean MFE becomes 1.0 and an absent/positive MAE becomes zero
+        # under the scoring fallbacks; neither can qualify forward evidence.
+        and _valid_economic(mfe_pct, nonnegative=True)
+        and _valid_economic(mae_pct)
+        and float(mae_pct) <= 0.0
     )
     ev = _f(expected_net_edge_pct)
     mfe = max(0.0, _f(mfe_pct))
