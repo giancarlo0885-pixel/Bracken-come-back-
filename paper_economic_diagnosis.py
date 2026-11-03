@@ -31,6 +31,46 @@ def fee_only_break_even_return(entry_fee_rate, exit_fee_rate):
     return result if math.isfinite(result) else None
 
 
+
+def _entry_cohort_cost_attribution(qualified):
+    """Descriptive, complete-population fee attribution using original entry labels.
+
+    No winner-only filtering, inferred unexecuted opportunities, strategy
+    selection, confidence claims or execution authority. Input has already
+    passed canonical fill/fee and entry-time provenance checks.
+    """
+    grouped = {}
+    for row in qualified:
+        key = tuple(str(row.get(field) or "unknown") for field in
+                    ("strategy", "regime", "entry_pattern"))
+        grouped.setdefault(key, []).append(row)
+
+    results = []
+    for (strategy, regime, entry_pattern), rows in sorted(grouped.items()):
+        gross = math.fsum(row["gross_pnl"] for row in rows)
+        fees = math.fsum(row["explicit_fees"] for row in rows)
+        net = math.fsum(row["net_pnl"] for row in rows)
+        notional = math.fsum(row["entry_notional"] for row in rows)
+        results.append({
+            "strategy": strategy,
+            "regime": regime,
+            "entry_pattern": entry_pattern,
+            "qualified_entry_lots": len(rows),
+            "winners": sum(row["net_pnl"] > 0 for row in rows),
+            "losers": sum(row["net_pnl"] < 0 for row in rows),
+            "flat": sum(row["net_pnl"] == 0 for row in rows),
+            "gross_fill_price_pnl": gross,
+            "explicit_fees": fees,
+            "net_pnl": net,
+            "allocated_entry_notional": notional,
+            "fee_drag_fraction_of_notional": fees / notional,
+            "net_return_on_allocated_notional": net / notional,
+            "fee_erased_positive_gross_lots": sum(
+                row["gross_pnl"] > 0 and row["net_pnl"] <= 0 for row in rows),
+            "promotion_action": "NONE",
+        })
+    return results
+
 def diagnose_economics(rows, *, market, as_of, coverage=None):
     """Use completed, accounting-qualified entry lots, including every loser.
 
@@ -103,6 +143,12 @@ def diagnose_economics(rows, *, market, as_of, coverage=None):
                        "episode_windows": summary["episodes"],
                        "retrospective_lower_bound": summary["score_lower_bound"]},
         "fee_erased_positive_gross_lots": sum(r["gross_pnl"] > 0 and r["net_pnl"] <= 0 for r in qualified),
+        "cohort_cost_attribution": _entry_cohort_cost_attribution(qualified),
+        "cohort_attribution_semantics": (
+            "Descriptive all-outcome accounting by immutable entry strategy/regime/pattern. "
+            "Groups include winners, losers and flats; no cohort selection, "
+            "independent forward inference or promotion authority."
+        ),
         "entry_vs_exit_cause": "UNRESOLVED_REQUIRES_FIXED_ENTRY_MATCHED_FORWARD_EXPERIMENT",
         "unexecuted_missed_opportunities": "NOT_MEASURED_BY_COMPLETED_TRADES",
         "full_brain_consumption_and_pricing_certification": "NOT_ESTABLISHED_BY_THIS_REPORT",
