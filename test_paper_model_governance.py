@@ -279,3 +279,34 @@ def test_paper_trade_economics_quarantines_entire_cohort_on_unqualified_close(mo
     result = paper_gov._paper_trade_economics("m", "v")
     assert result == {"closed_paper_trades": 0,
                       "paper_expectancy": None, "paper_profit_factor": None}
+
+
+def test_exact_round_trip_with_nonzero_entry_fee_is_not_false_quarantined(monkeypatch):
+    # The SELL ledger net deducts the exit fee only. Exact-lot net also
+    # deducts the original entry fee; these values must not be compared directly.
+    row = {
+        "gross_pnl": 1.0, "net_pnl": 0.9, "exit_fees": 0.1,
+        "verified_net_pnl": 0.8, "verified_fees": 0.2,
+        "cost_provenance": "exact_lot",
+    }
+    monkeypatch.setattr(paper_gov, "rows", lambda sql, params=None: [row])
+    result = paper_gov._paper_trade_economics("m", "v")
+    assert result["closed_paper_trades"] == 1
+    assert result["paper_expectancy"] == pytest.approx(0.8)
+
+
+def test_false_round_trip_arithmetic_cannot_qualify_model(monkeypatch):
+    # A round-trip outcome cannot equal exit-only net when the verified
+    # total fees include a nonzero entry fee. Reject this inconsistent row.
+    row = {
+        "gross_pnl": 1.0, "net_pnl": 0.9, "exit_fees": 0.1,
+        "verified_net_pnl": 0.9, "verified_fees": 0.2,
+        "cost_provenance": "exact_lot",
+    }
+    monkeypatch.setattr(paper_gov, "rows", lambda sql, params=None: [row])
+    result = paper_gov._paper_trade_economics("m", "v")
+    assert result == {
+        "closed_paper_trades": 0,
+        "paper_expectancy": None,
+        "paper_profit_factor": None,
+    }
