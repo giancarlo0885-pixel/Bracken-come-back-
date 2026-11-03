@@ -136,7 +136,14 @@ def should_take_profit(*, unrealized_return_pct: float, round_trip_cost_pct: flo
                        mfe_since_entry_pct: float, pullback_from_peak_pct: float,
                        minimum_net_profit_pct: float = 0.20) -> bool:
     """Paper research exit: protect a favorable move after costs."""
-    if not _valid_economic(round_trip_cost_pct, nonnegative=True):
+    # Exit decisions require real, finite observations; bools are not percentages.
+    if not (
+        _valid_economic(unrealized_return_pct)
+        and _valid_economic(round_trip_cost_pct, nonnegative=True)
+        and _valid_economic(mfe_since_entry_pct, nonnegative=True)
+        and _valid_economic(pullback_from_peak_pct, nonnegative=True)
+        and _valid_economic(minimum_net_profit_pct, nonnegative=True)
+    ):
         return False
     ret = _f(unrealized_return_pct)
     cost = max(0.0, _f(round_trip_cost_pct))
