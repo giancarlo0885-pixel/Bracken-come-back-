@@ -112,10 +112,10 @@ def test_paper_trade_economics_uses_realized_net_pnl(monkeypatch):
         paper_gov,
         "rows",
         lambda sql, params=None: [
-            {"net_pnl": 2.0, "verified_net_pnl": 2.0, "verified_fees": 0.01, "cost_provenance": "exact_lot"},
-            {"net_pnl": 1.0, "verified_net_pnl": 1.0, "verified_fees": 0.01, "cost_provenance": "exact_lot"},
-            {"net_pnl": -1.5, "verified_net_pnl": -1.5, "verified_fees": 0.01, "cost_provenance": "exact_lot"},
-            {"net_pnl": -0.5, "verified_net_pnl": -0.5, "verified_fees": 0.01, "cost_provenance": "exact_lot"},
+            {"gross_pnl": 2.01, "net_pnl": 2.0, "exit_fees": 0.01, "verified_net_pnl": 2.0, "verified_fees": 0.01, "cost_provenance": "exact_lot"},
+            {"gross_pnl": 1.01, "net_pnl": 1.0, "exit_fees": 0.01, "verified_net_pnl": 1.0, "verified_fees": 0.01, "cost_provenance": "exact_lot"},
+            {"gross_pnl": -1.49, "net_pnl": -1.5, "exit_fees": 0.01, "verified_net_pnl": -1.5, "verified_fees": 0.01, "cost_provenance": "exact_lot"},
+            {"gross_pnl": -0.49, "net_pnl": -0.5, "exit_fees": 0.01, "verified_net_pnl": -0.5, "verified_fees": 0.01, "cost_provenance": "exact_lot"},
         ],
     )
 
@@ -245,14 +245,17 @@ def test_paper_trade_economics_requires_paper_environment_and_exact_cost_join(mo
     def evidence(sql, params=None):
         queries.append((" ".join(sql.split()), params))
         return [
-            {"net_pnl": 1.0, "verified_net_pnl": 1.0,
-             "verified_fees": 0.02, "cost_provenance": "exact_lot"},
+            {"gross_pnl": 1.02, "net_pnl": 1.0, "exit_fees": 0.02,
+             "verified_net_pnl": 1.0, "verified_fees": 0.02,
+             "cost_provenance": "exact_lot"},
         ]
 
     monkeypatch.setattr(paper_gov, "rows", evidence)
     result = paper_gov._paper_trade_economics("m", "v")
     assert result["closed_paper_trades"] == 1
     sql, params = queries[0]
+    assert "l.gross_pnl AS gross_pnl" in sql
+    assert "l.fees AS exit_fees" in sql
     assert "FROM trade_ledger l" in sql
     assert "JOIN paper_regime_trade_metrics m ON m.trade_id=l.trade_id" in sql
     assert "l.broker_mode='PAPER'" in sql
@@ -273,8 +276,10 @@ def test_paper_trade_economics_requires_paper_environment_and_exact_cost_join(mo
 def test_paper_trade_economics_quarantines_entire_cohort_on_unqualified_close(monkeypatch, bad):
     # One valid winner cannot qualify a model when another close lacks
     # independently reconciled after-cost evidence. No winner-only selection.
-    valid = {"net_pnl": 1.0, "verified_net_pnl": 1.0,
-             "verified_fees": 0.01, "cost_provenance": "exact_lot"}
+    valid = {"gross_pnl": 1.01, "net_pnl": 1.0, "exit_fees": 0.01,
+             "verified_net_pnl": 1.0, "verified_fees": 0.01,
+             "cost_provenance": "exact_lot"}
+    bad = {"gross_pnl": 4.01, "exit_fees": 0.01, **bad}
     monkeypatch.setattr(paper_gov, "rows", lambda sql, params=None: [valid, bad])
     result = paper_gov._paper_trade_economics("m", "v")
     assert result == {"closed_paper_trades": 0,
