@@ -240,13 +240,19 @@ def forecast_price(
             return unavailable("future_live_quote_timestamp")
         if now - quote_time > timedelta(seconds=90):
             return unavailable("stale_live_quote_timestamp")
-        # A fresh quote cannot authorize OHLC bars dated after this decision.
-        # Inspect the whole index: a future bar may precede the final row.
-        if isinstance(history.index, pd.DatetimeIndex) and history.index.tz is not None:
-            newest_bar = history.index.max()
-            if (pd.notna(newest_bar)
-                    and newest_bar.to_pydatetime().astimezone(timezone.utc) > now + timedelta(seconds=5)):
-                return unavailable("future_history_bar_timestamp")
+        # Live quote anchoring requires a fully dated, timezone-aware history.
+        # Unknown bar chronology must not bypass the point-in-time model gate.
+        if (not isinstance(history.index, pd.DatetimeIndex)
+                or history.index.tz is None or history.index.hasnans):
+            return unavailable("unverifiable_live_history_timestamps")
+        # Check the entire index: a later bar can hide before the final row.
+        newest_bar = history.index.max().to_pydatetime().astimezone(timezone.utc)
+        if newest_bar > now + timedelta(seconds=5):
+            return unavailable("future_history_bar_timestamp")
+        # A bar observed after the quoted price cannot inform that quote's
+        # forecast, even if both timestamps are earlier than the current clock.
+        if newest_bar > quote_time + timedelta(seconds=5):
+            return unavailable("history_bar_after_live_quote")
     if asset == "crypto" and (causal_requested or short_horizon_crypto):
         if not short_horizon_crypto:
             return unavailable("unsupported_causal_horizon")
