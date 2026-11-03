@@ -156,6 +156,11 @@ def classify_paper_model_metrics(
     exclusively owned by capital_model_governance.py and its CAPITAL_* thresholds.
     """
     thresholds = _thresholds()
+    # An explicit boolean clean verdict is mandatory; truthy strings/numbers
+    # are not evidence that future-outcome leakage was excluded.
+    leakage_clean = temporal_leakage_ok is True
+    walk_forward_runs = _nonnegative_integral_count(recent_walk_forward_runs)
+    verified_symbols = _nonnegative_integral_count(distinct_symbols)
     samples = _nonnegative_integral_count(metrics.get("sample_count"))
     accuracy = _finite(metrics.get("directional_accuracy"))
     ece = _finite(metrics.get("expected_calibration_error"))
@@ -182,16 +187,16 @@ def classify_paper_model_metrics(
     if ece is None or not 0.0 <= ece <= 1.0 or ece > float(thresholds["maximum_ece"]):
         core_ok = False
         reasons.append(f"ECE {ece} above {thresholds['maximum_ece']}")
-    if not temporal_leakage_ok:
+    if not leakage_clean:
         core_ok = False
         reasons.append("temporal leakage evidence is not clean")
-    if recent_walk_forward_runs <= 0:
+    if walk_forward_runs <= 0:
         core_ok = False
         reasons.append("no recent walk-forward evidence")
-    if distinct_symbols < int(thresholds["minimum_distinct_symbols"]):
+    if verified_symbols < int(thresholds["minimum_distinct_symbols"]):
         core_ok = False
         reasons.append(
-            f"only {distinct_symbols} distinct walk-forward symbols; needs {thresholds['minimum_distinct_symbols']}"
+            f"only {verified_symbols} distinct walk-forward symbols; needs {thresholds['minimum_distinct_symbols']}"
         )
 
     paper_economics_ok = True
@@ -253,9 +258,9 @@ def classify_paper_model_metrics(
         directional_accuracy=accuracy,
         expected_calibration_error=ece,
         brier_skill_score=brier_skill,
-        temporal_leakage_ok=bool(temporal_leakage_ok),
-        recent_walk_forward_runs=int(recent_walk_forward_runs),
-        distinct_symbols=int(distinct_symbols),
+        temporal_leakage_ok=leakage_clean,
+        recent_walk_forward_runs=walk_forward_runs,
+        distinct_symbols=verified_symbols,
         closed_paper_trades=closed_paper_trades,
         paper_expectancy=paper_expectancy,
         paper_profit_factor=paper_profit_factor,
