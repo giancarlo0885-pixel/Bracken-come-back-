@@ -19,6 +19,17 @@ def _f(value: float, default: float = 0.0) -> float:
     return value if math.isfinite(value) else default
 
 
+def _valid_economic(value: Any, *, nonnegative: bool = False) -> bool:
+    """Require actual finite measurements before research can claim an edge."""
+    if isinstance(value, bool):
+        return False
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return False
+    return math.isfinite(numeric) and (not nonnegative or numeric >= 0.0)
+
+
 def _clip(value: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, value))
 
@@ -64,6 +75,11 @@ def score_entry(
 ) -> AEVEEntry:
     """Score a forward paper candidate using the frozen generation configuration."""
     cfg = _config(config)
+    # Missing/invalid costs must not be interpreted as free execution.
+    economic_evidence_valid = (
+        _valid_economic(expected_net_edge_pct)
+        and _valid_economic(round_trip_cost_pct, nonnegative=True)
+    )
     ev = _f(expected_net_edge_pct)
     mfe = max(0.0, _f(mfe_pct))
     mae = abs(min(0.0, _f(mae_pct)))
@@ -110,7 +126,7 @@ def score_entry(
     rebound_confirmed = rebound_quality >= cfg.rebound_gate
     loss_streak_ok = streak <= cfg.max_loss_streak
     would_trade = bool(
-        enough_history and regime_ok and economically_positive and excursion_positive
+        economic_evidence_valid and enough_history and regime_ok and economically_positive and excursion_positive
         and rebound_confirmed and loss_streak_ok and score > cfg.score_gate
     )
     return AEVEEntry(score, ev, dip_quality, rebound_quality, excursion_quality, cost_coverage, would_trade)
@@ -120,6 +136,8 @@ def should_take_profit(*, unrealized_return_pct: float, round_trip_cost_pct: flo
                        mfe_since_entry_pct: float, pullback_from_peak_pct: float,
                        minimum_net_profit_pct: float = 0.20) -> bool:
     """Paper research exit: protect a favorable move after costs."""
+    if not _valid_economic(round_trip_cost_pct, nonnegative=True):
+        return False
     ret = _f(unrealized_return_pct)
     cost = max(0.0, _f(round_trip_cost_pct))
     mfe = max(0.0, _f(mfe_since_entry_pct))
