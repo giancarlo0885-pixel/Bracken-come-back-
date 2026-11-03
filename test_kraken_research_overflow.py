@@ -32,6 +32,28 @@ def test_creation_requires_explicit_paper_only_gate(monkeypatch,key,value):
     conn.transaction.assert_not_called()
 
 
+@pytest.mark.parametrize('missing_key', [
+    'EXECUTION_MODE', 'ENABLE_BROKER_SUBMISSION', 'LIVE_TRADING_ARMED',
+])
+def test_overflow_creation_fails_closed_if_safety_setting_missing(monkeypatch, missing_key):
+    activate(monkeypatch)
+    monkeypatch.delenv(missing_key)
+    conn = Mock()
+    assert ensure_overflow_schema(conn) is False
+    conn.transaction.assert_not_called()
+    conn.execute.assert_not_called()
+
+
+def test_overflow_creation_fails_closed_if_all_safety_settings_missing(monkeypatch):
+    activate(monkeypatch)
+    for key in ('EXECUTION_MODE', 'ENABLE_BROKER_SUBMISSION', 'LIVE_TRADING_ARMED'):
+        monkeypatch.delenv(key)
+    conn = Mock()
+    assert ensure_overflow_schema(conn) is False
+    conn.transaction.assert_not_called()
+    conn.execute.assert_not_called()
+
+
 @pytest.mark.parametrize('table,identity', [('kraken_research_evidence',5001),
     ('kraken_research_evidence_overflow',5000),('kraken_research_evidence_overflow',10001),
     ('untrusted_table',1),('kraken_research_evidence',True)])
@@ -227,3 +249,29 @@ def test_pg_full_cycle_resumes_new_durable_research_and_brain_copy(pg,monkeypatc
         assert (receipt['expected'],receipt['matched'],receipt['unmatched'])==(2,2,0)
         assert conn.execute('SELECT * FROM kraken_research_evidence').fetchall()==before
         assert client.history.call_count==1
+
+def test_pg_capacity_headroom_uses_per_table_indexable_max_without_rewriting_evidence(pg,monkeypatch):
+    """Preserve sparse immutable IDs across both primary-key indexed tables."""
+    activate(monkeypatch)
+    with pg() as conn:
+        conn.execute(EVIDENCE_DDL)
+        assert read_evidence_capacity(conn)['highest_id'] == 0
+        conn.execute("INSERT INTO kraken_research_evidence VALUES(1,%s,%s,'{}',%s)",
+                     ('first-original',NOW,b'original-one'))
+        conn.execute("INSERT INTO kraken_research_evidence VALUES(4999,%s,%s,'{}',%s)",
+                     ('last-original',NOW,b'original-last'))
+        before = conn.execute('SELECT * FROM kraken_research_evidence ORDER BY id').fetchall()
+        assert read_evidence_capacity(conn)['remaining_id_slots'] == 1
+        assert ensure_overflow_schema(conn)
+        assert read_evidence_capacity(conn)['remaining_id_slots'] == 5001
+        conn.execute("INSERT INTO kraken_research_evidence_overflow VALUES(5001,%s,%s,'{}',%s)",
+                     ('first-overflow',NOW,b'overflow-one'))
+        conn.execute("INSERT INTO kraken_research_evidence_overflow VALUES(9999,%s,%s,'{}',%s)",
+                     ('last-overflow',NOW,b'overflow-last'))
+        overflow_before = conn.execute('SELECT * FROM kraken_research_evidence_overflow ORDER BY id').fetchall()
+        capacity = read_evidence_capacity(conn)
+        assert capacity['highest_id'] == 9999
+        assert capacity['remaining_id_slots'] == 1
+        assert capacity['status'] == 'CAPACITY_CRITICAL'
+        assert conn.execute('SELECT * FROM kraken_research_evidence ORDER BY id').fetchall() == before
+        assert conn.execute('SELECT * FROM kraken_research_evidence_overflow ORDER BY id').fetchall() == overflow_before
