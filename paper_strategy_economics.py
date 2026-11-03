@@ -40,11 +40,13 @@ def _truthy(name: str, default: str = "false") -> bool:
 
 
 def active() -> bool:
+    """Activate research only with explicit paper-only execution controls."""
+    disabled = {"false", "0", "no", "off"}
     return bool(
-        str(os.getenv("EXECUTION_MODE", "paper") or "paper").strip().lower() == "paper"
+        str(os.getenv("EXECUTION_MODE", "")).strip().lower() == "paper"
         and _truthy("PAPER_AUTONOMOUS_LEARNING")
-        and not _truthy("ENABLE_BROKER_SUBMISSION")
-        and not _truthy("LIVE_TRADING_ARMED")
+        and str(os.getenv("ENABLE_BROKER_SUBMISSION", "")).strip().lower() in disabled
+        and str(os.getenv("LIVE_TRADING_ARMED", "")).strip().lower() in disabled
     )
 
 
