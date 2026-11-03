@@ -398,7 +398,10 @@ def strategy_economics(signal: Any) -> StrategyEconomics:
         symbol = str(signal.get("symbol") or "").upper().strip()
     else:
         symbol = str(getattr(signal, "symbol", "") or "").upper().strip()
-    cache_key = f"{strategy}|{symbol or '*'}"
+    # Cached sizing and model-tier approval must not cross model/version identities.
+    # Tuple repr avoids collisions between arbitrary model and strategy strings.
+    model, version = _model_identity(signal)
+    cache_key = repr((strategy, symbol or "*", model, version))
     ttl = max(15.0, _number(os.getenv("PAPER_STRATEGY_ECON_CACHE_SECONDS", "60"), 60.0))
     cached = _CACHE.get(cache_key)
     now = time.monotonic()
