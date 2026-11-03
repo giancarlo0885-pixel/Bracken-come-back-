@@ -30,6 +30,11 @@ def install_crypto_candidate_source_guard(worker, eligible, reason, *, require_f
             valid = bool(eligible((prices or {}).get(symbol), symbol))
         except Exception:
             valid = False
+        # Preserve the upstream candidate while adding selected-source evidence.
+        result = dict(result)
+        if valid:
+            from paper_strategy_execution_guard import _with_entry_economics_provenance
+            result = _with_entry_economics_provenance(result, (prices or {}).get(symbol))
         result['execution_source_eligible'] = valid
         if not valid:
             result['qualified_for_capital'] = False
