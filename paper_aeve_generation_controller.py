@@ -468,8 +468,10 @@ def record_generation_outcomes(limit: int = 250) -> int:
                 and math.isfinite(_f(rebound, float("nan"))))
             decision = score_entry(
                 expected_net_edge_pct=edge if entry_evidence_complete else 0.0,
-                mfe_pct=max(0.0, _f(prior.get("mfe"))),
-                mae_pct=min(0.0, _f(prior.get("mae"))),
+                # Preserve missing/nonfinite historical excursion evidence for
+                # score_entry's fail-closed gate; never coerce it into zero.
+                mfe_pct=prior.get("mfe"),
+                mae_pct=prior.get("mae"),
                 round_trip_cost_pct=entry_cost_pct if entry_cost_pct is not None else 0.0,
                 loss_streak=loss_streak,
                 dip_depth_pct=(max(0.0, _f(dip_depth)) * 100.0) if entry_evidence_complete else 0.0,
