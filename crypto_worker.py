@@ -140,7 +140,8 @@ if __name__ == "__main__":
         # Reuse the bounded OHLC/metadata cache rather than issuing duplicate
         # requests from the paper adapter and background research in this worker.
         research_data = pricing.data if getattr(pricing, 'source', None) == 'Kraken WebSocket v2 paper pricing' else None
-        market_worker._kraken_primary_research = PrimaryResearch(data=research_data)
+        market_worker._kraken_primary_research = PrimaryResearch(data=research_data,
+            paper_pricing=pricing if research_data is not None else None)
         market_worker._kraken_primary_research.start()
     emit_capital_readiness_report(logger)
     if os.getenv("EXECUTION_MODE", "paper").strip().lower() == "paper":
