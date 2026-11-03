@@ -21,12 +21,18 @@ def _truthy(name: str) -> bool:
     return str(os.getenv(name, "false")).strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _explicitly_disabled(name: str) -> bool:
+    # Missing or ambiguous execution controls must never activate research.
+    value = os.getenv(name)
+    return value is not None and value.strip().lower() in {"0", "false", "no", "off"}
+
+
 def active() -> bool:
     return (
-        str(os.getenv("EXECUTION_MODE", "paper")).strip().lower() == "paper"
+        str(os.getenv("EXECUTION_MODE", "")).strip().lower() == "paper"
         and _truthy("PAPER_AUTONOMOUS_LEARNING")
-        and not _truthy("ENABLE_BROKER_SUBMISSION")
-        and not _truthy("LIVE_TRADING_ARMED")
+        and _explicitly_disabled("ENABLE_BROKER_SUBMISSION")
+        and _explicitly_disabled("LIVE_TRADING_ARMED")
     )
 
 

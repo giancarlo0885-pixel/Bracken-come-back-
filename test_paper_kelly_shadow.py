@@ -145,6 +145,37 @@ def test_runtime_disarms_when_live_or_broker_enabled(monkeypatch):
     assert not active()
 
 
+@pytest.mark.parametrize("missing_or_ambiguous", [
+    ("EXECUTION_MODE", None),
+    ("ENABLE_BROKER_SUBMISSION", None),
+    ("LIVE_TRADING_ARMED", None),
+    ("ENABLE_BROKER_SUBMISSION", "unknown"),
+    ("LIVE_TRADING_ARMED", "unknown"),
+])
+def test_kelly_shadow_requires_explicit_paper_only_controls(monkeypatch, missing_or_ambiguous):
+    """Missing or ambiguous execution controls must not activate even research."""
+    monkeypatch.setenv("EXECUTION_MODE", "paper")
+    monkeypatch.setenv("PAPER_AUTONOMOUS_LEARNING", "true")
+    monkeypatch.setenv("ENABLE_BROKER_SUBMISSION", "false")
+    monkeypatch.setenv("LIVE_TRADING_ARMED", "false")
+    assert active()
+    name, value = missing_or_ambiguous
+    if value is None:
+        monkeypatch.delenv(name, raising=False)
+    else:
+        monkeypatch.setenv(name, value)
+    assert not active()
+
+
+@pytest.mark.parametrize("disabled", ["false", "0", "no", "off", " FALSE "])
+def test_kelly_shadow_recognizes_explicit_disabled_spellings(monkeypatch, disabled):
+    monkeypatch.setenv("EXECUTION_MODE", "paper")
+    monkeypatch.setenv("PAPER_AUTONOMOUS_LEARNING", "true")
+    monkeypatch.setenv("ENABLE_BROKER_SUBMISSION", disabled)
+    monkeypatch.setenv("LIVE_TRADING_ARMED", disabled)
+    assert active()
+
+
 def test_entrypoint_is_observation_only():
     source = Path("crypto_worker_entrypoint.py").read_text()
     assert "install_aeve_generation_controller()" in source
