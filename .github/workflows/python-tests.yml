@@ -135,6 +135,7 @@ jobs:
           test_cli_probability_audit.py
           test_kraken_capacity_backpressure.py::test_postgres_capacity_blocks_requests_and_preserves_original_evidence
           test_kraken_research_overflow.py
+          test_kraken_research_extension.py
           test_regime_summary_provenance.py
           test_regime_quote_sampling.py
           test_entry_challenger_availability.py

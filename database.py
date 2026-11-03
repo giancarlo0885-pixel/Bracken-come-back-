@@ -96,6 +96,7 @@ CANONICAL_PROTECTED_TABLES = {
     "paper_fill_price_evidence",
     "kraken_research_evidence",
     "kraken_research_evidence_overflow",
+    "kraken_research_evidence_extension",
     "portfolios",
     "positions",
     "trades",

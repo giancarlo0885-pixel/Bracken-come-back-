@@ -62,6 +62,8 @@ def test_immutable_evidence_id_headroom(highest, status, remaining):
     assert len(conn.queries) == 2
     assert all(query.strip().startswith("SELECT") for query in conn.queries)
     assert "MAX(id)" in conn.queries[1]
+    assert "UNION ALL" not in conn.queries[1]
+    assert "SELECT MAX(id) FROM kraken_research_evidence" in conn.queries[1]
     assert all("DELETE" not in query and "UPDATE" not in query for query in conn.queries)
 
 
