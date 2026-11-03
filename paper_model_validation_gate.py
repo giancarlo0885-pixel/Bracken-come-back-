@@ -57,8 +57,12 @@ def regime_validation_ok(signal: Any) -> tuple[bool, str]:
 
     min_regimes = max(1, int(os.getenv("PAPER_MODEL_MIN_VALIDATED_REGIMES", "2")))
     min_samples = max(5, int(os.getenv("PAPER_MODEL_MIN_REGIME_SAMPLES", "20")))
-    min_brier_skill = float(os.getenv("PAPER_MODEL_MIN_REGIME_BRIER_SKILL", "0.0"))
-    max_ece = max(0.0, min(1.0, float(os.getenv("PAPER_MODEL_MAX_REGIME_ECE", "0.18"))))
+    min_brier_skill = _finite_metric(os.getenv("PAPER_MODEL_MIN_REGIME_BRIER_SKILL", "0.0"))
+    configured_max_ece = _finite_metric(os.getenv("PAPER_MODEL_MAX_REGIME_ECE", "0.18"))
+    # Invalid configuration must not silently relax calibration and expand paper size.
+    if min_brier_skill is None or configured_max_ece is None:
+        return False, "regime_config_invalid"
+    max_ece = max(0.0, min(1.0, configured_max_ece))
 
     try:
         from database import rows
