@@ -40,7 +40,7 @@ def propose_kelly_size(
             fraction_of_kelly, max_allocation)
     if lower_bound_win_probability is not None:
         vals += (lower_bound_win_probability,)
-    if any(not isinstance(v, (int, float)) or not math.isfinite(v) for v in vals):
+    if any(isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) for v in vals):
         return abstain("invalid_numeric_input")
     if (not 0 <= win_probability <= 1 or
         lower_bound_win_probability is None or
