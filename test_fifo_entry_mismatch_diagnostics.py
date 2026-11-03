@@ -70,3 +70,16 @@ def test_matching_entry_has_no_mismatch_reasons_or_changed_economics():
     assert report["diagnostics"].get("fifo_entry_identity_mismatch", 0) == 0
     assert all(report["diagnostics"].get(reason, 0) == 0 for reason in REASONS)
     assert report["execution_impact"] == "NONE"
+
+
+def test_multi_buy_lot_sell_is_distinguished_from_scalar_entry_mismatches():
+    first = buy("buy-first", 1, 100, 0.1)
+    second = buy("buy-second", 1, 110, 0.1, minute=1)
+    closing = sell("sell", 2, 100, 120, 0.2, 30)
+    report = reconcile_fifo([first, second, closing],
+                            as_of=START + timedelta(hours=1))
+    assert len(report["closes"][0]["members"]) == 2
+    assert report["qualified_fifo_closes"] == 0
+    assert report["diagnostics"]["fifo_entry_identity_mismatch"] == 1
+    assert report["diagnostics"]["fifo_entry_multiple_buy_lots"] == 1
+    assert report["closes"][0]["net_pnl"] is None
