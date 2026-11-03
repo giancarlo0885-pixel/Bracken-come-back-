@@ -227,3 +227,30 @@ def test_pg_full_cycle_resumes_new_durable_research_and_brain_copy(pg,monkeypatc
         assert (receipt['expected'],receipt['matched'],receipt['unmatched'])==(2,2,0)
         assert conn.execute('SELECT * FROM kraken_research_evidence').fetchall()==before
         assert client.history.call_count==1
+
+def test_pg_capacity_headroom_uses_per_table_indexable_max_without_rewriting_evidence(pg,monkeypatch):
+    """Preserve sparse immutable IDs across both primary-key indexed tables."""
+    activate(monkeypatch)
+    with pg() as conn:
+        conn.execute(EVIDENCE_DDL)
+        assert read_evidence_capacity(conn)['highest_id'] == 0
+        conn.execute("INSERT INTO kraken_research_evidence VALUES(1,%s,%s,'{}',%s)",
+                     ('first-original',NOW,b'original-one'))
+        conn.execute("INSERT INTO kraken_research_evidence VALUES(4999,%s,%s,'{}',%s)",
+                     ('last-original',NOW,b'original-last'))
+        before = conn.execute('SELECT * FROM kraken_research_evidence ORDER BY id').fetchall()
+        assert read_evidence_capacity(conn)['remaining_id_slots'] == 1
+        assert ensure_overflow_schema(conn)
+        assert read_evidence_capacity(conn)['remaining_id_slots'] == 5001
+        conn.execute("INSERT INTO kraken_research_evidence_overflow VALUES(5001,%s,%s,'{}',%s)",
+                     ('first-overflow',NOW,b'overflow-one'))
+        conn.execute("INSERT INTO kraken_research_evidence_overflow VALUES(9999,%s,%s,'{}',%s)",
+                     ('last-overflow',NOW,b'overflow-last'))
+        overflow_before = conn.execute('SELECT * FROM kraken_research_evidence_overflow ORDER BY id').fetchall()
+        capacity = read_evidence_capacity(conn)
+        assert capacity['highest_id'] == 9999
+        assert capacity['remaining_id_slots'] == 1
+        assert capacity['status'] == 'CAPACITY_CRITICAL'
+        assert conn.execute('SELECT * FROM kraken_research_evidence ORDER BY id').fetchall() == before
+        assert conn.execute('SELECT * FROM kraken_research_evidence_overflow ORDER BY id').fetchall() == overflow_before
+

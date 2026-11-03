@@ -70,8 +70,12 @@ def read_evidence_capacity(conn):
     try:
         from kraken_research_store import evidence_layout, evidence_sql
         layout = evidence_layout(conn)
-        source = evidence_sql(layout,'id')
-        value = conn.execute(f'SELECT COALESCE(MAX(id),0) AS highest_id FROM ({source}) e').fetchone()
+        # Each table has a primary-key index. Per-table scalar MAX can use
+        # its index instead of aggregating the combined UNION ALL rows.
+        # Only trusted table names from evidence_layout enter this SQL.
+        heads = [f'COALESCE((SELECT MAX(id) FROM {table}),0)' for table in layout['tables']]
+        expression = heads[0] if len(heads) == 1 else f"GREATEST({','.join(heads)})"
+        value = conn.execute(f'SELECT {expression} AS highest_id').fetchone()
         highest_id = value['highest_id']
         if (type(highest_id) is not int or highest_id < 0
                 or highest_id > layout['max_id']):
