@@ -1709,41 +1709,45 @@ def live_position_pulse(market: str) -> tuple[list[Any], int, str]:
     return actions, len(prices), provider_text
 
 
+def _collect_market_brief_intelligence() -> None:
+    try:
+        brief_result = sync_market_brief_inbox()
+        if brief_result.get("status") == "ingested":
+            log.info(
+                "MONDAY MARKET INTELLIGENCE INBOX | status=INGESTED | brief_id=%s | "
+                "events=%s | execution_impact=NONE",
+                brief_result.get("brief_id"),
+                brief_result.get("events_persisted", 0),
+            )
+        elif brief_result.get("status") not in {"disabled", "no_change"}:
+            log.info(
+                "MONDAY MARKET INTELLIGENCE INBOX | status=%s | execution_impact=NONE",
+                str(brief_result.get("status") or "unknown").upper(),
+            )
+    except Exception as exc:
+        # The regular provider collectors must continue if the external
+        # weekly brief is absent, malformed, stale, or temporarily
+        # unavailable.
+        diagnostics = market_brief_failure_diagnostics(exc)
+        log.warning(
+            "MONDAY MARKET INTELLIGENCE INBOX | status=UNAVAILABLE | reason=%s | "
+            "http_status=%s | failure_class=%s | rate_limit_limit=%s | "
+            "rate_limit_remaining=%s | rate_limit_reset_epoch=%s | retry_after_seconds=%s | "
+            "github_request_id=%s | execution_impact=NONE",
+            diagnostics["reason"],
+            diagnostics["http_status"],
+            diagnostics["failure_class"],
+            diagnostics["rate_limit_limit"],
+            diagnostics["rate_limit_remaining"],
+            diagnostics["rate_limit_reset_epoch"],
+            diagnostics["retry_after_seconds"],
+            diagnostics["github_request_id"],
+        )
+
+
 def _collect_stock_intelligence() -> None:
     try:
-        try:
-            brief_result = sync_market_brief_inbox()
-            if brief_result.get("status") == "ingested":
-                log.info(
-                    "MONDAY MARKET INTELLIGENCE INBOX | status=INGESTED | brief_id=%s | "
-                    "events=%s | execution_impact=NONE",
-                    brief_result.get("brief_id"),
-                    brief_result.get("events_persisted", 0),
-                )
-            elif brief_result.get("status") not in {"disabled", "no_change"}:
-                log.info(
-                    "MONDAY MARKET INTELLIGENCE INBOX | status=%s | execution_impact=NONE",
-                    str(brief_result.get("status") or "unknown").upper(),
-                )
-        except Exception as exc:
-            # The regular provider collectors must continue if the external
-            # weekly brief is absent, malformed, stale, or temporarily
-            # unavailable.
-            diagnostics = market_brief_failure_diagnostics(exc)
-            log.warning(
-                "MONDAY MARKET INTELLIGENCE INBOX | status=UNAVAILABLE | reason=%s | "
-                "http_status=%s | failure_class=%s | rate_limit_limit=%s | "
-                "rate_limit_remaining=%s | rate_limit_reset_epoch=%s | retry_after_seconds=%s | "
-                "github_request_id=%s | execution_impact=NONE",
-                diagnostics["reason"],
-                diagnostics["http_status"],
-                diagnostics["failure_class"],
-                diagnostics["rate_limit_limit"],
-                diagnostics["rate_limit_remaining"],
-                diagnostics["rate_limit_reset_epoch"],
-                diagnostics["retry_after_seconds"],
-                diagnostics["github_request_id"],
-            )
+        _collect_market_brief_intelligence()
         intelligence_results = collect_all()
         for category, result in intelligence_results.items():
             if stop_event.is_set():
@@ -1803,6 +1807,21 @@ def _cash_opportunity_scans_enabled(market: str) -> bool:
         return True
 
 
+def _crypto_market_brief_handoff_enabled(market: str) -> bool:
+    """Optional GitHub-only intake while the cash worker is in standby.
+
+    This does not activate cash scans, stock provider calls or execution. Existing
+    inbox validation and durable payload/event identities remain authoritative.
+    """
+    return (market == "crypto"
+        and os.getenv("ENABLE_CRYPTO_MARKET_BRIEF_HANDOFF", "false").strip().lower() == "true"
+        and os.getenv("ENABLE_CASH_MARKET_RESEARCH", "false").strip().lower() != "true"
+        and bool(os.getenv("MARKET_BRIEF_GITHUB_ISSUE", "").strip())
+        and os.getenv("EXECUTION_MODE", "").strip().lower() == "paper"
+        and os.getenv("ENABLE_BROKER_SUBMISSION", "").strip().lower() == "false"
+        and os.getenv("LIVE_TRADING_ARMED", "").strip().lower() == "false")
+
+
 def run_worker(market: str) -> None:
     requested_market = market.lower().strip()
     market = "cash" if requested_market == "stock" else requested_market
@@ -1846,7 +1865,9 @@ def run_worker(market: str) -> None:
 
     deep_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"{market}-deep")
     fast_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"{market}-fast")
-    intelligence_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="market-intelligence") if market == "cash" else None
+    intelligence_collect = (_collect_stock_intelligence if market == "cash" else
+                            _collect_market_brief_intelligence if _crypto_market_brief_handoff_enabled(market) else None)
+    intelligence_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="market-intelligence") if intelligence_collect else None
     brain_learning_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"{market}-brain-learning")
     deep_future: Future[list[Any]] | None = None
     fast_future: Future[list[Any]] | None = None
@@ -1946,7 +1967,7 @@ def run_worker(market: str) -> None:
                         fast_future = fast_executor.submit(fast_scan_market, market)
                         log.info("%s fast scan launched; next target in %ss", label, cadence.fast_scan_seconds)
 
-                if market == "cash" and intelligence_executor is not None:
+                if intelligence_executor is not None:
                     if intelligence_future is not None and intelligence_future.done():
                         try:
                             intelligence_future.result()
@@ -1954,7 +1975,7 @@ def run_worker(market: str) -> None:
                             log.warning("Intelligence refresh failed: %s", exc)
                         intelligence_future = None
                     if intelligence_future is None and now_monotonic >= next_intelligence_due:
-                        intelligence_future = intelligence_executor.submit(_collect_stock_intelligence)
+                        intelligence_future = intelligence_executor.submit(intelligence_collect)
                         next_intelligence_due = now_monotonic + INTELLIGENCE_REFRESH_SECONDS
 
                 if brain_learning_future is not None and brain_learning_future.done():

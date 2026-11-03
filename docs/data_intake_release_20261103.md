@@ -23,3 +23,7 @@ An OHLC integrity/subscription failure falls back to bounded REST and remains di
 Selected-model cost is a minimum: quantity/depth impact or a later authenticated quote can increase final cost. Passing planner gates does not authorize a fill. Model, exact forecast, timestamp, fees, liquidity and portfolio gates remain mandatory.
 
 No profit guarantee, model promotion, expanded live universe, stock-autotrade activation or canonical accounting changes. Record exact candidate CI and public diagnostic separately from production health.
+
+## Scheduled intelligence handoff
+
+The intentional cash-worker standby also stops its scheduled GitHub brief intake. An additional default-off ENABLE_CRYPTO_MARKET_BRIEF_HANDOFF flag reuses the existing validator and15-minute executor to ingest only the configured inbox issue while cash research stays paused. It never starts broad stock collectors, cash scans or order paths. Existing HTTP status/rate-limit diagnostics and durable event/payload deduplication remain intact. Cash and crypto service configurations must agree on standby before activation; no distributed HTTP-poll ownership is claimed. This is curated research intake, not live stock-price coverage or proof of profitable decisions. Missing explicit paper safety settings disables it.
