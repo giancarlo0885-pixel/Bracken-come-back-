@@ -56,6 +56,16 @@ def _number(value: Any, default: float = 0.0) -> float:
     return number if math.isfinite(number) else default
 
 
+def _valid_realized_pnl(value: Any) -> bool:
+    """Only finite, nonboolean realized amounts qualify as sizing evidence."""
+    if value is None or isinstance(value, bool):
+        return False
+    try:
+        return math.isfinite(float(value))
+    except (TypeError, ValueError, OverflowError):
+        return False
+
+
 def normalize_strategy_identity(value: Any) -> str:
     """Return a stable economics key for strategy provenance.
 
@@ -408,15 +418,25 @@ def strategy_economics(signal: Any) -> StrategyEconomics:
     if cached and now - cached[0] <= ttl:
         return cached[1]
 
-    records = _ledger_records(strategy, symbol)
+    source_records = _ledger_records(strategy, symbol)
+    # Missing/malformed outcomes cannot become winners or neutral closes. Even
+    # when other rows are valid, incomplete provenance bars capital promotion.
+    records = [row for row in source_records if _valid_realized_pnl(row.get("net_pnl"))]
+    incomplete_cohort = len(records) != len(source_records)
+    if incomplete_cohort:
+        log.warning(
+            "PAPER STRATEGY ECONOMICS | status=INVALID_REALIZED_PNL | "
+            "strategy=%s | symbol=%s | excluded=%d | promotion=BLOCKED",
+            strategy, symbol, len(source_records) - len(records),
+        )
     pnls = [_number(item.get("net_pnl")) for item in records]
     wins = [value for value in pnls if value > 0]
     losses = [value for value in pnls if value <= 0]
     gross_win = sum(wins)
     gross_loss = abs(sum(losses))
     pf = gross_win / gross_loss if gross_loss > 0 else (999.0 if gross_win > 0 else 0.0)
-    validated = model_validation_ok(signal)
-    tier = paper_model_tier(signal)
+    validated = model_validation_ok(signal) if not incomplete_cohort else False
+    tier = paper_model_tier(signal) if not incomplete_cohort else "RESEARCH"
     expectancy = sum(pnls) / len(pnls) if pnls else 0.0
     multiplier = _multiplier(
         sample_count=len(records),
