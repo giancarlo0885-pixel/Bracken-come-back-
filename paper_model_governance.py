@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, replace
+from decimal import Decimal, InvalidOperation
 from datetime import datetime, timedelta, timezone
 import json
 import math
@@ -52,6 +53,20 @@ def _finite(value: Any) -> float | None:
     except (TypeError, ValueError, OverflowError):
         return None
     return number if math.isfinite(number) else None
+
+
+def _nonnegative_integral_count(value: Any) -> int:
+    """Fail closed on missing, fractional, boolean or nonfinite count evidence."""
+    if value is None or isinstance(value, bool):
+        return 0
+    try:
+        count = int(value)
+        exact = Decimal(str(value))
+    except (TypeError, ValueError, OverflowError, InvalidOperation):
+        return 0
+    if not exact.is_finite() or exact < 0 or exact != count:
+        return 0
+    return count
 
 
 def _int_env(name: str, default: int, minimum: int, maximum: int | None = None) -> int:
@@ -141,14 +156,14 @@ def classify_paper_model_metrics(
     exclusively owned by capital_model_governance.py and its CAPITAL_* thresholds.
     """
     thresholds = _thresholds()
-    samples = int(metrics.get("sample_count") or 0)
+    samples = _nonnegative_integral_count(metrics.get("sample_count"))
     accuracy = _finite(metrics.get("directional_accuracy"))
     ece = _finite(metrics.get("expected_calibration_error"))
     brier_skill = _finite(metrics.get("brier_skill_score"))
     # Brier skill = 1 - model_brier / reference_brier cannot exceed one.
     if brier_skill is not None and brier_skill > 1.0:
         brier_skill = None
-    closed_paper_trades = int(metrics.get("closed_paper_trades") or 0)
+    closed_paper_trades = _nonnegative_integral_count(metrics.get("closed_paper_trades"))
     paper_expectancy = _finite(metrics.get("paper_expectancy"))
     paper_profit_factor = _finite(metrics.get("paper_profit_factor"))
 
