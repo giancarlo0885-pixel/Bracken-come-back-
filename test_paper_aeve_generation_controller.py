@@ -287,6 +287,7 @@ def test_evaluator_passes_independent_entry_inputs_and_persists_version(monkeypa
     identity = generation_config_hash(cfg)
     features = {'edge_pct': 0.24, 'dip_depth_pct': 0.0025, 'rebound_pct': 0.0005, 'aeve_estimated_round_trip_cost_pct': 0.15, 'aeve_cost_estimated_at': '2026-09-22T00:00:00Z', 'aeve_cost_provenance': 'entry_signal_estimate'}
     realized_fees = [0.15]
+    prior_excursions = {'mfe': 1.1, 'mae': -0.3}
     captured, inserted = [], []
     real_score = formula.score_entry
 
@@ -312,7 +313,7 @@ def test_evaluator_passes_independent_entry_inputs_and_persists_version(monkeypa
                     aeve_config_json=cfg.__dict__, aeve_config_hash=identity)])
             if 'COUNT(*) AS samples' in sql:
                 return Result([dict(samples=80, expectancy=0.1, gross_win=2, gross_loss=1,
-                                    mfe=1.1, mae=-0.3)])
+                                    mfe=prior_excursions['mfe'], mae=prior_excursions['mae'])])
             if 'SELECT round_trip_net_pnl AS net_pnl' in sql:
                 return Result([])
             if 'INSERT INTO paper_aeve_generation_outcomes' in sql:
@@ -356,6 +357,17 @@ def test_evaluator_passes_independent_entry_inputs_and_persists_version(monkeypa
     assert controller.record_generation_outcomes() == 1
     assert captured[-1] == (previous_inputs, previous_decision)
     assert inserted[-1][7] == 50.0  # Realized cost still belongs to outcome accounting.
+    # The producer must not erase missing historical excursions before the
+    # scorer's finite-evidence guard can reject them.
+    prior_excursions['mae'] = None
+    assert controller.record_generation_outcomes() == 1
+    assert captured[-1][0]['mae_pct'] is None
+    assert captured[-1][1].would_trade is False
+    prior_excursions['mae'] = -0.3
+    prior_excursions['mfe'] = None
+    assert controller.record_generation_outcomes() == 1
+    assert captured[-1][0]['mfe_pct'] is None
+    assert captured[-1][1].would_trade is False
     features.pop('dip_depth_pct')
     assert controller.record_generation_outcomes() == 1
     assert inserted[-1][8] is False
