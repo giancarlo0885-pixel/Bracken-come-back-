@@ -37,6 +37,7 @@ def test_boolean_net_pnl_cannot_become_a_profitable_trade(monkeypatch):
     assert result.net_pnl == 0.0
     assert result.model_validated is False
     assert result.model_tier == "RESEARCH"
+    assert result.evidence_complete is False
     assert result.size_multiplier <= 1.0
 
 
@@ -57,4 +58,27 @@ def test_finite_numeric_profit_preserves_existing_sizing(monkeypatch):
     assert result.net_pnl == 30.0
     assert result.model_validated is True
     assert result.model_tier == "CAPITAL_QUALIFIED"
+    assert result.evidence_complete is True
     assert result.size_multiplier == 1.25
+
+
+def test_incomplete_negative_cohort_cannot_reenable_missing_edge_exploration(monkeypatch):
+    _setup(monkeypatch, [_row(-1.0) for _ in range(29)] + [_row(True)])
+    monkeypatch.setenv("PAPER_KNOWN_NEGATIVE_EDGE_MIN_SAMPLES", "30")
+    allowed, reason, edge, cost = econ.fee_edge_allows_entry(
+        {"strategy": "synthetic", "symbol": "BTC-USD"}
+    )
+    assert allowed is False
+    assert reason == "invalid_realized_pnl_evidence"
+    assert edge is None and cost > 0
+
+
+def test_incomplete_cohort_cannot_authorize_explicit_edge_either(monkeypatch):
+    _setup(monkeypatch, [_row(-1.0) for _ in range(29)] + [_row(None)])
+    allowed, reason, edge, cost = econ.fee_edge_allows_entry(
+        {"strategy": "synthetic", "symbol": "BTC-USD",
+         "expected_edge_pct": 2.0, "estimated_cost_pct": 0.5}
+    )
+    assert (allowed, reason, edge, cost) == (
+        False, "invalid_realized_pnl_evidence", 2.0, 0.5
+    )
