@@ -282,22 +282,32 @@ def _with_entry_economics_provenance(
     allocation = _value(signal, "v39_optimizer_allocation", None)
     if _value(signal, "estimated_cost_pct", None) is None and isinstance(allocation, dict):
         raw_optimizer_cost = allocation.get("estimated_round_trip_cost_pct")
-        try:
-            optimizer_cost = float(raw_optimizer_cost)
-        except (TypeError, ValueError):
-            optimizer_cost = float("nan")
-        if optimizer_cost == optimizer_cost and optimizer_cost >= 0 and optimizer_cost != float("inf"):
-            updates["estimated_cost_pct"] = optimizer_cost
+        if raw_optimizer_cost is not None:
+            try:
+                optimizer_cost = float(raw_optimizer_cost)
+            except (TypeError, ValueError, OverflowError):
+                optimizer_cost = float("nan")
+            if (not isinstance(raw_optimizer_cost, bool)
+                    and math.isfinite(optimizer_cost) and optimizer_cost >= 0):
+                updates["estimated_cost_pct"] = optimizer_cost
+            else:
+                # A supplied but malformed selected cost is not an absent estimate.
+                updates["paper_pricing_cost_unavailable"] = True
 
     if quant_assessment is not None:
         raw_quant_cost = getattr(quant_assessment, "estimated_cost_pct", None)
         try:
             quant_cost = float(raw_quant_cost)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             quant_cost = float("nan")
         quant_cost_valid = (
-            quant_cost == quant_cost and quant_cost >= 0 and quant_cost != float("inf")
+            not isinstance(raw_quant_cost, bool)
+            and math.isfinite(quant_cost)
+            and quant_cost >= 0
         )
+        if raw_quant_cost is not None and not quant_cost_valid:
+            # Never replace explicitly invalid quant costs with a generic estimate.
+            updates["paper_pricing_cost_unavailable"] = True
 
         # If no optimizer/signal cost exists, preserve the exact cost that the
         # quant standard used when computing its net expected value.
