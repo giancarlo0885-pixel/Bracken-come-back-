@@ -32,6 +32,7 @@ class StrategyEconomics:
     size_multiplier: float
     model_validated: bool
     model_tier: str = "RESEARCH"
+    evidence_complete: bool = True
     epoch_name: str = _EPOCH_NAME
 
 
@@ -460,6 +461,7 @@ def strategy_economics(signal: Any) -> StrategyEconomics:
         size_multiplier=multiplier,
         model_validated=validated,
         model_tier=tier,
+        evidence_complete=not incomplete_cohort,
     )
     _CACHE[cache_key] = (now, result)
     return result
@@ -537,6 +539,8 @@ def fee_edge_allows_entry(signal: Any) -> tuple[bool, str, float | None, float]:
 
     if edge is None:
         economics = strategy_economics(signal)
+        if not getattr(economics, "evidence_complete", True):
+            return False, "invalid_realized_pnl_evidence", None, cost
         if (
             economics.sample_count >= min_samples
             and economics.expectancy < 0.0
@@ -555,6 +559,8 @@ def fee_edge_allows_entry(signal: Any) -> tuple[bool, str, float | None, float]:
     margin = base_margin
     negative_economics = False
     economics = strategy_economics(signal)
+    if not getattr(economics, "evidence_complete", True):
+        return False, "invalid_realized_pnl_evidence", edge, cost
     if (
         economics.sample_count >= min_samples
         and economics.expectancy < 0.0
