@@ -129,12 +129,14 @@ jobs:
           test_paper_fill_provenance_pg.py
           test_alpaca_auth_recovery_pg.py
           test_kraken_reference_pg.py
+          test_kraken_streamed_candles_pg.py
           test_paper_persisted_lineage_audit_pg.py
           test_stock_worker_cost_control.py::test_postgres_inventory_pause_policy
           test_provider_budget_marker_pg.py
           test_cli_probability_audit.py
           test_kraken_capacity_backpressure.py::test_postgres_capacity_blocks_requests_and_preserves_original_evidence
           test_kraken_research_overflow.py
+          test_kraken_research_extension.py
           test_regime_summary_provenance.py
           test_regime_quote_sampling.py
           test_entry_challenger_availability.py

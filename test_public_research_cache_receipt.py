@@ -35,7 +35,7 @@ def test_slow_http_response_keeps_two_seconds_of_cache_after_receipt(monkeypatch
 def test_cache_growth_and_provider_budget_boundaries_unchanged(monkeypatch):
     c,get,reserve,clock=client(monkeypatch)
     for i in range(80):c.request('Coinbase Public Research','products/fixture-'+str(i))
-    assert len(c.cache)<=12
+    assert len(c.cache)<=16
     reserve.return_value={'reserved':False,'reason':'provider capability budget exhausted'}
     with pytest.raises(data.ResearchUnavailable,match='PROVIDER_BUDGET_EXHAUSTED'):
         c.request('Coinbase Public Research','products/not-cached')

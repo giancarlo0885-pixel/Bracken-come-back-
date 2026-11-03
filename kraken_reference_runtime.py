@@ -202,6 +202,8 @@ class KrakenReferenceService:
         self.socket = None
         self.last_log = 0.0
         self._last_publication_timing = None
+        from kraken_streamed_candles import CandleStream, enabled as candle_stream_enabled
+        self.candles = CandleStream() if candle_stream_enabled() else None
 
     def start(self):
         with self.lock:
@@ -255,6 +257,8 @@ class KrakenReferenceService:
             now = utc_now()
             payload = self.state.health(now)
             payload["subscribed_symbols"] = list(self.symbols.values())
+            if self.candles is not None:
+                payload['candle_stream'] = self.candles.health()
             timing.enter('history_lock_wait')
             with self.lock:
                 timing.enter('history_copy')
@@ -298,15 +302,34 @@ class KrakenReferenceService:
         finally:
             timing.finish(failed)
 
+    def _ingest_wire(self, raw, received):
+        if self.candles is not None:
+            if not isinstance(raw,str) or len(raw)>1_000_000:
+                raise BookIntegrityError('invalid_message_size')
+            message = json.loads(raw,parse_float=str)
+            if not isinstance(message,dict):raise BookIntegrityError('invalid_message')
+            result = message.get('result') or {}
+            if (message.get('channel') == 'ohlc'
+                    or (isinstance(result,dict) and result.get('channel') == 'ohlc')
+                    or (message.get('method') in {'subscribe','unsubscribe'} and message.get('req_id') == 3)):
+                self.candles.consume(message,received)
+                return
+        self.state.ingest(raw,received)
+        if self.candles is not None:self.candles.wire(received)
+
     def _session(self, conn):
         ws = self.socket_factory(URL, timeout=8, enable_multithread=True)
         self.socket = ws
         try:
             self.state.opened(utc_now())
+            if self.candles is not None:self.candles.opened(self.symbols,utc_now())
             self.clear_references()
             self.publish(conn)  # Replace any previous owner's live-looking row immediately.
             ws.send(json.dumps({"method": "subscribe", "params": {
                 "channel": "book", "symbol": list(self.symbols), "depth": 10, "snapshot": True}, "req_id": 1}))
+            if self.candles is not None:
+                ws.send(json.dumps({'method':'subscribe','params':{'channel':'ohlc',
+                    'symbol':list(self.symbols),'interval':5,'snapshot':True},'req_id':3}))
             ws.settimeout(1)
             opened = last_wire = last_ping = last_publish = time.monotonic()
             while not self.stop_event.is_set():
@@ -318,7 +341,7 @@ class KrakenReferenceService:
                 if raw == "" or raw == b"":
                     raise BookIntegrityError("disconnected")
                 if raw is not None:
-                    self.state.ingest(raw, utc_now())
+                    self._ingest_wire(raw, utc_now())
                     self.remember_references(utc_now())
                     last_wire = now_mono
                 if now_mono - last_wire > 15:
@@ -336,6 +359,7 @@ class KrakenReferenceService:
                     last_publish = now_mono
         finally:
             self.state.invalidate()
+            if self.candles is not None:self.candles.invalidate()
             self.clear_references()
             ws.close()
             self.socket = None
@@ -413,6 +437,9 @@ def install_kraken_reference(worker):
     research_symbols = list(getattr(worker, 'WATCHLISTS', {}).get('crypto', {})) if enabled() else None
     service = KrakenReferenceService()
     service.research_symbols = research_symbols
+    pricing = getattr(worker,'_coinbase_paper_pricing',None)
+    if service.candles is not None and getattr(pricing,'source',None) == 'Kraken WebSocket v2 paper pricing':
+        pricing.data.ohlc_stream = service.candles
     provider = getattr(worker, '_robinhood_current_marketdata_provider', None)
     client = getattr(provider, 'client', None)
     original = getattr(client, 'best_bid_ask_quotes', None)
