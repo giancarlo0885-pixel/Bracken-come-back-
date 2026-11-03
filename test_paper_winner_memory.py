@@ -178,3 +178,31 @@ def test_duplicate_partial_sell_cannot_manufacture_a_fully_closed_winner():
     result = winner_entry_memory([close, deepcopy(close)])
     assert result['records'] == []
     assert result['exclusions'] == {'unverified_fill_lot_linkage': 1}
+
+
+def test_cross_market_reused_buy_trade_id_keeps_both_qualified_outcomes():
+    # Trade identifiers are scoped to a market, not globally unique.
+    crypto = exact_close(buy_id='shared-entry', buy_fill_id='crypto-buy-fill',
+                         lot_id='crypto-lot', sell_id='crypto-sell',
+                         sell_fill_id='crypto-sell-fill')
+    cash = exact_close(buy_id='shared-entry', buy_fill_id='cash-buy-fill',
+                       lot_id='cash-lot', sell_id='cash-sell',
+                       sell_fill_id='cash-sell-fill')
+    cash.update(market='cash', symbol='TEST', net_pnl=-0.2)
+    result = winner_entry_memory([crypto, cash])
+    assert result['winners'] == 1
+    assert result['losers'] == 1
+    assert len(result['records']) == 2
+    assert {row['market'] for row in result['records']} == {'crypto', 'cash'}
+    assert result['exclusions'] == {}
+
+
+def test_same_market_reused_buy_trade_id_with_distinct_lots_still_fails_closed():
+    first = exact_close(buy_id='shared-entry', buy_fill_id='first-buy-fill',
+                        lot_id='first-lot', sell_id='first-sell')
+    second = exact_close(buy_id='shared-entry', buy_fill_id='second-buy-fill',
+                         lot_id='second-lot', sell_id='second-sell',
+                         sell_fill_id='second-sell-fill')
+    result = winner_entry_memory([first, second])
+    assert result['records'] == []
+    assert result['exclusions'] == {'unverified_fill_lot_linkage': 1}
