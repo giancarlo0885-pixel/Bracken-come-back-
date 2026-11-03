@@ -14,6 +14,16 @@ log = logging.getLogger("paper-strategy-economics")
 _CACHE: dict[str, tuple[float, "StrategyEconomics"]] = {}
 _EPOCH_NAME = "post-churn-capacity-economics-v1"
 _ORACLE_COUNCIL_V3_KEY = "oracle_council_v3"
+# Ordered explicit gross directional forecast fields. Booleans are not returns.
+_GROSS_EDGE_FIELDS = (
+    "expected_edge_pct",
+    "calibrated_expected_edge_pct",
+    "expected_return_pct",
+    "forecast_return_pct",
+    "possible_move_pct",
+    "expected_move_pct",
+    "edge_pct",
+)
 
 
 @dataclass(frozen=True)
@@ -458,22 +468,25 @@ def expected_edge_pct(signal: Any) -> float | None:
     # This function feeds a gate that compares edge against execution cost.
     # A field explicitly named net_expected_value_pct has already had cost
     # deducted and therefore must not be treated as gross edge here.
-    for name in (
-        "expected_edge_pct",
-        "calibrated_expected_edge_pct",
-        "expected_return_pct",
-        "forecast_return_pct",
-        "possible_move_pct",
-        "expected_move_pct",
-        "edge_pct",
-    ):
+    for name in _GROSS_EDGE_FIELDS:
         raw = value(name, None)
-        if raw is None:
+        if raw is None or isinstance(raw, bool):
             continue
         parsed = _number(raw, float("nan"))
         if math.isfinite(parsed):
             return parsed
     return None
+
+
+def _has_boolean_gross_edge(signal: Any) -> bool:
+    """Explicit boolean forecast evidence must not become numeric edge or missing-edge exploration."""
+    return any(
+        isinstance(
+            signal.get(name) if isinstance(signal, dict) else getattr(signal, name, None),
+            bool,
+        )
+        for name in _GROSS_EDGE_FIELDS
+    )
 
 
 def estimated_round_trip_cost_pct(signal: Any) -> float:
@@ -506,6 +519,8 @@ def fee_edge_allows_entry(signal: Any) -> tuple[bool, str, float | None, float]:
     cost = estimated_round_trip_cost_pct(signal)
     if not math.isfinite(cost):
         return False, 'paper_pricing_cost_unavailable', edge, cost
+    if _has_boolean_gross_edge(signal):
+        return False, 'invalid_explicit_forecast_edge', edge, cost
     if (isinstance(signal, dict) and signal.get('paper_pricing_edge_unavailable') is True
             or not isinstance(signal, dict) and getattr(signal, 'paper_pricing_edge_unavailable', False) is True):
         return False, 'kraken_paper_gross_edge_unavailable', edge, cost
