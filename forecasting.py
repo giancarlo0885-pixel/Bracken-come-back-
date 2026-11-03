@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
 import hashlib
 import math
@@ -59,6 +59,8 @@ class Forecast:
     regime: str = "unknown"
     validation_status: str = "unvalidated"
     bars_per_year: float = 252.0
+    # Optional original-quote anchor evidence; not model or execution approval.
+    reference: dict[str, Any] = field(default_factory=dict)
 
 
 def _series(frame: pd.DataFrame, column: str) -> pd.Series:
