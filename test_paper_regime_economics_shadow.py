@@ -376,3 +376,27 @@ def test_regime_schema_checks_catalog_before_repair_alter():
     assert "FROM pg_attribute" in source
     assert "ADD COLUMN IF NOT EXISTS round_trip_net_pnl" not in source
     assert "ADD COLUMN IF NOT EXISTS round_trip_fees" not in source
+
+
+@pytest.mark.parametrize("missing", [
+    "EXECUTION_MODE", "ENABLE_BROKER_SUBMISSION", "LIVE_TRADING_ARMED",
+])
+def test_regime_shadow_requires_explicit_paper_only_controls(monkeypatch, missing):
+    _paper(monkeypatch)
+    monkeypatch.delenv(missing)
+    assert regime.active() is False
+
+
+@pytest.mark.parametrize("control", ["ENABLE_BROKER_SUBMISSION", "LIVE_TRADING_ARMED"])
+def test_regime_shadow_abstains_on_ambiguous_execution_controls(monkeypatch, control):
+    _paper(monkeypatch)
+    monkeypatch.setenv(control, "unknown")
+    assert regime.active() is False
+
+
+@pytest.mark.parametrize("disabled", ["false", "0", "no", "off"])
+def test_regime_shadow_accepts_explicit_disabled_spellings(monkeypatch, disabled):
+    _paper(monkeypatch)
+    monkeypatch.setenv("ENABLE_BROKER_SUBMISSION", disabled)
+    monkeypatch.setenv("LIVE_TRADING_ARMED", disabled)
+    assert regime.active() is True
