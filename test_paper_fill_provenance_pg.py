@@ -402,9 +402,12 @@ def test_paper_book_evidence_commits_atomically_and_rollback_preserves_canonical
     with connection() as conn:
         _seed_graph(conn)
         conn.execute((Path(__file__).parent/'migrations/20261019_coinbase_paper_price_evidence.sql').read_text())
-    # Use real accounting math; quote registration/depth behavior is unit-tested separately.
+    # This graph-only fixture supplies the receipt boundary explicitly. Actual
+    # registered depth receipts and delayed finalization are exercised separately.
     from paper_execution_accounting import _simulate_fill_explicit_fee
-    monkeypatch.setattr(reality,'simulate_fill',_simulate_fill_explicit_fee)
+    monkeypatch.setattr(reality,'paper_fill_for_accounting',lambda **k:_simulate_fill_explicit_fee(
+        side=k['side'],market=k['market'],reference_price=k['reference_price'],
+        quote=k['quote'],fee_pct=k['fee_pct']),raising=False)
     def write(conn,evidence):
         lot='price-lot:'+uuid.uuid4().hex;ledger='price-buy:'+uuid.uuid4().hex
         at=datetime.now(timezone.utc).isoformat()

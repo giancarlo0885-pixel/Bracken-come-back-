@@ -283,11 +283,21 @@ def _record_order_and_fill(
                 or data.get("provider_symbol")!=symbol or data.get("paper_fee_pct")!=0.006
                 or abs(fee_pct-0.006)>1e-10):
             raise ValueError("paper price identity or modeled fee mismatch")
-    pricing = reality.simulate_fill if data.get("provider") in {"Coinbase Exchange paper pricing", "Kraken WebSocket v2 paper pricing"} else _simulate_fill_explicit_fee
-    fill = pricing(
-        side=side, market=market, reference_price=reference, quote=data,
-        order_value=data.get("paper_depth_order_value", filled_notional), fee_pct=fee_pct,
-    )
+    if data.get("provider") in {"Coinbase Exchange paper pricing", "Kraken WebSocket v2 paper pricing"}:
+        # Validate the immutable fill already computed against a fresh quote.
+        # Finishing a transaction is not a second trading decision and must
+        # not reprice it against current quote freshness or a replaced session.
+        recorded_fill = getattr(reality, "paper_fill_for_accounting", None)
+        if not callable(recorded_fill):
+            raise ValueError("paper price adapter fill receipt unavailable")
+        fill = recorded_fill(quote=data, side=side, market=market,
+            reference_price=reference, executed_price=executed_price,
+            quantity=qty, fee_pct=fee_pct)
+    else:
+        fill = _simulate_fill_explicit_fee(
+            side=side, market=market, reference_price=reference, quote=data,
+            order_value=data.get("paper_depth_order_value", filled_notional), fee_pct=fee_pct,
+        )
     requested = max(filled_notional, _finite(requested_notional, filled_notional))
     requested_qty = requested / reference
     remaining_notional = max(0.0, requested - filled_notional)
