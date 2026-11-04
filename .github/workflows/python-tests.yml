@@ -141,3 +141,4 @@ jobs:
           test_regime_summary_provenance.py
           test_regime_quote_sampling.py
           test_entry_challenger_availability.py
+          test_setup_refresh_write_amplification.py
