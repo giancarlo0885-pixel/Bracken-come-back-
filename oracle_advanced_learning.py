@@ -137,13 +137,22 @@ def refresh_setup_attribution(conn: Any, *, market: str | None=None) -> dict[str
     for x in rows:
         loss=_f(x.get("gross_loss")); pf=_f(x.get("gross_win"))/loss if loss>0 else None
         key=f"{x.get('market')}:{x.get('strategy')}:{x.get('regime')}"
+        # Recompute every cycle, but do not rewrite identical metrics. The
+        # learner's heartbeat remains in oracle_brain_learning_state; this row's
+        # updated_at records an actual materialized-cohort change.
         conn.execute(
             """INSERT INTO oracle_setup_validation(
               cohort_key,market,strategy,regime,samples,wins,losses,expectancy,profit_factor,avg_mfe_pct,avg_mae_pct,execution_impact
             ) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'NONE')
             ON CONFLICT(cohort_key) DO UPDATE SET samples=EXCLUDED.samples,wins=EXCLUDED.wins,
             losses=EXCLUDED.losses,expectancy=EXCLUDED.expectancy,profit_factor=EXCLUDED.profit_factor,
-            avg_mfe_pct=EXCLUDED.avg_mfe_pct,avg_mae_pct=EXCLUDED.avg_mae_pct,updated_at=NOW()""",
+            avg_mfe_pct=EXCLUDED.avg_mfe_pct,avg_mae_pct=EXCLUDED.avg_mae_pct,updated_at=NOW()
+            WHERE (oracle_setup_validation.samples,oracle_setup_validation.wins,
+                   oracle_setup_validation.losses,oracle_setup_validation.expectancy,
+                   oracle_setup_validation.profit_factor,oracle_setup_validation.avg_mfe_pct,
+                   oracle_setup_validation.avg_mae_pct)
+              IS DISTINCT FROM (EXCLUDED.samples,EXCLUDED.wins,EXCLUDED.losses,EXCLUDED.expectancy,
+                                EXCLUDED.profit_factor,EXCLUDED.avg_mfe_pct,EXCLUDED.avg_mae_pct)""",
             (key,x.get("market"),x.get("strategy"),x.get("regime"),x.get("samples"),x.get("wins"),x.get("losses"),
              x.get("expectancy"),pf,x.get("avg_mfe"),x.get("avg_mae")))
     return {"setup_cohorts":len(rows)}

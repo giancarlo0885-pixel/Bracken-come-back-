@@ -4,6 +4,7 @@ import copy
 from datetime import datetime, timezone
 import logging
 import math
+from execution_actions import EXECUTABLE_ENTRY_ACTIONS
 import os
 from typing import Any
 
@@ -138,7 +139,7 @@ def _research_entry_confirmation_allows(
         return True, "research_entry_confirmation_not_required"
 
     action = str(_value(signal, "action", "BUY") or "BUY").upper().strip()
-    if action not in {"BUY", "ACCUMULATE"}:
+    if action not in EXECUTABLE_ENTRY_ACTIONS:
         _RESEARCH_ENTRY_CONFIRMATIONS.pop(key, None)
         return True, "research_entry_confirmation_non_entry_action"
 
@@ -415,7 +416,7 @@ def install_paper_strategy_execution_guard() -> bool:
     """Install paper-only fee-aware entry filtering and adaptive strategy sizing.
 
     This wrapper is intentionally installed after the optimizer-size handoff so it
-    governs the final BUY/ACCUMULATE entry path. It never changes SELL/EXIT/CLOSE,
+    governs every existing executable BUY alias. It never changes SELL/EXIT/CLOSE,
     quote integrity, accounting, or live-capital controls.
     """
     global _INSTALLED
