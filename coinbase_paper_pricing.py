@@ -280,7 +280,7 @@ class PaperPricing:
             if any(quote.get(k)!=v for k,v in original.items() if k!='price'):return False
             if quote.get('price')!=original['price']:
                 key=(quote.get('quote_id'),quote.get('paper_depth_side'),str(quote.get('paper_depth_order_value')))
-                fill=self.fill_receipts.get(key)
+                fill=self.fill_receipts.get(quote.get('paper_fill_receipt_id'))
                 if (not fill or quote.get('price')!=fill['price'] or quote.get('paper_fill_price')!=fill['price']
                         or quote.get('paper_depth_vwap')!=fill['vwap']
                         or quote.get('paper_reference_price')!=original['price']):return False
@@ -411,8 +411,12 @@ def install_paper_pricing(worker,provider=None):
         fill=pricing(**{**kwargs,'quote':depth_quote,'market_impact_pct':0.0})
         with provider.lock:
             if len(provider.fill_receipts)>=128:provider.fill_receipts.pop(next(iter(provider.fill_receipts)))
-            provider.fill_receipts[(q['quote_id'],side,str(kwargs.get('order_value')))]=dict(
-                price=fill.fill_price,vwap=vwap,fill=fill,original=deepcopy(q['paper_original_price_quote']))
+            import uuid
+            token = str(uuid.uuid4())
+            q['paper_fill_receipt_id'] = token
+            provider.fill_receipts[token]=dict(
+                price=fill.fill_price,vwap=vwap,fill=fill,original=deepcopy(q['paper_original_price_quote']),
+                order_value=str(kwargs.get('order_value')))
         return fill
 
     def accounting_fill(*, quote, side, market, reference_price, executed_price, quantity, fee_pct):
@@ -426,11 +430,13 @@ def install_paper_pricing(worker,provider=None):
             raise ResearchUnavailable('PAPER_FILL_RECEIPT_UNAVAILABLE')
         key=(quote.get('quote_id'),side,str(quote.get('paper_depth_order_value')))
         with provider.lock:
-            receipt=provider.fill_receipts.get(key)
+            receipt=provider.fill_receipts.get(quote.get('paper_fill_receipt_id'))
             if not receipt or 'fill' not in receipt or 'original' not in receipt:
                 raise ResearchUnavailable('PAPER_FILL_RECEIPT_UNAVAILABLE')
             original=receipt['original'];fill=receipt['fill']
-            if (quote.get('provider')!=provider.source or market!=fill.market
+            if (str(quote.get('paper_depth_order_value'))!=receipt['order_value']
+                    or quote.get('paper_depth_side')!=side
+                    or quote.get('provider')!=provider.source or market!=fill.market
                     or side!=fill.side or original.get('symbol')!=quote.get('symbol')
                     or any(quote.get(k)!=v for k,v in original.items() if k!='price')
                     or quote.get('paper_original_price_quote')!=original

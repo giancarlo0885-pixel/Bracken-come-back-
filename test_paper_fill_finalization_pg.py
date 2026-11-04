@@ -134,3 +134,58 @@ def test_book_invalidation_cannot_mint_new_fill_or_destroy_original_receipt(fill
     with connection() as conn:trade=record(conn,quote,fill)
     with reader() as conn:
         assert conn.execute('SELECT count(*) AS n FROM paper_fills WHERE canonical_trade_id=%s',(trade,)).fetchone()['n']==1
+
+
+def test_one_simulated_receipt_cannot_finalize_two_execution_ids(fill_evidence_db, monkeypatch):
+    provider, quote, fill, clock = setup_fill(monkeypatch)
+    provider.clock = lambda: clock + timedelta(hours=1)
+    connection, reader = fill_evidence_db
+    schema(connection)
+    with connection() as conn:
+        first = record(conn, quote, fill)
+    with pytest.raises(ValueError, match='already finalized'):
+        with connection() as conn:
+            record(conn, quote, fill)
+    with reader() as conn:
+        assert conn.execute('SELECT count(*) AS n FROM paper_fills').fetchone()['n'] == 1
+        row = conn.execute('SELECT evidence FROM paper_fill_price_evidence').fetchone()['evidence']
+        assert row['execution']['simulation_receipt_id'] == quote['paper_fill_receipt_id']
+        assert conn.execute('SELECT canonical_trade_id FROM paper_fills').fetchone()['canonical_trade_id'] == first
+
+
+def test_failed_transaction_does_not_consume_original_receipt(fill_evidence_db, monkeypatch):
+    provider, quote, fill, clock = setup_fill(monkeypatch)
+    provider.clock = lambda: clock + timedelta(seconds=6)
+    connection, reader = fill_evidence_db
+    schema(connection)
+    with pytest.raises(RuntimeError, match='after receipt insert'):
+        with connection() as conn:
+            record(conn, quote, fill, fail=True)
+    with connection() as conn:
+        record(conn, quote, fill)
+    with reader() as conn:
+        assert conn.execute('SELECT count(*) AS n FROM paper_fills').fetchone()['n'] == 1
+
+
+def test_concurrent_replay_commits_exactly_one_execution(fill_evidence_db, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    import threading
+    provider, quote, fill, clock = setup_fill(monkeypatch)
+    provider.clock = lambda: clock + timedelta(hours=1)
+    connection, reader = fill_evidence_db
+    schema(connection)
+    barrier = threading.Barrier(2)
+    def attempt():
+        try:
+            with connection() as conn:
+                barrier.wait(timeout=5)
+                record(conn, quote, fill)
+            return 'committed'
+        except ValueError as exc:
+            assert 'already finalized' in str(exc)
+            return 'rejected'
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(attempt) for _ in range(2)]
+        assert sorted(f.result(timeout=15) for f in futures) == ['committed', 'rejected']
+    with reader() as conn:
+        assert conn.execute('SELECT count(*) AS n FROM paper_fills').fetchone()['n'] == 1

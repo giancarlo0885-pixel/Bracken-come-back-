@@ -49,6 +49,10 @@ def test_kraken_depth_receipt_and_canonical_fill_commit_or_rollback_together(fil
         audit=pricing_receipt_evidence(stored,[record],execution_time=canonical['created_at'])
         assert audit['status']=='CONSISTENT_ORIGINAL_PAPER_RECEIPT',audit
         assert len(str(record['evidence']))<32768
+    # The rollback scenario is a separate valid simulation, not replay of the
+    # already committed execution's single-use receipt.
+    adjusted,fill=reality._execution_quote(market='crypto',side=side,reference_price=q['price'],
+        quote=p.quote('BTC-USD'),order_value=150)
     with pytest.raises(RuntimeError,match='rollback after receipt'):
         with connection() as conn:write(conn,fail=True)
     with reader() as conn:
