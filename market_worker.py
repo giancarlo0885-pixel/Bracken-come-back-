@@ -357,7 +357,7 @@ def _attach_execution_metadata(signal: Any, history: Any, scan_type: str) -> dic
     return route
 
 
-def _signal_payload(signal: Any, route: dict[str, Any], scan_type: str, **extra: Any) -> dict[str, Any]:
+def _signal_payload(signal: Any, route: dict[str, Any], scan_type: str, *, forecast: Any = None, **extra: Any) -> dict[str, Any]:
     payload = signal.to_dict() if hasattr(signal, "to_dict") else dict(getattr(signal, "__dict__", {}) or {})
     payload.update(
         {
@@ -385,11 +385,30 @@ def _signal_payload(signal: Any, route: dict[str, Any], scan_type: str, **extra:
         payload["edge_provenance"] = "predecision_forecast_expected_move_pct"
         payload["forecast_id"] = getattr(signal, "forecast_id", None)
     payload.update(extra)
+    reference = getattr(forecast, 'reference', None)
+    if isinstance(reference, dict) and reference:
+        from copy import deepcopy
+        payload['forecast_reference'] = deepcopy(reference)
     # OracleSignal.to_dict() serializes dataclass fields only. Brain feedback is
     # runtime enrichment, so preserve its actual bounded assessment explicitly.
     from oracle_brain_feedback import signal_feedback_evidence
     payload.update(signal_feedback_evidence(signal))
     return payload
+
+
+# Installed only by an eligible paper pricing adapter. Legacy/cash paths retain
+# their original forecast contract and no new quote is fetched during binding.
+_bind_paper_forecast_reference = None
+
+
+def _bind_forecast_reference(market, forecast, quote, symbol, diagnostics):
+    if forecast is None or market != 'crypto' or _bind_paper_forecast_reference is None:
+        return forecast
+    try:
+        return _bind_paper_forecast_reference(forecast, quote, symbol)
+    except (ValueError, TypeError, KeyError, AttributeError, OverflowError, ArithmeticError):
+        diagnostics['unavailable_reason'] = 'paper_forecast_reference_unavailable'
+        return None
 
 
 def _normalize_starter_action(signal: Any) -> Any:
@@ -1316,6 +1335,7 @@ def fast_scan_market(market: str) -> list[Any]:
                     diagnostics=forecast_diagnostics,
                     require_live_quote=(market == "crypto"),
                 )
+                forecast = _bind_forecast_reference(market, forecast, quote_payload, symbol, forecast_diagnostics)
                 if forecast:
                     setattr(signal, "forecast_id", getattr(forecast, "forecast_id", None))
                     setattr(signal, "expected_edge_pct", getattr(forecast, "expected_move_pct", None))
@@ -1336,6 +1356,7 @@ def fast_scan_market(market: str) -> list[Any]:
                         signal,
                         route,
                         "fast",
+                        forecast=forecast,
                         always_on_fast_scan=True,
                         forecast_unavailable_reason=forecast_diagnostics.get("unavailable_reason"),
                         trade_configuration={
@@ -1516,6 +1537,7 @@ def scan_market(market: str) -> list[Any]:
                 diagnostics=forecast_diagnostics,
                 require_live_quote=(market == "crypto"),
             )
+            forecast = _bind_forecast_reference(market, forecast, quote_payload, symbol, forecast_diagnostics)
             if forecast is None:
                 log.warning("DEEP_FORECAST_MISSING | market=%s | symbol=%s | scan=deep | unavailable_reason=%s",
                             market, symbol, forecast_diagnostics.get("unavailable_reason", "unknown"))
@@ -1535,6 +1557,7 @@ def scan_market(market: str) -> list[Any]:
                     signal,
                     route,
                     "deep",
+                    forecast=forecast,
                     forecast_unavailable_reason=forecast_diagnostics.get("unavailable_reason"),
                     headlines=news.headlines[:8],
                     news_source=news.source,

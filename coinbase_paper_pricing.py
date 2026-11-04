@@ -439,6 +439,9 @@ def install_paper_pricing(worker,provider=None):
     market_data.get_live_snapshot=snapshot
     oracle._verified_quote_for=verified;oracle._execution_quote_guard=guard
     reality.simulate_fill=simulate;oracle.simulate_fill=simulate
+    from paper_forecast_reference import bind_paper_forecast_reference
+    worker._bind_paper_forecast_reference = lambda forecast, quote, symbol: bind_paper_forecast_reference(
+        forecast, quote, symbol, authentic=provider.authentic)
     worker._coinbase_paper_pricing=provider
     from crypto_execution_source import install_crypto_candidate_source_guard
     install_crypto_candidate_source_guard(worker,provider.authentic,'PAPER_PRICE_UNVERIFIED_OR_STALE',require_forecast=True)
