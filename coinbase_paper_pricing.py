@@ -280,7 +280,7 @@ class PaperPricing:
             if any(quote.get(k)!=v for k,v in original.items() if k!='price'):return False
             if quote.get('price')!=original['price']:
                 key=(quote.get('quote_id'),quote.get('paper_depth_side'),str(quote.get('paper_depth_order_value')))
-                fill=self.fill_receipts.get(key)
+                fill=self.fill_receipts.get(quote.get('paper_fill_receipt_id'))
                 if (not fill or quote.get('price')!=fill['price'] or quote.get('paper_fill_price')!=fill['price']
                         or quote.get('paper_depth_vwap')!=fill['vwap']
                         or quote.get('paper_reference_price')!=original['price']):return False
@@ -411,8 +411,57 @@ def install_paper_pricing(worker,provider=None):
         fill=pricing(**{**kwargs,'quote':depth_quote,'market_impact_pct':0.0})
         with provider.lock:
             if len(provider.fill_receipts)>=128:provider.fill_receipts.pop(next(iter(provider.fill_receipts)))
-            provider.fill_receipts[(q['quote_id'],side,str(kwargs.get('order_value')))]=dict(price=fill.fill_price,vwap=vwap)
+            import uuid
+            token = str(uuid.uuid4())
+            q['paper_fill_receipt_id'] = token
+            provider.fill_receipts[token]=dict(
+                price=fill.fill_price,vwap=vwap,fill=fill,original=deepcopy(q['paper_original_price_quote']),
+                order_value=str(kwargs.get('order_value')))
         return fill
+
+    def accounting_fill(*, quote, side, market, reference_price, executed_price, quantity, fee_pct):
+        """Read a previously validated fill, never authorize or reprice a new one.
+
+        Database writes may finish after the source quote expires or disconnects.
+        Only a fill minted by the fresh simulation path above is eligible here.
+        The canonical writer still checks the exact trade/lot/fee relationships.
+        """
+        if not provider.available() or not isinstance(quote,dict):
+            raise ResearchUnavailable('PAPER_FILL_RECEIPT_UNAVAILABLE')
+        key=(quote.get('quote_id'),side,str(quote.get('paper_depth_order_value')))
+        with provider.lock:
+            receipt=provider.fill_receipts.get(quote.get('paper_fill_receipt_id'))
+            if not receipt or 'fill' not in receipt or 'original' not in receipt:
+                raise ResearchUnavailable('PAPER_FILL_RECEIPT_UNAVAILABLE')
+            original=receipt['original'];fill=receipt['fill']
+            if (str(quote.get('paper_depth_order_value'))!=receipt['order_value']
+                    or quote.get('paper_depth_side')!=side
+                    or quote.get('provider')!=provider.source or market!=fill.market
+                    or side!=fill.side or original.get('symbol')!=quote.get('symbol')
+                    or any(quote.get(k)!=v for k,v in original.items() if k!='price')
+                    or quote.get('paper_original_price_quote')!=original
+                    or quote.get('paper_depth_side')!=side
+                    or quote.get('paper_depth_vwap')!=receipt['vwap']
+                    or quote.get('price')!=fill.fill_price
+                    or quote.get('paper_fill_price')!=fill.fill_price
+                    or quote.get('paper_reference_price')!=fill.reference_price
+                    or reference_price!=fill.reference_price or executed_price!=fill.fill_price
+                    or abs(fee_pct-fill.fee_pct)>1e-10
+                    or quote.get('paper_executable_reference')!=fill.executable_reference
+                    or quote.get('paper_adverse_cost_pct')!=fill.adverse_cost_pct
+                    or quote.get('paper_market_impact_pct')!=fill.market_impact_pct
+                    or quote.get('paper_participation_rate')!=fill.participation_rate):
+                raise ResearchUnavailable('PAPER_FILL_RECEIPT_MISMATCH')
+            # A smaller actual IOC allocation remains conservative at the
+            # original depth price. A larger quantity was never simulated.
+            try:
+                notional=float(quantity)*fill.fill_price
+                maximum=float(quote['paper_depth_order_value'])
+                if not 0<notional<=maximum+max(1e-8,maximum*1e-8):
+                    raise ValueError('Unsimulated fill quantity')
+            except (ValueError,TypeError,KeyError,OverflowError):
+                raise ResearchUnavailable('PAPER_FILL_RECEIPT_QUANTITY_MISMATCH')
+            return fill
 
     def snapshot(symbol):
         if not is_crypto(symbol):return original_live(symbol)
@@ -439,6 +488,7 @@ def install_paper_pricing(worker,provider=None):
     market_data.get_live_snapshot=snapshot
     oracle._verified_quote_for=verified;oracle._execution_quote_guard=guard
     reality.simulate_fill=simulate;oracle.simulate_fill=simulate
+    reality.paper_fill_for_accounting=accounting_fill
     from paper_forecast_reference import bind_paper_forecast_reference
     worker._bind_paper_forecast_reference = lambda forecast, quote, symbol: bind_paper_forecast_reference(
         forecast, quote, symbol, authentic=provider.authentic)

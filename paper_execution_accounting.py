@@ -283,11 +283,35 @@ def _record_order_and_fill(
                 or data.get("provider_symbol")!=symbol or data.get("paper_fee_pct")!=0.006
                 or abs(fee_pct-0.006)>1e-10):
             raise ValueError("paper price identity or modeled fee mismatch")
-    pricing = reality.simulate_fill if data.get("provider") in {"Coinbase Exchange paper pricing", "Kraken WebSocket v2 paper pricing"} else _simulate_fill_explicit_fee
-    fill = pricing(
-        side=side, market=market, reference_price=reference, quote=data,
-        order_value=data.get("paper_depth_order_value", filled_notional), fee_pct=fee_pct,
-    )
+    if data.get("provider") in {"Coinbase Exchange paper pricing", "Kraken WebSocket v2 paper pricing"}:
+        # Validate the immutable fill already computed against a fresh quote.
+        # Finishing a transaction is not a second trading decision and must
+        # not reprice it against current quote freshness or a replaced session.
+        recorded_fill = getattr(reality, "paper_fill_for_accounting", None)
+        if not callable(recorded_fill):
+            raise ValueError("paper price adapter fill receipt unavailable")
+        fill = recorded_fill(quote=data, side=side, market=market,
+            reference_price=reference, executed_price=executed_price,
+            quantity=qty, fee_pct=fee_pct)
+        # One freshly simulated receipt may finalize exactly one execution.
+        # The transaction lock serializes concurrent attempts; rollback leaves
+        # no consumed proof, so a failed transaction can safely retry.
+        token = data.get("paper_fill_receipt_id")
+        if not isinstance(token, str) or not token:
+            raise ValueError("paper fill simulation identity missing")
+        conn.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
+                     ("paper-fill-finalization:" + token,))
+        used = conn.execute("""SELECT f.canonical_trade_id
+            FROM paper_fill_price_evidence e JOIN paper_fills f USING(fill_id)
+            WHERE e.evidence->'execution'->>'simulation_receipt_id'=%s LIMIT 1""",
+            (token,)).fetchone()
+        if used:
+            raise ValueError("paper fill simulation receipt already finalized")
+    else:
+        fill = _simulate_fill_explicit_fee(
+            side=side, market=market, reference_price=reference, quote=data,
+            order_value=data.get("paper_depth_order_value", filled_notional), fee_pct=fee_pct,
+        )
     requested = max(filled_notional, _finite(requested_notional, filled_notional))
     requested_qty = requested / reference
     remaining_notional = max(0.0, requested - filled_notional)
@@ -295,7 +319,11 @@ def _record_order_and_fill(
     status = "PARTIAL_CANCELLED" if remaining_notional > max(0.01, requested * 1e-6) else "FILLED"
     now = datetime.now(timezone.utc).isoformat()
     order_id = f"paper-order:{uuid.uuid4()}"
-    fill_id = f"paper-fill:{uuid.uuid4()}"
+    # The existing primary key is the authoritative single-use guarantee even
+    # under REPEATABLE READ, whose earlier snapshot can miss a committed token.
+    fill_id = ("paper-fill:" + data["paper_fill_receipt_id"]
+        if data.get("provider") in {"Coinbase Exchange paper pricing", "Kraken WebSocket v2 paper pricing"}
+        else f"paper-fill:{uuid.uuid4()}")
 
     # The canonical trade fee and fill/lot links commit or roll back together.
     # SELL initially stores gross realized P/L; charge the exit fee once here.
@@ -344,7 +372,7 @@ def _record_order_and_fill(
         original=data["paper_original_price_quote"]
         if original.get("quote_id")!=data["quote_id"] or original.get("book")!=data.get("book"):
             raise ValueError("paper original price receipt mismatch")
-        evidence={"source_quote":original,"execution":{"side":side,"quantity":qty,"price":executed_price,
+        evidence={"source_quote":original,"execution":{"simulation_receipt_id":data["paper_fill_receipt_id"],"side":side,"quantity":qty,"price":executed_price,
             "reference_price":reference,"fee_amount":fee,"fee_pct":fee_pct,
             "depth_vwap":data.get("paper_depth_vwap"),"depth_order_value":data.get("paper_depth_order_value"),
             "slippage_pct":fill.slippage_pct,"latency_pct":fill.latency_pct,"market_impact_pct":fill.market_impact_pct},
