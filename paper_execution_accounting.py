@@ -319,7 +319,11 @@ def _record_order_and_fill(
     status = "PARTIAL_CANCELLED" if remaining_notional > max(0.01, requested * 1e-6) else "FILLED"
     now = datetime.now(timezone.utc).isoformat()
     order_id = f"paper-order:{uuid.uuid4()}"
-    fill_id = f"paper-fill:{uuid.uuid4()}"
+    # The existing primary key is the authoritative single-use guarantee even
+    # under REPEATABLE READ, whose earlier snapshot can miss a committed token.
+    fill_id = ("paper-fill:" + data["paper_fill_receipt_id"]
+        if data.get("provider") in {"Coinbase Exchange paper pricing", "Kraken WebSocket v2 paper pricing"}
+        else f"paper-fill:{uuid.uuid4()}")
 
     # The canonical trade fee and fill/lot links commit or roll back together.
     # SELL initially stores gross realized P/L; charge the exit fee once here.

@@ -189,3 +189,30 @@ def test_concurrent_replay_commits_exactly_one_execution(fill_evidence_db, monke
         assert sorted(f.result(timeout=15) for f in futures) == ['committed', 'rejected']
     with reader() as conn:
         assert conn.execute('SELECT count(*) AS n FROM paper_fills').fetchone()['n'] == 1
+
+
+def test_repeatable_read_snapshot_cannot_replay_a_committed_receipt(fill_evidence_db, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    import threading
+    import psycopg
+    provider, quote, fill, clock = setup_fill(monkeypatch)
+    provider.clock = lambda: clock + timedelta(hours=1)
+    connection, reader = fill_evidence_db
+    schema(connection)
+    barrier = threading.Barrier(2)
+    def attempt():
+        try:
+            with connection() as conn:
+                conn.execute('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ')
+                conn.execute('SELECT count(*) FROM paper_fills').fetchone()
+                barrier.wait(timeout=5)
+                record(conn, quote, fill)
+            return 'committed'
+        except psycopg.errors.UniqueViolation:
+            return 'rejected'
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        jobs = [pool.submit(attempt) for _ in range(2)]
+        assert sorted(job.result(timeout=15) for job in jobs) == ['committed', 'rejected']
+    with reader() as conn:
+        assert conn.execute('SELECT count(*) AS n FROM paper_fills').fetchone()['n'] == 1
+        assert conn.execute('SELECT count(*) AS n FROM trades').fetchone()['n'] == 1
