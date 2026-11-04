@@ -32,6 +32,9 @@ def _time(value):
 
 
 def _finite(value):
+    # Python booleans are integers, not financial measurements.
+    if isinstance(value, bool):
+        return None
     try:
         result = float(value)
         return result if math.isfinite(result) else None
