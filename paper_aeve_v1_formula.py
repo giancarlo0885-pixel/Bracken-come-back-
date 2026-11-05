@@ -128,3 +128,34 @@ def should_take_profit(*, unrealized_return_pct: float, round_trip_cost_pct: flo
     required_net = max(_f(minimum_net_profit_pct, 0.20), cost)
     trailing_trigger = max(0.15, 0.30 * mfe)
     return bool(net >= required_net and pullback >= trailing_trigger)
+
+
+@dataclass(frozen=True)
+class MatureCohortResearchGate:
+    quarantine: bool
+    reason: str
+    completed_trades: int
+
+
+def evaluate_mature_cohort_research(
+    *, completed_trades: int, net_expectancy: float | None,
+    profit_factor: float | None, min_trades: int = 50,
+) -> MatureCohortResearchGate:
+    """Research-only eligibility; never wired into order execution.
+
+    Call only on a precise strategy/regime/setup cohort with completed,
+    fee-aware round trips available strictly before the candidate entry.
+    Missing or immature evidence cannot establish a mature losing cohort.
+    """
+    count = max(0, int(completed_trades))
+    if count < min_trades:
+        return MatureCohortResearchGate(False, "insufficient_completed_history", count)
+    if net_expectancy is None or profit_factor is None:
+        return MatureCohortResearchGate(False, "missing_economic_evidence", count)
+    expectancy = _f(net_expectancy, float("nan"))
+    pf = _f(profit_factor, float("nan"))
+    if not (math.isfinite(expectancy) and math.isfinite(pf)) or pf < 0:
+        return MatureCohortResearchGate(False, "invalid_economic_evidence", count)
+    if expectancy < 0 and pf < 1.0:
+        return MatureCohortResearchGate(True, "mature_negative_post_cost_cohort", count)
+    return MatureCohortResearchGate(False, "no_mature_negative_evidence", count)
