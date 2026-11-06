@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
+import pytest
+
 import paper_model_governance as paper_gov
 from capital_model_governance import assess_model_evidence
 from paper_model_governance import (
@@ -110,10 +112,10 @@ def test_paper_trade_economics_uses_realized_net_pnl(monkeypatch):
         paper_gov,
         "rows",
         lambda sql, params=None: [
-            {"net_pnl": 2.0},
-            {"net_pnl": 1.0},
-            {"net_pnl": -1.5},
-            {"net_pnl": -0.5},
+            {"gross_pnl": 2.01, "net_pnl": 2.0, "exit_fees": 0.01, "verified_net_pnl": 2.0, "verified_fees": 0.01, "cost_provenance": "exact_lot"},
+            {"gross_pnl": 1.01, "net_pnl": 1.0, "exit_fees": 0.01, "verified_net_pnl": 1.0, "verified_fees": 0.01, "cost_provenance": "exact_lot"},
+            {"gross_pnl": -1.49, "net_pnl": -1.5, "exit_fees": 0.01, "verified_net_pnl": -1.5, "verified_fees": 0.01, "cost_provenance": "exact_lot"},
+            {"gross_pnl": -0.49, "net_pnl": -0.5, "exit_fees": 0.01, "verified_net_pnl": -0.5, "verified_fees": 0.01, "cost_provenance": "exact_lot"},
         ],
     )
 
@@ -235,3 +237,81 @@ def test_paper_assessment_uses_same_current_evidence_windows_as_readiness(monkey
     assert "LIMIT 1000" in calibration_sql
     assert "ORDER BY created_at DESC" in walk_forward_sql
     assert "LIMIT 20" in walk_forward_sql
+
+
+def test_paper_trade_economics_requires_paper_environment_and_exact_cost_join(monkeypatch):
+    queries = []
+
+    def evidence(sql, params=None):
+        queries.append((" ".join(sql.split()), params))
+        return [
+            {"gross_pnl": 1.02, "net_pnl": 1.0, "exit_fees": 0.02,
+             "verified_net_pnl": 1.0, "verified_fees": 0.02,
+             "cost_provenance": "exact_lot"},
+        ]
+
+    monkeypatch.setattr(paper_gov, "rows", evidence)
+    result = paper_gov._paper_trade_economics("m", "v")
+    assert result["closed_paper_trades"] == 1
+    sql, params = queries[0]
+    assert "l.gross_pnl AS gross_pnl" in sql
+    assert "l.fees AS exit_fees" in sql
+    assert "FROM trade_ledger l" in sql
+    assert "JOIN paper_regime_trade_metrics m ON m.trade_id=l.trade_id" in sql
+    assert "l.broker_mode='PAPER'" in sql
+    assert "l.account_environment='PAPER'" in sql
+    assert "l.market='crypto'" in sql
+    assert "l.side='SELL'" in sql
+    assert params == ("m", "v")
+
+
+@pytest.mark.parametrize("bad", [
+    {"net_pnl": None, "verified_net_pnl": None, "verified_fees": None, "cost_provenance": None},
+    {"net_pnl": 4.0, "verified_net_pnl": None, "verified_fees": 0.01, "cost_provenance": "exact_lot"},
+    {"net_pnl": 4.0, "verified_net_pnl": 4.0, "verified_fees": 0.01, "cost_provenance": "legacy_unknown"},
+    {"net_pnl": 4.0, "verified_net_pnl": 3.5, "verified_fees": 0.01, "cost_provenance": "exact_lot"},
+    {"net_pnl": 4.0, "verified_net_pnl": 4.0, "verified_fees": -0.01, "cost_provenance": "exact_lot"},
+    {"net_pnl": True, "verified_net_pnl": 1.0, "verified_fees": 0.01, "cost_provenance": "exact_lot"},
+])
+def test_paper_trade_economics_quarantines_entire_cohort_on_unqualified_close(monkeypatch, bad):
+    # One valid winner cannot qualify a model when another close lacks
+    # independently reconciled after-cost evidence. No winner-only selection.
+    valid = {"gross_pnl": 1.01, "net_pnl": 1.0, "exit_fees": 0.01,
+             "verified_net_pnl": 1.0, "verified_fees": 0.01,
+             "cost_provenance": "exact_lot"}
+    bad = {"gross_pnl": 4.01, "exit_fees": 0.01, **bad}
+    monkeypatch.setattr(paper_gov, "rows", lambda sql, params=None: [valid, bad])
+    result = paper_gov._paper_trade_economics("m", "v")
+    assert result == {"closed_paper_trades": 0,
+                      "paper_expectancy": None, "paper_profit_factor": None}
+
+
+def test_exact_round_trip_with_nonzero_entry_fee_is_not_false_quarantined(monkeypatch):
+    # The SELL ledger net deducts the exit fee only. Exact-lot net also
+    # deducts the original entry fee; these values must not be compared directly.
+    row = {
+        "gross_pnl": 1.0, "net_pnl": 0.9, "exit_fees": 0.1,
+        "verified_net_pnl": 0.8, "verified_fees": 0.2,
+        "cost_provenance": "exact_lot",
+    }
+    monkeypatch.setattr(paper_gov, "rows", lambda sql, params=None: [row])
+    result = paper_gov._paper_trade_economics("m", "v")
+    assert result["closed_paper_trades"] == 1
+    assert result["paper_expectancy"] == pytest.approx(0.8)
+
+
+def test_false_round_trip_arithmetic_cannot_qualify_model(monkeypatch):
+    # A round-trip outcome cannot equal exit-only net when the verified
+    # total fees include a nonzero entry fee. Reject this inconsistent row.
+    row = {
+        "gross_pnl": 1.0, "net_pnl": 0.9, "exit_fees": 0.1,
+        "verified_net_pnl": 0.9, "verified_fees": 0.2,
+        "cost_provenance": "exact_lot",
+    }
+    monkeypatch.setattr(paper_gov, "rows", lambda sql, params=None: [row])
+    result = paper_gov._paper_trade_economics("m", "v")
+    assert result == {
+        "closed_paper_trades": 0,
+        "paper_expectancy": None,
+        "paper_profit_factor": None,
+    }
