@@ -425,6 +425,17 @@ def _trigger_telemetry(
         return reject("unverified_quote_or_timestamp")
     if observed_at > now:
         return reject("future_quote")
+    # A fresh quote is not necessarily decision-time evidence. Reject a quote
+    # created after the persisted signal decision, even if it predates now.
+    # The canonical signal reader supplies created_at; invalid supplied
+    # decision timestamps must not bypass this cutoff.
+    decision_timestamp = signal.get("created_at")
+    if decision_timestamp is not None:
+        decision_at = _dt(decision_timestamp)
+        if decision_at is None:
+            return reject("invalid_signal_decision_timestamp")
+        if observed_at > decision_at:
+            return reject("quote_after_signal_decision")
     if (now - observed_at).total_seconds() > _signal_max_age_seconds(market):
         return reject("stale_quote")
 
