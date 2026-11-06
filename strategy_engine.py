@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from typing import Any, Callable
 
 
@@ -69,6 +70,8 @@ class StrategySignal:
     available: bool
     message: str
     evidence: dict[str, Any]
+    # A scoring family identifies implemented logic, not independent outcomes.
+    scoring_family: str | None = None
 
 
 def _metric(data: dict[str, Any], key: str, default: float = 0.0) -> float:
@@ -104,8 +107,9 @@ def _generic_strategy(name: str, data: dict[str, Any]) -> StrategySignal:
         score,
         confidence,
         True,
-        "Configured provider evidence evaluated",
+        "Shared market composite; no separate strategy-specific model",
         {key: data.get(key) for key in required} | {"momentum": momentum, "trend": trend, "volume": volume},
+        scoring_family="generic_market_composite_v1",
     )
 
 
@@ -162,6 +166,7 @@ def _mean_reversion_strategy(data: dict[str, Any]) -> StrategySignal:
             "horizon_minutes": data.get("mean_reversion_horizon_minutes"),
             "displacement_bps": data.get("mean_reversion_displacement_bps"),
         },
+        scoring_family="crypto_short_horizon_mean_reversion_v1",
     )
 
 
@@ -179,7 +184,23 @@ def evaluate_strategies(data: dict[str, Any], enabled: list[str] | None = None) 
 
 def ensemble_score(signals: list[StrategySignal], portfolio_fit: float = 50.0, data_quality: float = 50.0) -> dict[str, float]:
     available = [signal for signal in signals if signal.available]
-    if not available:
+    # Registry labels sharing the same implemented formula are one scoring vote.
+    # Equal scores from genuinely different families are still separate votes.
+    # Repeated identical rows within a family never alter its contribution.
+    families: dict[str, set[tuple[float, float]]] = {}
+    for signal in available:
+        if (isinstance(signal.score, bool) or isinstance(signal.confidence, bool)
+                or not isinstance(signal.score, (int, float))
+                or not isinstance(signal.confidence, (int, float))
+                or not math.isfinite(signal.score) or not math.isfinite(signal.confidence)):
+            continue
+        declared_family = getattr(signal, "scoring_family", None)
+        family = declared_family if isinstance(declared_family, str) and declared_family else "strategy:" + str(signal.strategy)
+        families.setdefault(family, set()).add((signal.score, signal.confidence))
+    votes = [(sum(score for score, _ in members) / len(members),
+              sum(confidence for _, confidence in members) / len(members))
+             for members in families.values()]
+    if not votes:
         return {
             "expected_return": 0.0,
             "downside_risk": 100.0,
@@ -192,10 +213,12 @@ def ensemble_score(signals: list[StrategySignal], portfolio_fit: float = 50.0, d
             "data_quality": data_quality,
             "model_agreement": 0.0,
             "overall_confidence": 0.0,
+            "available_strategy_count": len(available),
+            "scoring_family_count": 0,
         }
-    average_score = sum(signal.score for signal in available) / len(available)
-    confidence = sum(signal.confidence for signal in available) / len(available)
-    dispersion = sum(abs(signal.score - average_score) for signal in available) / len(available)
+    average_score = sum(score for score, _ in votes) / len(votes)
+    confidence = sum(confidence for _, confidence in votes) / len(votes)
+    dispersion = sum(abs(score - average_score) for score, _ in votes) / len(votes)
     agreement = max(0.0, 100.0 - dispersion)
     return {
         "expected_return": average_score,
@@ -209,4 +232,6 @@ def ensemble_score(signals: list[StrategySignal], portfolio_fit: float = 50.0, d
         "data_quality": data_quality,
         "model_agreement": agreement,
         "overall_confidence": max(0.0, min(100.0, confidence * agreement)),
+        "available_strategy_count": len(available),
+        "scoring_family_count": len(votes),
     }

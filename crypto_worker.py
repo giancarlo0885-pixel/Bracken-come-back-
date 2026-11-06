@@ -140,7 +140,8 @@ if __name__ == "__main__":
         # Reuse the bounded OHLC/metadata cache rather than issuing duplicate
         # requests from the paper adapter and background research in this worker.
         research_data = pricing.data if getattr(pricing, 'source', None) == 'Kraken WebSocket v2 paper pricing' else None
-        market_worker._kraken_primary_research = PrimaryResearch(data=research_data)
+        market_worker._kraken_primary_research = PrimaryResearch(data=research_data,
+            paper_pricing=pricing if research_data is not None else None)
         # The optional OHLC channel belongs to the elected shared feed. Research
         # clients reuse its bounded history even with a different pricing source.
         candles = getattr(getattr(market_worker,'_kraken_reference_service',None),'candles',None)

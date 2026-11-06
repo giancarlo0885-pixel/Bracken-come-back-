@@ -398,13 +398,16 @@ def test_paper_book_evidence_commits_atomically_and_rollback_preserves_canonical
     from coinbase_paper_pricing import SOURCE,MODEL
     from test_coinbase_paper_pricing import valid
     connection,reader=fill_evidence_db
-    q=valid();q.update(paper_price_model=MODEL,provider=SOURCE);q['paper_original_price_quote']=dict(q)
+    q=valid();q.update(paper_price_model=MODEL,provider=SOURCE);q['paper_original_price_quote']=dict(q);q['paper_fill_receipt_id']='graph-fixture:'+uuid.uuid4().hex
     with connection() as conn:
         _seed_graph(conn)
         conn.execute((Path(__file__).parent/'migrations/20261019_coinbase_paper_price_evidence.sql').read_text())
-    # Use real accounting math; quote registration/depth behavior is unit-tested separately.
+    # This graph-only fixture supplies the receipt boundary explicitly. Actual
+    # registered depth receipts and delayed finalization are exercised separately.
     from paper_execution_accounting import _simulate_fill_explicit_fee
-    monkeypatch.setattr(reality,'simulate_fill',_simulate_fill_explicit_fee)
+    monkeypatch.setattr(reality,'paper_fill_for_accounting',lambda **k:_simulate_fill_explicit_fee(
+        side=k['side'],market=k['market'],reference_price=k['reference_price'],
+        quote=k['quote'],fee_pct=k['fee_pct']),raising=False)
     def write(conn,evidence):
         lot='price-lot:'+uuid.uuid4().hex;ledger='price-buy:'+uuid.uuid4().hex
         at=datetime.now(timezone.utc).isoformat()
@@ -425,7 +428,7 @@ def test_paper_book_evidence_commits_atomically_and_rollback_preserves_canonical
         assert receipt['evidence']['source_quote']['book']==q['book']
         count=conn.execute('SELECT COUNT(*) AS n FROM trades').fetchone()['n']
     # A failed immutable evidence constraint must roll back the fill and canonical trade.
-    too_large={**q,'paper_original_price_quote':{**q['paper_original_price_quote'],'oversize':'x'*40000}}
+    too_large={**q,'paper_fill_receipt_id':'graph-fixture:'+uuid.uuid4().hex,'paper_original_price_quote':{**q['paper_original_price_quote'],'oversize':'x'*40000}}
     with pytest.raises(Exception):
         with connection() as conn:write(conn,too_large)
     with reader() as conn:

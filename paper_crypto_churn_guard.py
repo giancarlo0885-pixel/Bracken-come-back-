@@ -7,12 +7,13 @@ from datetime import datetime, timezone
 from typing import Any
 
 from paper_fast_reversal_hysteresis import install_paper_fast_reversal_hysteresis
+from execution_actions import EXECUTABLE_ENTRY_ACTIONS
 
 
 log = logging.getLogger("paper-churn-guard")
 _INSTALLED = False
 _SELL_CONFIRMATIONS: dict[str, tuple[int, float]] = {}
-_ENTRY_ACTIONS = {"BUY", "ACCUMULATE"}
+_ENTRY_ACTIONS = EXECUTABLE_ENTRY_ACTIONS
 
 
 def _truthy(name: str, default: str = "false") -> bool:
@@ -229,9 +230,9 @@ def _current_price(signal: Any, prices: dict[str, Any], symbol: str) -> float:
 def _allow_generic_buy(signal: Any) -> tuple[bool, str]:
     """Apply the same durable re-entry rule to every paper entry semantic.
 
-    Core-rebalance candidates may arrive as ACCUMULATE even though execution
-    ultimately routes through the BUY function. Treating ACCUMULATE as an entry
-    prevents alternate optimizer paths from bypassing same-symbol loss cooldowns.
+    Core-rebalance candidates may arrive as ACCUMULATE, STRONG_BUY or LONG
+    even though execution ultimately routes through BUY. Use the router's exact
+    entry semantics so aliases cannot bypass same-symbol loss cooldowns.
     """
     symbol = str(_value(signal, "symbol", "") or "").upper().strip()
     action = str(_value(signal, "action", "") or "").upper().strip()
@@ -400,7 +401,7 @@ def install_paper_crypto_churn_guard(worker: Any) -> bool:
     log.info(
         "Installed paper crypto churn guard | mode=%s | min_hold=%.2fm | confirmations=%d | window=%.0fs | "
         "emergency_loss=%.2f%% | reentry_cooldown=%.2fm | loss_reentry_multiplier=%.2fx | loss_streak_step=%.2fx | "
-        "entry_actions=BUY,ACCUMULATE | upstream_hysteresis=%s | relaxed_signal_thresholds=UNCHANGED | "
+        "entry_actions=BUY,STRONG_BUY,ACCUMULATE,LONG | upstream_hysteresis=%s | relaxed_signal_thresholds=UNCHANGED | "
         "broker_submission=NONE | live_trading=DISARMED",
         "UNBOUNDED_CONTROLLED" if unbounded else "BOUNDED",
         min_hold,

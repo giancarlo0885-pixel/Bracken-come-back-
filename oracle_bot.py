@@ -14,6 +14,7 @@ from config import *
 from capital_allocator import adaptive_capital_allocation
 from database import connect, row, rows, utc_now, ENTRY_EVIDENCE_RETENTION_LOCK
 from execution_policy import execution_policy
+from execution_actions import EXECUTABLE_ENTRY_ACTIONS
 from forecast_quality import model_execution_approved
 from quant_trade_standard import assess_trade
 from oracle_intelligence import evaluate_opportunity
@@ -3347,12 +3348,7 @@ def process_signals(
                 )
             continue
 
-        buy_signal = action in {
-            "BUY",
-            "STRONG_BUY",
-            "ACCUMULATE",
-            "LONG",
-        }
+        buy_signal = action in EXECUTABLE_ENTRY_ACTIONS
 
         if not buy_signal:
             log.info(
