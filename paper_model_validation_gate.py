@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 from typing import Any
 
@@ -25,6 +26,17 @@ def _json(value: Any) -> dict[str, Any]:
         except Exception:
             return {}
     return {}
+
+
+def _finite_metric(value: Any) -> float | None:
+    """Accept only real, finite numerical evidence; booleans are not metrics."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return number if math.isfinite(number) else None
 
 
 def regime_validation_ok(signal: Any) -> tuple[bool, str]:
@@ -73,16 +85,21 @@ def regime_validation_ok(signal: Any) -> tuple[bool, str]:
         for regime, payload in regimes.items():
             metrics = _json(payload)
             observed.add(str(regime))
-            sample_count = int(metrics.get("sample_count") or 0)
-            brier_skill = metrics.get("brier_skill_score")
-            ece = metrics.get("expected_calibration_error")
-            if sample_count < min_samples or brier_skill is None or ece is None:
+            sample_count = _finite_metric(metrics.get("sample_count"))
+            brier_skill = _finite_metric(metrics.get("brier_skill_score"))
+            ece = _finite_metric(metrics.get("expected_calibration_error"))
+            # Counts are nonnegative integers; Brier skill cannot exceed 1,
+            # and expected calibration error is a probability-scale magnitude.
+            # Invalid evidence cannot authorize a positive paper size boost.
+            if (
+                sample_count is None or not sample_count.is_integer()
+                or sample_count < min_samples
+                or brier_skill is None or brier_skill > 1.0
+                or ece is None or not 0.0 <= ece <= max_ece
+            ):
                 continue
-            try:
-                if float(brier_skill) >= min_brier_skill and float(ece) <= max_ece:
-                    passed.add(str(regime))
-            except (TypeError, ValueError):
-                continue
+            if brier_skill >= min_brier_skill:
+                passed.add(str(regime))
 
     if len(passed) >= min_regimes:
         return True, f"regime_validation_pass:{len(passed)}"
