@@ -158,6 +158,7 @@ def reconcile_fifo(fills: list[dict[str, Any]], metrics: dict[str, dict[str, Any
         identity_matches = True
         entry_fees_verified = True
         exact_linkage_verified = True
+        mismatch_reasons = set()  # Read-only cause attribution; qualification is unchanged.
         while remaining > 0 and lots[key]:
             lot = lots[key][0]
             matched = min(remaining, lot["remaining"])
@@ -166,12 +167,20 @@ def reconcile_fifo(fills: list[dict[str, Any]], metrics: dict[str, dict[str, Any
             entry_fees_verified &= lot["fee_verified"]
             declared_price = number(row.get("entry_price"))
             declared_time = timestamp(row.get("entry_time"))
-            identity_matches &= declared_price == lot["price"] and declared_time == lot["time"]
+            price_matches = declared_price == lot["price"]
+            time_matches = declared_time == lot["time"]
+            if not price_matches:
+                mismatch_reasons.add("fifo_entry_price_mismatch")
+            if not time_matches:
+                mismatch_reasons.add("fifo_entry_time_mismatch")
+            identity_matches &= price_matches and time_matches
             # Scalar prices and times cannot establish a durable lot identity.
             # Contradictory entry IDs must fail even when those scalars match.
             for field in ("entry_signal_id", "entry_decision_id", "entry_forecast_id", "entry_quote_id"):
                 declared_id, original_id = row.get(field), lot["row"].get(field)
                 if declared_id or original_id:
+                    if declared_id != original_id:
+                        mismatch_reasons.add("fifo_entry_provenance_id_mismatch")
                     identity_matches &= declared_id == original_id
             exact_member = bool(
                 row.get("_fill_accounting_provenance") == "exact_fill_lot_v1"
@@ -184,6 +193,8 @@ def reconcile_fifo(fills: list[dict[str, Any]], metrics: dict[str, dict[str, Any
             )
             exact_linkage_verified &= exact_member
             if row.get("_canonical_lot_id") or lot["row"].get("_canonical_lot_id"):
+                if not exact_member:
+                    mismatch_reasons.add("fifo_entry_canonical_lot_mismatch")
                 identity_matches &= exact_member
             members.append({"buy_trade_id": lot["identity"], "sell_trade_id": identity,
                             "buy_fill_id": lot["row"].get("_canonical_fill_id"),
@@ -223,6 +234,10 @@ def reconcile_fifo(fills: list[dict[str, Any]], metrics: dict[str, dict[str, Any
                         and (not require_fill_fee_evidence or (fee_evidence_verified and fee_semantics != "unreconciled")))
         if not identity_matches:
             diagnostics["fifo_entry_identity_mismatch"] += 1
+            if len(members) > 1:
+                mismatch_reasons.add("fifo_entry_multiple_buy_lots")
+            for reason in mismatch_reasons:
+                diagnostics[reason] += 1
         if gross_delta is None or abs(gross_delta) > TOLERANCE:
             diagnostics["gross_accounting_unreconciled"] += 1
         if exit_net_delta is None or abs(exit_net_delta) > TOLERANCE:
