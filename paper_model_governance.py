@@ -44,9 +44,12 @@ class PaperModelGovernanceAssessment:
 
 
 def _finite(value: Any) -> float | None:
+    # Python booleans are not measured financial or calibration evidence.
+    if value is None or isinstance(value, bool):
+        return None
     try:
         number = float(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
     return number if math.isfinite(number) else None
 
@@ -142,6 +145,9 @@ def classify_paper_model_metrics(
     accuracy = _finite(metrics.get("directional_accuracy"))
     ece = _finite(metrics.get("expected_calibration_error"))
     brier_skill = _finite(metrics.get("brier_skill_score"))
+    # Brier skill = 1 - model_brier / reference_brier cannot exceed one.
+    if brier_skill is not None and brier_skill > 1.0:
+        brier_skill = None
     closed_paper_trades = int(metrics.get("closed_paper_trades") or 0)
     paper_expectancy = _finite(metrics.get("paper_expectancy"))
     paper_profit_factor = _finite(metrics.get("paper_profit_factor"))
@@ -153,12 +159,12 @@ def classify_paper_model_metrics(
         reasons.append(
             f"only {samples} validation samples; needs {thresholds['minimum_validation_samples']}"
         )
-    if accuracy is None or accuracy < float(thresholds["minimum_directional_accuracy"]):
+    if accuracy is None or not 0.0 <= accuracy <= 1.0 or accuracy < float(thresholds["minimum_directional_accuracy"]):
         core_ok = False
         reasons.append(
             f"directional accuracy {accuracy} below {thresholds['minimum_directional_accuracy']}"
         )
-    if ece is None or ece > float(thresholds["maximum_ece"]):
+    if ece is None or not 0.0 <= ece <= 1.0 or ece > float(thresholds["maximum_ece"]):
         core_ok = False
         reasons.append(f"ECE {ece} above {thresholds['maximum_ece']}")
     if not temporal_leakage_ok:
