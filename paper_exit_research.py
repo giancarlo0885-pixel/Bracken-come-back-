@@ -120,15 +120,18 @@ def reconcile_fifo(fills: list[dict[str, Any]], metrics: dict[str, dict[str, Any
         if event_time is not None and event_time > as_of:
             diagnostics["future_fill"] += 1
             continue
-        if identity in unique:
-            if row == unique[identity]:
+        # Trade IDs are unique within a market, not across independent markets.
+        # Keep same-market conflicts quarantined without tainting another market.
+        identity_key = (key[0], identity)
+        if identity_key in unique:
+            if row == unique[identity_key]:
                 diagnostics["duplicate_fill"] += 1
             else:
                 diagnostics["conflicting_fill_identity"] += 1
                 tainted.add(key)
-                tainted.add((str(unique[identity].get("market") or ""), str(unique[identity].get("symbol") or "")))
+                tainted.add((str(unique[identity_key].get("market") or ""), str(unique[identity_key].get("symbol") or "")))
             continue
-        unique[identity] = row
+        unique[identity_key] = row
         side = str(row.get("side") or "").upper()
         event_time = timestamp(row.get("entry_time") if side == "BUY" else row.get("exit_time"))
         price = number(row.get("entry_price") if side == "BUY" else row.get("exit_price"))
