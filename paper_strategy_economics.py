@@ -486,7 +486,15 @@ def estimated_round_trip_cost_pct(signal: Any) -> float:
         return float('inf')
     explicit = value("estimated_cost_pct", None)
     if explicit is not None:
-        return max(0.0, _number(explicit))
+        # An explicitly supplied cost is evidence, not a defaultable hint.
+        # Coercing invalid or negative values to zero manufactures free execution.
+        if isinstance(explicit, bool):
+            return float("inf")
+        try:
+            parsed = float(explicit)
+        except (TypeError, ValueError, OverflowError):
+            return float("inf")
+        return parsed if math.isfinite(parsed) and parsed >= 0 else float("inf")
     slippage = max(0.0, _number(value("expected_slippage_pct", value("slippage_pct", 0.165)), 0.165))
     spread = max(0.0, _number(value("spread_pct", 0.0)))
     fee = max(0.0, _number(value("fee_pct", os.getenv("PAPER_ESTIMATED_FEE_PCT", "0.10")), 0.10))
