@@ -294,11 +294,10 @@ def _counterfactual_memory_for_signal(signal: Any, *, market: str, symbol: str, 
     unevaluable = 0
     for record in records:
         outcome = str(record.get("outcome_class") or "")
-        if outcome == "avoided_loss":
-            avoided.append(record)
+        if outcome not in {"avoided_loss", "missed_winner"}:
             continue
-        if outcome != "missed_winner":
-            continue
+        # Raw labels use gross horizon moves. Apply the same post-cost
+        # verification to both classes before allowing learning influence.
         try:
             entry = float(record.get("entry_price"))
             horizon = float(record.get("horizon_price"))
@@ -318,8 +317,15 @@ def _counterfactual_memory_for_signal(signal: Any, *, market: str, symbol: str, 
             sell = simulate_fill(side="SELL", market=market, reference_price=horizon, order_value=order_value)
             net_return_pct = ((sell.fill_price / buy.fill_price) - 1.0) * 100.0
             record["simulated_post_cost_return_pct"] = net_return_pct
-            if net_return_pct > 0:
+            if net_return_pct < 0:
+                # A gross missed winner can still be an avoided net loss.
+                avoided.append(record)
+            elif net_return_pct > 0 and outcome == "missed_winner":
                 profitable.append(record)
+            else:
+                # Positive "avoided_loss" labels conflict with verified
+                # economics; do not silently promote them to winners.
+                unevaluable += 1
         except (TypeError, ValueError, OverflowError):
             unevaluable += 1
 
