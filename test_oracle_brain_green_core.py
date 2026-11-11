@@ -59,3 +59,33 @@ def test_green_core_ignores_missing_entry_features():
     result = green_core_profile(rows, {"momentum_5d": 0.03}, min_samples=30)
     assert result["status"] == "no_separation"
     assert result["adjustment"] == 0.0
+
+
+def test_green_core_does_not_learn_from_boolean_historical_features():
+    """Boolean telemetry must not masquerade as a numeric winner/loser edge."""
+    rows = [
+        {"net_pnl": 1.0, "feature_snapshot": {"momentum_5d": True}}
+        for _ in range(20)
+    ] + [
+        {"net_pnl": -1.0, "feature_snapshot": {"momentum_5d": False}}
+        for _ in range(20)
+    ]
+    result = green_core_profile(rows, {"momentum_5d": 1.0}, min_samples=30)
+    assert result["status"] == "no_separation"
+    assert result["adjustment"] == 0.0
+    assert result["features"] == []
+
+
+def test_green_core_does_not_rank_on_boolean_current_feature():
+    """A boolean live feature is not evidence of a measured market value."""
+    rows = [
+        {"net_pnl": 1.0, "feature_snapshot": {"momentum_5d": 0.03}}
+        for _ in range(20)
+    ] + [
+        {"net_pnl": -1.0, "feature_snapshot": {"momentum_5d": -0.03}}
+        for _ in range(20)
+    ]
+    result = green_core_profile(rows, {"momentum_5d": True}, min_samples=30)
+    assert result["status"] == "no_separation"
+    assert result["adjustment"] == 0.0
+    assert result["features"] == []

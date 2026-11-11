@@ -61,6 +61,13 @@ def _number(value: Any, default: float = 0.0) -> float:
     return parsed if math.isfinite(parsed) else default
 
 
+def _feature_number(value: Any) -> float:
+    """Boolean telemetry is not a measured numeric market feature."""
+    if isinstance(value, bool):
+        return float("nan")
+    return _number(value, float("nan"))
+
+
 def _normalized_market(value: Any) -> str:
     market = str(value or "").strip().lower()
     return "cash" if market in {"stock", "stocks", "equity", "equities", "cash"} else market
@@ -114,8 +121,8 @@ def green_core_profile(rows: list[dict[str, Any]], signal: Any, *, min_samples: 
     weighted_match = 0.0
     total_weight = 0.0
     for name in _GREEN_FEATURES:
-        pos = [_number(s.get(name), float("nan")) for s in positives if s.get(name) is not None]
-        neg = [_number(s.get(name), float("nan")) for s in negatives if s.get(name) is not None]
+        pos = [_feature_number(s.get(name)) for s in positives if s.get(name) is not None]
+        neg = [_feature_number(s.get(name)) for s in negatives if s.get(name) is not None]
         pos = [v for v in pos if math.isfinite(v)]
         neg = [v for v in neg if math.isfinite(v)]
         if len(pos) < 5 or len(neg) < 5:
@@ -131,7 +138,7 @@ def green_core_profile(rows: list[dict[str, Any]], signal: Any, *, min_samples: 
         separation = (pos_mean - neg_mean) / scale
         if abs(separation) < 0.20:
             continue
-        current = _number(_value(signal, name, float("nan")), float("nan"))
+        current = _feature_number(_value(signal, name, float("nan")))
         if not math.isfinite(current):
             continue
         midpoint = (pos_mean + neg_mean) / 2.0
