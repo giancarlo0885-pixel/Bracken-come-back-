@@ -31,6 +31,8 @@ def active() -> bool:
 
 
 def _finite(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
     try:
         val = float(value)
     except (ValueError, TypeError, OverflowError):
@@ -70,7 +72,8 @@ def episode_win_lower_bound(outcomes: list[CompletedPaperOutcome]) -> float | No
         return None
     episodes: dict[str, list[float]] = {}
     for o in outcomes:
-        if not math.isfinite(o.net_return_pct):
+        if (isinstance(o.net_return_pct, bool) or not isinstance(o.net_return_pct, (int, float))
+                or not math.isfinite(o.net_return_pct)):
             return None
         episodes.setdefault(o.episode_id, []).append(1.0 if o.net_return_pct > 0 else 0.0)
     rate = sum(sum(v) / len(v) for v in episodes.values()) / len(episodes)

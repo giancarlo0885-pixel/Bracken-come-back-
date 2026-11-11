@@ -50,7 +50,8 @@ def evaluate_prior_generation_evidence(
     if len({o.trade_id for o in prior}) != len(prior):
         return abstain("duplicate_trade")
     import math
-    if any(not math.isfinite(o.net_return_pct) for o in prior):
+    if any(isinstance(o.net_return_pct, bool) or not isinstance(o.net_return_pct, (int, float))
+           or not math.isfinite(o.net_return_pct) for o in prior):
         return abstain("invalid_net_return")
     wins = [o.net_return_pct for o in prior if o.net_return_pct > 0]
     losses = [o.net_return_pct for o in prior if o.net_return_pct < 0]
