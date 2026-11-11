@@ -19,10 +19,10 @@ def _truthy(name: str, default: str = "false") -> bool:
 
 def active() -> bool:
     return bool(
-        str(os.getenv("EXECUTION_MODE", "paper") or "paper").strip().lower() == "paper"
+        str(os.getenv("EXECUTION_MODE") or "").strip().lower() == "paper"
         and _truthy("PAPER_AUTONOMOUS_LEARNING")
-        and not _truthy("ENABLE_BROKER_SUBMISSION")
-        and not _truthy("LIVE_TRADING_ARMED")
+        and str(os.getenv("ENABLE_BROKER_SUBMISSION") or "").strip().lower() in {"0", "false", "no", "off"}
+        and str(os.getenv("LIVE_TRADING_ARMED") or "").strip().lower() in {"0", "false", "no", "off"}
     )
 
 
