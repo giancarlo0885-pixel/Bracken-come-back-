@@ -74,11 +74,11 @@ def prepare(rows, as_of):
                 or (exited is not None and exited > as_of)):
             counts["future_or_open_outcome"] += 1
             continue
-        identities[str(row.get("trade_id") or "")].append(row)
+        identities[(str(row.get("market") or ""), str(row.get("trade_id") or ""))].append(row)
     valid = []
     for identity, versions in identities.items():
         row = versions[0]
-        if not identity or any(version != row for version in versions):
+        if not identity[1] or any(version != row for version in versions):
             counts["missing_or_conflicting_identity"] += len(versions)
             continue
         counts["duplicate"] += len(versions) - 1
