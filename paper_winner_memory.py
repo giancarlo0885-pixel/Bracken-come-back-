@@ -1,7 +1,7 @@
 """Winner entry evidence from fully closed, independently cost-reconciled BUY lots."""
 from collections import defaultdict
 from decimal import Decimal
-from paper_exit_research import timestamp, number
+from paper_exit_research import TOLERANCE, timestamp, number
 
 
 def _quantity_matches(closed, opened):
@@ -33,6 +33,33 @@ def _exact_fill_lot_identity(buy_id, parts):
             return False
         seen_sell_ids.add(close['trade_id'])
     return True
+
+
+
+def _verified_cost_breakdown(parts):
+    """Attribute only exact FIFO gross and explicit BUY/SELL fee legs.
+
+    Missing, nonfinite, negative-fee or internally inconsistent components
+    remain unavailable. This diagnostic never changes net P&L or qualification.
+    """
+    totals = {name: Decimal(0) for name in
+              ('gross_pnl', 'entry_fees', 'exit_fees', 'net_pnl')}
+    for close, _ in parts:
+        values = {name: number(close.get(name)) for name in totals}
+        if (any(value is None for value in values.values())
+                or values['entry_fees'] < 0 or values['exit_fees'] < 0
+                or abs(values['gross_pnl'] - values['entry_fees']
+                       - values['exit_fees'] - values['net_pnl']) > TOLERANCE):
+            return None
+        for name, value in values.items():
+            totals[name] += value
+    return {
+        'gross_pnl': float(totals['gross_pnl']),
+        'entry_fees': float(totals['entry_fees']),
+        'exit_fees': float(totals['exit_fees']),
+        'fee_drag': float(totals['entry_fees'] + totals['exit_fees']),
+        'fee_erased_gross_win': bool(totals['gross_pnl'] > 0 and totals['net_pnl'] <= 0),
+    }
 
 
 def winner_entry_memory(closes):
@@ -67,6 +94,13 @@ def winner_entry_memory(closes):
             excluded['missing_or_late_entry_features'] += 1
             continue
         c = parts[0][0]
+        costs = _verified_cost_breakdown(parts)
+        # Retain every already-qualified winner and loser even when a separate
+        # fee decomposition cannot be certified; never fill gaps with zeros.
+        cost_fields = costs if costs is not None else {
+            name: None for name in ('gross_pnl', 'entry_fees', 'exit_fees',
+                                   'fee_drag', 'fee_erased_gross_win')
+        }
         from paper_regime_economics_shadow import classify_regime
         records.append(dict(buy_trade_id=buy_id, lot_id=first['lot_id'], buy_fill_id=first['buy_fill_id'],
                             exact_fill_lot_linkage_verified=True, market=c['market'], symbol=c['symbol'],
@@ -76,6 +110,8 @@ def winner_entry_memory(closes):
                             entry_time=entry.isoformat(), decision_timestamp=decision.isoformat(),
                             exit_time=max(timestamp(c['exit_time']) for c, _ in parts).isoformat(),
                             net_pnl=sum(c['net_pnl'] for c, _ in parts),
+                            cost_decomposition_status='VERIFIED' if costs is not None else 'UNAVAILABLE',
+                            **cost_fields,
                             feature_snapshot=features, sell_trade_ids=[c['trade_id'] for c, _ in parts]))
     return dict(version='canonical-winner-entry-v1', records=records,
                 winners=sum(r['net_pnl'] > 0 for r in records),
