@@ -32,6 +32,9 @@ def _time(value):
 
 
 def _finite(value):
+    # A boolean telemetry flag is not a verified monetary amount or notional.
+    if isinstance(value, bool):
+        return None
     try:
         result = float(value)
         return result if math.isfinite(result) else None
