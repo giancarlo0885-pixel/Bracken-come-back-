@@ -70,12 +70,16 @@ def signal_price_samples(rows: list[dict[str, Any]], as_of: datetime) -> dict[tu
             continue
         route = payload.get("market_data_route") or {}
         quote = {**(route if isinstance(route, dict) else {}), **payload}
-        observed = timestamp(quote.get("quote_timestamp") or quote.get("source_quote_timestamp"))
+        quote_time = timestamp(quote.get("quote_timestamp") or quote.get("source_quote_timestamp"))
+        # A quote's exchange timestamp is not proof that the signal's price was
+        # observable then. Use the durable signal creation time, never backdate.
+        observed = timestamp(row.get("created_at"))
         symbol = str(row.get("symbol") or "").upper()
         requested = str(quote.get("requested_symbol") or quote.get("symbol") or "").upper()
         price = number(row.get("price"))
         if (quote.get("quote_verified") is not True or not symbol or requested != symbol
-                or observed is None or observed > as_of or price is None or price <= 0):
+                or observed is None or quote_time is None or quote_time > observed
+                or observed > as_of or price is None or price <= 0):
             continue
         result[(row["market"], symbol)].append({"observed_at": observed, "price": float(price),
                                                "source": "persisted_verified_signal_quote"})
@@ -432,7 +436,7 @@ def emit_reconciliation(market: str) -> dict[str, Any]:
                 (market, min(timestamp(r["entry_time"]) for r in sells), datetime.now(timezone.utc))).fetchall())
             for sample in samples[:50000]:
                 prices[(market, sample["symbol"])].append(dict(sample))
-            signals = list(conn.execute("""SELECT market,symbol,price,details FROM signals
+            signals = list(conn.execute("""SELECT market,symbol,price,details,created_at FROM signals
                 WHERE market=%s AND NULLIF(created_at,'')::timestamptz >= %s
                   AND NULLIF(created_at,'')::timestamptz <= %s
                 ORDER BY id DESC LIMIT 6000""", (market, min(timestamp(r["entry_time"]) for r in sells),
