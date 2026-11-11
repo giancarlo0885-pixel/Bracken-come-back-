@@ -184,6 +184,23 @@ class KrakenPaperPricing(PaperPricing):
                 reference = state.get('quotes', {}).get(symbol)
                 if not reference:
                     raise ResearchUnavailable('NO_FRESH_KRAKEN_BOOK')
+                # A stale/future reference can never authorize a paper quote.
+                # Reject it before a cache miss can reserve HTTP metadata budget;
+                # validate_kraken_book rechecks after the metadata request.
+                if not isinstance(reference, dict):
+                    raise ResearchUnavailable('KRAKEN_SYMBOL_OR_BOOK_INVALID')
+                # A known-invalid source cannot become valid through HTTP
+                # metadata. The complete identity/CRC checks still run below.
+                if (reference.get('checksum_status') != 'VALID'
+                        or reference.get('execution_authority') != 'NONE'):
+                    raise ResearchUnavailable('KRAKEN_REFERENCE_IDENTITY_OR_AUTHORITY_INVALID')
+                now = self.clock()
+                event = timestamp(reference.get('quote_timestamp'))
+                received = timestamp(reference.get('received_at'))
+                if (not fresh(event, received, now)
+                        or not 0 <= (now-event).total_seconds() <= 5
+                        or not 0 <= (now-received).total_seconds() <= 5):
+                    raise ResearchUnavailable('STALE_KRAKEN_PAPER_BOOK')
                 # Existing bounded HTTP cache and shared allowance apply only to
                 # instrument metadata. Tick pricing uses the one elected feed.
                 with self.data.lock:
