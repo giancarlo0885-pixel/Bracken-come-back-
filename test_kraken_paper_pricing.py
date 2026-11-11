@@ -214,6 +214,24 @@ def test_stored_original_kraken_receipt_audit_replays_crc_and_costs_without_netw
         assert pricing_receipt_evidence(fill,[altered],execution_time=event,entry=entry)['status']=='UNAVAILABLE'
 
 
+
+@pytest.mark.parametrize('stale_case', ['event', 'receipt', 'clock'])
+def test_stale_reference_never_reserves_product_metadata_budget(monkeypatch, stale_case):
+    """A known-expired book cannot become a paper quote, so skip HTTP metadata."""
+    p, snapshot = provider(monkeypatch)
+    source_quote = snapshot['quotes']['BTC-USD']
+    if stale_case == 'event':
+        source_quote['quote_timestamp'] = (NOW - timedelta(seconds=6)).isoformat()
+    elif stale_case == 'receipt':
+        source_quote['received_at'] = (NOW - timedelta(seconds=6)).isoformat()
+    else:
+        p.clock = lambda: NOW + timedelta(seconds=6)
+
+    assert p.quote('BTC-USD') is None
+    p.data.instruments.assert_not_called()
+    assert p.last_health['BTC-USD']['reason'] == 'STALE_KRAKEN_PAPER_BOOK'
+
+
 def test_metadata_age_and_metadata_budget_failure_do_not_reset_or_relax_quota(monkeypatch):
     p,_=provider(monkeypatch);p.data.last_receipt=NOW-timedelta(seconds=301)
     assert p.quote('BTC-USD') is None

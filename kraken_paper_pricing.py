@@ -45,6 +45,17 @@ def validate_rules(symbol, metadata):
     return {k: row[k] for k in keys}
 
 
+
+def _paper_reference_times(reference, now):
+    """Reject expired source evidence before an HTTP metadata reservation."""
+    event = timestamp(reference.get('quote_timestamp'))
+    received = timestamp(reference.get('received_at'))
+    if (not fresh(event, received, now) or not 0 <= (now-event).total_seconds() <= 5
+            or not 0 <= (now-received).total_seconds() <= 5):
+        raise ResearchUnavailable('STALE_KRAKEN_PAPER_BOOK')
+    return event, received
+
+
 def validate_kraken_book(symbol, reference, rules, metadata_received_at, now):
     """Recompute CRC32 and validate original source time; never re-date a book."""
     if (not isinstance(symbol, str) or not symbol.endswith('-USD') or not symbol[:-4].isalnum()
@@ -59,10 +70,7 @@ def validate_kraken_book(symbol, reference, rules, metadata_received_at, now):
         raise ResearchUnavailable('KRAKEN_REFERENCE_IDENTITY_OR_AUTHORITY_INVALID')
     if not isinstance(reference.get('session_id'), str) or not 1 <= len(reference['session_id']) <= 64:
         raise ResearchUnavailable('KRAKEN_SNAPSHOT_SESSION_REQUIRED')
-    event, received = timestamp(reference.get('quote_timestamp')), timestamp(reference.get('received_at'))
-    if (not fresh(event, received, now) or not 0 <= (now-event).total_seconds() <= 5
-            or not 0 <= (now-received).total_seconds() <= 5):
-        raise ResearchUnavailable('STALE_KRAKEN_PAPER_BOOK')
+    event, received = _paper_reference_times(reference, now)
     metadata_time = timestamp(metadata_received_at)
     if not 0 <= (now-metadata_time).total_seconds() <= 300:
         raise ResearchUnavailable('STALE_KRAKEN_PRODUCT_RULES')
@@ -184,6 +192,7 @@ class KrakenPaperPricing(PaperPricing):
                 reference = state.get('quotes', {}).get(symbol)
                 if not reference:
                     raise ResearchUnavailable('NO_FRESH_KRAKEN_BOOK')
+                _paper_reference_times(reference, self.clock())
                 # Existing bounded HTTP cache and shared allowance apply only to
                 # instrument metadata. Tick pricing uses the one elected feed.
                 with self.data.lock:
