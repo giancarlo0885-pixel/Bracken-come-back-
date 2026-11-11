@@ -303,3 +303,45 @@ def test_selected_single_venue_paper_model_does_not_claim_missing_execution_prov
     payload=json.loads(stored[0][1][1])
     assert all(c['status']=='SINGLE_VENUE_PAPER_MODEL_SELECTED' for c in payload['comparisons'].values())
     assert payload['execution_authority']=='NONE'
+
+
+def test_replaced_valid_book_in_same_session_revokes_original_paper_receipt(monkeypatch):
+    """A new valid CRC/depth packet cannot authorize an older fill price."""
+    from decimal import Decimal
+    from kraken_reference_book import book_checksum
+    p, snapshot = provider(monkeypatch)
+    old = p.quote('BTC-USD')
+    assert old and p.authentic(old, 'BTC-USD')
+    current = snapshot['quotes']['BTC-USD']
+    current['book']['bids'][0][0] = '100.01'
+    current['bid'] = '100.01'
+    current['price'] = str((Decimal('100.01') + Decimal('100.10')) / 2)
+    current['checksum'] = book_checksum(
+        {Decimal(price): Decimal(qty) for price, qty in current['book']['bids']},
+        {Decimal(price): Decimal(qty) for price, qty in current['book']['asks']})
+    current['quote_timestamp'] = (NOW + timedelta(seconds=1)).isoformat()
+    current['received_at'] = current['quote_timestamp']
+    p.clock = lambda: NOW + timedelta(seconds=1)
+    assert current['session_id'] == old['session_id']
+    assert current['checksum'] != old['checksum']
+    pricing.validate_kraken_book('BTC-USD', current, rules(), NOW.isoformat(), p.clock())
+    assert not p.authentic(old, 'BTC-USD')
+
+
+def test_unsubscribed_symbol_revokes_existing_paper_receipt(monkeypatch):
+    p, snapshot = provider(monkeypatch)
+    old = p.quote('BTC-USD')
+    assert old and p.authentic(old, 'BTC-USD')
+    snapshot['subscribed_symbols'] = []
+    assert not p.authentic(old, 'BTC-USD')
+
+
+def test_metadata_race_unsubscribed_symbol_cannot_mint_paper_receipt(monkeypatch):
+    p, snapshot = provider(monkeypatch)
+    metadata = p.data.instruments.return_value
+    def unsubscribe_during_metadata():
+        snapshot['subscribed_symbols'] = []
+        return metadata
+    p.data.instruments.side_effect = unsubscribe_during_metadata
+    assert p.quote('BTC-USD') is None
+    assert not p.receipts

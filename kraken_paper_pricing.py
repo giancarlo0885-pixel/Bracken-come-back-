@@ -192,7 +192,8 @@ class KrakenPaperPricing(PaperPricing):
                     metadata_received = self.data.last_receipt.isoformat()
                 current = self.reference()
                 reference = current.get('quotes', {}).get(symbol)
-                if not current.get('connected') or not reference:
+                if (not current.get('connected') or symbol not in current.get('subscribed_symbols', [])
+                        or not reference):
                     raise ResearchUnavailable('KRAKEN_CONNECTED_SNAPSHOT_REQUIRED')
                 quote = validate_kraken_book(symbol, reference, rules, metadata_received, self.clock())
                 self.receipts = {k: v for k, v in self.receipts.items()
@@ -225,8 +226,12 @@ class KrakenPaperPricing(PaperPricing):
         try:
             state = self.reference()
             current = state.get('quotes', {}).get(symbol, {})
-            return (state.get('connected') is True and current.get('checksum_status') == 'VALID'
+            return (state.get('connected') is True
+                    and symbol in state.get('subscribed_symbols', [])
+                    and current.get('checksum_status') == 'VALID'
                     and current.get('session_id') == quote.get('session_id')
+                    and current.get('checksum') == quote.get('checksum')
+                    and current.get('book') == quote.get('original_reference', {}).get('book')
                     and fresh(timestamp(current['quote_timestamp']), timestamp(current['received_at']), self.clock()))
         except (ValueError, KeyError, TypeError, AttributeError):
             return False
