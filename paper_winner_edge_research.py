@@ -212,6 +212,12 @@ def verified_ledger_inputs(ledger, fills, *, as_of, fifo_report=None, allocation
         if buy_id not in buys:
             exclusions["missing_or_conflicting_entry_identity"] += 1
             continue
+        # A caller-supplied FIFO snapshot may be newer than this evaluation.
+        # Future or unparseable exits cannot complete a historical BUY lot.
+        if any((exit_at := _time(part.get("exit_time"))) is None or exit_at > as_of
+               for part in parts):
+            exclusions["future_or_unobserved_exit"] += 1
+            continue
         from paper_fill_provenance import number
         opened = number(buys.get(buy_id, {}).get("quantity"))
         quantities = [number(part["members"][0].get("quantity")) for part in parts]
