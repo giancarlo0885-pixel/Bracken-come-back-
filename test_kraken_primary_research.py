@@ -199,6 +199,41 @@ def test_coinbase_diagnostic_rejects_bad_data(monkeypatch,change):
     with pytest.raises(ValueError):data.coinbase_quote(c,'BTC-USD',NOW)
 
 
+
+@pytest.mark.parametrize("event_age_seconds,should_pass", [(0, True), (11, False)])
+def test_coinbase_uncached_quote_validates_after_network_receipt(monkeypatch, event_age_seconds, should_pass):
+    # The first uncached HTTP response arrives after the call starts.
+    # Its original receipt must not be treated as future-dated.
+    clock = [NOW]
+
+    class Clock:
+        @staticmethod
+        def now(tz):
+            return clock[0]
+
+    monkeypatch.setattr(data, "datetime", Clock)
+    client, get, _ = request_client(monkeypatch, [])
+
+    def deliver(*args, **kwargs):
+        clock[0] = NOW + timedelta(milliseconds=100)
+        return response({
+            "time": (NOW - timedelta(seconds=event_age_seconds)).isoformat(),
+            "bids": [["100", "1", 1]],
+            "asks": [["101", "1", 1]],
+        })
+
+    get.side_effect = deliver
+    if should_pass:
+        result = data.coinbase_quote(client, "BTC-USD")
+        assert result["symbol"] == "BTC-USD"
+        assert result["received_at"] == clock[0].isoformat()
+        assert result["quote_timestamp"] == NOW.isoformat()
+    else:
+        with pytest.raises(data.ResearchUnavailable, match="COINBASE_STALE"):
+            data.coinbase_quote(client, "BTC-USD")
+    assert get.call_count == 1
+
+
 def test_coinbase_backup_is_explicit_and_cannot_mix_history_venues():
     q=quote();q.update(provider='Coinbase Exchange public reference',checksum_status='NOT_PROVIDED')
     with pytest.raises(data.ResearchUnavailable,match='VENUE'):research.research_forecast(q,history(),NOW,forecast=prediction)
