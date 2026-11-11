@@ -40,11 +40,13 @@ def _truthy(name: str, default: str = "false") -> bool:
 
 
 def active() -> bool:
+    # Require explicit safe controls; absent or unrecognized values are not disarmed.
+    safe_false = {"0", "false", "no", "off"}
     return bool(
-        str(os.getenv("EXECUTION_MODE", "paper") or "paper").strip().lower() == "paper"
+        str(os.getenv("EXECUTION_MODE") or "").strip().lower() == "paper"
         and _truthy("PAPER_AUTONOMOUS_LEARNING")
-        and not _truthy("ENABLE_BROKER_SUBMISSION")
-        and not _truthy("LIVE_TRADING_ARMED")
+        and str(os.getenv("ENABLE_BROKER_SUBMISSION") or "").strip().lower() in safe_false
+        and str(os.getenv("LIVE_TRADING_ARMED") or "").strip().lower() in safe_false
     )
 
 
