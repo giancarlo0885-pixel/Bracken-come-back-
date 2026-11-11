@@ -212,6 +212,16 @@ def verified_ledger_inputs(ledger, fills, *, as_of, fifo_report=None, allocation
         if buy_id not in buys:
             exclusions["missing_or_conflicting_entry_identity"] += 1
             continue
+        # Reused FIFO snapshots must not count one SELL trade or one original
+        # SELL fill twice to manufacture a fully closed, profitable BUY lot.
+        # A single SELL can legitimately close different BUY lots; uniqueness
+        # is enforced only within this one original entry.
+        exit_trade_ids = [str(part.get("trade_id") or "") for part in parts]
+        exit_fill_ids = [str(part.get("exit_fill_id") or "") for part in parts]
+        if (len(set(exit_trade_ids)) != len(parts)
+                or len(set(exit_fill_ids)) != len(parts)):
+            exclusions["duplicate_exit_identity"] += 1
+            continue
         from paper_fill_provenance import number
         opened = number(buys.get(buy_id, {}).get("quantity"))
         quantities = [number(part["members"][0].get("quantity")) for part in parts]
