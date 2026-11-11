@@ -39,9 +39,9 @@ def winner_entry_memory(closes):
     groups = defaultdict(list)
     for close in closes:
         for member in close.get('members', []):
-            groups[member['buy_trade_id']].append((close, member))
+            groups[(close.get('market'), member['buy_trade_id'])].append((close, member))
     records, excluded = [], defaultdict(int)
-    for buy_id, parts in sorted(groups.items()):
+    for (_, buy_id), parts in sorted(groups.items(), key=lambda item: (str(item[0][0]), str(item[0][1]))):
         if any(c.get('fifo_complete') is not True or c.get('fill_fee_evidence_verified') is not True for c, _ in parts):
             excluded['unreconciled_close'] += 1
             continue
