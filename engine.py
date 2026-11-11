@@ -78,10 +78,10 @@ def _crypto_symbol(symbol: str) -> bool:
 
 def _signal_thresholds(symbol: str) -> tuple[float, float]:
     paper_learning = (
-        str(os.getenv("EXECUTION_MODE", "paper") or "paper").strip().lower() == "paper"
+        str(os.getenv("EXECUTION_MODE") or "").strip().lower() == "paper"
+        and str(os.getenv("ENABLE_BROKER_SUBMISSION") or "").strip().lower() == "false"
+        and str(os.getenv("LIVE_TRADING_ARMED") or "").strip().lower() == "false"
         and _truthy("PAPER_AUTONOMOUS_LEARNING")
-        and not _truthy("ENABLE_BROKER_SUBMISSION")
-        and not _truthy("LIVE_TRADING_ARMED")
         and _crypto_symbol(symbol)
     )
     if not paper_learning:
