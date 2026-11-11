@@ -22,11 +22,12 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
 
 
 def _active() -> bool:
+    # Paper-learning risk overrides must fail closed when execution controls are unset.
     return (
-        str(os.getenv("EXECUTION_MODE", "paper") or "paper").strip().lower() == "paper"
+        str(os.getenv("EXECUTION_MODE", "") or "").strip().lower() == "paper"
         and _truthy("PAPER_AUTONOMOUS_LEARNING")
-        and not _truthy("ENABLE_BROKER_SUBMISSION")
-        and not _truthy("LIVE_TRADING_ARMED")
+        and str(os.getenv("ENABLE_BROKER_SUBMISSION", "") or "").strip().lower() == "false"
+        and str(os.getenv("LIVE_TRADING_ARMED", "") or "").strip().lower() == "false"
     )
 
 
