@@ -33,8 +33,8 @@ class Reader:
             if self.fail:
                 raise RuntimeError("connection details must not be logged")
             return Result({"highest_id": self.highest})
-        if "COUNT(*) AS matched" in sql:
-            return Result({"matched": 1})
+        if "WITH checked AS MATERIALIZED" in sql:
+            return Result({"expected": 1, "matched": 1, "sample": []})
         if "COUNT(*) AS n" in sql:
             return Result({"n": 1})
         if "ORDER BY e.id DESC LIMIT 10" in sql:
@@ -93,5 +93,5 @@ def test_current_brain_receipt_includes_capacity_without_trade_promotion():
     assert receipt["trade_outcomes"] == "NOT_INFERRED"
     assert receipt["profitability"] == "NOT_EVALUATED"
     assert receipt["execution_impact"] == "NONE"
-    assert len(conn.queries) == 7
-    assert all(sql.strip().startswith("SELECT") for sql in conn.queries)
+    assert len(conn.queries) == 5
+    assert all(sql.strip().startswith(("SELECT", "WITH")) for sql in conn.queries)
