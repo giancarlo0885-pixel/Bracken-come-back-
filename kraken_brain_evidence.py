@@ -104,15 +104,28 @@ def committed_receipt(conn):
     """Read committed rows after the caller's ingestion transaction has exited."""
     from kraken_research_store import evidence_layout, evidence_sql, read_storage_footprint
     source = evidence_sql(evidence_layout(conn),'id,payload')
-    count=conn.execute(f'''SELECT COUNT(*) AS matched FROM oracle_brain_sources s
-        JOIN ({source}) e ON s.source_key='kraken-research:'||e.id::text
-        WHERE s.metadata->'evidence'=e.payload AND s.metadata->>'source_table'=e.source_table AND s.metadata->>'evidence_id'=e.id::text AND s.source_ref=e.source_table||':'||e.id::text AND s.execution_impact='NONE'
-        AND s.metadata->>'execution_authority'='NONE' ''').fetchone()['matched']
-    sample=conn.execute(f'''SELECT e.id,e.payload->>'symbol' AS symbol,e.payload->>'status' AS decision,
-        e.payload->'forecast'->>'forecast_id' AS forecast_id FROM oracle_brain_sources s
-        JOIN ({source}) e ON s.source_key='kraken-research:'||e.id::text
-        WHERE s.metadata->'evidence'=e.payload AND s.metadata->>'source_table'=e.source_table AND s.metadata->>'evidence_id'=e.id::text AND s.source_ref=e.source_table||':'||e.id::text AND s.execution_impact='NONE' AND s.metadata->>'execution_authority'='NONE' ORDER BY e.id DESC LIMIT 10''').fetchall()
-    expected=conn.execute(f'SELECT COUNT(*) AS n FROM ({source}) e').fetchone()['n']
-    return {'expected':expected,'matched':count,'unmatched':expected-count,'sample':[dict(r) for r in sample],
+    # One statement snapshot binds totals and the sample even when a different
+    # writer commits ingestion concurrently. Materialize only IDs/match flags,
+    # not the large original JSON/history payloads. Read display fields for the
+    # last ten matched originals after checking every original receipt exactly.
+    snapshot=conn.execute(f'''WITH checked AS MATERIALIZED (
+        SELECT e.id,e.source_table,COALESCE(
+            s.metadata->'evidence'=e.payload AND s.metadata->>'source_table'=e.source_table
+            AND s.metadata->>'evidence_id'=e.id::text
+            AND s.source_ref=e.source_table||':'||e.id::text AND s.execution_impact='NONE'
+            AND s.metadata->>'execution_authority'='NONE',FALSE) AS matched
+        FROM ({source}) e LEFT JOIN oracle_brain_sources s
+            ON s.source_key='kraken-research:'||e.id::text
+        )
+        SELECT COUNT(*) AS expected,COUNT(*) FILTER(WHERE matched) AS matched,
+            COALESCE((SELECT jsonb_agg(to_jsonb(sample) ORDER BY sample.id DESC) FROM (
+                SELECT e.id,e.payload->>'symbol' AS symbol,e.payload->>'status' AS decision,
+                    e.payload->'forecast'->>'forecast_id' AS forecast_id
+                FROM (SELECT id,source_table FROM checked WHERE matched ORDER BY id DESC LIMIT 10) recent
+                JOIN ({source}) e ON e.id=recent.id AND e.source_table=recent.source_table
+            ) sample),'[]'::jsonb) AS sample
+        FROM checked''').fetchone()
+    expected,count=snapshot['expected'],snapshot['matched']
+    return {'expected':expected,'matched':count,'unmatched':expected-count,'sample':snapshot['sample'],
         'evidence_capacity':read_evidence_capacity(conn),'storage_footprint':read_storage_footprint(conn),'execution_impact':'NONE',
         'trade_outcomes':'NOT_INFERRED','profitability':'NOT_EVALUATED'}

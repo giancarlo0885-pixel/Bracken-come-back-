@@ -15,10 +15,24 @@ import math
 from typing import Any
 
 log = logging.getLogger("paper-exit-research")
-REPORT_VERSION = "canonical-fifo-exit-research-v3-exact-fill-lots"
+REPORT_VERSION = "canonical-fifo-exit-research-v4-terminal-precision"
 POST_EXIT_MINUTES = (15, 60, 240)
 REPORT_DETAIL_LIMIT = 250
 TOLERANCE = Decimal("0.000001")
+
+
+def _terminal_quantity_roundoff(lot: dict[str, Any], residual: Decimal, exit_price: Decimal) -> bool:
+    """Recognize only negligible residuals inside the existing quantity contract.
+
+    Callers additionally require original exact CLOSED evidence and exact prior
+    allocations. No absolute quantity floor can forgive a missing tiny lot.
+    Bound notional and entry-fee effects by the existing accounting tolerance.
+    """
+    from paper_fill_provenance import close
+    return bool(residual > 0
+                and close(lot["opened"] - residual, lot["opened"], quantity=True)
+                and residual * max(lot["price"], exit_price) <= TOLERANCE
+                and lot["fee"] * residual / lot["opened"] <= TOLERANCE)
 
 
 def timestamp(value: Any) -> datetime | None:
@@ -152,7 +166,8 @@ def reconcile_fifo(fills: list[dict[str, Any]], metrics: dict[str, dict[str, Any
             confirmed_fee = number(row.get("_canonical_fill_fee"))
             lots[key].append(dict(identity=identity, time=when, price=price, opened=qty,
                                   remaining=qty, fee=confirmed_fee if confirmed_fee is not None else fee,
-                                  fee_verified=confirmed_fee is not None and abs(confirmed_fee-fee) <= TOLERANCE, row=row))
+                                  fee_verified=confirmed_fee is not None and abs(confirmed_fee-fee) <= TOLERANCE,
+                                  exact_exit_history=True, row=row))
             continue
         remaining, gross, entry_fees, members = qty, Decimal(0), Decimal(0), []
         identity_matches = True
@@ -183,6 +198,7 @@ def reconcile_fifo(fills: list[dict[str, Any]], metrics: dict[str, dict[str, Any
                 and row.get("_canonical_fill_id") and lot["row"].get("_canonical_fill_id")
             )
             exact_linkage_verified &= exact_member
+            lot["exact_exit_history"] &= exact_member
             if row.get("_canonical_lot_id") or lot["row"].get("_canonical_lot_id"):
                 identity_matches &= exact_member
             members.append({"buy_trade_id": lot["identity"], "sell_trade_id": identity,
@@ -197,6 +213,21 @@ def reconcile_fifo(fills: list[dict[str, Any]], metrics: dict[str, dict[str, Any
                             "entry_regime": (lot["row"].get("feature_snapshot") or {}).get("regime") if isinstance(lot["row"].get("feature_snapshot"), dict) else None})
             lot["remaining"] -= matched
             remaining -= matched
+            # The persisted writer explicitly closed this original lot. Its
+            # float arithmetic can leave decimal reconstruction a few ULPs
+            # short/over. Never carry that residue into an unrelated exact lot,
+            # alter recorded quantities/P&L, or infer closure from current lot
+            # state. Missing/nonterminal/conflicting proof retains strict FIFO.
+            if (exact_member and exact_linkage_verified and identity_matches and lot["exact_exit_history"]
+                    and row.get("_canonical_lot_terminal_close") is True):
+                if remaining == 0 and _terminal_quantity_roundoff(lot, lot["remaining"], price):
+                    members[-1]["normalized_lot_quantity_residual"] = str(lot["remaining"])
+                    diagnostics["normalized_terminal_lot_residual"] += 1
+                    lot["remaining"] = Decimal(0)
+                elif lot["remaining"] == 0 and _terminal_quantity_roundoff(lot, remaining, price):
+                    members[-1]["normalized_sell_quantity_residual"] = str(remaining)
+                    diagnostics["normalized_terminal_sell_residual"] += 1
+                    remaining = Decimal(0)
             if lot["remaining"] == 0:
                 lots[key].popleft()
         if remaining > 0:
