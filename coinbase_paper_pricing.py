@@ -10,6 +10,7 @@ import threading
 import time
 
 from asset_routing import infer_asset_class
+from paper_price_health import HealthPublication, LatestHealthPublisher
 from kraken_research_data import PublicResearchData, ResearchUnavailable, coinbase_history
 from kraken_reference_book import exact_decimal, timestamp, fresh, compare_reference
 
@@ -130,7 +131,7 @@ def _depth_price(quote, side, order_value):
     return cost/units
 
 
-class PaperPricing:
+class PaperPricing(HealthPublication):
     source = SOURCE
 
     def available(self):
@@ -143,86 +144,33 @@ class PaperPricing:
         from kraken_reference_runtime import read_kraken_reference_state
         self.data=data or PublicResearchData()
         self.reference=reference or read_kraken_reference_state
-        self.clock=clock;self.publish=publish;self.lock=threading.RLock();self.receipts={};self.fill_receipts={};self.last_health={}
-        self._health_publication_signature = None
-        self._health_publication_monotonic = float('-inf')
-        self._health_attempt_signature = None
-        self._health_attempt_monotonic = float('-inf')
+        self.lock=threading.RLock();self.receipts={};self.fill_receipts={}
+        super().__init__(self.source, clock, publish, log,
+            'COINBASE PAPER PRICING' if self.source == SOURCE else 'KRAKEN PAPER PRICING')
+        self._health_publisher = None
 
-    def _expire_stale_health(self):
-        """Never publish an old successful quote as currently valid.
-
-        This only changes diagnostic status. Actual fill eligibility still
-        depends on the original immutable receipt and authentic() checks.
-        """
-        now = self.clock()
-        for record in self.last_health.values():
-            if record.get('status') != 'VALID_PAPER_PRICE':
-                continue
-            try:
-                age = (now - timestamp(record['quote_timestamp'])).total_seconds()
-                expired = age > 5 or age < -2
-                reason = 'QUOTE_TTL_EXPIRED'
-            except (KeyError, TypeError, ValueError, OverflowError):
-                expired = True
-                reason = 'INVALID_QUOTE_TIMESTAMP'
-            if expired:
-                record.update(status='STALE_PAPER_PRICE', reason=reason,
-                              execution_authority='NONE')
-
-    def _health_signature(self):
-        return tuple(sorted(
-            (symbol, record.get('status'), record.get('reason'))
-            for symbol, record in self.last_health.items()
-        ))
-
-    def _health_publication_due(self):
-        # Keep successful paper quotes visible without delay. Only identical
-        # all-unavailable states are throttled; no execution receipts are cached
-        # or revalidated by this diagnostic publication throttle.
-        signature = self._health_signature()
-        has_valid_quote = any(
-            record.get('status') == 'VALID_PAPER_PRICE'
-            for record in self.last_health.values()
-        )
-        current = time.monotonic()
-        if not has_valid_quote:
-            if (signature == self._health_publication_signature
-                    and current - self._health_publication_monotonic < 60):
+    def start_health_publisher(self, stop_event=None):
+        """Runtime-only diagnostic I/O; no quote, order or receipt processing."""
+        if not self.publish:
+            return False
+        with self.lock:
+            if self._health_publisher is not None:
                 return False
-            if (signature == self._health_attempt_signature
-                    and current - self._health_attempt_monotonic < 5):
+            sink = HealthPublication(self.source, lambda: self.clock(), self.publish, log,
+                'COINBASE PAPER PRICING' if self.source == SOURCE else 'KRAKEN PAPER PRICING')
+            publisher = LatestHealthPublisher(sink, stop_event if stop_event is not None else threading.Event())
+            if not publisher.start():
                 return False
+            self._health_publisher = publisher
         return True
 
     def _publish_health(self):
+        if self._health_publisher is None:
+            return super()._publish_health()
+        # quote() already owns the provider lock. The publisher only copies
+        # this bounded diagnostic state; its database work never owns this lock.
         self._expire_stale_health()
-        if not self._health_publication_due():
-            return
-        signature = self._health_signature()
-        publication_status = 'LOG_ONLY'
-        try:
-            if self.publish:
-                from database import connect
-                with connect() as conn:
-                    conn.execute('''INSERT INTO coinbase_paper_price_state VALUES(1,NOW(),%s::jsonb)
-                        ON CONFLICT(id) DO UPDATE SET updated_at=EXCLUDED.updated_at,payload=EXCLUDED.payload''',
-                        (json.dumps({'provider':self.source,'symbols':self.last_health,'broker_submission':'NONE'}),))
-                publication_status = 'COMMITTED'
-            # Exiting connect() includes commit. An attempted write must not
-            # acknowledge durable delivery or start the successful throttle.
-            self._health_publication_signature = signature
-            self._health_publication_monotonic = time.monotonic()
-        except Exception:
-            publication_status = 'UNAVAILABLE'
-        finally:
-            # Bound failed-write retries too, measured after completion so slow
-            # failures cannot cause immediate catch-up writes.
-            self._health_attempt_signature = signature
-            self._health_attempt_monotonic = time.monotonic()
-        log.info('%s | %s', 'COINBASE PAPER PRICING' if self.source==SOURCE else 'KRAKEN PAPER PRICING',json.dumps({
-            'symbols':self.last_health,'broker_submission':'NONE',
-            'health_publication_status':publication_status}))
+        self._health_publisher.submit(self.last_health)
 
     def quote(self,symbol):
         symbol=str(symbol).upper().strip()
@@ -493,6 +441,10 @@ def install_paper_pricing(worker,provider=None):
     worker._bind_paper_forecast_reference = lambda forecast, quote, symbol: bind_paper_forecast_reference(
         forecast, quote, symbol, authentic=provider.authentic)
     worker._coinbase_paper_pricing=provider
+    # One bounded diagnostics publisher per installed adapter, sharing the
+    # existing worker shutdown event. Standalone publish=False fixtures stay
+    # synchronous/log-only. Diagnostic commits cannot consume quote freshness.
+    provider.start_health_publisher(getattr(worker, 'stop_event', None))
     from crypto_execution_source import install_crypto_candidate_source_guard
     install_crypto_candidate_source_guard(worker,provider.authentic,'PAPER_PRICE_UNVERIFIED_OR_STALE',require_forecast=True)
     log.info('PAPER PRICING | status=INSTALLED | provider=%s | authority=PAPER_SIMULATION_ONLY | live_trading=DISARMED',provider.source)
