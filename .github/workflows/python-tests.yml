@@ -130,6 +130,8 @@ jobs:
           test_paper_fill_finalization_pg.py
           test_prospective_paper_research_pg.py
           test_paper_fill_provenance_pg.py
+          test_fill_quantity_precision_pg.py
+          test_fifo_terminal_precision_pg.py
           test_alpaca_auth_recovery_pg.py
           test_kraken_reference_pg.py
           test_kraken_streamed_candles_pg.py

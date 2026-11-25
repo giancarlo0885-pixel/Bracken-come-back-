@@ -13,10 +13,14 @@ import json
 from typing import Any
 
 PROVENANCE_VERSION = "exact_fill_lot_v1"
+# Same currency bound used by FIFO accounting; relative quantity tolerance
+# alone must not certify a financially material over-allocation.
+QUANTITY_ROUNDOFF_VALUE_LIMIT = Decimal("0.000001")
 ANNOTATIONS = (
     "_canonical_fill_fee", "_canonical_fill_id", "_canonical_lot_id",
     "_canonical_entry_trade_id", "_canonical_entry_fill_id",
     "_canonical_entry_fill_fee", "_canonical_entry_quantity",
+    "_canonical_lot_terminal_close",
     "_fill_accounting_provenance",
 )
 
@@ -50,6 +54,16 @@ def _time(value: Any) -> datetime | None:
         return result.astimezone(timezone.utc) if result.tzinfo else None
     except (TypeError, ValueError, OverflowError):
         return None
+
+
+def _within_quantity_bound(quantity: Decimal, upper: Decimal, price: Decimal,
+                           fee_per_unit: Decimal) -> bool:
+    if quantity <= upper:
+        return True
+    excess = quantity - upper
+    return (close(quantity, upper, quantity=True)
+            and excess * price <= QUANTITY_ROUNDOFF_VALUE_LIMIT
+            and excess * fee_per_unit <= QUANTITY_ROUNDOFF_VALUE_LIMIT)
 
 
 def load_fill_lot_allocations(
@@ -167,12 +181,16 @@ def _valid_link(a, fill, order, execution, ledger, lot, total_qty, total_fee, to
     q, fee = number(a.get("quantity")), number(a.get("fee_amount"))
     fill_q, fill_fee, price, opened = (number(fill.get("quantity")), number(fill.get("fee_amount")),
                                       number(fill.get("fill_price")), number(lot.get("quantity_opened")))
+    entry_price, entry_fee = number(lot.get("entry_price")), number(lot.get("entry_fees"))
     closed = number(lot_closed_quantity)
-    if (side not in {"BUY", "SELL"} or any(v is None for v in (q, fee, fill_q, fill_fee, price, opened))
-            or min(q, fill_q, price, opened) <= 0 or min(fee, fill_fee) < 0
-            or closed is None or closed < 0
-            or (closed > opened and not close(closed, opened, quantity=True))
-            or (side == "SELL" and q > closed and not close(q, closed, quantity=True))
+    if (side not in {"BUY", "SELL"} or any(v is None for v in (q, fee, fill_q, fill_fee, price, opened, entry_price, entry_fee))
+            or min(q, fill_q, price, opened, entry_price) <= 0 or min(fee, fill_fee, entry_fee) < 0):
+        return False
+    price_bound = max(price, entry_price)
+    fee_per_unit = max(fill_fee / fill_q, entry_fee / opened)
+    if (closed is None or closed < 0
+            or not _within_quantity_bound(closed, opened, price_bound, fee_per_unit)
+            or (side == "SELL" and not _within_quantity_bound(q, closed, price_bound, fee_per_unit))
             or not a.get("trade_id") or a.get("trade_id") != ledger.get("trade_id")
             or not a.get("lot_id") or a.get("lot_id") != lot.get("lot_id")
             or not a.get("fill_id") or a.get("fill_id") != fill.get("fill_id")
@@ -184,7 +202,9 @@ def _valid_link(a, fill, order, execution, ledger, lot, total_qty, total_fee, to
             or any(o.get("market") != ledger.get("market") or o.get("symbol") != ledger.get("symbol") for o in (fill, order, execution, lot))
             or any(o.get("side") != side for o in (fill, order, execution, ledger))
             or any(o.get("broker_mode") != "PAPER" or o.get("account_environment") != "PAPER" for o in (ledger, lot))
-            or not close(q, ledger.get("quantity"), quantity=True) or q > fill_q or q > opened
+            or not close(q, ledger.get("quantity"), quantity=True)
+            or not _within_quantity_bound(q, fill_q, price_bound, fee_per_unit)
+            or not _within_quantity_bound(q, opened, price_bound, fee_per_unit)
             or not close(fee, fill_fee*q/fill_q, quantity=True)
             or not close(fee, ledger.get("fees"))
             or not close(total_qty, fill_q, quantity=True) or not close(total_fee, fill_fee)
@@ -298,5 +318,8 @@ def attach_exact_fill_lot_evidence(
                    _canonical_lot_id=a["lot_id"], _canonical_entry_trade_id=entry_a["trade_id"],
                    _canonical_entry_fill_id=entry_fill["fill_id"], _canonical_entry_fill_fee=str(number(entry_a["fee_amount"])),
                    _canonical_entry_quantity=str(number(entry_a["quantity"])), _fill_accounting_provenance=PROVENANCE_VERSION)
+        # Original event-time intent, not the lot's later/current inventory.
+        # Caller-supplied annotations/status cannot establish this proof.
+        row["_canonical_lot_terminal_close"] = stored.get("side") == "SELL" and stored.get("status") == "CLOSED"
         result.append(row)
     return result
