@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone, timedelta
 import json
+import math
 import os
 from typing import Any, Iterable
 
@@ -52,6 +53,17 @@ def _json(value: Any) -> dict[str, Any]:
     return {}
 
 
+def _finite_metric(value: Any) -> float | None:
+    """Only measured, finite numerical evidence can qualify a model."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return number if math.isfinite(number) else None
+
+
 def assess_model_evidence(
     model: str,
     model_version: str,
@@ -71,11 +83,13 @@ def assess_model_evidence(
     max_ece = max(0.0, min(1.0, float(os.getenv("CAPITAL_MAX_ECE", "0.12"))))
     min_accuracy = max(0.0, min(1.0, float(os.getenv("CAPITAL_MIN_DIRECTIONAL_ACCURACY", "0.52"))))
 
-    cutoff = now.astimezone(timezone.utc) - timedelta(days=max_age_days)
+    assessment_time = now.astimezone(timezone.utc)
+    cutoff = assessment_time - timedelta(days=max_age_days)
     recent: list[dict[str, Any]] = []
     for item in evidence_rows:
         created = _parse_ts(item.get("created_at"))
-        if created is None or created < cutoff:
+        # A future-dated validation cannot be known at the assessment clock.
+        if created is None or created < cutoff or created > assessment_time:
             continue
         if str(item.get("model") or "") != str(model):
             continue
@@ -88,15 +102,15 @@ def assess_model_evidence(
     for item in recent:
         metrics = _json(item.get("metrics"))
         leakage = _json(item.get("leakage_checks"))
-        brier_skill = metrics.get("brier_skill_score")
-        ece = metrics.get("expected_calibration_error")
-        accuracy = metrics.get("directional_accuracy")
+        brier_skill = _finite_metric(metrics.get("brier_skill_score"))
+        ece = _finite_metric(metrics.get("expected_calibration_error"))
+        accuracy = _finite_metric(metrics.get("directional_accuracy"))
         status_pass = str(item.get("status") or "").upper() == "PASS"
         leak_pass = leakage.get("strict_ordering") is True and _json(leakage.get("future_mutation_probe")).get("ok") is True
         metric_pass = (
-            brier_skill is not None and float(brier_skill) >= min_brier_skill
-            and ece is not None and float(ece) <= max_ece
-            and accuracy is not None and float(accuracy) >= min_accuracy
+            brier_skill is not None and min_brier_skill <= brier_skill <= 1.0
+            and ece is not None and 0.0 <= ece <= max_ece
+            and accuracy is not None and min_accuracy <= accuracy <= 1.0
             and metrics.get("beats_all_baselines") is True
         )
         if status_pass and leak_pass and metric_pass:
