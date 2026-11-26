@@ -54,12 +54,14 @@ def selected_outcome(trial, exit_quote):
 def matched_panel(pairs):
     """Same original entries, two observed checkpoints, predefined exit rules.
 
-    Missing endpoint/selection evidence excludes the pair. UTC dates are only
-    dependence proxies. Sparse snapshots cannot certify continuous MFE/MAE.
+    Missing or contradictory endpoint/selection evidence excludes the pair.
+    Matched observations include abstentions; modeled trade counts do not.
+    UTC dates are only dependence proxies. Sparse snapshots cannot certify
+    continuous MFE/MAE.
     """
     policies = {name: [] for name in ('passive_900', 'entry_only_900',
                                      'exit_only_checkpoints', 'combined_checkpoints', 'no_trade')}
-    seen, exclusions = set(), 0
+    seen, exclusions, selected_entries = set(), 0, 0
     for first, last in pairs:
         try:
             identity = first['source_evidence_id']
@@ -70,10 +72,24 @@ def matched_panel(pairs):
                     or first['challenger_policy'] != last['challenger_policy']):
                 raise ValueError('unmatched original experiment')
             decision = first['challenger_policy']
+            if decision['selection_status'] == 'SELECTED' and decision['action'] == 'RESEARCH_LONG':
+                selected = True
+            elif decision['selection_status'] == 'ABSTAIN' and decision['action'] == 'NO_TRADE':
+                selected = False
+            else:
+                raise ValueError('conflicting frozen selection')
             baseline = first['baseline_exit_policy']
             if baseline != last['baseline_exit_policy']: raise ValueError('conflicting exit policy')
             early_baseline = exit_reason(baseline, Decimal(first['net_return']) * 100, 300)
             selected_first, selected_last = first['selected_outcome'], last['selected_outcome']
+            for endpoint in (selected_first, selected_last):
+                if selected:
+                    if (endpoint['status'] != 'COMPLETED_SIMULATION'
+                            or not Decimal(endpoint['net_return']).is_finite()):
+                        raise ValueError('selected entry requires completed outcomes')
+                elif (endpoint['status'] != 'NO_TRADE' or endpoint['net_return'] is not None
+                      or Decimal(endpoint['net_pnl']) != 0):
+                    raise ValueError('abstention cannot have a trading outcome')
             early_selected = (selected_first['net_return'] is not None and
                 exit_reason(decision, Decimal(selected_first['net_return']) * 100, 300))
             chosen_baseline = first if early_baseline else last
@@ -85,8 +101,10 @@ def matched_panel(pairs):
             parsed = {k: Decimal(v) for k, v in values.items()}
             if any(not v.is_finite() for v in parsed.values()): raise ValueError('nonfinite outcome')
             for name, value in parsed.items():
-                policies[name].append({'net_pnl': value, 'episode': episode})
+                traded = name != 'no_trade' and (selected or name in ('passive_900', 'exit_only_checkpoints'))
+                policies[name].append({'net_pnl': value, 'episode': episode, 'traded': traded})
             seen.add(identity)
+            selected_entries += int(selected)
         except (KeyError, TypeError, ValueError, ArithmeticError):
             exclusions += 1
     reports = {}
@@ -96,6 +114,9 @@ def matched_panel(pairs):
         losses = -sum((v for v in values if v < 0), Decimal(0))
         net = sum(values, Decimal(0))
         reports[name] = {'matched_observations': len(values),
+            'modeled_trade_count': sum(r['traded'] for r in records),
+            'no_trade_opportunity_count': sum(not r['traded'] for r in records),
+            'expectancy_denominator': 'MATCHED_ORIGINAL_ENTRY_OPPORTUNITIES_INCLUDING_ABSTENTIONS',
             'modeled_net_pnl': str(net) if values else None,
             'expectancy_per_opportunity_usd': str(net / len(values)) if values else None,
             'profit_factor': str(wins / losses) if losses else None,
@@ -103,7 +124,10 @@ def matched_panel(pairs):
             'independent_episodes': None, 'confidence_interval': None,
             'portfolio_drawdown': None, 'var_05': None, 'cvar_05': None,
             'mfe': None, 'mae': None, 'promotion_action': 'NONE'}
-    return {'policies': reports, 'matched_original_entries': len(seen), 'pair_exclusions': exclusions,
+    return {'policies': reports, 'matched_original_entries': len(seen),
+            'matched_selected_entry_opportunities': selected_entries,
+            'matched_abstained_entry_opportunities': len(seen) - selected_entries,
+            'pair_exclusions': exclusions,
             'exit_semantics': 'FIRST_OBSERVED_BOOK_AT_300_OR_900_SECONDS_ONLY',
             'metric_limit': 'Independent episodes, portfolio risk and continuous excursions are not certified',
             'execution_authority': 'NONE', 'realized_trading_profit': None}
