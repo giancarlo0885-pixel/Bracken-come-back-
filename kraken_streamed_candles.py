@@ -15,6 +15,13 @@ from kraken_reference_book import exact_decimal, timestamp
 
 MAX_ROWS = 721  # 720 historical bars plus one uncommitted interval, per <=4 pairs.
 COLUMNS = ['Open', 'High', 'Low', 'Close', 'Volume']
+# Only fixed internal reason codes can enter public diagnostics.
+FAILURE_DETAILS = frozenset({
+    'OHLC_SUBSCRIPTION_REJECTED', 'INVALID_OHLC_MESSAGE',
+    'OHLC_SNAPSHOT_REQUIRED', 'INVALID_OHLC_INTERVAL', 'INVALID_OHLC_VALUES',
+    'CLOSED_CANDLE_REVISION', 'OHLC_TIMESTAMP_OR_VOLUME_REGRESSION',
+    'OHLC_GAP_REQUIRES_RESNAPSHOT',
+})
 
 
 def enabled():
@@ -30,6 +37,7 @@ class CandleStream:
         self.lock = threading.RLock()
         self.connected = False
         self.reason = 'AWAITING_CONNECTION'
+        self.failure_detail = None
         self.session = None
         self.symbols = {}
         self.rows = {}
@@ -54,13 +62,16 @@ class CandleStream:
             self.bootstrap_receipts = {}
             self.connected = True
             self.reason = None
+            self.failure_detail = None
             self.session = uuid.uuid4().hex
             self.last_wire = now
 
-    def invalidate(self, reason='DISCONNECTED'):
+    def invalidate(self, reason='DISCONNECTED', *, failure_detail=None):
         with self.lock:
             self.connected = False
             self.reason = reason
+            self.failure_detail = (failure_detail if failure_detail in FAILURE_DETAILS
+                                   or failure_detail == 'OHLC_MALFORMED_PAYLOAD' else None)
             self.rows = {s:{} for s in self.symbols.values()}
             self.trade_counts = {s:{} for s in self.symbols.values()}
             self.seeded.clear()
@@ -130,8 +141,11 @@ class CandleStream:
                         self.trade_counts[symbol].pop(oldest, None)
                     self.updates += 1
                 self.last_wire = now
-            except (ValueError,KeyError,TypeError,OverflowError,ArithmeticError):
-                self.invalidate('OHLC_INVALID_REQUIRES_RECONNECT')
+            except (ValueError,KeyError,TypeError,OverflowError,ArithmeticError) as exc:
+                detail = str(exc) if type(exc) is ValueError else None
+                if detail not in FAILURE_DETAILS:
+                    detail = 'OHLC_MALFORMED_PAYLOAD'
+                self.invalidate('OHLC_INVALID_REQUIRES_RECONNECT', failure_detail=detail)
 
     def generation(self):
         with self.lock:return self.session
@@ -194,6 +208,7 @@ class CandleStream:
 
     def health(self):
         with self.lock:
-            return {'connected':self.connected,'reason':self.reason,'updates':self.updates,
+            return {'connected':self.connected,'reason':self.reason,'failure_detail':self.failure_detail,
+                'updates':self.updates,
                 'session_id':self.session,'seeded_symbols':sorted(self.seeded),
                 'bars':{s:len(r) for s,r in self.rows.items()},'execution_authority':'NONE'}

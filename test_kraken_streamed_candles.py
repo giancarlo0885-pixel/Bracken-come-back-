@@ -257,3 +257,38 @@ def test_elected_session_uses_one_socket_and_clears_both_channels_on_disconnect(
     assert sent[1]['params']['interval']==5 and sent[1]['params']['snapshot'] is True
     assert ws.close.called and not s.state.books and not s.candles.connected
     assert s.candles.updates==1 and not s.candles.seeded
+
+
+@pytest.mark.parametrize('kind, expected', [
+    ('gap', 'OHLC_GAP_REQUIRES_RESNAPSHOT'),
+    ('revision', 'CLOSED_CANDLE_REVISION'),
+    ('regression', 'OHLC_TIMESTAMP_OR_VOLUME_REGRESSION'),
+    ('invalid_values', 'INVALID_OHLC_VALUES'),
+    ('invalid_interval', 'INVALID_OHLC_INTERVAL'),
+    ('malformed', 'OHLC_MALFORMED_PAYLOAD'),
+])
+def test_failure_health_preserves_bounded_diagnostic_without_reenabling_history(kind, expected):
+    s = ready()
+    if kind == 'gap':
+        at = NOW + timedelta(minutes=10)
+        s.consume(packet(at), at)
+    elif kind == 'revision':
+        s.consume(packet(NOW - timedelta(minutes=5), close='100.5'), NOW)
+    elif kind == 'regression':
+        s.consume(packet(volume='1'), NOW)
+    elif kind == 'invalid_values':
+        s.consume(packet(high='90'), NOW)
+    elif kind == 'invalid_interval':
+        s.consume(packet(interval=1), NOW)
+    else:
+        message = packet()
+        del message['data'][0]['close']
+        s.consume(message, NOW)
+    health = s.health()
+    assert health['reason'] == 'OHLC_INVALID_REQUIRES_RECONNECT'
+    assert health['failure_detail'] == expected
+    assert not health['connected'] and not health['seeded_symbols']
+    assert s.history('BTC-USD', NOW) is None
+    assert health['execution_authority'] == 'NONE'
+    s.opened(SYMBOLS, NOW)
+    assert s.health()['failure_detail'] is None
