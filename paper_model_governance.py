@@ -302,42 +302,70 @@ def assess_paper_model_evidence(
 
 
 def _paper_trade_economics(model: str, model_version: str) -> dict[str, Any]:
-    """Return realized after-cost paper economics from canonical closed trade ledger rows.
+    """Read-only, fail-closed paper economics for model qualification.
 
-    Missing or unreadable evidence fails closed: paper qualification receives zero
-    closed trades and unavailable expectancy/profit factor.
+    Every close in the bounded, predeclared recent cohort must have independently
+    recorded exact-lot costs reconcilable to the ledger gross and exit fees. Excluding unknown losers
+    would turn incomplete evidence into a spuriously positive model score.
+    This gate does not replace full canonical fill/lot provenance certification.
     """
+    unavailable = {
+        "closed_paper_trades": 0,
+        "paper_expectancy": None,
+        "paper_profit_factor": None,
+    }
     try:
         realized = rows(
             """
-            SELECT net_pnl
-            FROM trade_ledger
-            WHERE market='crypto' AND side='SELL'
-              AND model=%s AND COALESCE(model_version,'')=COALESCE(%s,'')
-              AND net_pnl IS NOT NULL
-            ORDER BY id DESC
+            SELECT l.gross_pnl AS gross_pnl,
+                   l.net_pnl AS net_pnl,
+                   l.fees AS exit_fees,
+                   m.round_trip_net_pnl AS verified_net_pnl,
+                   m.round_trip_fees AS verified_fees,
+                   m.cost_provenance AS cost_provenance
+            FROM trade_ledger l
+            LEFT JOIN paper_regime_trade_metrics m ON m.trade_id=l.trade_id
+                 AND m.market=l.market
+            WHERE l.market='crypto' AND l.side='SELL'
+              AND l.broker_mode='PAPER' AND l.account_environment='PAPER'
+              AND l.model=%s AND COALESCE(l.model_version,'')=COALESCE(%s,'')
+            ORDER BY l.id DESC
             LIMIT 1000
             """,
             (model, model_version),
         )
     except Exception:
-        return {
-            "closed_paper_trades": 0,
-            "paper_expectancy": None,
-            "paper_profit_factor": None,
-        }
+        return unavailable
 
-    pnls = [
-        value
-        for item in (realized or [])
-        if (value := _finite(dict(item).get("net_pnl"))) is not None
-    ]
-    if not pnls:
-        return {
-            "closed_paper_trades": 0,
-            "paper_expectancy": None,
-            "paper_profit_factor": None,
-        }
+    if not realized:
+        return unavailable
+    pnls: list[float] = []
+    for item in realized:
+        try:
+            evidence = dict(item)
+        except (TypeError, ValueError):
+            return unavailable
+        # SELL ledger net is exit-only; exact-lot net includes original entry fees.
+        # Reconcile both to the same gross basis, never to each other directly.
+        if any(isinstance(evidence.get(field), bool)
+               for field in ("gross_pnl", "net_pnl", "exit_fees",
+                             "verified_net_pnl", "verified_fees")):
+            return unavailable
+        gross = _finite(evidence.get("gross_pnl"))
+        ledger_net = _finite(evidence.get("net_pnl"))
+        exit_fees = _finite(evidence.get("exit_fees"))
+        verified_net = _finite(evidence.get("verified_net_pnl"))
+        verified_fees = _finite(evidence.get("verified_fees"))
+        if (evidence.get("cost_provenance") != "exact_lot"
+                or any(value is None for value in (
+                    gross, ledger_net, exit_fees, verified_net, verified_fees
+                ))
+                or exit_fees < 0 or verified_fees < 0
+                or verified_fees + 0.000000001 < exit_fees
+                or abs(ledger_net - (gross - exit_fees)) > 0.000001
+                or abs(verified_net - (gross - verified_fees)) > 0.000001):
+            return unavailable
+        pnls.append(verified_net)
 
     wins = [value for value in pnls if value > 0]
     losses = [value for value in pnls if value <= 0]
@@ -349,7 +377,6 @@ def _paper_trade_economics(model: str, model_version: str) -> dict[str, Any]:
         "paper_expectancy": sum(pnls) / len(pnls),
         "paper_profit_factor": profit_factor,
     }
-
 
 def paper_model_governance_assessment(model: str, model_version: str) -> PaperModelGovernanceAssessment:
     """Read current evidence and return a non-authorizing paper model tier."""
